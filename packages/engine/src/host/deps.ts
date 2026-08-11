@@ -37,8 +37,7 @@ export const buildPluginDeps = (input: {
 /**
  * Classic plugins are out of scope; this rejects rather than pretending.
  * Wired into PluginInputArgs.installClassicPluginDeps (spec §2.8), which is
- * the name plugins actually call — exported under both names so either
- * caller can use it directly.
+ * the name plugins actually call.
  */
 export const rejectClassicPluginDeps = async (deps: string[]): Promise<never> => {
   throw new Error(
@@ -46,5 +45,3 @@ export const rejectClassicPluginDeps = async (deps: string[]): Promise<never> =>
       `does not support Tdarr classic plugins. Use a flow plugin instead.`,
   );
 };
-
-export const installClassicPluginDeps = rejectClassicPluginDeps;

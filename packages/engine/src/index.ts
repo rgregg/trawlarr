@@ -1,5 +1,6 @@
 export * from './host/require-from-string.js';
 export * from './host/loader.js';
+export * from './host/args.js';
 export * from './host/file-object.js';
 export * from './host/deps.js';
 export * from './host/crud-trans-dbn.js';
@@ -7,5 +8,7 @@ export * from './host/axios-middleware.js';
 export * from './ffmpeg/progress.js';
 export * from './ffmpeg/run.js';
 export * from './executor/run-flow.js';
+export * from './executor/encode-target.js';
+export * from './executor/execute-node.js';
 export * from './executor/vouchable.js';
 export * from './executor/dry-run.js';

@@ -8,6 +8,7 @@ export default defineConfig({
     alias: {
       '@trawlarr/plugin-api': pkg('plugin-api'),
       '@trawlarr/core': pkg('core'),
+      '@trawlarr/plugins-core': pkg('plugins-core'),
       '@trawlarr/engine': pkg('engine'),
       '@trawlarr/server': pkg('server'),
     },
