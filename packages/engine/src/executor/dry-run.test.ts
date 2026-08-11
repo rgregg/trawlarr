@@ -95,6 +95,13 @@ describe('classifySideEffects', () => {
   it('treats anything unrecognised as unknown, which is the safe default', () => {
     expect(classifySideEffects(loaded('community:mysteryNode', pass))).toBe('unknown');
   });
+
+  it('classifies a path-hash id (from createPluginLoader) as unknown', () => {
+    // createPluginLoader produces 16-hex-char ids via SHA-256.slice(0, 16)
+    // These will never match the trawlarr:* allowlists, so they correctly classify as unknown.
+    const hashId = 'a1b2c3d4e5f6a1b2';
+    expect(classifySideEffects(loaded(hashId, pass))).toBe('unknown');
+  });
 });
 
 describe('runDryFlow', () => {
@@ -184,5 +191,23 @@ describe('runDryFlow', () => {
     // because a dry run stopping early is normal, not an error to fix.
     expect(result.failed).toBe(false);
     expect(result.complete).toBe(false);
+  });
+
+  it('stops at a node with a path-hash id, with complete: false and failed: false', async () => {
+    const hashId = 'a1b2c3d4e5f6a1b2';
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:checkVideoCodec'), node('b', hashId)],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) => loaded(n.pluginId, pass),
+    });
+
+    // Third-party plugins loaded from disk via createPluginLoader get hash ids
+    // and correctly classify as unknown, so the dry run stops.
+    expect(result.complete).toBe(false);
+    expect(result.failed).toBe(false);
+    expect(result.stoppedAtNodeId).toBe('b');
   });
 });
