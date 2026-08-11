@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { utimesSync, writeFileSync } from 'node:fs';
-import { PluginLoadError, createPluginLoader } from './loader.js';
+import { statSync, utimesSync, writeFileSync } from 'node:fs';
+import { PluginLoadError, contentVersion, createPluginLoader } from './loader.js';
 import { simplePluginCode, writePluginFile } from '../../test/fixtures/make-plugin.js';
 
 describe('createPluginLoader', () => {
@@ -13,15 +13,44 @@ describe('createPluginLoader', () => {
     expect(loaded.absPath).toBe(abs);
   });
 
-  it('derives a stable id from the path when none is given', () => {
-    const abs = writePluginFile(simplePluginCode());
-    const loader = createPluginLoader();
-    expect(loader.load(abs).id).toBe(loader.load(abs).id);
+  it('derives the id from the plugin path, so two loaders agree on it', () => {
+    const code = simplePluginCode();
+    const abs = writePluginFile(code);
+    const other = writePluginFile(code);
+
+    // Same path, independent loaders (no shared cache to satisfy the check
+    // trivially) => same id. Different path, identical bytes => different id.
+    expect(createPluginLoader().load(abs).id).toBe(createPluginLoader().load(abs).id);
+    expect(createPluginLoader().load(abs).id).toMatch(/^[0-9a-f]{16}$/);
+    expect(createPluginLoader().load(other).id).not.toBe(createPluginLoader().load(abs).id);
   });
 
-  it('defaults the version to requiresVersion when not supplied', () => {
-    const abs = writePluginFile(simplePluginCode());
-    expect(createPluginLoader().load(abs).version).toBe('2.11.01');
+  it('defaults the version to a hash of the plugin source, not requiresVersion', () => {
+    // requiresVersion ('2.11.01' in the fixture) is the host level the plugin
+    // demands, not a version of the plugin. Using it meant a plugin whose code
+    // changed reported an unchanged version.
+    const code = simplePluginCode();
+    const abs = writePluginFile(code);
+    const version = createPluginLoader().load(abs).version;
+
+    expect(version).toBe(contentVersion(code));
+    expect(version).toMatch(/^sha256-[0-9a-f]{16}$/);
+    expect(version).not.toBe('2.11.01');
+  });
+
+  it('changes the default version when the plugin source changes', () => {
+    const first = writePluginFile(simplePluginCode(1));
+    const second = writePluginFile(simplePluginCode(2));
+    expect(createPluginLoader().load(first).version).not.toBe(
+      createPluginLoader().load(second).version,
+    );
+  });
+
+  it('keeps the default version stable for identical source at a different path', () => {
+    const code = simplePluginCode();
+    expect(createPluginLoader().load(writePluginFile(code)).version).toBe(
+      createPluginLoader().load(writePluginFile(code)).version,
+    );
   });
 
   it('prefers an explicitly supplied version', () => {
@@ -29,13 +58,13 @@ describe('createPluginLoader', () => {
     expect(createPluginLoader().load(abs, { version: '3.0.0' }).version).toBe('3.0.0');
   });
 
-  it('caches by path and mtime', () => {
+  it('caches by path and content hash', () => {
     const abs = writePluginFile(simplePluginCode());
     const loader = createPluginLoader();
     expect(loader.load(abs).module).toBe(loader.load(abs).module);
   });
 
-  it('reloads when the file changes on disk', () => {
+  it('reloads when the file contents change on disk', () => {
     const abs = writePluginFile(simplePluginCode());
     const loader = createPluginLoader();
     const first = loader.load(abs);
@@ -43,6 +72,39 @@ describe('createPluginLoader', () => {
     const later = new Date(Date.now() + 5000);
     utimesSync(abs, later, later);
     expect(loader.load(abs).module).not.toBe(first.module);
+    expect(loader.load(abs).version).not.toBe(first.version);
+  });
+
+  it('reloads changed contents even when the mtime is unchanged', () => {
+    // The reason the key is a content hash: mtime granularity is coarse on
+    // some filesystems, and tooling routinely restores timestamps. Keyed on
+    // mtime, this rewrite would have served the stale module forever.
+    const abs = writePluginFile(simplePluginCode());
+    // Pin to a whole second so restoring it afterwards is exact — sub-ms
+    // timestamps do not survive a round trip through utimes on every platform.
+    const pinned = new Date(Math.floor(Date.now() / 1000) * 1000);
+    utimesSync(abs, pinned, pinned);
+
+    const loader = createPluginLoader();
+    const first = loader.load(abs);
+    const before = statSync(abs).mtimeMs;
+
+    writeFileSync(abs, simplePluginCode(2), 'utf8');
+    utimesSync(abs, pinned, pinned);
+    expect(statSync(abs).mtimeMs).toBe(before);
+
+    const reloaded = loader.load(abs);
+    expect(reloaded.module).not.toBe(first.module);
+    expect(reloaded.version).not.toBe(first.version);
+  });
+
+  it('serves the cache when a rewrite restores the identical contents', () => {
+    const code = simplePluginCode();
+    const abs = writePluginFile(code);
+    const loader = createPluginLoader();
+    const first = loader.load(abs);
+    writeFileSync(abs, code, 'utf8');
+    expect(loader.load(abs).module).toBe(first.module);
   });
 
   it('bypasses the cache when asked for a fresh load', () => {
