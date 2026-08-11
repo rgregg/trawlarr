@@ -257,17 +257,30 @@ describe('claimNext', () => {
   });
 
   it('never claims terminal files', () => {
-    for (const state of ['good', 'failed', 'not_converging'] as const) {
-      const id = scan({
+    // Each state needs its OWN inode AND its own content hash: upsertScanned
+    // resolves identity by inode first and by content second, so three files
+    // sharing either one collapse into a single row and the loop below just
+    // overwrites one file's state three times. That degenerate version of this
+    // test passed even when claimNext handed out 'good' and 'failed' files,
+    // because there was only ever one row and it was 'not_converging'.
+    const ids = ['good', 'failed', 'not_converging'].map((state, index) =>
+      scan({
         identity: buildIdentityCandidate({
           deviceId: 2049,
-          inode: 500,
-          hash: { ...hash, headHex: state },
+          inode: 500 + index,
+          hash: { ...hash, headHex: `terminal-${state}` },
         }),
         path: `/media/movies/${state}.mkv`,
-      });
-      repo.setState({ fileId: id, state });
+      }),
+    );
+    expect(new Set(ids).size).toBe(3);
+
+    const states = ['good', 'failed', 'not_converging'] as const;
+    ids.forEach((id, index) => repo.setState({ fileId: id, state: states[index]! }));
+    for (const [index, state] of states.entries()) {
+      expect(repo.getById(ids[index]!)?.state).toBe(state);
     }
+
     expect(repo.claimNext({ workerClass: 'transcode', nowMs: NOW })).toBeNull();
   });
 

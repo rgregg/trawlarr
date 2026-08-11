@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -22,16 +22,13 @@ const hasFfmpegSync = (): boolean => {
 
 const available = hasFfmpegSync();
 let workDir: string;
+let sourceDir: string;
 let mediaPath: string;
+let convergedPath: string;
 
-beforeAll(async () => {
-  if (!available) return;
-
-  workDir = mkdtempSync(join(tmpdir(), 'trawlarr-e2e-'));
-  mediaPath = join(workDir, 'sample.mkv');
-
-  // Generate a tiny h264 sample rather than committing a binary fixture.
-  await execFileAsync('ffmpeg', [
+// Generate tiny samples rather than committing binary fixtures.
+const makeSample = (path: string, videoCodec: string) =>
+  execFileAsync('ffmpeg', [
     '-hide_banner',
     '-y',
     '-f',
@@ -43,14 +40,65 @@ beforeAll(async () => {
     '-i',
     'sine=frequency=440:duration=2',
     '-c:v',
-    'libx264',
+    videoCodec,
     '-preset',
     'ultrafast',
     '-c:a',
     'aac',
-    mediaPath,
+    path,
   ]);
-}, 60_000);
+
+const audioCodecOf = async (path: string): Promise<string> => {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'quiet',
+    '-select_streams',
+    'a:0',
+    '-show_entries',
+    'stream=codec_name',
+    '-of',
+    'csv=p=0',
+    path,
+  ]);
+  return stdout.trim();
+};
+
+const videoCodecOf = async (path: string): Promise<string> => {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'quiet',
+    '-select_streams',
+    'v:0',
+    '-show_entries',
+    'stream=codec_name',
+    '-of',
+    'csv=p=0',
+    path,
+  ]);
+  return stdout.trim();
+};
+
+beforeAll(async () => {
+  if (!available) return;
+
+  // The inputs live OUTSIDE the work dir. The CLI computes an Execute node's
+  // output as <work-dir>/<basename>.<container>, so a source that lives in the
+  // work dir would resolve its output onto itself — which the engine now
+  // refuses (spec §6.1: never implicitly replace a file). Separating the two
+  // directories is what a real deployment does, and it keeps every input in
+  // this suite immutable, so no test depends on another having mutated disk.
+  workDir = mkdtempSync(join(tmpdir(), 'trawlarr-e2e-'));
+  sourceDir = join(workDir, 'source');
+  mkdirSync(sourceDir, { recursive: true });
+  mediaPath = join(sourceDir, 'sample.mkv');
+  convergedPath = join(sourceDir, 'already-hevc.mkv');
+
+  await makeSample(mediaPath, 'libx264');
+  // A file that already satisfies the flow's check, built here rather than
+  // inherited from the transcode test's output: tests must not depend on each
+  // other's side effects, or a failure upstream shows up as a mystery here.
+  await makeSample(convergedPath, 'libx265');
+}, 120_000);
 
 const flowPath = () => {
   const path = join(workDir, 'flow.json');
@@ -106,11 +154,9 @@ describe.runIf(available)('end to end', () => {
     expect(stdout).toContain('-c:v libx265');
     expect(stdout).toContain('Stopped: end-of-flow');
 
-    // The dry run must report a command that could actually run: since
-    // mediaPath and its computed output path collide (both are
-    // workDir/sample.mkv), a naive report would describe ffmpeg reading and
-    // writing the same file — which ffmpeg refuses outright. Assert the
-    // reported output path differs from the input path.
+    // The dry run must report a command that could actually run: ffmpeg
+    // refuses to write the file it is reading, so a report naming the input
+    // as the output would describe something that could never execute.
     const match = /Would run: ffmpeg (.+)/.exec(stdout);
     const reportedArgs = match?.[1]?.trim().split(/\s+/) ?? [];
     const reportedOutputPath = reportedArgs.at(-1);
@@ -118,7 +164,15 @@ describe.runIf(available)('end to end', () => {
     expect(reportedOutputPath).not.toBe(mediaPath);
   }, 60_000);
 
-  it('transcodes the sample to hevc for real', async () => {
+  it('transcodes the sample to hevc for real, into a new file', async () => {
+    // Captured BEFORE the run: the output is a distinct file, but reading the
+    // input's codec up front is what makes the comparison below falsifiable
+    // rather than a tautology.
+    const inputVideoCodec = await videoCodecOf(mediaPath);
+    const inputAudioCodec = await audioCodecOf(mediaPath);
+    expect(inputVideoCodec).toBe('h264');
+    expect(inputAudioCodec).toBe('aac');
+
     const { stdout } = await runCli([
       '--flow',
       flowPath(),
@@ -129,64 +183,40 @@ describe.runIf(available)('end to end', () => {
     ]);
     expect(stdout).toContain('Stopped: end-of-flow');
 
-    const outputPath = join(workDir, 'sample.mkv');
     const match = /Result path: (.+)/.exec(stdout);
-    const produced = match?.[1]?.trim() ?? outputPath;
-    expect(statSync(produced).size).toBeGreaterThan(0);
+    const produced = match?.[1]?.trim();
+    expect(produced).toBeDefined();
+    // The engine never implicitly replaces a file: the result is a new path.
+    expect(produced).not.toBe(mediaPath);
+    expect(produced).toBe(join(workDir, 'sample.mkv'));
+    expect(statSync(produced!).size).toBeGreaterThan(0);
+    // The input survived untouched.
+    expect(await videoCodecOf(mediaPath)).toBe('h264');
 
-    const { stdout: probeOut } = await execFileAsync('ffprobe', [
-      '-v',
-      'quiet',
-      '-select_streams',
-      'v:0',
-      '-show_entries',
-      'stream=codec_name',
-      '-of',
-      'csv=p=0',
-      produced,
-    ]);
-    expect(probeOut.trim()).toBe('hevc');
+    expect(await videoCodecOf(produced!)).toBe('hevc');
 
     // Regression guard: the flow only touched the video encoder. The audio
-    // stream was never asked to encode, so it must come out exactly as it
-    // went in (aac) rather than falling through to ffmpeg's container
-    // default (which, for Matroska, is vorbis) — that fallthrough was a
-    // real, silent data-quality bug where untouched streams got re-encoded.
-    const { stdout: inputAudioCodec } = await execFileAsync('ffprobe', [
-      '-v',
-      'quiet',
-      '-select_streams',
-      'a:0',
-      '-show_entries',
-      'stream=codec_name',
-      '-of',
-      'csv=p=0',
-      mediaPath,
-    ]);
-    const { stdout: outputAudioCodec } = await execFileAsync('ffprobe', [
-      '-v',
-      'quiet',
-      '-select_streams',
-      'a:0',
-      '-show_entries',
-      'stream=codec_name',
-      '-of',
-      'csv=p=0',
-      produced,
-    ]);
-    expect(outputAudioCodec.trim()).toBe(inputAudioCodec.trim());
-    expect(outputAudioCodec.trim()).toBe('aac');
+    // stream was never asked to encode, so it must come out of the OUTPUT
+    // exactly as it went into the input (aac) rather than falling through to
+    // ffmpeg's container default (which, for Matroska, is vorbis) — that
+    // fallthrough was a real, silent data-quality bug where untouched streams
+    // got re-encoded.
+    expect(await audioCodecOf(produced!)).toBe(inputAudioCodec);
+    expect(await audioCodecOf(produced!)).toBe('aac');
   }, 180_000);
 
   it('routes to the already-correct branch on a second pass, doing no work', async () => {
-    // Convergence in miniature: the transcoded file should now match, so the
-    // flow ends at the check node instead of transcoding again.
-    const converged = join(workDir, 'sample.mkv');
+    // Convergence in miniature: a file that already matches ends the flow at
+    // the check node instead of transcoding. The converged fixture is built in
+    // beforeAll, not inherited from the transcode test's output — depending on
+    // another test's side effects makes an upstream failure look like a bug
+    // here, and couples the two to their execution order.
+    expect(await videoCodecOf(convergedPath)).toBe('hevc');
     const { stdout } = await runCli([
       '--flow',
       flowPath(),
       '--file',
-      converged,
+      convergedPath,
       '--work-dir',
       workDir,
       '--dry-run',

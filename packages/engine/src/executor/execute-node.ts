@@ -26,9 +26,11 @@ export const createExecuteRunner =
       details: () => plugin.details,
       plugin: async (args) => {
         const command = args.variables.ffmpegCommand;
-        // The scratch/final split (and the guarantee that they're never the
-        // same path) lives in resolveEncodeTarget, shared with the dry run,
-        // so the two can never disagree about what command would run.
+        // The scratch/final split — and the refusal to resolve a final path
+        // that IS the input, which would silently replace the original —
+        // lives in resolveEncodeTarget, shared with the dry run, so the two
+        // can never disagree about what command would run. It throws rather
+        // than returning, which runFlow records as this node's error.
         const { writePath: scratchOutputPath, finalPath: outputPath } = resolveEncodeTarget({
           path: args.inputFileObj._id,
           container: command.container,

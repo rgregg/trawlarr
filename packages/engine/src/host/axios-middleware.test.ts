@@ -18,10 +18,34 @@ describe('createAxiosMiddleware', () => {
     expect(probeFile).toHaveBeenCalledWith('/media/movie.mkv');
   });
 
-  it('tolerates a leading slash on the endpoint', async () => {
+  // Plugins spell the same endpoint several ways. Every one of these is the
+  // supported endpoint, and reporting any of them as unsupported would be this
+  // component failing at the one thing it exists to do.
+  it.each([
+    ['a leading slash', '/api/v2/scan-individual-file'],
+    ['repeated leading slashes', '//api/v2/scan-individual-file'],
+    ['a trailing slash', 'api/v2/scan-individual-file/'],
+    ['both slashes', '/api/v2/scan-individual-file/'],
+    ['a query string', 'api/v2/scan-individual-file?cacheBust=1'],
+    ['a query string after a trailing slash', '/api/v2/scan-individual-file/?a=1&b=2'],
+    ['a fragment', 'api/v2/scan-individual-file#frag'],
+    ['mixed case', '/API/v2/Scan-Individual-File'],
+  ])('tolerates %s', async (_label, endpoint) => {
     const { call, probeFile } = make();
-    await call('/api/v2/scan-individual-file', { file: { _id: '/media/a.mkv' } });
+    await call(endpoint, { file: { _id: '/media/a.mkv' } });
     expect(probeFile).toHaveBeenCalledWith('/media/a.mkv');
+  });
+
+  it('recognises a known-unsupported endpoint through the same normalisation', async () => {
+    const { call } = make();
+    await expect(call('/api/v2/read-plugin/?x=1', {})).rejects.toThrow(/classic plugins/i);
+  });
+
+  it('still rejects a genuinely different endpoint', async () => {
+    const { call } = make();
+    await expect(call('/api/v2/scan-individual-file/extra', {})).rejects.toThrow(
+      UnsupportedHostEndpointError,
+    );
   });
 
   it('rejects an unsupported endpoint by name, so the fix is obvious', async () => {

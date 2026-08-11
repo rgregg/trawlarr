@@ -7,6 +7,15 @@ const edgeKey = (edge: FlowEdge): string =>
   `${edge.fromNodeId}|${edge.outputNumber}|${edge.toNodeId}`;
 
 /**
+ * A total ordering on the sort keys. Returning 0 for equal keys matters: a
+ * comparator that answers -1 or 1 for a pair it considers equal is
+ * inconsistent, and an inconsistent comparator makes the sort's output
+ * implementation-defined — which for a hash of the sorted result means the
+ * same flow could hash differently.
+ */
+const byKey = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
  * Hash of the entire flow definition: structure, every node's configuration,
  * and every referenced plugin version.
  *
@@ -20,8 +29,8 @@ const edgeKey = (edge: FlowEdge): string =>
  * This value also serves as the flow's version — there is no separate counter.
  */
 export const flowDefinitionHash = (flow: FlowDefinition): string => {
-  const nodes = [...flow.nodes].sort((a, b) => (nodeKey(a) < nodeKey(b) ? -1 : 1));
-  const edges = [...flow.edges].sort((a, b) => (edgeKey(a) < edgeKey(b) ? -1 : 1));
+  const nodes = [...flow.nodes].sort((a, b) => byKey(nodeKey(a), nodeKey(b)));
+  const edges = [...flow.edges].sort((a, b) => byKey(edgeKey(a), edgeKey(b)));
 
   return sha256Hex(
     canonicalJson({

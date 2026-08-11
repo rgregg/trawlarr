@@ -40,8 +40,16 @@ export const runDryFlow = async (
   },
 ): Promise<DryRunResult> => {
   const plannedCommands: string[][] = [];
-  let stoppedAtNodeId: string | null = null;
-  let stoppedBecause: string | null = null;
+
+  // Nodes whose plugin we declined to vouch for, recorded when the loader
+  // wrapper is asked for them. Being asked is NOT the same as being reached:
+  // runFlow's start-node discovery loads candidate nodes while searching, so a
+  // third-party node listed before the start node gets probed even though the
+  // walk may never visit it. Recording a *candidate* here and deciding
+  // afterwards which one (if any) the walk actually reached is what keeps a
+  // flow that ran to completion from reporting `complete: false` with a
+  // stoppedAtNodeId it never executed.
+  const stopCandidates = new Map<string, string>();
 
   const inertStandIn = (plugin: LoadedPlugin): PluginModule => ({
     details: () => plugin.details,
@@ -87,8 +95,7 @@ export const runDryFlow = async (
 
       if (classification === 'unknown') {
         const stop = new DryRunStop(node.id, plugin.id);
-        stoppedAtNodeId = node.id;
-        stoppedBecause = stop.message;
+        stopCandidates.set(node.id, stop.message);
         throw stop;
       }
 
@@ -100,6 +107,16 @@ export const runDryFlow = async (
     },
   });
 
+  // The walk reached a node only if runFlow recorded a step for it. A load
+  // that throws produces a step with the error attached and ends the run, so
+  // the last step is the only place a stop can legitimately have happened.
+  const lastStep = result.steps.at(-1);
+  const stoppedAtNodeId =
+    lastStep !== undefined && lastStep.error !== null && stopCandidates.has(lastStep.nodeId)
+      ? lastStep.nodeId
+      : null;
+  const stoppedBecause =
+    stoppedAtNodeId === null ? null : (stopCandidates.get(stoppedAtNodeId) ?? null);
   const stoppedEarly = stoppedAtNodeId !== null;
 
   return {

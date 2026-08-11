@@ -21,7 +21,21 @@ const KNOWN_UNSUPPORTED = new Map([
   ],
 ]);
 
-const normalise = (endpoint: string): string => endpoint.replace(/^\/+/, '');
+/**
+ * Reduce an endpoint as a plugin wrote it to the path we match on.
+ *
+ * Plugins spell the same endpoint several ways — with or without a leading
+ * slash, with a trailing slash, with a cache-busting query string. This is the
+ * one component whose entire job is to fail accurately, so a cosmetic
+ * difference must not turn a SUPPORTED endpoint into a reported
+ * incompatibility. Query and fragment are dropped (nothing here routes on
+ * them) and surrounding slashes are trimmed.
+ */
+const normalise = (endpoint: string): string =>
+  endpoint.split('#')[0]!.split('?')[0]!.replace(/^\/+/, '').replace(/\/+$/, '');
+
+/** Matching is case-insensitive; the reported name keeps the plugin's casing. */
+const matchKey = (name: string): string => name.toLowerCase();
 
 /**
  * Backs deps.axiosMiddleware.
@@ -38,10 +52,11 @@ export const createAxiosMiddleware =
   }): PluginDeps['axiosMiddleware'] =>
   async (endpoint, data) => {
     const name = normalise(endpoint);
+    const key = matchKey(name);
 
-    if (!SUPPORTED_ENDPOINTS.has(name)) {
+    if (!SUPPORTED_ENDPOINTS.has(key)) {
       const detail =
-        KNOWN_UNSUPPORTED.get(name) ??
+        KNOWN_UNSUPPORTED.get(key) ??
         `Supported endpoints: ${[...SUPPORTED_ENDPOINTS].join(', ')}.`;
       input.log(`Plugin called unsupported host endpoint "${name}". ${detail}`);
       throw new UnsupportedHostEndpointError(name, detail);

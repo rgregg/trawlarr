@@ -21,11 +21,15 @@ const details = (over: Partial<PluginDetails> = {}): PluginDetails => ({
   ...over,
 });
 
-const loaded = (id: string, module: PluginModule): LoadedPlugin => ({
+const loaded = (
+  id: string,
+  module: PluginModule,
+  over: Partial<PluginDetails> = {},
+): LoadedPlugin => ({
   id,
   absPath: `/plugins/${id}.js`,
   version: '1.0.0',
-  details: details({ name: id }),
+  details: details({ name: id, ...over }),
   module,
 });
 
@@ -76,12 +80,16 @@ const buildArgs = (invocation: { currentPath: string; variables: unknown }) =>
     jobLog: () => {},
   }) as unknown as PluginInputArgs;
 
-const base = {
-  initialPath: '/in.mkv',
-  startNodeId: 'a',
-  buildArgs,
-  outputPathFor: (path: string, container: string) => `/staging/out.${container}`,
-};
+const outputPathFor = (path: string, container: string) => `/staging/out.${container}`;
+
+const base = { initialPath: '/in.mkv', startNodeId: 'a', buildArgs, outputPathFor };
+
+/**
+ * `base` without `startNodeId`, so runFlow must discover the start node — the
+ * way cli.ts actually calls it. Passing an explicit start node short-circuits
+ * discovery, which is why discovery bugs went unnoticed here.
+ */
+const discovering = { initialPath: '/in.mkv', buildArgs, outputPathFor };
 
 describe('classifySideEffects', () => {
   it('knows first-party filters are inert', () => {
@@ -145,6 +153,28 @@ describe('runDryFlow', () => {
     expect(reportedOutputPath).toMatch(/^\/staging\/out\.trawlarr-tmp-.+\.mkv$/);
   });
 
+  it('reports the node as failed when the planned Execute would overwrite its input', async () => {
+    // The dry run must not describe a command the real Execute would refuse.
+    // resolveEncodeTarget is shared by both, so an in-place output surfaces
+    // here as a plugin error rather than as a cheerfully planned command.
+    const result = await runDryFlow({
+      ...base,
+      outputPathFor: (path: string) => path,
+      flow: flow(
+        [node('a', 'trawlarr:beginCommand'), node('b', 'trawlarr:execute')],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, n.pluginId === 'trawlarr:beginCommand' ? beginAndEncode : pass),
+    });
+
+    expect(result.plannedCommands).toHaveLength(0);
+    expect(result.stopReason).toBe('plugin-error');
+    expect(result.error).toMatch(/Replace Original File/i);
+    // Not a vouching stop — this is a real configuration failure.
+    expect(result.stoppedAtNodeId).toBeNull();
+  });
+
   it('stops at an unrecognised node and says which one and why', async () => {
     const result = await runDryFlow({
       ...base,
@@ -192,6 +222,47 @@ describe('runDryFlow', () => {
     // because a dry run stopping early is normal, not an error to fix.
     expect(result.failed).toBe(false);
     expect(result.complete).toBe(false);
+  });
+
+  it('completes when discovery merely probes a third-party node it never walks into', async () => {
+    // The production path (cli.ts) never passes startNodeId, so runFlow has to
+    // discover the start node by loading candidates in array order. A
+    // third-party node listed BEFORE the start node therefore gets loaded
+    // during discovery — but it is never executed. Being probed must not be
+    // mistaken for being reached: this flow completes, so it must report
+    // complete: true and no stop node. Every other case here passes an
+    // explicit startNodeId, which short-circuits discovery — which is exactly
+    // why this was invisible.
+    const result = await runDryFlow({
+      ...discovering,
+      flow: flow([node('n-third', 'community:mysteryNode'), node('n-start', 'trawlarr:start')], []),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, pass, n.pluginId === 'trawlarr:start' ? { isStartPlugin: true } : {}),
+    });
+
+    expect(result.stopReason).toBe('end-of-flow');
+    expect(result.complete).toBe(true);
+    expect(result.failed).toBe(false);
+    expect(result.stoppedAtNodeId).toBeNull();
+    expect(result.stoppedBecause).toBeNull();
+    expect(result.steps.map((s) => s.nodeId)).toEqual(['n-start']);
+  });
+
+  it('still stops at a third-party node the walk actually reaches, without startNodeId', async () => {
+    const result = await runDryFlow({
+      ...discovering,
+      flow: flow(
+        [node('n-third', 'community:mysteryNode'), node('n-start', 'trawlarr:start')],
+        [{ fromNodeId: 'n-start', outputNumber: 1, toNodeId: 'n-third' }],
+      ),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, pass, n.pluginId === 'trawlarr:start' ? { isStartPlugin: true } : {}),
+    });
+
+    expect(result.complete).toBe(false);
+    expect(result.failed).toBe(false);
+    expect(result.stoppedAtNodeId).toBe('n-third');
+    expect(result.stoppedBecause).toMatch(/community:mysteryNode/);
   });
 
   it('stops at a node with a path-hash id, with complete: false and failed: false', async () => {
