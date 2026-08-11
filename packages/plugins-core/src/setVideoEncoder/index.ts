@@ -1,8 +1,33 @@
 import type { PluginDetails, PluginInputArgs, PluginOutputArgs } from '@trawlarr/plugin-api';
 import { assertCommandInitialised } from '@trawlarr/core';
 
-/** Encoders that take -crf; the hardware ones take -cq instead. */
-const CRF_ENCODERS = new Set(['libx264', 'libx265', 'libsvtav1', 'libvpx-vp9']);
+/**
+ * Each ffmpeg encoder exposes its own quality knob under a different flag name.
+ * Verified against ffmpeg 6.1.1 via `ffmpeg -h encoder=<name>` (and, for
+ * hevc_qsv's -global_quality, `ffmpeg -h full | grep global_quality`, since
+ * that option is a generic AVCodecContext option rather than encoder-private):
+ *   - libx264 / libx265 / libsvtav1 / libvpx-vp9 (software) -> -crf
+ *   - hevc_nvenc / h264_nvenc (NVIDIA)                       -> -cq
+ *   - hevc_vaapi (VAAPI)                                      -> -qp (no -crf/-cq)
+ *   - hevc_qsv (Intel Quick Sync)                             -> -global_quality
+ *     (has no -crf, -cq, or -qp private option at all)
+ *
+ * The default below covers an encoder the dropdown doesn't list (a user can
+ * type an arbitrary value in the string input): -crf is the flag accepted by
+ * the largest, most common family of ffmpeg encoders (essentially every
+ * software x264/x265/AV1/VP9-style encoder), so it's the best blind guess.
+ */
+const QUALITY_FLAG_BY_ENCODER: Record<string, string> = {
+  libx264: '-crf',
+  libx265: '-crf',
+  libsvtav1: '-crf',
+  'libvpx-vp9': '-crf',
+  hevc_nvenc: '-cq',
+  h264_nvenc: '-cq',
+  hevc_vaapi: '-qp',
+  hevc_qsv: '-global_quality',
+};
+const DEFAULT_QUALITY_FLAG = '-crf';
 
 export const details = (): PluginDetails => ({
   name: 'Set Video Encoder',
@@ -43,7 +68,7 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
 
   const encoder = String(args.inputs.encoder ?? 'libx265');
   const quality = String(args.inputs.quality ?? '24');
-  const qualityFlag = CRF_ENCODERS.has(encoder) ? '-crf' : '-cq';
+  const qualityFlag = QUALITY_FLAG_BY_ENCODER[encoder] ?? DEFAULT_QUALITY_FLAG;
 
   for (const stream of args.variables.ffmpegCommand.streams) {
     if (stream.codec_type !== 'video' || stream.removed === true) continue;

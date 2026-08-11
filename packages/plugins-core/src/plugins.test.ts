@@ -102,4 +102,44 @@ describe('trawlarr:setVideoEncoder', () => {
       ),
     ).rejects.toThrow(/Begin Command/i);
   });
+
+  describe('quality flag per encoder', () => {
+    const flagFor = async (encoder: string): Promise<string | undefined> => {
+      const begun = await FIRST_PARTY_PLUGINS['trawlarr:beginCommand']!.module.plugin(argsFor());
+      const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
+        argsFor({ variables: begun.variables, inputs: { encoder, quality: '24' } }),
+      );
+      const outputArgs = out.variables.ffmpegCommand.streams[0]!.outputArgs;
+      const flagIndex = outputArgs.findIndex((arg) => arg.startsWith('-') && arg !== '-c:v');
+      return outputArgs[flagIndex];
+    };
+
+    it('libx265 uses -crf', async () => {
+      expect(await flagFor('libx265')).toBe('-crf');
+    });
+
+    it('libx264 uses -crf', async () => {
+      expect(await flagFor('libx264')).toBe('-crf');
+    });
+
+    it('hevc_nvenc uses -cq', async () => {
+      expect(await flagFor('hevc_nvenc')).toBe('-cq');
+    });
+
+    it('h264_nvenc uses -cq', async () => {
+      expect(await flagFor('h264_nvenc')).toBe('-cq');
+    });
+
+    it('hevc_vaapi uses -qp', async () => {
+      expect(await flagFor('hevc_vaapi')).toBe('-qp');
+    });
+
+    it('hevc_qsv uses -global_quality', async () => {
+      expect(await flagFor('hevc_qsv')).toBe('-global_quality');
+    });
+
+    it('an encoder not in the map falls back to the -crf default', async () => {
+      expect(await flagFor('some_future_encoder')).toBe('-crf');
+    });
+  });
 });
