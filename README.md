@@ -43,7 +43,7 @@ plugin.
 This repository currently contains only the workspace toolchain and the
 `@trawlarr/core` package skeleton. The domain logic, the SQLite persistence
 layer, and the plugin execution engine are being built out in subsequent
-tasks; see `.superpowers/sdd/` for the design spec and implementation plan.
+tasks; see [`docs/superpowers/specs/2026-08-10-trawlarr-design.md`](./docs/superpowers/specs/2026-08-10-trawlarr-design.md) for the design spec and [`docs/superpowers/plans/2026-08-10-trawlarr-p0-p1-engine.md`](./docs/superpowers/plans/2026-08-10-trawlarr-p0-p1-engine.md) for the implementation plan.
 
 ## Development
 
