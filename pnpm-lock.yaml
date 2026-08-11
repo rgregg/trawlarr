@@ -44,6 +44,9 @@ importers:
       '@trawlarr/plugin-api':
         specifier: workspace:*
         version: link:../plugin-api
+      '@trawlarr/plugins-core':
+        specifier: workspace:*
+        version: link:../plugins-core
       axios:
         specifier: ^1.7.7
         version: 1.19.0
