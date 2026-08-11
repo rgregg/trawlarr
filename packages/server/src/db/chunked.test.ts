@@ -72,7 +72,11 @@ describe('runChunked', () => {
     // For each chunk boundary (last item of chunk N, first item of chunk
     // N+1), check whether a 'tick' marker landed strictly between them.
     let boundariesWithTick = 0;
-    for (let lastOfChunk = chunkSize - 1; lastOfChunk < items.length - 1; lastOfChunk += chunkSize) {
+    for (
+      let lastOfChunk = chunkSize - 1;
+      lastOfChunk < items.length - 1;
+      lastOfChunk += chunkSize
+    ) {
       const lastIdx = events.indexOf(`item:${lastOfChunk}`);
       const nextIdx = events.indexOf(`item:${lastOfChunk + 1}`);
       const between = events.slice(lastIdx + 1, nextIdx);
