@@ -40,10 +40,55 @@ plugin.
 
 ## Status
 
-This repository currently contains only the workspace toolchain and the
-`@trawlarr/core` package skeleton. The domain logic, the SQLite persistence
-layer, and the plugin execution engine are being built out in subsequent
-tasks; see [`docs/superpowers/specs/2026-08-10-trawlarr-design.md`](./docs/superpowers/specs/2026-08-10-trawlarr-design.md) for the design spec and [`docs/superpowers/plans/2026-08-10-trawlarr-p0-p1-engine.md`](./docs/superpowers/plans/2026-08-10-trawlarr-p0-p1-engine.md) for the implementation plan.
+Early. There is no server process, no HTTP API, no UI, and no scheduler yet —
+the pieces below are libraries plus a development CLI that runs one file
+through one flow.
+
+The pnpm workspace holds five packages:
+
+| Package                  | What it is                                                                                                                                                                                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@trawlarr/core`         | Pure domain logic: file identity, fact extraction, the convergence ledger, flow definitions and their signature hash, and the cooperative ffmpeg command model (build → compile to argv). No I/O.                                                                                     |
+| `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                          |
+| `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute.                                                                                                                                                                     |
+| `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run. |
+| `@trawlarr/server`       | SQLite persistence: connection setup, forward-only migrations, the media-file repository (identity-preserving upsert, atomic claim) and the plugin document store.                                                                                                                    |
+
+### The development CLI
+
+`@trawlarr/engine` builds a CLI that walks a single flow over a single file.
+It is a harness for exercising the engine, not a product surface.
+
+```bash
+pnpm build
+node packages/engine/dist/cli.js --flow flow.json --file /media/movie.mkv [--dry-run]
+```
+
+It probes the file with `ffprobe`, resolves each node (first-party nodes
+in-process, anything else loaded from disk), walks the flow, and prints a step
+trace with each node's output number and duration. `--dry-run` walks without
+side effects: it reports the exact ffmpeg command Execute would run, and stops
+at the first node whose side effects the engine cannot vouch for — which is
+every third-party plugin, because a plugin can spawn subprocesses directly.
+
+Transcodes write to a new path. The engine never implicitly replaces a file;
+an explicit Replace Original File node is not implemented yet.
+
+### Compatibility harness
+
+The engine is checked against real community plugins rather than mocks. The
+corpus is fetched into `cache/` (gitignored) at a pinned upstream revision:
+
+```bash
+pnpm compat:fetch
+pnpm test -- packages/engine/test/compat
+```
+
+The suite skips itself, loudly, if the corpus was never fetched. A nightly
+workflow re-runs it against upstream `master` and opens an issue on failure,
+so contract drift surfaces as a dated report rather than as a bug much later.
+
+See [`docs/superpowers/specs/2026-08-10-trawlarr-design.md`](./docs/superpowers/specs/2026-08-10-trawlarr-design.md) for the design spec and [`docs/superpowers/plans/2026-08-10-trawlarr-p0-p1-engine.md`](./docs/superpowers/plans/2026-08-10-trawlarr-p0-p1-engine.md) for the implementation plan.
 
 ## Development
 

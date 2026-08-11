@@ -219,7 +219,7 @@ describe('runFlow — cycles', () => {
 describe('runFlow — discovery load failures', () => {
   it('names the failing plugin and surfaces the underlying error when the start node fails to load', async () => {
     const result = await runFlow({
-      flow: flow([node('a')], []),
+      flow: flow([node('a', 'plugin-a')], []),
       initialPath: '/in.mkv',
       loadPlugin: () => {
         throw new Error('syntax error in plugin source');
@@ -228,7 +228,9 @@ describe('runFlow — discovery load failures', () => {
     });
     expect(result.stopReason).toBe('no-start-node');
     expect(result.failed).toBe(true);
-    expect(result.error).toMatch(/a/);
+    // The plugin id, not just "some character": /a/ matched almost anything.
+    expect(result.error).toMatch(/plugin "plugin-a"/);
+    expect(result.error).toMatch(/node "a"/);
     expect(result.error).toMatch(/syntax error in plugin source/);
     expect(result.error).not.toMatch(/this flow has no start node/i);
   });

@@ -43,9 +43,11 @@ const DEFAULT_STDERR_TAIL_LINES = 40;
  *
  * Progress is forwarded as it arrives because it doubles as the job's stall
  * heartbeat — a job that reports nothing for long enough is indistinguishable
- * from a hung one and gets killed. stderr is kept as a bounded tail so that a
- * pathological run cannot exhaust memory while still leaving a diagnosable
- * message when ffmpeg fails.
+ * from a hung one and gets killed. stderr is kept as a tail of the last
+ * `stderrTailLines` lines, which keeps a diagnosable message when ffmpeg fails
+ * without accumulating the entire (often enormous) stderr stream. Note this
+ * bounds the LINE COUNT, not the byte count: a run that emits a small number
+ * of pathologically long lines is still bounded only by those lines' length.
  */
 export const runFfmpeg = (input: RunFfmpegInput): Promise<FfmpegRunResult> =>
   new Promise((resolve, reject) => {

@@ -23,9 +23,17 @@ const ModuleCtor = Module as unknown as {
 /**
  * Compile CommonJS source into a fresh module instance.
  *
- * Deliberately does not populate require.cache: every call yields a clean
- * module, which is what the contract's `importFresh` semantics require and
- * what stops one job's plugin state leaking into the next.
+ * Deliberately does not populate require.cache, so each call re-executes THIS
+ * source and gets its own `module.exports` — which is what the contract's
+ * `importFresh` semantics require.
+ *
+ * The freshness stops there, and it is worth being precise about the limit:
+ * anything the plugin itself `require`s resolves through Node's ordinary
+ * module cache and is therefore SHARED across every plugin and every job in
+ * the process. A plugin that keeps state in a helper module it requires, or
+ * that mutates a shared dependency, will see that state carried from one job
+ * into the next. Nothing here isolates plugins from each other — see the
+ * README's "Plugins run as the service user" section.
  */
 export const requireFromString = (input: {
   code: string;

@@ -182,14 +182,22 @@ describe.runIf(available)('Tdarr community flow plugins', () => {
     const abs = pluginPath(testCase.rel);
 
     describe(testCase.rel, () => {
-      it.runIf(existsSync(abs))('loads and exposes usable details()', () => {
+      // These assert existence rather than gating on it (`it.runIf`). A plugin
+      // directory that upstream renamed or version-bumped IS the drift this
+      // suite exists to detect, so it must fail rather than silently skip —
+      // otherwise the nightly compatibility job reports green while running
+      // nothing. Skipping when the corpus was never fetched at all is handled
+      // once, by the outer `describe.runIf(available)`.
+      it('loads and exposes usable details()', () => {
+        expect(existsSync(abs)).toBe(true);
         const loaded = createPluginLoader().load(abs);
         expect(loaded.details.name).toBeTruthy();
         expect(loaded.details.outputs.length).toBeGreaterThan(0);
         expect(Array.isArray(loaded.details.inputs)).toBe(true);
       });
 
-      it.runIf(existsSync(abs))('executes and returns a routable output number', async () => {
+      it('executes and returns a routable output number', async () => {
+        expect(existsSync(abs)).toBe(true);
         const loaded = createPluginLoader().load(abs);
         const output = await loaded.module.plugin(argsFor(testCase.inputs, testCase.command));
         expect(typeof output.outputNumber).toBe('number');
@@ -201,10 +209,77 @@ describe.runIf(available)('Tdarr community flow plugins', () => {
   }
 });
 
+describe.runIf(available)('checkVideoCodec routes on the projected video codec', () => {
+  const abs = pluginPath('video/checkVideoCodec/1.0.0/index.js');
+
+  // The fixture's video stream is h264. checkVideoCodec walks
+  // `args.inputFileObj.ffProbeData.streams` and matches `codec_type ===
+  // 'video' && codec_name === inputs.codec`, so the output number is a direct
+  // function of the projected probe. Asking for both the codec the file HAS
+  // and one it does NOT makes each answer falsifiable: a broken projection
+  // (missing streams, wrong field names, subtitle/audio streams misreported as
+  // video) collapses both cases onto output 2, and asserting only "some
+  // routable number" would not notice.
+  it('routes to "has codec" when asked for the codec the file actually has', async () => {
+    expect(existsSync(abs)).toBe(true);
+    const loaded = createPluginLoader().load(abs);
+    const args = argsFor({ codec: 'h264' }, false);
+    expect(args.inputFileObj.ffProbeData.streams?.[0]?.codec_name).toBe('h264');
+
+    const output = await loaded.module.plugin(args);
+    expect(output.outputNumber).toBe(1);
+  });
+
+  it('routes to "does not have codec" for a codec the file lacks', async () => {
+    expect(existsSync(abs)).toBe(true);
+    const loaded = createPluginLoader().load(abs);
+    const output = await loaded.module.plugin(argsFor({ codec: 'hevc' }, false));
+    expect(output.outputNumber).toBe(2);
+  });
+});
+
+describe.runIf(available)('processedCheck round-trips through crudTransDBN', () => {
+  const abs = pluginPath('tools/processedCheck/1.0.0/index.js');
+  const SKIPLIST = 'F2FOutputJSONDB';
+  const key = `${SKIPLIST}::/media/movies/Sample.mkv`;
+
+  // processedCheck ("Check Skiplist") reads the host document store:
+  // `crudTransDBN('F2FOutputJSONDB', 'getById', <file path>, {})` and routes to
+  // output 2 only when the stored document's `DB` matches the file object's
+  // `DB` (the library id). Driving it both ways is what proves the store is
+  // genuinely wired: a crudTransDBN that always returned undefined, or a file
+  // object with a missing `DB`, would still produce "a routable output number"
+  // — it would just always be 1.
+  it('reports not-on-skiplist when the document store is empty', async () => {
+    expect(existsSync(abs)).toBe(true);
+    documents.delete(key);
+    const loaded = createPluginLoader().load(abs);
+    const output = await loaded.module.plugin(argsFor({ checkType: 'filePath' }, false));
+    expect(output.outputNumber).toBe(1);
+  });
+
+  it('sees a file the host previously wrote to the skiplist collection', async () => {
+    expect(existsSync(abs)).toBe(true);
+    const args = argsFor({ checkType: 'filePath' }, false);
+    // Write through the same deps.crudTransDBN the plugin reads through, so
+    // this is a genuine round trip rather than a poke at the backing map.
+    await deps.crudTransDBN(SKIPLIST, 'insert', args.inputFileObj._id, {
+      DB: args.inputFileObj.DB,
+    });
+    expect(documents.get(key)).toEqual({ DB: 'lib1' });
+
+    const loaded = createPluginLoader().load(abs);
+    const output = await loaded.module.plugin(args);
+    expect(output.outputNumber).toBe(2);
+    documents.delete(key);
+  });
+});
+
 describe.runIf(available)('checkFileSize proves file_size is projected in megabytes', () => {
   const abs = pluginPath('file/checkFileSize/1.0.0/index.js');
 
-  it.runIf(existsSync(abs))('routes a 8000MB file into a [7000MB, 9000MB) range', async () => {
+  it('routes a 8000MB file into a [7000MB, 9000MB) range', async () => {
+    expect(existsSync(abs)).toBe(true);
     const loaded = createPluginLoader().load(abs);
     const args = argsFor({ unit: 'MB', greaterThan: '7000', lessThan: '9000' }, false);
 
@@ -226,7 +301,8 @@ describe.runIf(available)('checkFileSize proves file_size is projected in megaby
 describe.runIf(available)('ffmpegCommand cooperation across community plugins', () => {
   const abs = pluginPath('ffmpegCommand/ffmpegCommandSetVideoEncoder/1.0.0/index.js');
 
-  it.runIf(existsSync(abs))('produces a compilable command', async () => {
+  it('produces a compilable command', async () => {
+    expect(existsSync(abs)).toBe(true);
     const loaded = createPluginLoader().load(abs);
     const args = argsFor({ outputCodec: 'hevc', ffmpegPreset: 'medium' }, true);
     const output = await loaded.module.plugin(args);
