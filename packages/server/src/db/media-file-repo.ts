@@ -2,6 +2,28 @@ import { randomUUID } from 'node:crypto';
 import type { FileState, IdentityCandidate, IdentityLookup } from '@trawlarr/core';
 import type { Db } from './connection.js';
 
+/**
+ * Raised in place of a raw SqliteError when a UNIQUE (library_id, content_key)
+ * violation still somehow escapes the conflict resolution in `upsertScanned`.
+ * A scan must never be aborted by a single pathological file: callers (the
+ * scanner's chunked loop) can catch this named error, skip the offending
+ * file, and continue with the rest of the library.
+ */
+export class IdentityConflictError extends Error {
+  readonly libraryId: string;
+  readonly contentKey: string;
+
+  constructor(libraryId: string, contentKey: string, cause?: unknown) {
+    super(
+      `Identity conflict in library ${libraryId}: content key ${contentKey} is already owned by another row`,
+    );
+    this.name = 'IdentityConflictError';
+    this.libraryId = libraryId;
+    this.contentKey = contentKey;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
 export interface MediaFileRow {
   id: string;
   library_id: string;
@@ -59,6 +81,21 @@ export interface MediaFileRepo {
   getById(fileId: string): MediaFileRow | null;
 }
 
+const isUniqueConstraintError = (err: unknown): boolean =>
+  err instanceof Error &&
+  err.name === 'SqliteError' &&
+  'code' in err &&
+  (err as { code?: unknown }).code === 'SQLITE_CONSTRAINT_UNIQUE';
+
+/**
+ * Belt-and-braces: if a UNIQUE (library_id, content_key) violation still
+ * somehow reaches the database despite the conflict resolution above,
+ * translate it into a named, catchable error instead of letting a raw
+ * SqliteError propagate and abort the whole scan.
+ */
+const toIdentityConflictError = (err: unknown, libraryId: string, contentKey: string): unknown =>
+  isUniqueConstraintError(err) ? new IdentityConflictError(libraryId, contentKey, err) : err;
+
 export const createMediaFileRepo = (db: Db): MediaFileRepo => {
   const byInode = db.prepare(`SELECT id FROM media_file WHERE library_id = ? AND inode_key = ?`);
   const byContent = db.prepare(
@@ -79,6 +116,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         SET inode_key = ?, content_key = ?, path = ?, nlink = ?,
             size_bytes = ?, mtime_ms = ?, ctime_ms = ?, container = ?, updated_at = ?
       WHERE id = ?`,
+  );
+
+  const clearInodeKey = db.prepare(
+    `UPDATE media_file SET inode_key = NULL, updated_at = ? WHERE id = ?`,
   );
 
   /**
@@ -111,12 +152,50 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
 
     upsertScanned(input) {
       const lookup = identityLookup(input.libraryId);
+      const inodeMatch =
+        input.identity.inodeKey !== null ? lookup.byInodeKey(input.identity.inodeKey) : null;
+      const contentMatch = lookup.byContentKey(input.identity.contentKey);
+
+      // Bytes are the authoritative identity (the same premise behind the
+      // content-hash fallback). If the inode match and the content match
+      // land on different rows, the file's bytes now belong to the
+      // content-matched row, so it wins. The inode-matched row loses its
+      // now-stale inode_key so it cannot keep colliding with this content
+      // key on every future scan.
       const existing =
-        (input.identity.inodeKey !== null ? lookup.byInodeKey(input.identity.inodeKey) : null) ??
-        lookup.byContentKey(input.identity.contentKey);
+        inodeMatch !== null && contentMatch !== null && inodeMatch !== contentMatch
+          ? contentMatch
+          : (inodeMatch ?? contentMatch);
 
       if (existing !== null) {
-        updateScanned.run(
+        if (inodeMatch !== null && inodeMatch !== existing) {
+          clearInodeKey.run(input.nowMs, inodeMatch);
+        }
+
+        try {
+          updateScanned.run(
+            input.identity.inodeKey,
+            input.identity.contentKey,
+            input.path,
+            input.nlink,
+            input.sizeBytes,
+            input.mtimeMs,
+            input.ctimeMs,
+            input.container,
+            input.nowMs,
+            existing,
+          );
+        } catch (err) {
+          throw toIdentityConflictError(err, input.libraryId, input.identity.contentKey);
+        }
+        return existing;
+      }
+
+      const id = randomUUID();
+      try {
+        insertFile.run(
+          id,
+          input.libraryId,
           input.identity.inodeKey,
           input.identity.contentKey,
           input.path,
@@ -125,28 +204,13 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
           input.mtimeMs,
           input.ctimeMs,
           input.container,
+          input.sizeBytes,
           input.nowMs,
-          existing,
+          input.nowMs,
         );
-        return existing;
+      } catch (err) {
+        throw toIdentityConflictError(err, input.libraryId, input.identity.contentKey);
       }
-
-      const id = randomUUID();
-      insertFile.run(
-        id,
-        input.libraryId,
-        input.identity.inodeKey,
-        input.identity.contentKey,
-        input.path,
-        input.nlink,
-        input.sizeBytes,
-        input.mtimeMs,
-        input.ctimeMs,
-        input.container,
-        input.sizeBytes,
-        input.nowMs,
-        input.nowMs,
-      );
       return id;
     },
 

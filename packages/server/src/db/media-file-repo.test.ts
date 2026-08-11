@@ -84,6 +84,120 @@ describe('upsertScanned and identity', () => {
     const id = scan({ nlink: 2 });
     expect(repo.getById(id)?.nlink).toBe(2);
   });
+
+  describe('conflicting inode and content matches', () => {
+    // Row A: inode 42, content Ka. Row B: some other inode, content Kb.
+    // Then A's path is rescanned but its bytes now match B's content key
+    // (e.g. the file was replaced in place by a copy of B, or a dedup tool
+    // rewrote its content) while its inode is still 42. The inode lookup
+    // would match row A, but writing Kb onto row A collides with row B's
+    // UNIQUE (library_id, content_key). Content identity must win: the
+    // bytes now belong to B's record, so B should absorb the rescan.
+    const hashB = { sizeBytes: 8192, headHex: 'cc', tailHex: 'dd' };
+
+    const seedTwoRows = () => {
+      const a = scan({
+        identity: buildIdentityCandidate({ deviceId: 2049, inode: 42, hash }),
+        path: '/media/movies/A.mkv',
+      });
+      const b = scan({
+        identity: buildIdentityCandidate({ deviceId: 2049, inode: 77, hash: hashB }),
+        path: '/media/movies/B.mkv',
+      });
+      return { a, b };
+    };
+
+    it('resolves an inode/content match split across two rows by favouring content, without throwing', () => {
+      const { a, b } = seedTwoRows();
+
+      // A's path, rescanned with A's inode but B's content key.
+      const conflicting = buildIdentityCandidate({ deviceId: 2049, inode: 42, hash: hashB });
+
+      let resolvedId!: string;
+      expect(() => {
+        resolvedId = scan({ identity: conflicting, path: '/media/movies/A.mkv' });
+      }).not.toThrow();
+
+      expect(resolvedId).toBe(b);
+
+      const count = db.prepare(`SELECT COUNT(*) AS c FROM media_file`).get() as { c: number };
+      expect(count.c).toBe(2);
+
+      expect(repo.getById(b)).toMatchObject({
+        path: '/media/movies/A.mkv',
+        content_key: expect.any(String),
+      });
+      void a;
+    });
+
+    it('clears the losing row inode_key and stays stable on a repeat scan', () => {
+      const { a, b } = seedTwoRows();
+      const conflicting = buildIdentityCandidate({ deviceId: 2049, inode: 42, hash: hashB });
+
+      scan({ identity: conflicting, path: '/media/movies/A.mkv' });
+
+      // Row A no longer owns inode 42.
+      expect(repo.getById(a)?.inode_key).toBeNull();
+
+      // Rescanning again with the same inputs must be stable: no throw,
+      // same resolved row, no flip-flopping between A and B.
+      let resolvedAgain!: string;
+      expect(() => {
+        resolvedAgain = scan({ identity: conflicting, path: '/media/movies/A.mkv' });
+      }).not.toThrow();
+      expect(resolvedAgain).toBe(b);
+
+      const count = db.prepare(`SELECT COUNT(*) AS c FROM media_file`).get() as { c: number };
+      expect(count.c).toBe(2);
+    });
+
+    it('still matches by inode alone when only the inode-matched row exists', () => {
+      const id = scan({
+        identity: buildIdentityCandidate({ deviceId: 2049, inode: 42, hash }),
+        path: '/media/movies/A.mkv',
+      });
+      const again = scan({
+        identity: buildIdentityCandidate({
+          deviceId: 2049,
+          inode: 42,
+          hash: { ...hash, headHex: 'zz' },
+        }),
+        path: '/media/movies/A.mkv',
+      });
+      expect(again).toBe(id);
+      const count = db.prepare(`SELECT COUNT(*) AS c FROM media_file`).get() as { c: number };
+      expect(count.c).toBe(1);
+    });
+
+    it('still matches by content alone when only the content-matched row exists', () => {
+      const id = scan({
+        identity: buildIdentityCandidate({ deviceId: 2049, inode: 42, hash }),
+        path: '/media/movies/A.mkv',
+      });
+      const again = scan({
+        identity: buildIdentityCandidate({ deviceId: 3000, inode: 999, hash }),
+        path: '/media/movies/A.mkv',
+      });
+      expect(again).toBe(id);
+      const count = db.prepare(`SELECT COUNT(*) AS c FROM media_file`).get() as { c: number };
+      expect(count.c).toBe(1);
+    });
+
+    it('inserts a new row when neither inode nor content matches', () => {
+      seedTwoRows();
+      const fresh = scan({
+        identity: buildIdentityCandidate({
+          deviceId: 2049,
+          inode: 555,
+          hash: { ...hash, headHex: 'ee' },
+        }),
+        path: '/media/movies/C.mkv',
+      });
+      const count = db.prepare(`SELECT COUNT(*) AS c FROM media_file`).get() as { c: number };
+      expect(count.c).toBe(3);
+      expect(repo.getById(fresh)?.path).toBe('/media/movies/C.mkv');
+    });
+  });
 });
 
 describe('claimNext', () => {
