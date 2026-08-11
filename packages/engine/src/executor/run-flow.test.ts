@@ -216,6 +216,84 @@ describe('runFlow — cycles', () => {
   });
 });
 
+describe('runFlow — discovery load failures', () => {
+  it('names the failing plugin and surfaces the underlying error when the start node fails to load', async () => {
+    const result = await runFlow({
+      flow: flow([node('a')], []),
+      initialPath: '/in.mkv',
+      loadPlugin: () => {
+        throw new Error('syntax error in plugin source');
+      },
+      buildArgs,
+    });
+    expect(result.stopReason).toBe('no-start-node');
+    expect(result.failed).toBe(true);
+    expect(result.error).toMatch(/a/);
+    expect(result.error).toMatch(/syntax error in plugin source/);
+    expect(result.error).not.toMatch(/this flow has no start node/i);
+  });
+
+  it('still discovers a valid start node when an unrelated node fails to load', async () => {
+    const result = await runFlow({
+      flow: flow([node('broken'), node('start')], []),
+      initialPath: '/in.mkv',
+      loadPlugin: loaderFor({
+        start: { module: routeTo(1), details: details({ isStartPlugin: true }) },
+      }),
+      buildArgs,
+    });
+    expect(result.stopReason).toBe('end-of-flow');
+    expect(result.failed).toBe(false);
+    expect(result.steps.map((s) => s.nodeId)).toEqual(['start']);
+  });
+
+  it('keeps the original generic message when there is no start node and nothing failed to load', async () => {
+    const result = await runFlow({
+      flow: flow([node('a')], []),
+      initialPath: '/in.mkv',
+      loadPlugin: loaderFor({ a: { module: routeTo(1) } }),
+      buildArgs,
+    });
+    expect(result.stopReason).toBe('no-start-node');
+    expect(result.failed).toBe(true);
+    expect(result.error).toMatch(/this flow has no start node/i);
+  });
+});
+
+describe('runFlow — load memoisation', () => {
+  it('loads each node at most once per run, even across discovery and execution', async () => {
+    const loadCounts: Record<string, number> = {};
+    const behaviours: Record<string, { module: PluginModule; details?: PluginDetails }> = {
+      start: { module: routeTo(1), details: details({ isStartPlugin: true }) },
+      b: { module: routeTo(1) },
+      c: { module: routeTo(1) },
+    };
+    const baseLoader = loaderFor(behaviours);
+    const countingLoader = (n: FlowNode): LoadedPlugin => {
+      loadCounts[n.id] = (loadCounts[n.id] ?? 0) + 1;
+      return baseLoader(n);
+    };
+
+    const result = await runFlow({
+      flow: flow(
+        [node('start'), node('b'), node('c')],
+        [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'b' },
+          { fromNodeId: 'b', outputNumber: 1, toNodeId: 'c' },
+        ],
+      ),
+      initialPath: '/in.mkv',
+      loadPlugin: countingLoader,
+      buildArgs,
+    });
+
+    expect(result.steps.map((s) => s.nodeId)).toEqual(['start', 'b', 'c']);
+    expect(loadCounts.start).toBe(1);
+    expect(loadCounts.b).toBe(1);
+    expect(loadCounts.c).toBe(1);
+  });
+});
+
 describe('runFlow — errors', () => {
   const boom: PluginModule = {
     details: () => details(),
@@ -298,6 +376,27 @@ describe('runFlow — errors', () => {
 });
 
 describe('runFlow — state threading', () => {
+  it('leaves currentPath unchanged when a plugin returns an empty _id', async () => {
+    const blank: PluginModule = {
+      details: () => details(),
+      plugin: (args) => ({
+        outputNumber: 1,
+        outputFileObj: { _id: '' },
+        variables: args.variables,
+      }),
+    };
+
+    const result = await runFlow({
+      flow: flow([node('a')], []),
+      initialPath: '/in.mkv',
+      startNodeId: 'a',
+      loadPlugin: loaderFor({ a: { module: blank } }),
+      buildArgs,
+    });
+
+    expect(result.currentPath).toBe('/in.mkv');
+  });
+
   it('threads a path change from one node into the next', async () => {
     const rename: PluginModule = {
       details: () => details(),

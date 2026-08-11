@@ -85,12 +85,37 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
     error,
   });
 
+  // Memoise loads for this run only: discovery (findStartNode / findErrorHandler) and the
+  // main loop both need a node's LoadedPlugin, and without this each node the discovery
+  // step touches gets loaded a second time when it's actually executed. This does not
+  // replace the loader's own cross-run cache — it just avoids doing the loader's work twice
+  // within a single runFlow call.
+  const loadedByNodeId = new Map<string, LoadedPlugin>();
+  const loadPluginOnce = (node: FlowNode): LoadedPlugin => {
+    const cached = loadedByNodeId.get(node.id);
+    if (cached !== undefined) return cached;
+    const loaded = options.loadPlugin(node);
+    loadedByNodeId.set(node.id, loaded);
+    return loaded;
+  };
+
+  // Discovery must keep going when some unrelated node fails to load, but it must not
+  // silently swallow the failure of the node that actually is the flow's start node — that
+  // would misreport a broken plugin as "no start node". So load failures are collected here
+  // and only surfaced if discovery comes up empty.
+  const startDiscoveryLoadErrors: { nodeId: string; pluginId: string; message: string }[] = [];
+
   const findStartNode = (): FlowNode | undefined => {
     if (options.startNodeId !== undefined) return nodesById.get(options.startNodeId);
     return options.flow.nodes.find((node) => {
       try {
-        return options.loadPlugin(node).details.isStartPlugin === true;
-      } catch {
+        return loadPluginOnce(node).details.isStartPlugin === true;
+      } catch (error) {
+        startDiscoveryLoadErrors.push({
+          nodeId: node.id,
+          pluginId: node.pluginId,
+          message: messageOf(error),
+        });
         return false;
       }
     });
@@ -99,7 +124,7 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
   const findErrorHandler = (): FlowNode | undefined =>
     options.flow.nodes.find((node) => {
       try {
-        return options.loadPlugin(node).details.pType === 'onFlowError';
+        return loadPluginOnce(node).details.pType === 'onFlowError';
       } catch {
         return false;
       }
@@ -107,6 +132,18 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
 
   let current = findStartNode();
   if (current === undefined) {
+    if (startDiscoveryLoadErrors.length > 0) {
+      const failures = startDiscoveryLoadErrors
+        .map(
+          (failure) =>
+            `plugin "${failure.pluginId}" (node "${failure.nodeId}"): ${failure.message}`,
+        )
+        .join('; ');
+      return finish(
+        'no-start-node',
+        `Could not determine the flow's start node because one or more nodes failed to load: ${failures}`,
+      );
+    }
     return finish(
       'no-start-node',
       'This flow has no start node. Mark a node as the start, or pass an explicit start node id.',
@@ -130,7 +167,7 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
 
     let plugin: LoadedPlugin;
     try {
-      plugin = options.loadPlugin(node);
+      plugin = loadPluginOnce(node);
     } catch (error) {
       const step: StepRecord = {
         seq,
@@ -169,7 +206,9 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
         );
       }
       outputNumber = output.outputNumber;
-      if (typeof output.outputFileObj?._id === 'string') currentPath = output.outputFileObj._id;
+      if (typeof output.outputFileObj?._id === 'string' && output.outputFileObj._id !== '') {
+        currentPath = output.outputFileObj._id;
+      }
       if (output.variables !== undefined) variables = output.variables;
     } catch (error) {
       stepError = messageOf(error);
