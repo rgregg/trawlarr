@@ -108,6 +108,35 @@ const numeric = (value: unknown): number => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const BYTES_PER_MEGABYTE = 1_000 * 1_000;
+
+/**
+ * Trawlarr keeps every size internally in bytes. The Tdarr plugin contract
+ * does not: `file_object.file_size` (and, by extension, `oldSize`/`newSize`,
+ * which the corpus always derives directly from `file_size`) is MEGABYTES.
+ *
+ * Evidence from the GPL community corpus (not shipped in this repo):
+ *  - CommunityFlowPlugins/file/checkFileSize/1.0.0/index.js:75 —
+ *    `var fileSizeBytes = args.inputFileObj.file_size * 1000 * 1000;`
+ *  - CommunityFlowPlugins/file/compareFileSizeRatio/2.0.0/index.js —
+ *    variable is misleadingly named `newFileSizeBytes`, but its own log
+ *    string reads "New file has size ${newFileSizeBytes.toFixed(3)} MB".
+ *  - CommunityFlowPlugins/basic/basicVideoOrAudio/1.0.0/index.js:294 —
+ *    `size = args.inputFileObj.file_size;` compared against
+ *    `fileSizeRangeMinMB`/`fileSizeRangeMaxMB` and logged as "${size}MB".
+ *  - FlowHelpers/1.0.0/cliUtils.js:169-170 —
+ *    `inputFileSize = ...file_size; inputFileSizeInGbytes = inputFileSize / 1024;`
+ *  - methods/library/filters/filterBySize.js — `file.file_size / 1000 >= lowerBound`
+ *    compared against a GB bound.
+ *
+ * Do NOT "fix" this back to bytes: that reintroduces the defect the
+ * community-plugin compatibility harness exists to catch (see
+ * packages/engine/test/compat/community-plugins.test.ts, "checkFileSize
+ * proves file_size is projected in megabytes").
+ */
+const toMegabytes = (bytes: number): number => bytes / BYTES_PER_MEGABYTE;
+const toBytesFromMegabytes = (megabytes: number): number => megabytes * BYTES_PER_MEGABYTE;
+
 export const toPluginFileObject = (source: ProjectionSource): PluginFileObject => {
   const streams = source.probe.streams ?? [];
   const videoIndex = videoStreamIndexOf(streams);
@@ -121,7 +150,13 @@ export const toPluginFileObject = (source: ProjectionSource): PluginFileObject =
     footprintId: source.footprintId,
     container: source.container,
     createdAt: source.discoveredAtMs,
-    file_size: source.sizeBytes,
+    // Tdarr contract unit: MEGABYTES. See toMegabytes() doc comment for evidence.
+    file_size: toMegabytes(source.sizeBytes),
+    // ffprobe's format.bit_rate is already bits/second (ffprobe's own
+    // convention, not a trawlarr choice), and the corpus reads it as such:
+    // CommunityFlowPlugins/video/checkOverallBitrate/1.0.0/index.js logs
+    // `"File bitrate is ${args.inputFileObj.bit_rate} bps"` and compares it
+    // directly against bps/kbps/mbps-scaled bounds. No conversion needed.
     bit_rate: numeric(source.probe.format?.bit_rate),
     statSync: { mtimeMs: source.mtimeMs, ctimeMs: source.ctimeMs },
     scannerReads: {
@@ -144,8 +179,14 @@ export const toPluginFileObject = (source: ProjectionSource): PluginFileObject =
     lastHealthCheckDate: source.lastHealthCheckMs ?? 0,
     lastTranscodeDate: source.lastTranscodeMs ?? 0,
     history: source.history,
-    oldSize: source.originalSizeBytes,
-    newSize: source.sizeBytes,
+    // Tdarr contract unit: MEGABYTES, same as file_size. The corpus never
+    // treats oldSize/newSize as a distinct unit — they are read as plain
+    // file_size aliases (Community/Tdarr_Plugin_a9he_New_file_size_check.js:
+    // `const newSize = file.file_size;` /
+    // `const oldSize = otherArguments.originalLibraryFile.file_size;`, then
+    // logged with an explicit "MB" suffix).
+    oldSize: toMegabytes(source.originalSizeBytes),
+    newSize: toMegabytes(source.sizeBytes),
     lastPluginDetails: '',
   };
 
@@ -173,6 +214,13 @@ export const absorbPluginFileObject = (fileObject: PluginFileObject): AbsorbedCh
         : '',
     holdUntilMs: typeof hold === 'number' && Number.isFinite(hold) && hold > 0 ? hold : null,
     bumped: fileObject.bumped === true,
-    newSizeBytes: typeof newSize === 'number' && Number.isFinite(newSize) ? newSize : null,
+    // `newSize` is projected in megabytes (see toMegabytes() doc comment);
+    // convert back to trawlarr's internal bytes representation so a plugin
+    // that merely echoes the file object back doesn't silently shrink the
+    // recorded size by a factor of a million.
+    newSizeBytes:
+      typeof newSize === 'number' && Number.isFinite(newSize)
+        ? toBytesFromMegabytes(newSize)
+        : null,
   };
 };

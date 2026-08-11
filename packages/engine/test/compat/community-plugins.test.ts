@@ -157,7 +157,19 @@ const argsFor = (inputs: Record<string, unknown>, withCommand: boolean): PluginI
  */
 const CASES = [
   { rel: 'video/checkVideoCodec/1.0.0/index.js', inputs: { codec: 'hevc' }, command: false },
-  { rel: 'file/checkFileSize/1.0.0/index.js', inputs: {}, command: false },
+  {
+    rel: 'file/checkFileSize/1.0.0/index.js',
+    // The fixture file is 8_000_000_000 bytes = 8000 MB. checkFileSize's own
+    // source (CommunityFlowPlugins/file/checkFileSize/1.0.0/index.js:75)
+    // computes `fileSizeBytes = args.inputFileObj.file_size * 1000 * 1000`,
+    // i.e. it treats `file_size` as MEGABYTES. With a correct MB projection
+    // (file_size === 8000), fileSizeBytes === 8e9, which falls inside
+    // [7000MB, 9000MB) => output 1. If `file_size` were bytes (the bug this
+    // case exists to catch), fileSizeBytes would be 8e9 * 1e6 = 8e15, wildly
+    // outside the range => output 2.
+    inputs: { unit: 'MB', greaterThan: '7000', lessThan: '9000' },
+    command: false,
+  },
   { rel: 'tools/processedCheck/1.0.0/index.js', inputs: {}, command: false },
 ];
 
@@ -187,6 +199,28 @@ describe.runIf(available)('Tdarr community flow plugins', () => {
       });
     });
   }
+});
+
+describe.runIf(available)('checkFileSize proves file_size is projected in megabytes', () => {
+  const abs = pluginPath('file/checkFileSize/1.0.0/index.js');
+
+  it.runIf(existsSync(abs))('routes a 8000MB file into a [7000MB, 9000MB) range', async () => {
+    const loaded = createPluginLoader().load(abs);
+    const args = argsFor({ unit: 'MB', greaterThan: '7000', lessThan: '9000' }, false);
+
+    // The fixture file is 8_000_000_000 bytes. If `file_size` is correctly
+    // projected in MB (8000), the plugin's own arithmetic
+    // (file_size * 1000 * 1000, per index.js:75) lands inside the range and
+    // routes to output 1. If `file_size` were left in bytes (the historical
+    // bug), the same arithmetic overshoots by a factor of a million and
+    // routes to output 2. This is the assertion that actually exercises the
+    // unit — a bare "returns some routable number" check would pass either
+    // way, which is how the original bug slipped through.
+    expect(args.inputFileObj.file_size).toBe(8000);
+
+    const output = await loaded.module.plugin(args);
+    expect(output.outputNumber).toBe(1);
+  });
 });
 
 describe.runIf(available)('ffmpegCommand cooperation across community plugins', () => {

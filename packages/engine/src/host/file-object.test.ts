@@ -60,7 +60,13 @@ describe('toPluginFileObject', () => {
     expect(file.video_resolution).toBe('1080p');
     expect(file.videoStreamIndex).toBe(0);
     expect(file.container).toBe('mkv');
-    expect(file.file_size).toBe(8_000_000_000);
+    // Tdarr contract: file_size is MEGABYTES, not bytes. Evidence:
+    // CommunityFlowPlugins/file/checkFileSize/1.0.0/index.js:75 —
+    // `fileSizeBytes = args.inputFileObj.file_size * 1000 * 1000`.
+    expect(file.file_size).toBe(8_000); // 8_000_000_000 bytes -> 8000 MB
+    // bit_rate is untouched: ffprobe's format.bit_rate is already bits/sec,
+    // and CommunityFlowPlugins/video/checkOverallBitrate/1.0.0/index.js logs
+    // it directly as "... bps".
     expect(file.bit_rate).toBe(8_000_000);
   });
 
@@ -93,10 +99,14 @@ describe('toPluginFileObject', () => {
     expect(file.mediaInfo).toBeUndefined();
   });
 
-  it('reports size history so size-comparison plugins work', () => {
+  it('reports size history so size-comparison plugins work, projected in megabytes', () => {
     const file = toPluginFileObject(source());
-    expect(file.oldSize).toBe(12_000_000_000);
-    expect(file.newSize).toBe(8_000_000_000);
+    // Tdarr contract: oldSize/newSize are megabytes, same as file_size.
+    // Community/Tdarr_Plugin_a9he_New_file_size_check.js reads them straight
+    // off `file.file_size` / `originalLibraryFile.file_size` and logs them
+    // with an explicit "MB" suffix.
+    expect(file.oldSize).toBe(12_000); // 12_000_000_000 bytes -> 12000 MB
+    expect(file.newSize).toBe(8_000); // 8_000_000_000 bytes -> 8000 MB
   });
 
   it('survives a probe with no streams', () => {
@@ -149,6 +159,21 @@ describe('absorbPluginFileObject', () => {
     const file = toPluginFileObject(source());
     file.holdUntil = 0;
     expect(absorbPluginFileObject(file).holdUntilMs).toBeNull();
+  });
+
+  it('round-trips newSize through the MB projection back to the original byte count', () => {
+    // Guards against the class of bug this task fixes: newSize is projected
+    // in MB, so absorbing it back MUST reconvert to bytes, or a plugin that
+    // merely passes the file object through unchanged would cause trawlarr
+    // to record a size a million times too small.
+    const file = toPluginFileObject(source());
+    expect(absorbPluginFileObject(file).newSizeBytes).toBe(8_000_000_000);
+  });
+
+  it('absorbs a plugin-modified newSize (MB) back into bytes', () => {
+    const file = toPluginFileObject(source());
+    file.newSize = 4_000; // plugin reports a 4000 MB output file
+    expect(absorbPluginFileObject(file).newSizeBytes).toBe(4_000_000_000);
   });
 
   it('ignores nonsense values rather than corrupting state', () => {
