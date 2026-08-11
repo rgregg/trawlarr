@@ -27,24 +27,59 @@ describe('runChunked', () => {
     db.close();
   });
 
-  it('yields to the event loop between chunks so the API stays responsive', async () => {
+  it('yields to the macrotask queue between chunks, not just the microtask queue', async () => {
     const db = setup();
     const insert = db.prepare(`INSERT INTO t (id, v) VALUES (?, ?)`);
-    let ticksDuringWrite = 0;
-    const timer = setInterval(() => {
-      ticksDuringWrite += 1;
-    }, 1);
+
+    // This test asserts *ordering*, not *timing*. Counting wall-clock timer
+    // ticks (the previous version of this test) is inherently racy: a tiny
+    // in-memory batch can finish in well under a millisecond, so a 1ms timer
+    // may never fire before runChunked resolves, even though the yield is
+    // working correctly. That made the test flake under load without ever
+    // detecting a real regression.
+    //
+    // Instead, record the interleaving of a self-rescheduling `setImmediate`
+    // chain against the `apply` calls. `setImmediate` callbacks run in the
+    // event loop's check phase in FIFO queue order, which is deterministic
+    // regardless of machine speed. If runChunked's yield between chunks were
+    // downgraded to a microtask-only yield (e.g. `await Promise.resolve()`)
+    // or removed entirely, the tick chain would never get a turn between
+    // chunk boundaries and no 'tick' marker would ever land between two
+    // `item:*` markers.
+    const events: string[] = [];
+    let running = true;
+    const scheduleTick = () => {
+      if (!running) return;
+      events.push('tick');
+      setImmediate(scheduleTick);
+    };
+    setImmediate(scheduleTick);
+
+    const chunkSize = 5;
+    const items = Array.from({ length: 50 }, (_, i) => i);
 
     await runChunked({
       db,
-      items: Array.from({ length: 50 }, (_, i) => i),
-      chunkSize: 5,
-      apply: (i) => insert.run(i, `v${i}`),
+      items,
+      chunkSize,
+      apply: (i) => {
+        insert.run(i, `v${i}`);
+        events.push(`item:${i}`);
+      },
     });
-    clearInterval(timer);
+    running = false;
 
-    // 10 chunks means at least a few macrotask boundaries were reached.
-    expect(ticksDuringWrite).toBeGreaterThan(0);
+    // For each chunk boundary (last item of chunk N, first item of chunk
+    // N+1), check whether a 'tick' marker landed strictly between them.
+    let boundariesWithTick = 0;
+    for (let lastOfChunk = chunkSize - 1; lastOfChunk < items.length - 1; lastOfChunk += chunkSize) {
+      const lastIdx = events.indexOf(`item:${lastOfChunk}`);
+      const nextIdx = events.indexOf(`item:${lastOfChunk + 1}`);
+      const between = events.slice(lastIdx + 1, nextIdx);
+      if (between.includes('tick')) boundariesWithTick += 1;
+    }
+
+    expect(boundariesWithTick).toBeGreaterThan(0);
     db.close();
   });
 
