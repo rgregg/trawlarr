@@ -1,4 +1,4 @@
-import { factsEquivalent, type FactSet } from './facts.js';
+import { factsHash, type FactSet } from './facts.js';
 
 export type FileState =
   'unknown' | 'queued' | 'running' | 'good' | 'failed' | 'not_converging' | 'held';
@@ -23,7 +23,7 @@ export interface RunOutcome {
 
 export const MAX_ATTEMPTS = 3 as const;
 export const BACKOFF_MINUTES = [5, 25, 125] as const;
-export const NOOP_LIMIT = 2 as const;
+export const NOOP_LIMIT = 1 as const;
 
 const MINUTE_MS = 60_000;
 
@@ -60,12 +60,24 @@ const recordFailedAttempt = (record: LedgerRecord, nowMs: number): LedgerRecord 
  * Fold a completed run into the ledger.
  *
  * Convergence is judged retrospectively: if the run claimed to modify the
- * file but the post-run facts are equivalent to the pre-run facts, the run
- * accomplished nothing. Two of those in a row and we stop, because the flow
- * and the file disagree in a way that repeating will not resolve.
+ * file but the post-run facts are byte-for-byte identical to the pre-run
+ * facts, the run accomplished nothing. That's one strike: a no-op run marks
+ * the file `not_converging` immediately, because a run that asked to change
+ * a file and changed nothing will not fix itself by repeating.
+ *
+ * The comparison here is deliberately exact (factsHash), not the tolerant
+ * factsEquivalent from facts.ts. A tolerant comparison would false-flag
+ * legitimate metadata-only flows (e.g. retagging subtitle languages or
+ * setting a title with mkvpropedit) that leave codecs, streams, container
+ * and duration untouched but do real work. factsHash already includes
+ * sizeBytes, so an exact hash match implies exact size equality too.
  *
  * A missing post-run probe alongside a modification claim counts as a no-op:
  * we cannot verify progress, and assuming progress is how infinite loops start.
+ *
+ * Known limitation: a flow that does real work but has no Replace Original
+ * File node leaves the library file itself unchanged, so this rule will
+ * flag it as non-converging. Arguable, not wrong — left as-is.
  */
 export const applyRunOutcome = (input: {
   record: LedgerRecord;
@@ -79,7 +91,7 @@ export const applyRunOutcome = (input: {
 
   const wasNoop =
     outcome.claimedModified &&
-    (outcome.postFacts === null || factsEquivalent(outcome.preFacts, outcome.postFacts));
+    (outcome.postFacts === null || factsHash(outcome.preFacts) === factsHash(outcome.postFacts));
 
   const consecutiveNoopCount = wasNoop ? record.consecutiveNoopCount + 1 : 0;
 

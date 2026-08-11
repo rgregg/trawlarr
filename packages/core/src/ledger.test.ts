@@ -83,38 +83,31 @@ describe('applyRunOutcome — convergence detection', () => {
     postFacts: factsFor('h264'),
   };
 
-  it('counts a run that claimed to modify the file but changed nothing', () => {
+  it(`gives up after ${NOOP_LIMIT} no-op run (one strike)`, () => {
     const next = applyRunOutcome({
       record: record({ state: 'running' }),
       outcome: noopRun,
       currentSignature: SIG,
       nowMs: NOW,
     });
-    expect(next.consecutiveNoopCount).toBe(1);
-    expect(next.state).toBe('good');
+    expect(next.consecutiveNoopCount).toBe(NOOP_LIMIT);
+    expect(next.state).toBe('not_converging');
   });
 
-  it(`gives up after ${NOOP_LIMIT} consecutive no-op runs`, () => {
-    const once = applyRunOutcome({
+  it('still stores the current signature on a no-op run, so a later flow edit re-queues the file', () => {
+    const next = applyRunOutcome({
       record: record({ state: 'running' }),
       outcome: noopRun,
       currentSignature: SIG,
       nowMs: NOW,
     });
-    const twice = applyRunOutcome({
-      record: { ...once, state: 'running' },
-      outcome: noopRun,
-      currentSignature: SIG,
-      nowMs: NOW,
-    });
-    expect(twice.consecutiveNoopCount).toBe(NOOP_LIMIT);
-    expect(twice.state).toBe('not_converging');
+    expect(next.signature).toBe(SIG);
+    expect(isKnownGood(next, SIG)).toBe(false);
   });
 
-  it('resets the no-op streak when a run actually changes the file', () => {
-    const stuck = record({ state: 'running', consecutiveNoopCount: 1 });
+  it('does not flag a run that actually changes the file', () => {
     const next = applyRunOutcome({
-      record: stuck,
+      record: record({ state: 'running' }),
       outcome: { success: true, claimedModified: true, preFacts: h264, postFacts: hevc },
       currentSignature: SIG,
       nowMs: NOW,
@@ -131,6 +124,24 @@ describe('applyRunOutcome — convergence detection', () => {
       nowMs: NOW,
     });
     expect(next.consecutiveNoopCount).toBe(1);
+    expect(next.state).toBe('not_converging');
+  });
+
+  it('does NOT flag a metadata-only change: same codecs/streams/container/duration but a different exact byte size', () => {
+    // A tolerant comparison (factsEquivalent) would call this "no change" because the
+    // size drift here is well under the 1% tolerance — but the size genuinely differs,
+    // which is exactly the kind of legitimate metadata-only edit (e.g. mkvpropedit
+    // retagging) that must NOT be flagged as non-converging.
+    const before = factsFor('h264', 1000);
+    const after = factsFor('h264', 1005);
+    const next = applyRunOutcome({
+      record: record({ state: 'running' }),
+      outcome: { success: true, claimedModified: true, preFacts: before, postFacts: after },
+      currentSignature: SIG,
+      nowMs: NOW,
+    });
+    expect(next.state).toBe('good');
+    expect(next.consecutiveNoopCount).toBe(0);
   });
 });
 
