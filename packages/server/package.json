@@ -1,0 +1,25 @@
+{
+  "name": "@trawlarr/server",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:sql": "node -e \"const{cpSync,mkdirSync}=require('node:fs');mkdirSync('dist/db/migrations',{recursive:true});cpSync('src/db/migrations','dist/db/migrations',{recursive:true})\""
+  },
+  "dependencies": {
+    "@trawlarr/core": "workspace:*",
+    "@trawlarr/plugin-api": "workspace:*",
+    "better-sqlite3": "^11.3.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11"
+  }
+}

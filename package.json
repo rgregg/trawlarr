@@ -8,7 +8,7 @@
   },
   "packageManager": "pnpm@9.12.0",
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && pnpm -r --if-present run build:sql",
     "test": "vitest run --typecheck",
     "test:watch": "vitest",
     "lint": "eslint . && prettier --check .",
