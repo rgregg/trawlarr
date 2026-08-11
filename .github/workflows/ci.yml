@@ -15,4 +15,6 @@ jobs:
       - run: pnpm build
       - run: pnpm lint
       - run: pnpm audit:licenses
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pnpm compat:fetch
       - run: pnpm test -- --coverage

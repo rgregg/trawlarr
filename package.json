@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
-    "audit:licenses": "node scripts/audit-licenses.mjs"
+    "audit:licenses": "node scripts/audit-licenses.mjs",
+    "compat:fetch": "node scripts/fetch-plugin-corpus.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",
