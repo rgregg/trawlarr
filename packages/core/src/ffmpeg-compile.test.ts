@@ -48,7 +48,7 @@ describe('compileFfmpegArgs', () => {
     ]);
   });
 
-  it('places per-stream outputArgs immediately after that stream map', () => {
+  it('places per-stream outputArgs immediately after that stream map, and copies untouched streams explicitly', () => {
     const cmd = command();
     cmd.streams[0]!.outputArgs.push('-c:v', 'hevc_nvenc', '-cq', '24');
     expect(compile(cmd)).toEqual([
@@ -62,16 +62,67 @@ describe('compileFfmpegArgs', () => {
       '24',
       '-map',
       '0:1',
+      '-c:1',
+      'copy',
       '-map',
       '0:2',
+      '-c:2',
+      'copy',
       '/out.mkv',
     ]);
   });
 
-  it('drops the blanket copy once any stream specifies its own encoding', () => {
+  it('drops the blanket copy once any stream specifies its own encoding, replacing it with per-stream copies', () => {
     const cmd = command();
     cmd.streams[0]!.outputArgs.push('-c:v', 'hevc_nvenc');
-    expect(compile(cmd)).not.toContain('copy');
+    const args = compile(cmd);
+    // No bare "-c copy" blanket directive anywhere...
+    expect(args.join(' ')).not.toContain('-c copy');
+    // ...but the untouched streams still get an explicit per-stream copy, so
+    // they are never silently handed to ffmpeg's container-default encoder.
+    expect(args).toEqual([
+      '-i',
+      '/in.mkv',
+      '-map',
+      '0:0',
+      '-c:v',
+      'hevc_nvenc',
+      '-map',
+      '0:1',
+      '-c:1',
+      'copy',
+      '-map',
+      '0:2',
+      '-c:2',
+      'copy',
+      '/out.mkv',
+    ]);
+  });
+
+  it('encodes only the video stream, leaving audio and subtitles untouched, with a removed middle stream — asserting -c:<n> refers to OUTPUT stream position, not input index', () => {
+    const cmd = command();
+    // probe order is [video(0), audio(1), subtitle(2)]. Remove the middle
+    // (audio) stream, then encode the video. The surviving streams are
+    // video (input 0) and subtitle (input 2); their OUTPUT positions are 0
+    // and 1 respectively, which must be what "-c:<n>" refers to — not their
+    // input indices (0 and 2).
+    cmd.streams[1]!.removed = true;
+    cmd.streams[0]!.outputArgs.push('-c:v', 'libx265', '-crf', '30');
+    expect(compile(cmd)).toEqual([
+      '-i',
+      '/in.mkv',
+      '-map',
+      '0:0',
+      '-c:v',
+      'libx265',
+      '-crf',
+      '30',
+      '-map',
+      '0:2',
+      '-c:1',
+      'copy',
+      '/out.mkv',
+    ]);
   });
 
   it('hoists stream inputArgs ahead of the input', () => {

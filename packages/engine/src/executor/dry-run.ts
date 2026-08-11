@@ -1,6 +1,7 @@
 import type { PluginModule } from '@trawlarr/plugin-api';
 import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
+import { resolveEncodeTarget } from './encode-target.js';
 import { runFlow, type FlowRunResult, type RunFlowOptions } from './run-flow.js';
 import { classifySideEffects } from './vouchable.js';
 
@@ -46,13 +47,18 @@ export const runDryFlow = async (
     details: () => plugin.details,
     plugin: (args) => {
       if (plugin.id === 'trawlarr:execute' && args.variables.ffmpegCommand.init) {
+        // Report the exact command the real Execute would run — same
+        // resolver, same scratch write target — so a dry run can never
+        // describe an in-place command that would fail if actually run.
+        const { writePath } = resolveEncodeTarget({
+          path: args.inputFileObj._id,
+          container: args.variables.ffmpegCommand.container,
+          outputPathFor: options.outputPathFor,
+        });
         plannedCommands.push(
           compileFfmpegArgs({
             command: args.variables.ffmpegCommand,
-            outputPath: options.outputPathFor(
-              args.inputFileObj._id,
-              args.variables.ffmpegCommand.container,
-            ),
+            outputPath: writePath,
           }),
         );
         return {

@@ -105,6 +105,17 @@ describe.runIf(available)('end to end', () => {
     expect(stdout).toContain('Would run:');
     expect(stdout).toContain('-c:v libx265');
     expect(stdout).toContain('Stopped: end-of-flow');
+
+    // The dry run must report a command that could actually run: since
+    // mediaPath and its computed output path collide (both are
+    // workDir/sample.mkv), a naive report would describe ffmpeg reading and
+    // writing the same file — which ffmpeg refuses outright. Assert the
+    // reported output path differs from the input path.
+    const match = /Would run: ffmpeg (.+)/.exec(stdout);
+    const reportedArgs = match?.[1]?.trim().split(/\s+/) ?? [];
+    const reportedOutputPath = reportedArgs.at(-1);
+    expect(reportedOutputPath).toBeDefined();
+    expect(reportedOutputPath).not.toBe(mediaPath);
   }, 60_000);
 
   it('transcodes the sample to hevc for real', async () => {
@@ -135,6 +146,36 @@ describe.runIf(available)('end to end', () => {
       produced,
     ]);
     expect(probeOut.trim()).toBe('hevc');
+
+    // Regression guard: the flow only touched the video encoder. The audio
+    // stream was never asked to encode, so it must come out exactly as it
+    // went in (aac) rather than falling through to ffmpeg's container
+    // default (which, for Matroska, is vorbis) — that fallthrough was a
+    // real, silent data-quality bug where untouched streams got re-encoded.
+    const { stdout: inputAudioCodec } = await execFileAsync('ffprobe', [
+      '-v',
+      'quiet',
+      '-select_streams',
+      'a:0',
+      '-show_entries',
+      'stream=codec_name',
+      '-of',
+      'csv=p=0',
+      mediaPath,
+    ]);
+    const { stdout: outputAudioCodec } = await execFileAsync('ffprobe', [
+      '-v',
+      'quiet',
+      '-select_streams',
+      'a:0',
+      '-show_entries',
+      'stream=codec_name',
+      '-of',
+      'csv=p=0',
+      produced,
+    ]);
+    expect(outputAudioCodec.trim()).toBe(inputAudioCodec.trim());
+    expect(outputAudioCodec.trim()).toBe('aac');
   }, 180_000);
 
   it('routes to the already-correct branch on a second pass, doing no work', async () => {

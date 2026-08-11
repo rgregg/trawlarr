@@ -1,10 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { rename, unlink } from 'node:fs/promises';
-import { extname } from 'node:path';
 import type { PluginModule } from '@trawlarr/plugin-api';
 import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import { runFfmpeg } from '../ffmpeg/run.js';
 import type { LoadedPlugin } from '../host/loader.js';
+import { resolveEncodeTarget } from './encode-target.js';
 
 /**
  * The engine owns execution: the Execute node's declared behaviour is replaced
@@ -27,15 +26,14 @@ export const createExecuteRunner =
       details: () => plugin.details,
       plugin: async (args) => {
         const command = args.variables.ffmpegCommand;
-        const outputPath = input.outputPathFor(args.inputFileObj._id, command.container);
-
-        // ffmpeg refuses to write to the same path it is reading from — and a
-        // convergent flow's declared output naturally lands back on the input
-        // path once the file already lives where it belongs. Write to a scratch
-        // path alongside the real one and rename into place on success, so the
-        // final path is atomic and never observed half-written.
-        const ext = extname(outputPath);
-        const scratchOutputPath = `${outputPath.slice(0, outputPath.length - ext.length)}.trawlarr-tmp-${randomUUID()}${ext}`;
+        // The scratch/final split (and the guarantee that they're never the
+        // same path) lives in resolveEncodeTarget, shared with the dry run,
+        // so the two can never disagree about what command would run.
+        const { writePath: scratchOutputPath, finalPath: outputPath } = resolveEncodeTarget({
+          path: args.inputFileObj._id,
+          container: command.container,
+          outputPathFor: input.outputPathFor,
+        });
         const ffmpegArgs = compileFfmpegArgs({ command, outputPath: scratchOutputPath });
 
         input.log?.(`Running: ${input.ffmpegPath} ${ffmpegArgs.join(' ')}`);

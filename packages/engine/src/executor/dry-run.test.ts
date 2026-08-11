@@ -133,15 +133,16 @@ describe('runDryFlow', () => {
 
     expect(result.complete).toBe(true);
     expect(result.plannedCommands).toHaveLength(1);
-    expect(result.plannedCommands[0]).toEqual([
-      '-i',
-      '/in.mkv',
-      '-map',
-      '0:0',
-      '-c:v',
-      'hevc_nvenc',
-      '/staging/out.mkv',
-    ]);
+    const planned = result.plannedCommands[0]!;
+    expect(planned.slice(0, -1)).toEqual(['-i', '/in.mkv', '-map', '0:0', '-c:v', 'hevc_nvenc']);
+    // The reported output path must be the SAME scratch target the real
+    // Execute would write to (matched via resolveEncodeTarget), and it must
+    // never equal the input path — ffmpeg refuses to write a file it's
+    // reading, so a dry run that reported an in-place command would be
+    // describing something that could never actually run.
+    const reportedOutputPath = planned.at(-1)!;
+    expect(reportedOutputPath).not.toBe('/in.mkv');
+    expect(reportedOutputPath).toMatch(/^\/staging\/out\.trawlarr-tmp-.+\.mkv$/);
   });
 
   it('stops at an unrecognised node and says which one and why', async () => {
