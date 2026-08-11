@@ -15,5 +15,17 @@ export default defineConfig({
   test: {
     include: ['packages/*/src/**/*.test.ts', 'packages/*/test/**/*.test.ts'],
     environment: 'node',
+    typecheck: {
+      // Each package's build tsconfig excludes *.test.ts so `dist/` never
+      // contains tests. That means `tsc --build` never sees test files, so
+      // structural "don't rename this field" guards written as `.test.ts`
+      // literals are inert unless something else type-checks them. This
+      // runs `tsc` over the same test files vitest executes at runtime, so
+      // a type error (e.g. an object literal assigned the wrong shape)
+      // fails `pnpm test` just like a failed assertion would.
+      enabled: true,
+      include: ['packages/*/src/**/*.test.ts', 'packages/*/test/**/*.test.ts'],
+      tsconfig: './tsconfig.typecheck.json',
+    },
   },
 });
