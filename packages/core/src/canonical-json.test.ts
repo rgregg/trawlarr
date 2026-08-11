@@ -27,6 +27,53 @@ describe('canonicalJson', () => {
     expect(() => canonicalJson({ fn: () => 1 })).toThrow(/not serialisable/i);
     expect(() => canonicalJson({ n: Number.NaN })).toThrow(/not serialisable/i);
   });
+
+  it('rejects a Date instance instead of collapsing to {}', () => {
+    expect(() => canonicalJson(new Date())).toThrow(/not serialisable/i);
+    expect(() => canonicalJson(new Date())).toThrow(/date/i);
+  });
+
+  it('rejects a Map instance instead of collapsing to {}', () => {
+    expect(() => canonicalJson(new Map([['a', 1]]))).toThrow(/not serialisable/i);
+    expect(() => canonicalJson(new Map([['a', 1]]))).toThrow(/map/i);
+  });
+
+  it('rejects a Set instance instead of collapsing to {}', () => {
+    expect(() => canonicalJson(new Set([1, 2, 3]))).toThrow(/not serialisable/i);
+    expect(() => canonicalJson(new Set([1, 2, 3]))).toThrow(/set/i);
+  });
+
+  it('rejects a RegExp instance instead of collapsing to {}', () => {
+    expect(() => canonicalJson(/abc/)).toThrow(/not serialisable/i);
+    expect(() => canonicalJson(/abc/)).toThrow(/regexp/i);
+  });
+
+  it('rejects a class instance instead of collapsing to {}', () => {
+    class Widget {
+      name = 'widget';
+    }
+    expect(() => canonicalJson(new Widget())).toThrow(/not serialisable/i);
+    expect(() => canonicalJson(new Widget())).toThrow(/widget/i);
+  });
+
+  it('serialises a null-prototype object normally', () => {
+    const obj = Object.create(null) as Record<string, unknown>;
+    obj.a = 1;
+    obj.b = 2;
+    expect(canonicalJson(obj)).toBe('{"a":1,"b":2}');
+  });
+
+  it('rejects a cyclic object with a comprehensible error, not a stack overflow', () => {
+    const obj: Record<string, unknown> = { a: 1 };
+    obj.self = obj;
+    expect(() => canonicalJson(obj)).toThrow(/circular/i);
+  });
+
+  it('still serialises the same object referenced from two sibling keys', () => {
+    const shared = { x: 1 };
+    const parent = { a: shared, b: shared };
+    expect(canonicalJson(parent)).toBe('{"a":{"x":1},"b":{"x":1}}');
+  });
 });
 
 describe('sha256Hex', () => {
