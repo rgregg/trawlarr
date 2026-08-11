@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/engine" },
     { "path": "packages/plugin-api" },
+    { "path": "packages/plugins-core" },
     { "path": "packages/server" }
   ]
 }

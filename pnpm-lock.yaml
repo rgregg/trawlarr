@@ -81,6 +81,15 @@ importers:
 
   packages/plugin-api: {}
 
+  packages/plugins-core:
+    dependencies:
+      '@trawlarr/core':
+        specifier: workspace:*
+        version: link:../core
+      '@trawlarr/plugin-api':
+        specifier: workspace:*
+        version: link:../plugin-api
+
   packages/server:
     dependencies:
       '@trawlarr/core':
