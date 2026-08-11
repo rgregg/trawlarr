@@ -1,0 +1,34 @@
+{
+  "name": "@trawlarr/engine",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "trawlarr-engine": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@trawlarr/core": "workspace:*",
+    "@trawlarr/plugin-api": "workspace:*",
+    "axios": "^1.7.7",
+    "fs-extra": "^11.2.0",
+    "graceful-fs": "^4.2.11",
+    "import-fresh": "^3.3.0",
+    "mvdir": "^1.0.21",
+    "ncp": "^2.0.0",
+    "string-argv": "^0.3.2",
+    "upath": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/graceful-fs": "^4.1.9",
+    "@types/ncp": "^2.0.7"
+  }
+}
