@@ -47,7 +47,9 @@ tasks; see [`docs/superpowers/specs/2026-08-10-trawlarr-design.md`](./docs/super
 
 ## Development
 
-Requires Node.js >= 22 and [pnpm](https://pnpm.io/) 9.
+Requires Node.js 22 (LTS) and [pnpm](https://pnpm.io/) 9.
+
+Node 22 is pinned in `.nvmrc`: if you use [nvm](https://github.com/nvm-sh/nvm), running `nvm use` will select the correct version. `better-sqlite3` ships prebuilt native binaries for Node 22; newer releases may not have prebuilds available yet and compilation would fail.
 
 ```bash
 pnpm install
