@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { InPlaceOutputError, resolveEncodeTarget } from './encode-target.js';
 
 const target = (path: string, outputPathFor: (p: string, c: string) => string) =>
@@ -44,5 +47,97 @@ describe('resolveEncodeTarget', () => {
       outputPathFor: (p, c) => `${p.slice(0, p.lastIndexOf('.'))}.${c}`,
     });
     expect(finalPath).toBe('/media/in.mkv');
+  });
+
+  describe('relative path guards', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = mkdtempSync(join(tmpdir(), 'encode-target-test-'));
+      // Create a test file so realpathSync can resolve it
+      writeFileSync(join(tempDir, 's.mkv'), '');
+    });
+
+    afterEach(() => {
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('catches when input uses . and output uses absolute path to the same file', () => {
+      const inputPath = join(tempDir, 's.mkv');
+      const outputPathFor = () => join(tempDir, './s.mkv');
+
+      expect(() => {
+        resolveEncodeTarget({
+          path: inputPath,
+          container: 'mkv',
+          outputPathFor,
+        });
+      }).toThrow(InPlaceOutputError);
+    });
+
+    it('catches .. segments that normalize onto the input file', () => {
+      const inputPath = join(tempDir, 's.mkv');
+      const outputPathFor = () => join(tempDir, 'subdir/../s.mkv');
+
+      expect(() => {
+        resolveEncodeTarget({
+          path: inputPath,
+          container: 'mkv',
+          outputPathFor,
+        });
+      }).toThrow(InPlaceOutputError);
+    });
+
+    it('catches trailing-slash working directory normalization', () => {
+      const inputPath = join(tempDir, 's.mkv');
+      const outputPathFor = () => join(tempDir + '/', 's.mkv');
+
+      expect(() => {
+        resolveEncodeTarget({
+          path: inputPath,
+          container: 'mkv',
+          outputPathFor,
+        });
+      }).toThrow(InPlaceOutputError);
+    });
+
+    it('catches multiple . segments that normalize onto the input file', () => {
+      const inputPath = join(tempDir, 's.mkv');
+      const outputPathFor = () => `${tempDir}/../${tempDir.split('/').pop()}/./s.mkv`;
+
+      expect(() => {
+        resolveEncodeTarget({
+          path: inputPath,
+          container: 'mkv',
+          outputPathFor,
+        });
+      }).toThrow(InPlaceOutputError);
+    });
+
+    it('still allows a genuinely different output path to pass through', () => {
+      const inputPath = join(tempDir, 's.mkv');
+      const outputPathFor = () => join(tempDir, 's-output.mkv');
+
+      expect(() => {
+        resolveEncodeTarget({
+          path: inputPath,
+          container: 'mkv',
+          outputPathFor,
+        });
+      }).not.toThrow();
+    });
+
+    it('still allows output in a different directory', () => {
+      const inputPath = join(tempDir, 's.mkv');
+      const outputPathFor = () => join(tempDir, '..', 's.mkv');
+
+      expect(() => {
+        resolveEncodeTarget({
+          path: inputPath,
+          container: 'mkv',
+          outputPathFor,
+        });
+      }).not.toThrow();
+    });
   });
 });

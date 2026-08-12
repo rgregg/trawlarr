@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { extname } from 'node:path';
+import { extname, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
 
 export interface EncodeTarget {
   /** Where ffmpeg should be told to write — never the same path as the input. */
@@ -33,6 +34,25 @@ export class InPlaceOutputError extends Error {
 }
 
 /**
+ * Resolve a path to its canonical absolute form.
+ *
+ * First attempts `realpathSync` to follow symlinks and normalize the path;
+ * if the file does not exist, falls back to `resolve` to at least normalize
+ * relative paths and `.` / `..` segments to absolute form.
+ *
+ * This allows the guard to catch cases where two different relative-path
+ * spellings denote the same file, or where symlinks would cause an overwrite.
+ */
+const canonicalPath = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    // Path may not exist yet (e.g., output file), so fall back to resolution.
+    return resolve(path);
+  }
+};
+
+/**
  * Decide where an Execute node's ffmpeg run writes, and where that output
  * ultimately belongs.
  *
@@ -53,7 +73,10 @@ export const resolveEncodeTarget = (input: {
   outputPathFor: (path: string, container: string) => string;
 }): EncodeTarget => {
   const finalPath = input.outputPathFor(input.path, input.container);
-  if (finalPath === input.path) throw new InPlaceOutputError(finalPath);
+  // Compare canonical absolute paths to catch relative-path spellings and symlink aliases.
+  if (canonicalPath(finalPath) === canonicalPath(input.path)) {
+    throw new InPlaceOutputError(finalPath);
+  }
   const ext = extname(finalPath);
   const writePath = `${finalPath.slice(0, finalPath.length - ext.length)}.trawlarr-tmp-${randomUUID()}${ext}`;
   return { writePath, finalPath };
