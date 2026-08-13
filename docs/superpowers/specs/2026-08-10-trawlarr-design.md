@@ -190,9 +190,12 @@ transcode:
 }
 ```
 
-A `FfmpegCommandStream` is **a raw ffprobe stream object with four mutation fields
+A `FfmpegCommandStream` is **a raw ffprobe stream object with five mutation fields
 added**: `removed: boolean`, `forceEncoding: boolean`, `inputArgs: string[]`,
-`outputArgs: string[]`. There is no separate map-argument field.
+`outputArgs: string[]`, and `mapArgs: string[]`. The `mapArgs` field holds the
+`-map` arguments selecting that stream, seeded from the ffprobe stream index; it is
+carried per-stream rather than derived because plugins reorder, clone, and insert
+streams, after which array position no longer identifies the source track.
 
 **Compilation** is mechanical, and is trawlarr's responsibility, not the plugins':
 
@@ -202,6 +205,10 @@ added**: `removed: boolean`, `forceEncoding: boolean`, `inputArgs: string[]`,
 4. For each stream where `removed` is false, emit `-map 0:<index>` followed by that
    stream's `outputArgs`.
 5. Emit `overallOuputArguments`, then the container-appropriate output path.
+
+Plugins emit `mapArgs` from each stream; the host resolves any `{outputIndex}` and
+`{outputTypeIndex}` placeholders appearing in a stream's `outputArgs` at compile time,
+since plugins cannot know their stream's final output position.
 
 **Lifecycle is a state machine the engine enforces**, not a convention:
 
