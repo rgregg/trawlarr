@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ProbeData } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand } from './ffmpeg-command.js';
-import { compileFfmpegArgs, outputStreamIndex, outputStreamTypeIndex } from './ffmpeg-compile.js';
+import {
+  compileFfmpegArgs,
+  outputStreamIndex,
+  outputStreamTypeIndex,
+  shouldCopyStream,
+} from './ffmpeg-compile.js';
 
 const probe: ProbeData = {
   streams: [
@@ -288,6 +293,59 @@ describe('compileFfmpegArgs — placeholder substitution', () => {
     cmd.streams[1]!.outputArgs.push('-c:{outputIndex}', 'libopus');
     compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
     expect(cmd.streams[1]!.outputArgs).toEqual(['-c:{outputIndex}', 'libopus']);
+  });
+});
+
+describe('shouldCopyStream', () => {
+  it('copies a stream with no output arguments', () => {
+    expect(shouldCopyStream([])).toBe(true);
+  });
+
+  it('does not copy a stream that sets a codec', () => {
+    expect(shouldCopyStream(['-c:v', 'libx265'])).toBe(false);
+    expect(shouldCopyStream(['-c:1', 'libopus'])).toBe(false);
+    expect(shouldCopyStream(['-codec:a', 'aac'])).toBe(false);
+    expect(shouldCopyStream(['-vcodec', 'libx264'])).toBe(false);
+    expect(shouldCopyStream(['-acodec', 'aac'])).toBe(false);
+  });
+
+  it('still copies when the arguments only tag the stream', () => {
+    // Setting a language or a disposition does not require re-encoding, and
+    // treating it as an encode would silently transcode a stream the user
+    // only wanted relabelled.
+    expect(shouldCopyStream(['-metadata:s:1', 'language=eng'])).toBe(true);
+    expect(shouldCopyStream(['-disposition:s:0', 'default'])).toBe(true);
+    expect(shouldCopyStream(['-metadata', 'title=x'])).toBe(true);
+  });
+
+  it('does not copy when a non-tagging argument is present', () => {
+    expect(shouldCopyStream(['-b:v', '2M'])).toBe(false);
+    expect(shouldCopyStream(['-metadata:s:1', 'language=eng', '-b:v', '2M'])).toBe(false);
+  });
+});
+
+describe('compileFfmpegArgs — copy directives', () => {
+  const twoStreams = () =>
+    beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+
+  it('copies a tagged stream while encoding the one that asked for it', () => {
+    const cmd = twoStreams();
+    cmd.streams[0]!.outputArgs.push('-c:v', 'libx265');
+    cmd.streams[1]!.outputArgs.push('-metadata:s:a:0', 'language=eng');
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    expect(args).toContain('-c:v');
+    // The audio stream is only relabelled, so it must be copied, not encoded.
+    expect(args.join(' ')).toContain('-c:1 copy');
+    expect(args.join(' ')).toContain('-metadata:s:a:0 language=eng');
   });
 });
 
