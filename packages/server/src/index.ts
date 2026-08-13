@@ -2,4 +2,5 @@ export * from './db/connection.js';
 export * from './db/migrate.js';
 export * from './db/chunked.js';
 export * from './db/media-file-repo.js';
+export * from './db/library-repo.js';
 export * from './db/plugin-document-repo.js';
