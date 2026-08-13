@@ -83,7 +83,12 @@ describe('trawlarr:setVideoEncoder', () => {
       }),
     );
     const video = out.variables.ffmpegCommand.streams[0]!;
-    expect(video.outputArgs).toEqual(['-c:v', 'libx265', '-crf', '24']);
+    // `-c:{outputIndex}`, not `-c:v`: a type specifier would also match cover
+    // art (an mjpeg video stream as far as ffmpeg is concerned) and, because
+    // ffmpeg takes the LAST matching specifier, would override that stream's
+    // own copy directive when the cover art precedes the video track.
+    expect(video.outputArgs).toEqual(['-c:{outputIndex}', 'libx265', '-crf', '24']);
+    expect(video.outputArgs).not.toContain('-c:v');
     expect(out.variables.ffmpegCommand.shouldProcess).toBe(true);
   });
 
@@ -110,7 +115,9 @@ describe('trawlarr:setVideoEncoder', () => {
         argsFor({ variables: begun.variables, inputs: { encoder, quality: '24' } }),
       );
       const outputArgs = out.variables.ffmpegCommand.streams[0]!.outputArgs;
-      const flagIndex = outputArgs.findIndex((arg) => arg.startsWith('-') && arg !== '-c:v');
+      const flagIndex = outputArgs.findIndex(
+        (arg) => arg.startsWith('-') && arg !== '-c:{outputIndex}',
+      );
       return outputArgs[flagIndex];
     };
 

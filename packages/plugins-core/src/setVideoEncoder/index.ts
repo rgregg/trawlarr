@@ -72,7 +72,16 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
 
   for (const stream of args.variables.ffmpegCommand.streams) {
     if (stream.codec_type !== 'video' || stream.removed === true) continue;
-    stream.outputArgs.push('-c:v', encoder, qualityFlag, quality);
+    // `-c:{outputIndex}`, never `-c:v`. ffmpeg resolves `-c` by LAST matching
+    // specifier, and a type specifier matches every video-typed output stream
+    // — including cover art, which is an mjpeg video stream to ffmpeg however
+    // we reclassify it internally. For a file whose cover art precedes the
+    // real video track, `-c:v libx265` appearing after the cover's `-c:0 copy`
+    // overrides it and encodes the poster frame into a full hevc stream
+    // (verified against ffmpeg 6.1.1). Addressing the stream by its own output
+    // index cannot collide; the host substitutes the placeholder at compile
+    // time, since a plugin cannot know its stream's final output position.
+    stream.outputArgs.push('-c:{outputIndex}', encoder, qualityFlag, quality);
     stream.forceEncoding = true;
   }
   args.variables.ffmpegCommand.shouldProcess = true;

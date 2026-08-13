@@ -4,6 +4,9 @@ import { mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import type { PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
+import { beginFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
+import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,6 +28,7 @@ let workDir: string;
 let sourceDir: string;
 let mediaPath: string;
 let convergedPath: string;
+let coverFirstPath: string;
 
 // Generate tiny samples rather than committing binary fixtures.
 const makeSample = (path: string, videoCodec: string) =>
@@ -47,6 +51,73 @@ const makeSample = (path: string, videoCodec: string) =>
     'aac',
     path,
   ]);
+
+/**
+ * A file whose first stream is a single-frame mjpeg still — the shape cover art
+ * takes — followed by the real video and its audio. Built by muxing a generated
+ * still ahead of the sample so the ORDER is real, which is the whole point:
+ * output-stream ordering is what decides whether a type-specifier codec flag
+ * collides with an earlier stream's copy directive.
+ */
+const makeCoverFirstSample = async (path: string, stillPath: string) => {
+  await execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=c=red:s=160x120:d=0.04:r=25',
+    '-frames:v',
+    '1',
+    stillPath,
+  ]);
+  await execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-i',
+    stillPath,
+    '-i',
+    mediaPath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '1:v:0',
+    '-map',
+    '1:a:0',
+    '-c:v:0',
+    'mjpeg',
+    '-c:v:1',
+    'copy',
+    '-c:a',
+    'copy',
+    '-disposition:v:0',
+    'attached_pic',
+    path,
+  ]);
+};
+
+/** The subset of an ffprobe stream these tests read back off a real file. */
+interface ProbedStream {
+  index: number;
+  codec_name: string;
+  codec_type: string;
+  disposition?: Record<string, number>;
+  // Open, like ProbeStream itself, so a probed stream can be handed straight
+  // to beginFfmpegCommand without being retyped.
+  [key: string]: unknown;
+}
+
+const streamsOf = async (path: string): Promise<ProbedStream[]> => {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'error',
+    '-show_streams',
+    '-of',
+    'json',
+    path,
+  ]);
+  return (JSON.parse(stdout) as { streams: ProbedStream[] }).streams;
+};
 
 const audioCodecOf = async (path: string): Promise<string> => {
   const { stdout } = await execFileAsync('ffprobe', [
@@ -98,6 +169,9 @@ beforeAll(async () => {
   // inherited from the transcode test's output: tests must not depend on each
   // other's side effects, or a failure upstream shows up as a mystery here.
   await makeSample(convergedPath, 'libx265');
+
+  coverFirstPath = join(sourceDir, 'cover-first.mkv');
+  await makeCoverFirstSample(coverFirstPath, join(sourceDir, 'cover.png'));
 }, 120_000);
 
 const flowPath = () => {
@@ -151,7 +225,10 @@ describe.runIf(available)('end to end', () => {
       workDir,
     ]);
     expect(stdout).toContain('Would run:');
-    expect(stdout).toContain('-c:v libx265');
+    // `-c:0`, not `-c:v`: codecs are addressed by resolved output index, so a
+    // type specifier can never reach a stream it was not meant for.
+    expect(stdout).toContain('-c:0 libx265');
+    expect(stdout).not.toContain('-c:v');
     expect(stdout).toContain('Stopped: end-of-flow');
 
     // The dry run must report a command that could actually run: ffmpeg
@@ -224,4 +301,75 @@ describe.runIf(available)('end to end', () => {
     expect(stdout).toContain('1. Start');
     expect(stdout).not.toContain('Would run:');
   }, 60_000);
+});
+
+/**
+ * Every other test in this suite, and every unit test behind it, checks the
+ * CONTRACT level: which argument strings we emit. This one checks the level
+ * below — what those strings MEAN to ffmpeg — because a codec flag can be
+ * spelled perfectly and still address the wrong stream.
+ */
+describe.runIf(available)('compiled argv, as real ffmpeg reads it', () => {
+  /** True for a flag that selects a codec for a whole stream TYPE. */
+  const isTypeSpecifierCodecFlag = (arg: string): boolean =>
+    /^-(c|codec):[vasdt]$/.test(arg) || /^-[vasd]codec(:|$)/.test(arg);
+
+  it('encodes the video while leaving cover art that precedes it untouched', async () => {
+    // The fixture really is ordered still-image first, video second.
+    const sourceStreams = await streamsOf(coverFirstPath);
+    expect(sourceStreams.map((stream) => stream.codec_name)).toEqual(['mjpeg', 'h264', 'aac']);
+
+    // The attached_pic disposition is set on the probe here rather than read
+    // back off the file, and that is a deliberate, documented compromise: no
+    // container ffmpeg 6.1.1 can WRITE yields a file where ffprobe reports
+    // cover art before the video. Matroska drops the disposition on muxing,
+    // and mp4/mov store cover art in a udta/meta `covr` atom, which the
+    // demuxer always surfaces as the LAST stream. So the ORDER is real (it
+    // comes from the file), and the disposition is injected to describe the
+    // file as a probe of real-world cover-art-first media would.
+    const probe: ProbeData = {
+      streams: sourceStreams.map((stream, position) =>
+        position === 0
+          ? { ...stream, disposition: { ...stream.disposition, attached_pic: 1 } }
+          : stream,
+      ),
+    };
+
+    const command = beginFfmpegCommand({
+      probe,
+      container: 'mkv',
+      inputPath: coverFirstPath,
+    });
+    // Cover art is reclassified, so the encoder node will skip it and the
+    // compiler will hand it a copy directive.
+    expect(command.streams[0]!.codec_type).toBe('attachment');
+
+    const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin({
+      inputFileObj: { _id: coverFirstPath, container: 'mkv', ffProbeData: probe },
+      variables: { ffmpegCommand: command, flowFailed: false, user: {} },
+      inputs: { encoder: 'libx265', quality: '30' },
+      jobLog: () => {},
+    } as unknown as PluginInputArgs);
+
+    const producedPath = join(workDir, 'cover-first-encoded.mkv');
+    const argv = compileFfmpegArgs({
+      command: out.variables.ffmpegCommand,
+      outputPath: producedPath,
+    });
+
+    await execFileAsync('ffmpeg', ['-hide_banner', '-y', ...argv]);
+
+    // The load-bearing assertion, and deliberately made BEFORE the argv check
+    // below: the video was encoded and the cover art was not. It is what real
+    // ffmpeg did, not what we believe we asked for.
+    const producedStreams = await streamsOf(producedPath);
+    expect(producedStreams.map((stream) => stream.codec_name)).toEqual(['mjpeg', 'hevc', 'aac']);
+
+    // And the reason, stated at the contract level so a regression names its
+    // own cause: ffmpeg resolves `-c` by LAST matching specifier, so a type
+    // specifier reaches every stream of that type — including cover art, a
+    // video-typed output stream however we classify it internally. Addressing
+    // codecs by output index is the only form that cannot collide.
+    expect(argv.filter(isTypeSpecifierCodecFlag)).toEqual([]);
+  }, 120_000);
 });
