@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ProbeData } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand } from './ffmpeg-command.js';
-import { compileFfmpegArgs } from './ffmpeg-compile.js';
+import { compileFfmpegArgs, outputStreamIndex, outputStreamTypeIndex } from './ffmpeg-compile.js';
 
 const probe: ProbeData = {
   streams: [
@@ -231,5 +231,87 @@ describe('compileFfmpegArgs — mapArgs', () => {
     });
     cmd.streams[0]!.mapArgs = [];
     expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toContain('0:4');
+  });
+});
+
+describe('compileFfmpegArgs — placeholder substitution', () => {
+  const threeStreams = () =>
+    beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+          { index: 2, codec_type: 'audio', codec_name: 'ac3' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+
+  it('substitutes {outputIndex} with the position among surviving streams', () => {
+    const cmd = threeStreams();
+    cmd.streams[2]!.outputArgs.push('-c:{outputIndex}', 'libopus');
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toContain('-c:2');
+  });
+
+  it('substitutes {outputTypeIndex} with the position among same-type survivors', () => {
+    // Stream 2 is the second audio stream, so its type index is 1.
+    const cmd = threeStreams();
+    cmd.streams[2]!.outputArgs.push('-b:a:{outputTypeIndex}', '128k');
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toContain('-b:a:1');
+  });
+
+  it('renumbers after a removal, so indices follow survivors not originals', () => {
+    const cmd = threeStreams();
+    cmd.streams[1]!.removed = true;
+    cmd.streams[2]!.outputArgs.push('-c:{outputIndex}', 'libopus', '-b:a:{outputTypeIndex}', '96k');
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    // Survivors are video(0) and ac3, so the ac3 output index is 1 and, being
+    // the only surviving audio stream, its type index is 0.
+    expect(args).toContain('-c:1');
+    expect(args).toContain('-b:a:0');
+    expect(args).not.toContain('-c:2');
+  });
+
+  it('substitutes every occurrence in one argument', () => {
+    const cmd = threeStreams();
+    cmd.streams[1]!.outputArgs.push('-filter:{outputIndex}', 'x={outputIndex}');
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    expect(args).toContain('-filter:1');
+    expect(args).toContain('x=1');
+  });
+
+  it('does not mutate the caller command', () => {
+    // The compiler must stay pure: a dry run compiles the same command a real
+    // run later executes, and must not leave substituted values behind.
+    const cmd = threeStreams();
+    cmd.streams[1]!.outputArgs.push('-c:{outputIndex}', 'libopus');
+    compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    expect(cmd.streams[1]!.outputArgs).toEqual(['-c:{outputIndex}', 'libopus']);
+  });
+});
+
+describe('output index helpers', () => {
+  const streams = () =>
+    beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+          { index: 2, codec_type: 'audio', codec_name: 'ac3' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    }).streams;
+
+  it('numbers output streams from zero in order', () => {
+    const s = streams();
+    expect(s.map((stream) => outputStreamIndex(s, stream))).toEqual([0, 1, 2]);
+  });
+
+  it('numbers type indices per codec_type', () => {
+    const s = streams();
+    expect(s.map((stream) => outputStreamTypeIndex(s, stream))).toEqual([0, 0, 1]);
   });
 });

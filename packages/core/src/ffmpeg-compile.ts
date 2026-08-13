@@ -8,6 +8,43 @@ const mapArgsOf = (stream: FfmpegCommandStream, position: number): string[] => {
 };
 
 /**
+ * Position of a stream among the streams that will actually be written.
+ * ffmpeg's `-c:<n>` and friends address output streams, which renumber from
+ * zero after any removal — so this is not the input index and not the array
+ * position.
+ *
+ * Callers pass the already-filtered surviving streams.
+ */
+export const outputStreamIndex = (
+  streams: readonly FfmpegCommandStream[],
+  stream: FfmpegCommandStream,
+): number => streams.indexOf(stream);
+
+/** As above, but counted within the stream's own codec_type. */
+export const outputStreamTypeIndex = (
+  streams: readonly FfmpegCommandStream[],
+  stream: FfmpegCommandStream,
+): number =>
+  streams.filter((candidate) => candidate.codec_type === stream.codec_type).indexOf(stream);
+
+/**
+ * Plugins write `-c:{outputIndex}` and `-b:a:{outputTypeIndex}` because they
+ * cannot know their stream's final output position — removals and insertions
+ * elsewhere in the flow decide it. Resolving them is the host's job; passing
+ * them through would hand ffmpeg a literal brace.
+ */
+const substitutePlaceholders = (
+  outputArgs: readonly string[],
+  streams: readonly FfmpegCommandStream[],
+  stream: FfmpegCommandStream,
+): string[] =>
+  outputArgs.map((arg) =>
+    arg
+      .replaceAll('{outputIndex}', String(outputStreamIndex(streams, stream)))
+      .replaceAll('{outputTypeIndex}', String(outputStreamTypeIndex(streams, stream))),
+  );
+
+/**
  * Compile the cooperatively-built command into argv.
  *
  * Order is fixed by ffmpeg's grammar: overall input args, then per-stream
@@ -65,7 +102,8 @@ export const compileFfmpegArgs = (input: {
 
     const streamEncodes = stream.outputArgs.length > 0 || stream.forceEncoding === true;
     if (streamEncodes) {
-      args.push(...stream.outputArgs);
+      const resolvedOutputArgs = substitutePlaceholders(stream.outputArgs, kept, stream);
+      args.push(...resolvedOutputArgs);
     } else if (anyStreamEncodes) {
       // At least one other stream is being encoded, so the blanket `-c copy`
       // below is not being emitted — this stream needs its own explicit copy
