@@ -44,16 +44,29 @@ const substitutePlaceholders = (
       .replaceAll('{outputTypeIndex}', String(outputStreamTypeIndex(streams, stream))),
   );
 
-/** Matches the arguments that set a codec, in any of ffmpeg's spellings. */
-const CODEC_ARG = /^-(c|codec)(:|$)/;
-const TYPED_CODEC_ARG = /^-[vasd]codec(:|$)/;
+/**
+ * The option a flag names, with its leading dash and any stream specifier
+ * stripped: `-c` and `-c:v` and `-c:0` all name `c`; `-metadata:s:0` names
+ * `metadata`. Everything the compiler needs to know about a flag is decided
+ * by this leading token, so classifying flags is a lookup on it rather than
+ * a pattern match over the whole string.
+ */
+const optionNameOf = (arg: string): string => {
+  if (!arg.startsWith('-')) return '';
+  const named = arg.slice(1);
+  const specifier = named.indexOf(':');
+  return specifier === -1 ? named : named.slice(0, specifier);
+};
 
-/** Arguments that only label a stream, and so survive a stream copy. */
-const isTaggingOnlyFlag = (arg: string): boolean =>
-  arg === '-metadata' ||
-  arg.startsWith('-metadata:') ||
-  arg === '-disposition' ||
-  arg.startsWith('-disposition:');
+/** Every option name that selects a codec, in each spelling ffmpeg accepts. */
+const CODEC_OPTIONS = new Set(['c', 'codec', 'vcodec', 'acodec', 'scodec', 'dcodec']);
+
+/**
+ * Option names that only label a stream, and so survive a stream copy:
+ * setting a language or a default-track flag rewrites container metadata and
+ * never touches the encoded frames.
+ */
+const TAGGING_OPTIONS = new Set(['metadata', 'disposition']);
 
 /**
  * Should this stream be copied rather than re-encoded?
@@ -68,8 +81,9 @@ export const shouldCopyStream = (outputArgs: readonly string[]): boolean => {
   for (let i = 0; i < outputArgs.length; i += 2) {
     const flag = outputArgs[i];
     if (flag === undefined) break;
-    if (CODEC_ARG.test(flag) || TYPED_CODEC_ARG.test(flag)) return false;
-    if (!isTaggingOnlyFlag(flag)) return false;
+    const option = optionNameOf(flag);
+    if (CODEC_OPTIONS.has(option)) return false;
+    if (!TAGGING_OPTIONS.has(option)) return false;
   }
   return true;
 };
@@ -112,8 +126,14 @@ export const compileFfmpegArgs = (input: {
     throw new Error('Cannot compile an ffmpeg command with no input file.');
   }
 
+  // Unconditional, not `command.streams.length > 0 && kept.length === 0`: a
+  // command seeded from an empty or unreadable probe has no streams to remove
+  // yet would otherwise compile a map-less invocation, which tells ffmpeg to
+  // apply its own default stream selection to a file the flow believes it has
+  // described completely. Refusing is the same answer as for "every stream was
+  // removed" — nothing was mapped — so it gets the same message.
   const kept = command.streams.filter((stream) => stream.removed !== true);
-  if (command.streams.length > 0 && kept.length === 0) {
+  if (kept.length === 0) {
     throw new Error(
       'No streams mapped for new file: every stream was removed, so the output would ' +
         'contain nothing. Check which streams the flow is removing.',
@@ -163,5 +183,13 @@ export const compileFfmpegArgs = (input: {
   args.push(...command.overallOuputArguments);
   args.push(outputPath);
 
-  return args;
+  // Trim every argument and drop the empties, as the last thing that happens.
+  // Not cosmetic: plugins that accept a free-text argument string split it on
+  // spaces, so a double or trailing space in a user's input yields an
+  // empty-string element. ffmpeg treats an empty argv element as a filename
+  // and dies immediately ("Error opening output file ."), which turns a flow
+  // that works elsewhere into a hard failure here. Doing it once at the end
+  // covers every source of arguments — plugin outputArgs, overall arguments,
+  // mapArgs — instead of asking each of them to be careful.
+  return args.map((arg) => arg.trim()).filter((arg) => arg !== '');
 };

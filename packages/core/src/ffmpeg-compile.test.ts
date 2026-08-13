@@ -189,6 +189,22 @@ describe('compileFfmpegArgs', () => {
     expect(() => compile(cmd)).toThrow(/every stream/i);
   });
 
+  it('refuses to compile a command that has no streams at all', () => {
+    // An empty or unreadable probe. Guarding this only when streams existed
+    // and were all removed let a stream-less command compile a map-less
+    // invocation, handing ffmpeg its own default stream selection for a file
+    // the flow believes it has fully described.
+    const cmd = beginFfmpegCommand({
+      probe: { streams: [] },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(cmd.streams).toEqual([]);
+    expect(() => compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toThrow(
+      /No streams mapped for new file/,
+    );
+  });
+
   it('refuses to compile when every stream was removed, naming the problem', () => {
     const cmd = beginFfmpegCommand({
       probe: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
@@ -305,6 +321,37 @@ describe('compileFfmpegArgs — placeholder substitution', () => {
     cmd.streams[1]!.outputArgs.push('-c:{outputIndex}', 'libopus');
     compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
     expect(cmd.streams[1]!.outputArgs).toEqual(['-c:{outputIndex}', 'libopus']);
+  });
+});
+
+describe('compileFfmpegArgs — argument hygiene', () => {
+  it('trims every argument and drops the empty ones', () => {
+    // This is the shape a plugin produces from a free-text argument string it
+    // split on spaces: a double space yields an empty element and a trailing
+    // space yields both a padded element and another empty one. ffmpeg treats
+    // an empty argv element as a filename and fails outright, so a flow that
+    // works elsewhere would hard-fail here.
+    const cmd = command();
+    cmd.overallInputArguments.push(...'-ss  30 '.split(' '));
+    cmd.overallOuputArguments.push(...' -map_metadata  0 '.split(' '));
+    cmd.streams[0]!.outputArgs.push(...'-c:{outputIndex} libx265 '.split(' '));
+
+    const args = compile(cmd);
+
+    expect(args).not.toContain('');
+    for (const arg of args) expect(arg).toBe(arg.trim());
+    // The real arguments all survived, in order, with nothing merged.
+    expect(args.slice(0, 4)).toEqual(['-ss', '30', '-i', '/in.mkv']);
+    expect(args).toContain('libx265');
+    expect(args.slice(-3)).toEqual(['-map_metadata', '0', '/out.mkv']);
+  });
+
+  it('keeps whitespace inside an argument that legitimately contains it', () => {
+    // Trimming is per-element, so a metadata value with an internal space is
+    // untouched — only padding around an element is removed.
+    const cmd = command();
+    cmd.streams[0]!.outputArgs.push('-metadata:s:0', 'title=Two Words');
+    expect(compile(cmd)).toContain('title=Two Words');
   });
 });
 
