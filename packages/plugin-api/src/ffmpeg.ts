@@ -1,6 +1,6 @@
 import type { ProbeStream } from './file-object.js';
 
-/** An ffprobe stream plus the four fields plugins mutate to shape the command. */
+/** An ffprobe stream plus the five fields plugins mutate to shape the command. */
 export interface FfmpegCommandStream extends ProbeStream {
   removed: boolean;
   forceEncoding: boolean;

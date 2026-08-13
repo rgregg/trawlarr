@@ -84,6 +84,17 @@ export const assertCommandInitialised = (command: FfmpegCommand): void => {
  * or adding overall arguments all mean work is needed even if no plugin said
  * so. Running ffmpeg when nothing changed would rewrite the file for no
  * reason — a needless remux of every file in a library.
+ *
+ * This is a DELIBERATE divergence from upstream, which decides only on
+ * `shouldProcess`, the overall arguments, and stream removal. We additionally
+ * treat a stream carrying `outputArgs`, or asking to `forceEncoding`, as work
+ * to be done. Upstream's narrower rule makes several of its own plugins do
+ * nothing when they are the only command-building node in a flow —
+ * `10BitVideo`, `HdrToSdr`, `SetVideoBitrate` and `SetVdeoFramerate` (sic) all
+ * push outputArgs without ever setting `shouldProcess`, so upstream skips the
+ * encode they just configured. Asking a stream to encode is a change by
+ * definition, so we honour it; the cost is that we will run ffmpeg in cases
+ * where upstream would not.
  */
 export const deriveShouldProcess = (command: FfmpegCommand): boolean =>
   command.shouldProcess ||

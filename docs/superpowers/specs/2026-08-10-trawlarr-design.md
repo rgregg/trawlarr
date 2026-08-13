@@ -202,9 +202,20 @@ streams, after which array position no longer identifies the source track.
 1. Emit `overallInputArguments`.
 2. Emit each stream's `inputArgs` ahead of the corresponding input.
 3. Emit the inputs from `inputFiles`.
-4. For each stream where `removed` is false, emit `-map 0:<index>` followed by that
-   stream's `outputArgs`.
-5. Emit `overallOuputArguments`, then the container-appropriate output path.
+4. For each stream where `removed` is false, emit that stream's own `mapArgs`,
+   followed by that stream's `outputArgs`. The `-map` arguments come from the stream,
+   never from its position in the array — see `mapArgs` above.
+5. Emit a copy directive for every surviving stream that was not asked to encode: a
+   stream with no `outputArgs` at all, or whose `outputArgs` only tag it
+   (`-metadata…`/`-disposition…`), is copied rather than re-encoded. When no stream
+   needs an encode this is a single blanket `-c copy`; as soon as one stream does, each
+   other stream instead gets its own `-c:<output index> copy`, because the blanket form
+   would override the encoder just configured, and omitting it would silently re-encode
+   untouched streams with the container's default codec.
+6. Emit `overallOuputArguments`, then the container-appropriate output path.
+7. Trim every argument and drop the empty ones. Plugins that split a free-text argument
+   string on spaces emit empty elements for any double or trailing space, and an empty
+   argv element makes ffmpeg fail immediately.
 
 Plugins emit `mapArgs` from each stream; the host resolves any `{outputIndex}` and
 `{outputTypeIndex}` placeholders appearing in a stream's `outputArgs` at compile time,
