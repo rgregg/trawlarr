@@ -337,30 +337,51 @@ describe.runIf(available)('ffmpegCommandRorderStreams', () => {
       },
       true,
     );
+    const probeOrder = args.variables.ffmpegCommand.streams.map((stream) => stream.codec_type);
+
     const output = await loaded.module.plugin(args);
+    const reorderedStreams = output.variables.ffmpegCommand.streams;
+
+    // Guard against silent coverage loss: if upstream ever renames
+    // `streamTypes`/`processOrder`, the plugin ignores the unknown input and
+    // returns the streams untouched, so position and source identity would
+    // coincide trivially and everything below would pass having exercised
+    // nothing. Fail loudly here instead, pointing at upstream drift rather
+    // than at trawlarr.
+    expect(reorderedStreams.map((stream) => stream.codec_type)).not.toEqual(probeOrder);
+    expect(reorderedStreams.map((stream) => stream.codec_type)).toEqual([
+      'audio',
+      'video',
+      'subtitle',
+    ]);
+
+    // Overwrite one surviving stream's mapArgs with a value that is NOT
+    // derivable from its `index` field ('0:v:0' vs. the video stream's
+    // index of 0, which would derive as '0:0'). The plugin itself never
+    // touches mapArgs — it only clones and reorders — so deriving the
+    // expectation as `0:${stream.index}` (as an earlier version of this test
+    // did) is mathematically identical to what mapArgs already contains and
+    // passes just as well for a compiler that ignores mapArgs and
+    // recomputes from index. Mutating mapArgs to a non-derivable value after
+    // the plugin runs, and asserting the compiler emits exactly that, is
+    // what proves mapArgs is actually read rather than recomputed.
+    const videoStream = reorderedStreams.find((stream) => stream.codec_type === 'video');
+    if (!videoStream) throw new Error('expected a video stream to survive the reorder');
+    videoStream.mapArgs = ['-map', '0:v:0'];
 
     const argv = compileFfmpegArgs({
       command: output.variables.ffmpegCommand,
       outputPath: '/staging/out.mkv',
     });
 
-    // Whatever order the streams ended up in, every original track must still
-    // be mapped exactly once, from its own source index.
     const maps = argv.reduce<string[]>(
       (acc, arg, i) => (arg === '-map' ? [...acc, argv[i + 1] ?? ''] : acc),
       [],
     );
-    // The plugin's own reordered stream array is the ground truth for which
-    // source track each output position must come from. A set-equality check
-    // on `maps` alone is not sufficient: reordering only permutes the same
-    // three source indices, so a position-derived `-map` (the pre-Task-2 bug)
-    // still produces the exact set {0:0, 0:1, 0:2} — just attached to the
-    // wrong streams. Asserting positional correspondence against the
-    // reordered array is what actually catches identity swaps.
-    const reorderedStreams = output.variables.ffmpegCommand.streams;
-    expect(maps).toHaveLength(reorderedStreams.length);
-    expect(new Set(maps).size).toBe(maps.length);
-    expect(maps).toEqual(reorderedStreams.map((stream) => `0:${stream.index}`));
+    const expectedMaps = reorderedStreams.map((stream) =>
+      stream === videoStream ? '0:v:0' : `0:${stream.index}`,
+    );
+    expect(maps).toEqual(expectedMaps);
   });
 });
 
