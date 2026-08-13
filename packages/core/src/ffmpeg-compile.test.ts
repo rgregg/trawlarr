@@ -188,6 +188,18 @@ describe('compileFfmpegArgs', () => {
     for (const stream of cmd.streams) stream.removed = true;
     expect(() => compile(cmd)).toThrow(/every stream/i);
   });
+
+  it('refuses to compile when every stream was removed, naming the problem', () => {
+    const cmd = beginFfmpegCommand({
+      probe: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    cmd.streams[0]!.removed = true;
+    expect(() => compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toThrow(
+      /No streams mapped for new file/,
+    );
+  });
 });
 
 describe('compileFfmpegArgs — mapArgs', () => {

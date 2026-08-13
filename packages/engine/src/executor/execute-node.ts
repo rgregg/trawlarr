@@ -1,6 +1,6 @@
 import { rename, unlink } from 'node:fs/promises';
 import type { PluginModule } from '@trawlarr/plugin-api';
-import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
+import { closeFfmpegCommand, compileFfmpegArgs, deriveShouldProcess } from '@trawlarr/core';
 import { runFfmpeg } from '../ffmpeg/run.js';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
@@ -26,6 +26,18 @@ export const createExecuteRunner =
       details: () => plugin.details,
       plugin: async (args) => {
         const command = args.variables.ffmpegCommand;
+
+        if (!deriveShouldProcess(command)) {
+          input.log?.(
+            'Nothing to do: no stream changes and no overall arguments. Skipping ffmpeg.',
+          );
+          return {
+            outputNumber: 1,
+            outputFileObj: { _id: args.inputFileObj._id },
+            variables: { ...args.variables, ffmpegCommand: closeFfmpegCommand(command) },
+          };
+        }
+
         // The scratch/final split — and the refusal to resolve a final path
         // that IS the input, which would silently replace the original —
         // lives in resolveEncodeTarget, shared with the dry run, so the two

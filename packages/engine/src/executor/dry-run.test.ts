@@ -60,6 +60,22 @@ const beginAndEncode: PluginModule = {
   },
 };
 
+const beginOnly: PluginModule = {
+  details: () => details(),
+  plugin: (args) => {
+    const command = beginFfmpegCommand({
+      probe: { streams: [{ codec_type: 'video', codec_name: 'h264' }] },
+      container: 'mkv',
+      inputPath: args.inputFileObj._id,
+    });
+    return {
+      outputNumber: 1,
+      outputFileObj: { _id: args.inputFileObj._id },
+      variables: { ...args.variables, ffmpegCommand: command },
+    };
+  },
+};
+
 const node = (id: string, pluginId: string): FlowNode => ({
   id,
   pluginId,
@@ -151,6 +167,21 @@ describe('runDryFlow', () => {
     const reportedOutputPath = planned.at(-1)!;
     expect(reportedOutputPath).not.toBe('/in.mkv');
     expect(reportedOutputPath).toMatch(/^\/staging\/out\.trawlarr-tmp-.+\.mkv$/);
+  });
+
+  it('plans no command when the built command has nothing to do, mirroring the real skip', async () => {
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:beginCommand'), node('b', 'trawlarr:execute')],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, n.pluginId === 'trawlarr:beginCommand' ? beginOnly : pass),
+    });
+
+    expect(result.complete).toBe(true);
+    expect(result.plannedCommands).toHaveLength(0);
   });
 
   it('reports the node as failed when the planned Execute would overwrite its input', async () => {

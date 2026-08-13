@@ -1,5 +1,5 @@
 import type { PluginModule } from '@trawlarr/plugin-api';
-import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
+import { closeFfmpegCommand, compileFfmpegArgs, deriveShouldProcess } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
 import { runFlow, type FlowRunResult, type RunFlowOptions } from './run-flow.js';
@@ -54,7 +54,11 @@ export const runDryFlow = async (
   const inertStandIn = (plugin: LoadedPlugin): PluginModule => ({
     details: () => plugin.details,
     plugin: (args) => {
-      if (plugin.id === 'trawlarr:execute' && args.variables.ffmpegCommand.init) {
+      if (
+        plugin.id === 'trawlarr:execute' &&
+        args.variables.ffmpegCommand.init &&
+        deriveShouldProcess(args.variables.ffmpegCommand)
+      ) {
         // Report the exact command the real Execute would run — same
         // resolver, same scratch write target — so a dry run can never
         // describe an in-place command that would fail if actually run.
@@ -69,6 +73,20 @@ export const runDryFlow = async (
             outputPath: writePath,
           }),
         );
+        return {
+          outputNumber: 1,
+          outputFileObj: { _id: args.inputFileObj._id },
+          variables: {
+            ...args.variables,
+            ffmpegCommand: closeFfmpegCommand(args.variables.ffmpegCommand),
+          },
+        };
+      }
+
+      if (plugin.id === 'trawlarr:execute' && args.variables.ffmpegCommand.init) {
+        // Mirrors the real Execute's skip: nothing to do, so no command is
+        // planned or recorded, but the command still closes the way the
+        // real node closes it.
         return {
           outputNumber: 1,
           outputFileObj: { _id: args.inputFileObj._id },

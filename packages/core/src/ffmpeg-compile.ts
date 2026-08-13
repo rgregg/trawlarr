@@ -115,8 +115,8 @@ export const compileFfmpegArgs = (input: {
   const kept = command.streams.filter((stream) => stream.removed !== true);
   if (command.streams.length > 0 && kept.length === 0) {
     throw new Error(
-      'Cannot compile an ffmpeg command in which every stream was removed — ' +
-        'the output would contain nothing.',
+      'No streams mapped for new file: every stream was removed, so the output would ' +
+        'contain nothing. Check which streams the flow is removing.',
     );
   }
 

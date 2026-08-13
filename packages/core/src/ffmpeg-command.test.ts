@@ -5,6 +5,7 @@ import {
   assertCommandInitialised,
   beginFfmpegCommand,
   closeFfmpegCommand,
+  deriveShouldProcess,
   emptyFfmpegCommand,
 } from './ffmpeg-command.js';
 
@@ -166,5 +167,51 @@ describe('beginFfmpegCommand — mapArgs and attachments', () => {
       inputPath: '/in.mkv',
     });
     expect(cmd.streams.map((s) => s.codec_type)).toEqual(['video', 'video']);
+  });
+});
+
+describe('deriveShouldProcess', () => {
+  const cmd = () =>
+    beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+
+  it('is false for an untouched command', () => {
+    expect(deriveShouldProcess(cmd())).toBe(false);
+  });
+
+  it('is true when a plugin set the flag directly', () => {
+    const c = cmd();
+    c.shouldProcess = true;
+    expect(deriveShouldProcess(c)).toBe(true);
+  });
+
+  it('is true when a stream was removed', () => {
+    const c = cmd();
+    c.streams[1]!.removed = true;
+    expect(deriveShouldProcess(c)).toBe(true);
+  });
+
+  it('is true when a stream requests encoding', () => {
+    const c = cmd();
+    c.streams[0]!.outputArgs.push('-c:v', 'libx265');
+    expect(deriveShouldProcess(c)).toBe(true);
+  });
+
+  it('is true when overall arguments were added', () => {
+    const withInput = cmd();
+    withInput.overallInputArguments.push('-fflags', '+genpts');
+    expect(deriveShouldProcess(withInput)).toBe(true);
+
+    const withOutput = cmd();
+    withOutput.overallOuputArguments.push('-max_muxing_queue_size', '9999');
+    expect(deriveShouldProcess(withOutput)).toBe(true);
   });
 });

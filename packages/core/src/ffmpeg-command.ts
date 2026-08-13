@@ -76,6 +76,23 @@ export const assertCommandInitialised = (command: FfmpegCommand): void => {
   }
 };
 
+/**
+ * Does this command actually change anything?
+ *
+ * Plugins set `shouldProcess` when they know they have made a change, but
+ * some changes are implicit: removing a stream, asking a stream to encode,
+ * or adding overall arguments all mean work is needed even if no plugin said
+ * so. Running ffmpeg when nothing changed would rewrite the file for no
+ * reason — a needless remux of every file in a library.
+ */
+export const deriveShouldProcess = (command: FfmpegCommand): boolean =>
+  command.shouldProcess ||
+  command.overallInputArguments.length > 0 ||
+  command.overallOuputArguments.length > 0 ||
+  command.streams.some(
+    (stream) => stream.removed === true || stream.outputArgs.length > 0 || stream.forceEncoding,
+  );
+
 /** Close the command after Execute; a further command needs a fresh Begin. */
 export const closeFfmpegCommand = (command: FfmpegCommand): FfmpegCommand => ({
   ...command,
