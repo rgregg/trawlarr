@@ -317,3 +317,83 @@ describe.runIf(available)('ffmpegCommand cooperation across community plugins', 
     expect(argv.filter((a) => a === '-map').length).toBeGreaterThan(0);
   });
 });
+
+describe.runIf(available)('ffmpegCommandRorderStreams', () => {
+  const abs = pluginPath('ffmpegCommand/ffmpegCommandRorderStreams/1.0.0/index.js');
+
+  it('reorders streams while keeping each mapped to its source track', async () => {
+    expect(existsSync(abs)).toBe(true);
+    const loaded = createPluginLoader().load(abs);
+    // Reorder by stream type so video leads. The fixture's streams are seeded
+    // in probe order, so this genuinely moves them and array position stops
+    // matching the source track — which is the case that used to mis-map.
+    const args = argsFor(
+      {
+        processOrder: 'streamTypes',
+        streamTypes: 'audio,video,subtitle',
+        languages: '',
+        channels: '',
+        codecs: '',
+      },
+      true,
+    );
+    const output = await loaded.module.plugin(args);
+
+    const argv = compileFfmpegArgs({
+      command: output.variables.ffmpegCommand,
+      outputPath: '/staging/out.mkv',
+    });
+
+    // Whatever order the streams ended up in, every original track must still
+    // be mapped exactly once, from its own source index.
+    const maps = argv.reduce<string[]>(
+      (acc, arg, i) => (arg === '-map' ? [...acc, argv[i + 1] ?? ''] : acc),
+      [],
+    );
+    // The plugin's own reordered stream array is the ground truth for which
+    // source track each output position must come from. A set-equality check
+    // on `maps` alone is not sufficient: reordering only permutes the same
+    // three source indices, so a position-derived `-map` (the pre-Task-2 bug)
+    // still produces the exact set {0:0, 0:1, 0:2} — just attached to the
+    // wrong streams. Asserting positional correspondence against the
+    // reordered array is what actually catches identity swaps.
+    const reorderedStreams = output.variables.ffmpegCommand.streams;
+    expect(maps).toHaveLength(reorderedStreams.length);
+    expect(new Set(maps).size).toBe(maps.length);
+    expect(maps).toEqual(reorderedStreams.map((stream) => `0:${stream.index}`));
+  });
+});
+
+describe.runIf(available)('ffmpegCommandEnsureAudioStream', () => {
+  const abs = pluginPath('ffmpegCommand/ffmpegCommandEnsureAudioStream/1.0.0/index.js');
+
+  it('adds a stream whose placeholder arguments resolve to real indices', async () => {
+    expect(existsSync(abs)).toBe(true);
+    const loaded = createPluginLoader().load(abs);
+    const args = argsFor(
+      {
+        audioEncoder: 'aac',
+        language: 'en',
+        channels: '2',
+        // Bitrate on, so the plugin also emits a '-b:a:{outputTypeIndex}'
+        // argument and the type-index placeholder is exercised too.
+        enableBitrate: 'true',
+        bitrate: '128k',
+        enableSamplerate: 'false',
+      },
+      true,
+    );
+    const output = await loaded.module.plugin(args);
+
+    const argv = compileFfmpegArgs({
+      command: output.variables.ffmpegCommand,
+      outputPath: '/staging/out.mkv',
+    });
+
+    // The plugin writes literal '-c:{outputIndex}' and '-b:a:{outputTypeIndex}'.
+    // Reaching ffmpeg unresolved, those are a hard failure.
+    expect(argv.join(' ')).not.toContain('{outputIndex}');
+    expect(argv.join(' ')).not.toContain('{outputTypeIndex}');
+    expect(argv.some((arg) => /^-c:\d+$/.test(arg))).toBe(true);
+  });
+});
