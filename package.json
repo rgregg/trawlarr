@@ -14,6 +14,7 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "audit:licenses": "node scripts/audit-licenses.mjs",
+    "check:refs": "node scripts/check-project-references.mjs",
     "compat:fetch": "node scripts/fetch-plugin-corpus.mjs"
   },
   "devDependencies": {
