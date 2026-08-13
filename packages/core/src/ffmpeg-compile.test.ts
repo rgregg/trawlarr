@@ -184,3 +184,52 @@ describe('compileFfmpegArgs', () => {
     expect(() => compile(cmd)).toThrow(/every stream/i);
   });
 });
+
+describe('compileFfmpegArgs — mapArgs', () => {
+  it('emits each stream mapArgs rather than deriving from array position', () => {
+    // This is the reorder case: a plugin may reorder the streams array, after
+    // which array position no longer matches the source track.
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    cmd.streams.reverse();
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    // Audio (source index 1) is now first, and must still map to 0:1.
+    expect(args.slice(args.indexOf('-i') + 2)).toEqual([
+      '-map',
+      '0:1',
+      '-map',
+      '0:0',
+      '-c',
+      'copy',
+      '/out.mkv',
+    ]);
+  });
+
+  it('honours mapArgs a plugin has rewritten', () => {
+    const cmd = beginFfmpegCommand({
+      probe: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    cmd.streams[0]!.mapArgs = ['-map', '1:5'];
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toContain('1:5');
+  });
+
+  it('falls back to the stream index when mapArgs was emptied', () => {
+    const cmd = beginFfmpegCommand({
+      probe: { streams: [{ index: 4, codec_type: 'video', codec_name: 'h264' }] },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    cmd.streams[0]!.mapArgs = [];
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toContain('0:4');
+  });
+});

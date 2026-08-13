@@ -1,4 +1,9 @@
-import type { FfmpegCommand, FfmpegCommandStream, ProbeData } from '@trawlarr/plugin-api';
+import type {
+  FfmpegCommand,
+  FfmpegCommandStream,
+  ProbeData,
+  ProbeStream,
+} from '@trawlarr/plugin-api';
 
 export class FfmpegCommandStateError extends Error {
   constructor(message: string) {
@@ -18,9 +23,18 @@ export const emptyFfmpegCommand = (): FfmpegCommand => ({
   overallOuputArguments: [],
 });
 
+/** ffprobe reports cover art as a video stream carrying this disposition. */
+const isAttachedPicture = (stream: ProbeStream): boolean =>
+  Number((stream.disposition as Record<string, unknown> | undefined)?.attached_pic) === 1;
+
+const mapArgsFor = (stream: ProbeStream, position: number): string[] => {
+  const index = typeof stream.index === 'number' ? stream.index : position;
+  return ['-map', `0:${index}`];
+};
+
 /**
  * Seed a command from a probe. Each ffprobe stream becomes a mutable stream
- * carrying its original fields plus the four the contract adds, because
+ * carrying its original fields plus the five the contract adds, because
  * plugins read arbitrary ffprobe properties while deciding what to do.
  */
 export const beginFfmpegCommand = (input: {
@@ -30,10 +44,14 @@ export const beginFfmpegCommand = (input: {
 }): FfmpegCommand => ({
   init: true,
   inputFiles: [input.inputPath],
-  streams: (input.probe.streams ?? []).map((stream): FfmpegCommandStream => ({
+  streams: (input.probe.streams ?? []).map((stream, position): FfmpegCommandStream => ({
     ...stream,
+    // Cover art is an mjpeg "video" stream; reclassifying it keeps encoder
+    // nodes, which select on codec_type, from trying to re-encode a poster.
+    codec_type: isAttachedPicture(stream) ? 'attachment' : stream.codec_type,
     removed: false,
     forceEncoding: false,
+    mapArgs: mapArgsFor(stream, position),
     inputArgs: [],
     outputArgs: [],
   })),

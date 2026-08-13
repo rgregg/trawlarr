@@ -6,6 +6,16 @@ export interface FfmpegCommandStream extends ProbeStream {
   forceEncoding: boolean;
   inputArgs: string[];
   outputArgs: string[];
+  /**
+   * The `-map` arguments selecting this stream from its input. Carried per
+   * stream rather than derived from array position, because plugins reorder,
+   * insert and clone streams — after a reorder, position no longer identifies
+   * the source track. Seeded as ['-map', '0:<ffprobe index>'].
+   *
+   * Present on the runtime object even though it is easy to overlook when
+   * reading the published interface; community plugins spread it directly.
+   */
+  mapArgs: string[];
 }
 
 export interface FfmpegCommand {

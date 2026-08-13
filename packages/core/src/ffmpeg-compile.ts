@@ -1,5 +1,11 @@
-import type { FfmpegCommand } from '@trawlarr/plugin-api';
+import type { FfmpegCommand, FfmpegCommandStream } from '@trawlarr/plugin-api';
 import { assertCommandInitialised } from './ffmpeg-command.js';
+
+const mapArgsOf = (stream: FfmpegCommandStream, position: number): string[] => {
+  if (stream.mapArgs.length > 0) return stream.mapArgs;
+  const index = typeof stream.index === 'number' ? stream.index : position;
+  return ['-map', `0:${index}`];
+};
 
 /**
  * Compile the cooperatively-built command into argv.
@@ -55,8 +61,7 @@ export const compileFfmpegArgs = (input: {
   );
 
   kept.forEach((stream, outputIndex) => {
-    const index = command.streams.indexOf(stream);
-    args.push('-map', `0:${index}`);
+    args.push(...mapArgsOf(stream, command.streams.indexOf(stream)));
 
     const streamEncodes = stream.outputArgs.length > 0 || stream.forceEncoding === true;
     if (streamEncodes) {

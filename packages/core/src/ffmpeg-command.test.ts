@@ -93,3 +93,78 @@ describe('closeFfmpegCommand', () => {
     expect(closeFfmpegCommand(cmd).shouldProcess).toBe(false);
   });
 });
+
+describe('beginFfmpegCommand — mapArgs and attachments', () => {
+  it('seeds mapArgs from the ffprobe stream index, not the array position', () => {
+    // Index 0 is absent from the array on purpose: ffprobe indices need not
+    // start at 0 or be contiguous, and the map argument must follow the real
+    // index or ffmpeg selects the wrong track.
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 3, codec_type: 'video', codec_name: 'h264' },
+          { index: 7, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(cmd.streams[0]?.mapArgs).toEqual(['-map', '0:3']);
+    expect(cmd.streams[1]?.mapArgs).toEqual(['-map', '0:7']);
+  });
+
+  it('falls back to the array position when a stream has no index', () => {
+    const cmd = beginFfmpegCommand({
+      probe: { streams: [{ codec_type: 'video', codec_name: 'h264' }] },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(cmd.streams[0]?.mapArgs).toEqual(['-map', '0:0']);
+  });
+
+  it('gives each stream its own mapArgs array', () => {
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    cmd.streams[0]?.mapArgs.push('-extra');
+    expect(cmd.streams[1]?.mapArgs).toEqual(['-map', '0:1']);
+  });
+
+  it('reclassifies an attached-picture stream as an attachment', () => {
+    // Cover art is an mjpeg "video" stream. Left as video, a Set Video Encoder
+    // node would try to re-encode the poster frame.
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 } },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(cmd.streams[0]?.codec_type).toBe('video');
+    expect(cmd.streams[1]?.codec_type).toBe('attachment');
+  });
+
+  it('leaves a normal video stream alone when disposition is absent or zero', () => {
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 0 } },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(cmd.streams.map((s) => s.codec_type)).toEqual(['video', 'video']);
+  });
+});
