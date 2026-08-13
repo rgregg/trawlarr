@@ -1,7 +1,7 @@
 import { rename, unlink } from 'node:fs/promises';
 import type { PluginModule } from '@trawlarr/plugin-api';
 import { closeFfmpegCommand, compileFfmpegArgs, deriveShouldProcess } from '@trawlarr/core';
-import { runFfmpeg } from '../ffmpeg/run.js';
+import { runFfmpeg, type RunFfmpegFn } from '../ffmpeg/run.js';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
 
@@ -18,6 +18,8 @@ export const createExecuteRunner =
     signal?: AbortSignal;
     onProgress?: (percent: number | null) => void;
     log?: (text: string) => void;
+    /** Seam for tests: substitute the ffmpeg run without encoding anything. */
+    runFfmpegFn?: RunFfmpegFn;
   }) =>
   (plugin: LoadedPlugin): PluginModule | null => {
     if (plugin.id !== 'trawlarr:execute') return null;
@@ -56,7 +58,7 @@ export const createExecuteRunner =
           String(args.inputFileObj.ffProbeData.format?.duration ?? ''),
         );
 
-        const result = await runFfmpeg({
+        const result = await (input.runFfmpegFn ?? runFfmpeg)({
           ffmpegPath: input.ffmpegPath,
           args: ffmpegArgs,
           durationMs: Number.isFinite(durationMs) ? durationMs * 1000 : null,

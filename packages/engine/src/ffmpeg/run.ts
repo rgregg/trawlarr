@@ -49,7 +49,9 @@ const DEFAULT_STDERR_TAIL_LINES = 40;
  * bounds the LINE COUNT, not the byte count: a run that emits a small number
  * of pathologically long lines is still bounded only by those lines' length.
  */
-export const runFfmpeg = (input: RunFfmpegInput): Promise<FfmpegRunResult> =>
+export type RunFfmpegFn = (input: RunFfmpegInput) => Promise<FfmpegRunResult>;
+
+export const runFfmpeg: RunFfmpegFn = (input) =>
   new Promise((resolve, reject) => {
     const spawnFn = input.spawnFn ?? (spawn as unknown as SpawnFn);
     const tailLimit = input.stderrTailLines ?? DEFAULT_STDERR_TAIL_LINES;
