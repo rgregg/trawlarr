@@ -38,32 +38,38 @@ export const verifyOutput = (input: {
     reasons.push(`the output has ${streams.length} streams, fewer than the original's ${expected}`);
   }
 
-  // "Unknown" must never read as "fine". ffmpeg can hit a corrupt region, stop
-  // early and still exit 0, leaving a short file whose duration element was
-  // never written — and ffprobe reports a missing duration as the literal
-  // "N/A", which parses to NaN just as an absent field does. Skipping the
-  // comparison in that case is a FALSE PASS on the check standing between a
-  // truncated encode and a destroyed original, so an unreadable output
-  // duration is itself a reason.
+  // "Unknown" must never read as "fine" — on EITHER side. ffmpeg can hit a
+  // corrupt region, stop early and still exit 0, leaving a short file whose
+  // duration element was never written; ffprobe reports a missing duration as
+  // the literal "N/A", which parses to NaN just as an absent field does. And a
+  // raw/VOB/TS ORIGINAL is routinely timed as "N/A" too, which used to skip
+  // the comparison from the other direction and leave the size floor as the
+  // only guard — a 20-minute 600 MB remnant of an 8 GB source clears a 5%
+  // floor comfortably. Either way the length check did not happen, and saying
+  // nothing about that is a false pass on the gate protecting a destructive
+  // step.
   const outDuration = Number.parseFloat(String(input.probe.format?.duration ?? ''));
   const origDuration = Number.parseFloat(String(input.originalProbe.format?.duration ?? ''));
-  if (Number.isFinite(origDuration)) {
-    if (!Number.isFinite(outDuration)) {
+  if (!Number.isFinite(origDuration)) {
+    reasons.push(
+      `the original's duration could not be read, so the output's length could not be ` +
+        `checked against it`,
+    );
+  } else if (!Number.isFinite(outDuration)) {
+    reasons.push(
+      `the output's duration could not be read, so it cannot be checked against the ` +
+        `original's ${origDuration.toFixed(1)}s — a transcode that stopped early often ` +
+        `leaves exactly this`,
+    );
+  } else {
+    const drift = Math.abs(outDuration - origDuration);
+    // `>`, not `>=`: the tolerance is how much the output MAY differ, so a
+    // drift of exactly the tolerance passes.
+    if (drift > input.durationToleranceSeconds) {
       reasons.push(
-        `the output's duration could not be read, so it cannot be checked against the ` +
-          `original's ${origDuration.toFixed(1)}s — a transcode that stopped early often ` +
-          `leaves exactly this`,
+        `the output runs ${outDuration.toFixed(1)}s against the original's ` +
+          `${origDuration.toFixed(1)}s, a ${drift.toFixed(1)}s difference`,
       );
-    } else {
-      const drift = Math.abs(outDuration - origDuration);
-      // `>`, not `>=`: the tolerance is how much the output MAY differ, so a
-      // drift of exactly the tolerance passes.
-      if (drift > input.durationToleranceSeconds) {
-        reasons.push(
-          `the output runs ${outDuration.toFixed(1)}s against the original's ` +
-            `${origDuration.toFixed(1)}s, a ${drift.toFixed(1)}s difference`,
-        );
-      }
     }
   }
 

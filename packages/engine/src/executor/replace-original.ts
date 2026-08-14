@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, link, lstat, mkdir, rename, unlink } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type { PluginModule, PluginOutputArgs } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
@@ -40,6 +40,8 @@ export type RenameFileFn = (from: string, to: string) => Promise<void>;
 
 export type LinkFileFn = (from: string, to: string) => Promise<void>;
 
+export type UnlinkFileFn = (path: string) => Promise<void>;
+
 /**
  * Builds the error raised when replacement would have to cross a filesystem
  * boundary and the operator has forbidden the copy fallback. Defaults to a
@@ -65,6 +67,8 @@ export interface ReplaceRunnerInput {
   renameFile?: RenameFileFn;
   /** Seam for tests: the exclusive-create half of every move this node makes. */
   linkFile?: LinkFileFn;
+  /** Seam for tests: the "remove the old name" half of every move. */
+  unlinkFile?: UnlinkFileFn;
 }
 
 const messageOf = (error: unknown): string =>
@@ -116,28 +120,45 @@ export const replacementPathFor = (input: { originalPath: string; newPath: strin
 };
 
 /**
- * Codes a `link(2)` returns when the filesystem cannot hardlink at all —
- * exFAT, FAT32 and some network mounts. Only these fall back to a rename;
- * anything else is a real failure and must surface.
+ * Codes a `link(2)` returns when hardlinking is not available for this file.
+ *
+ * `EPERM` is emphatically NOT limited to "the filesystem has no hardlinks":
+ * with `fs.protected_hardlinks=1`, which is the kernel default, `link(2)`
+ * returns it whenever the caller neither owns the source nor holds read+write
+ * on it. A container running as one uid over media owned by another, at 0644,
+ * on plain ext4, takes this branch for every single move — so this fallback is
+ * a mainstream path, not an exotic one, and it must be exactly as exclusive as
+ * the hardlink path.
+ *
+ * `EMLINK` is deliberately absent: it means the source has hit its link-count
+ * ceiling, not that the filesystem lacks links, and quietly treating it as
+ * "no hardlink support" would downgrade the guarantee for an unrelated
+ * condition.
  */
-const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP', 'EMLINK']);
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP']);
 
 /**
  * Create `to` as a second name for `from`, failing if `to` already exists.
  *
- * `rename(2)` silently replaces an existing destination, which is what makes
- * every check-then-rename in this node a way to destroy a file that appeared
- * in between. `link(2)` fails `EEXIST` atomically instead, and is same-device
- * by construction — exactly the property the trash and the swap both need.
+ * `rename(2)` replaces an existing destination silently, which is what makes
+ * every check-then-rename a way to destroy a file that appeared in between.
+ * Both branches here are therefore atomic reservations:
  *
- * Returns whether the source still exists afterwards, since the fallback path
- * consumes it.
+ *  - `link(2)` fails `EEXIST` atomically and is same-device by construction.
+ *  - Where linking is unavailable, `open(to, 'wx')` — `O_CREAT|O_EXCL` — is
+ *    the same guarantee: exactly one worker can create the name, and the
+ *    others get `EEXIST`. The rename then lands on a placeholder this call
+ *    owns, so it can never overwrite another file. Checking `exists()` and
+ *    renaming would be the original race with a shorter window, and a shorter
+ *    window is not a fix.
  */
 const createExclusively = async (input: {
   from: string;
   to: string;
   linkFile: LinkFileFn;
   renameFile: RenameFileFn;
+  unlinkFile: UnlinkFileFn;
+  note?: (text: string) => void;
 }): Promise<'linked' | 'renamed'> => {
   try {
     await input.linkFile(input.from, input.to);
@@ -145,17 +166,25 @@ const createExclusively = async (input: {
   } catch (error) {
     const code = codeOf(error);
     // The caller decides what an occupied destination or a device boundary
-    // means; only "this filesystem has no hardlinks" is handled here.
+    // means; only "hardlinking is unavailable here" is handled below.
     if (code === undefined || !LINK_UNSUPPORTED.has(code)) throw error;
-    // No atomic exclusive create exists on such a filesystem. Re-check as late
-    // as possible and rename: the window shrinks to the gap between these two
-    // calls rather than spanning the whole node, but it does not vanish.
-    if (await exists(input.to)) {
-      throw Object.assign(new Error(`EEXIST: "${input.to}" already exists`), { code: 'EEXIST' });
-    }
-    await input.renameFile(input.from, input.to);
-    return 'renamed';
+    input.note?.(
+      `Hardlinking is unavailable for "${input.from}" (${code}), so "${input.to}" is being ` +
+        `reserved with an exclusive create instead.`,
+    );
   }
+
+  // Reserve the name. EEXIST here means another worker won it.
+  const handle = await open(input.to, 'wx');
+  await handle.close();
+  try {
+    await input.renameFile(input.from, input.to);
+  } catch (error) {
+    // Do not leave the empty placeholder behind holding a name.
+    await input.unlinkFile(input.to).catch(() => {});
+    throw error;
+  }
+  return 'renamed';
 };
 
 /**
@@ -163,16 +192,78 @@ const createExclusively = async (input: {
  * either way, so a file's `(device, inode)` identity survives the move — which
  * is what lets the ledger follow an original into the trash.
  *
- * Interrupted between the link and the unlink, the file exists under BOTH
- * names: a duplicate, never a loss.
+ * `onSourceRemovalFailure` decides what happens when the destination was
+ * created but the old name could not be removed, which leaves the file under
+ * two names:
+ *
+ *  - `'rollback'` removes the name just created, returning the file to a
+ *    single link and failing cleanly. Used for moves INTO trash and into the
+ *    library, because a library file silently left at `nlink=2` is refused by
+ *    the hardlink guard on every subsequent run — trawlarr blaming the user
+ *    for a link trawlarr made, with nothing purging trash to undo it.
+ *  - `'keep'` keeps the destination and reports the leftover. Used when
+ *    restoring an original: having the file back at its own path matters more
+ *    than a stray link in the trash, and rolling back would mean abandoning
+ *    the restore entirely.
  */
 const moveExclusively = async (input: {
   from: string;
   to: string;
   linkFile: LinkFileFn;
   renameFile: RenameFileFn;
+  unlinkFile: UnlinkFileFn;
+  onSourceRemovalFailure?: 'rollback' | 'keep';
+  note?: (text: string) => void;
 }): Promise<void> => {
-  if ((await createExclusively(input)) === 'linked') await unlink(input.from);
+  if ((await createExclusively(input)) === 'renamed') return; // rename consumed the old name
+  try {
+    await input.unlinkFile(input.from);
+  } catch (error) {
+    if (input.onSourceRemovalFailure === 'keep') {
+      input.note?.(
+        `"${input.to}" is in place, but "${input.from}" could not be removed ` +
+          `(${messageOf(error)}), so the file currently has two names. Deleting ` +
+          `"${input.from}" returns it to one.`,
+      );
+      return;
+    }
+    await input.unlinkFile(input.to).catch(() => {});
+    throw new Error(
+      `"${input.from}" was linked to "${input.to}" but could not be removed from its old ` +
+        `name (${messageOf(error)}). The extra link has been removed, so the file is back ` +
+        `to a single name and nothing was lost.`,
+    );
+  }
+};
+
+/**
+ * Did the swap actually complete, despite the error that was raised?
+ *
+ * Decided on IDENTITY, not on size: two flows racing for the same destination
+ * hold files of the same length far too often for a size comparison to mean
+ * anything (a losing flow would otherwise see the winner's file and claim the
+ * win). If the new file is still present, the destination counts as ours only
+ * when it is the same `(device, inode)` — which is exactly what a completed
+ * link-then-failed-unlink leaves behind. Only when the new file is already
+ * gone does size stand in, since there is no longer an inode to compare.
+ */
+const swapLanded = async (input: {
+  newPath: string;
+  finalPath: string;
+  expectedSize: number;
+}): Promise<boolean> => {
+  let destination;
+  try {
+    destination = await lstat(input.finalPath);
+  } catch {
+    return false;
+  }
+  try {
+    const source = await lstat(input.newPath);
+    return source.dev === destination.dev && source.ino === destination.ino;
+  } catch {
+    return destination.size === input.expectedSize;
+  }
 };
 
 /**
@@ -194,6 +285,8 @@ const moveToTrash = async (input: {
   nowMs: number;
   linkFile: LinkFileFn;
   renameFile: RenameFileFn;
+  unlinkFile: UnlinkFileFn;
+  note?: (text: string) => void;
 }): Promise<string> => {
   const extension = extname(input.originalPath);
   const stem = basename(input.originalPath, extension);
@@ -206,6 +299,8 @@ const moveToTrash = async (input: {
         to: candidate,
         linkFile: input.linkFile,
         renameFile: input.renameFile,
+        unlinkFile: input.unlinkFile,
+        note: input.note,
       });
       return candidate;
     } catch (error) {
@@ -260,6 +355,7 @@ export const createReplaceOriginalRunner =
 
     const renameFile: RenameFileFn = input.renameFile ?? ((from, to) => rename(from, to));
     const linkFile: LinkFileFn = input.linkFile ?? ((from, to) => link(from, to));
+    const unlinkFile: UnlinkFileFn = input.unlinkFile ?? ((path) => unlink(path));
     const crossDeviceError: CrossDeviceErrorFn =
       input.crossDeviceError ??
       ((crossDevice) =>
@@ -410,6 +506,8 @@ export const createReplaceOriginalRunner =
             nowMs: input.nowMs(),
             linkFile,
             renameFile,
+            unlinkFile,
+            note: say,
           });
         } catch (error) {
           // The original is still at its own path: nothing to undo.
@@ -425,7 +523,17 @@ export const createReplaceOriginalRunner =
             // Exclusive, like every other move here: if anything claimed the
             // original's path during the swap window, restoring over it would
             // destroy that file instead.
-            await moveExclusively({ from: trashPath, to: originalPath, linkFile, renameFile });
+            await moveExclusively({
+              from: trashPath,
+              to: originalPath,
+              linkFile,
+              renameFile,
+              unlinkFile,
+              // Being back at its own path is what matters here; a leftover
+              // link in the trash is reported, not treated as a failure.
+              onSourceRemovalFailure: 'keep',
+              note: say,
+            });
             say(`Restored the original to "${originalPath}".`);
           } catch (error) {
             say(
@@ -443,16 +551,35 @@ export const createReplaceOriginalRunner =
             crossDeviceError,
             allowCrossDevice: booleanInput(args.inputs.allowCrossDevice, true),
             linkFile,
+            unlinkFile,
             say,
           });
         } catch (error) {
-          say(`Replacement failed: ${messageOf(error)}`);
-          await restoreOriginal();
-          return {
-            outputNumber: 2,
-            outputFileObj: { _id: originalPath },
-            variables: args.variables,
-          };
+          // The move can complete even though the call reported failure — the
+          // destination is created first and only then is the old name
+          // removed, so a cleanup that fails after a successful create leaves
+          // the replacement DONE. Ask the filesystem rather than assume:
+          // reporting failure here would be a lie that also sends
+          // restoreOriginal into an EEXIST and logs an URGENT about a file
+          // sitting exactly where it belongs.
+          const landed = await swapLanded({
+            newPath,
+            finalPath,
+            expectedSize: newStats.size,
+          });
+          if (!landed) {
+            say(`Replacement failed: ${messageOf(error)}`);
+            await restoreOriginal();
+            return {
+              outputNumber: 2,
+              outputFileObj: { _id: originalPath },
+              variables: args.variables,
+            };
+          }
+          say(
+            `The new file is in place at "${finalPath}", but cleaning up afterwards failed: ` +
+              `${messageOf(error)}`,
+          );
         }
 
         // Re-stat AFTER the swap. Nothing else does, so without this every
@@ -533,6 +660,7 @@ const swapIntoPlace = async (input: {
   finalPath: string;
   renameFile: RenameFileFn;
   linkFile: LinkFileFn;
+  unlinkFile: UnlinkFileFn;
   crossDeviceError: CrossDeviceErrorFn;
   allowCrossDevice: boolean;
   say: (text: string) => void;
@@ -544,6 +672,8 @@ const swapIntoPlace = async (input: {
       to: input.finalPath,
       linkFile: input.linkFile,
       renameFile: input.renameFile,
+      unlinkFile: input.unlinkFile,
+      note: input.say,
     });
     return;
   } catch (error) {
@@ -581,9 +711,11 @@ const swapIntoPlace = async (input: {
       to: input.finalPath,
       linkFile: input.linkFile,
       renameFile: input.renameFile,
+      unlinkFile: input.unlinkFile,
+      note: input.say,
     });
   } catch (error) {
-    await unlink(stagedPath).catch(() => {});
+    await input.unlinkFile(stagedPath).catch(() => {});
     if (codeOf(error) === 'EEXIST') {
       throw new Error(
         `"${input.finalPath}" was claimed by something else while this replacement was in ` +
@@ -593,5 +725,5 @@ const swapIntoPlace = async (input: {
     throw error;
   }
   // The staged source is now a duplicate of a file that lives in the library.
-  await unlink(input.newPath).catch(() => {});
+  await input.unlinkFile(input.newPath).catch(() => {});
 };

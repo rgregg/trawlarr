@@ -277,6 +277,32 @@ describe('verifyOutput', () => {
     expect(report.reasons).toHaveLength(2);
   });
 
+  it("fails when the ORIGINAL's duration is unreadable, rather than skipping", () => {
+    // The residual half of the same false pass: a raw/VOB/TS source that
+    // ffprobe times as "N/A". ffmpeg stops at 20 minutes leaving 600 MB of an
+    // 8 GB original; streams match, the length check is skipped for want of a
+    // baseline, and 7.5% clears the 5% floor — so the 8 GB original would be
+    // destroyed on a verification that reported no reasons at all.
+    const report = verifyOutput({
+      probe: {
+        streams: probeOf({ streams: 2, durationSeconds: 1200 }).streams,
+        format: { duration: '1200' },
+      },
+      originalProbe: {
+        streams: probeOf({ streams: 2, durationSeconds: 1 }).streams,
+        format: { duration: 'N/A' },
+      },
+      outputSizeBytes: 600 * 1_000 * 1_000,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasons).toHaveLength(1);
+    expect(report.reasons[0]).toContain('duration');
+  });
+
   it('fails an output ffprobe could not read at all', () => {
     const report = verifyOutput({
       probe: { streams: [], format: {} },

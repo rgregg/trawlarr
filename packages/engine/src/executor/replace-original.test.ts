@@ -7,10 +7,11 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { link, readdir, rename, stat } from 'node:fs/promises';
+import { link, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -726,6 +727,189 @@ describe('createReplaceOriginalRunner', () => {
     expect(readFileSync(targetPath, 'utf8')).toBe('the real media, living elsewhere');
     expect(existsSync(space.newPath)).toBe(true);
     expect(existsSync(space.trashDir)).toBe(false);
+  });
+
+  it('keeps every original when the filesystem cannot hardlink at all', async () => {
+    // The link-unsupported fallback is on the destructive path and must be
+    // exclusive too, or C1 is simply reintroduced for every deployment where
+    // link(2) does not work: SMB/CIFS without unix extensions, exFAT/FAT32,
+    // several FUSE mounts — and, on plain ext4, any container whose uid
+    // neither owns the media nor has read+write on it, because
+    // fs.protected_hardlinks=1 (the kernel default) makes link(2) return
+    // EPERM there.
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-replace-nolink-'));
+    const trashDir = join(root, '.trawlarr', 'trash');
+    const shows = ['A', 'B', 'C', 'D', 'E', 'F'];
+    const sources = shows.map((show) => {
+      const dir = join(root, `Show ${show}`, 'S1');
+      const stagingDir = join(root, '.trawlarr', 'staging', show);
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(stagingDir, { recursive: true });
+      const originalPath = join(dir, 'title00.mkv');
+      const newPath = join(stagingDir, 'title00.mkv');
+      writeFile(originalPath, `the ${show} original`);
+      writeFile(newPath, `the ${show} transcode`);
+      return { originalPath, newPath };
+    });
+    let renames = 0;
+    const module = runnerFor({
+      trashDir,
+      overrides: {
+        linkFile: () => {
+          // Exactly what protected_hardlinks reports for a file this process
+          // may read but does not own.
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        renameFile: async (from, to) => {
+          renames += 1;
+          await rename(from, to);
+        },
+      },
+    })(replacePlugin())!;
+
+    const outs = await Promise.all(
+      sources.map((source) => module.plugin(argsFor({ ...source, jobLog: () => {} }))),
+    );
+
+    // The fallback really was the path taken.
+    expect(renames).toBeGreaterThan(0);
+    expect(outs.map((out) => out.outputNumber)).toEqual(shows.map(() => 1));
+    const bodies = readdirSync(trashDir)
+      .map((name) => readFileSync(join(trashDir, name), 'utf8'))
+      .sort();
+    expect(bodies).toEqual(shows.map((show) => `the ${show} original`).sort());
+    for (const [index, source] of sources.entries()) {
+      expect(readFileSync(source.originalPath, 'utf8')).toBe(`the ${shows[index]!} transcode`);
+    }
+  });
+
+  it('leaves no orphan link when the original cannot be removed from its old name', async () => {
+    // link(2) succeeds into trash, then unlink of the original fails (a
+    // read-only library directory does this). Without a rollback the file is
+    // left with TWO names, so every later run refuses it as "hardlinked" —
+    // blaming the user for a link trawlarr created, and pointing them at a
+    // setting that would make it worse. Nothing purges trash, so it never
+    // recovers on its own.
+    const space = workspace();
+    const logged: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        unlinkFile: async (path) => {
+          if (path === space.originalPath) {
+            throw Object.assign(new Error(`EACCES: permission denied, unlink '${path}'`), {
+              code: 'EACCES',
+            });
+          }
+          await unlink(path);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => logged.push(text),
+      }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    // Back to ONE name: the file is not bricked for every future run.
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(statSync(space.originalPath).nlink).toBe(1);
+    expect(readdirSync(space.trashDir)).toEqual([]);
+    // And the message says what actually happened.
+    expect(logged.join('\n')).toMatch(/could not be removed|extra link/i);
+
+    // The proof that it is not stuck: a normal run afterwards succeeds.
+    const second = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+    const secondOut = await second.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+    expect(secondOut.outputNumber).toBe(1);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
+  });
+
+  it('rolls the swap back when the staged file cannot be cleaned up', async () => {
+    const space = workspace();
+    const logged: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        unlinkFile: async (path) => {
+          if (path === space.newPath) {
+            throw Object.assign(new Error(`EACCES: permission denied, unlink '${path}'`), {
+              code: 'EACCES',
+            });
+          }
+          await unlink(path);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => logged.push(text),
+      }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    // A clean, honest failure: the original is back, at one link, and the
+    // staged file still exists to be retried.
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(statSync(space.originalPath).nlink).toBe(1);
+    expect(existsSync(space.newPath)).toBe(true);
+    expect(readdirSync(space.trashDir)).toEqual([]);
+    // Not an URGENT unrecoverable report: nothing was lost and nothing needs
+    // a human.
+    expect(logged.join('\n')).not.toMatch(/URGENT/);
+  });
+
+  it('reports success when the new file did land, even though cleanup failed', async () => {
+    // The rollback itself fails too, so the destination really does hold the
+    // new content. Reporting failure here would be a lie that also sends
+    // restoreOriginal into an EEXIST and logs an URGENT about a file that is
+    // exactly where it should be.
+    const space = workspace({ newExtension: 'mp4' });
+    const finalPath = join(space.libraryDir, 'movie.mp4');
+    const logged: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        unlinkFile: async (path) => {
+          // The staged file cannot be removed, and neither can the link just
+          // created for it — so the rollback fails and the replacement stands.
+          if (path === space.newPath || path === finalPath) {
+            throw Object.assign(new Error(`EACCES: permission denied, unlink '${path}'`), {
+              code: 'EACCES',
+            });
+          }
+          await unlink(path);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => logged.push(text),
+      }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(out.outputFileObj._id).toBe(finalPath);
+    expect(readFileSync(finalPath, 'utf8')).toBe(NEW_BODY);
+    // The original is still recoverable, and nothing claims a lost file.
+    const trashed = readdirSync(space.trashDir);
+    expect(trashed).toHaveLength(1);
+    expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
+    expect(logged.join('\n')).not.toMatch(/URGENT/);
   });
 
   it('routes a partial companion failure to output 2, reporting the split', async () => {
