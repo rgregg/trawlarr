@@ -6,6 +6,7 @@ import {
   DEFAULT_COMPANION_EXTENSIONS,
   DEFAULT_EXTENSIONS,
   OverlappingRootsError,
+  RelativeReservedDirectoryError,
   ReservedDirectoryOverlapsRootError,
   createLibraryRepo,
   type LibraryRepo,
@@ -143,16 +144,43 @@ describe('create', () => {
     ).not.toThrow();
   });
 
-  it('resolves a relative stagingDir/trashDir the same way roots are resolved', () => {
+  it('rejects a relative stagingDir', () => {
+    // resolve() is defined against process.cwd() — but a library has
+    // multiple roots and the server's cwd has no relationship to any of
+    // them, so there is no correct base to resolve a relative stagingDir
+    // against. Silently resolving against cwd was the bug: a relative
+    // stagingDir would stage transcodes into wherever the service
+    // happened to be started from.
+    expect(() =>
+      repo.create({
+        name: 'Movies',
+        roots: ['/media/movies'],
+        stagingDir: 'staging',
+        nowMs: NOW,
+      }),
+    ).toThrow(RelativeReservedDirectoryError);
+  });
+
+  it('rejects a relative trashDir', () => {
+    expect(() =>
+      repo.create({
+        name: 'Movies',
+        roots: ['/media/movies'],
+        trashDir: 'trash',
+        nowMs: NOW,
+      }),
+    ).toThrow(RelativeReservedDirectoryError);
+  });
+
+  it('accepts an absolute stagingDir', () => {
+    // Guards against the relative-path check being over-broad.
     const created = repo.create({
       name: 'Movies',
       roots: ['/media/movies'],
-      stagingDir: 'staging',
-      trashDir: 'trash',
+      stagingDir: '/config/staging',
       nowMs: NOW,
     });
-    expect(created.stagingDir).toBe(resolve('staging'));
-    expect(created.trashDir).toBe(resolve('trash'));
+    expect(created.stagingDir).toBe(resolve('/config/staging'));
   });
 });
 

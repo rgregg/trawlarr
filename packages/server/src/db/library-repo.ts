@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import type { Db } from './connection.js';
 import { pathContains } from '../fs/path-contains.js';
 
@@ -61,6 +61,47 @@ export class OverlappingRootsError extends Error {
 }
 
 const overlaps = (a: string, b: string): boolean => pathContains(a, b) || pathContains(b, a);
+
+/**
+ * Thrown when a configured `stagingDir`/`trashDir` is not an absolute path.
+ *
+ * `resolve()`ing a relative path is defined against `process.cwd()` — but a
+ * library has multiple roots, and the server process's working directory
+ * has no relationship to any of them, so there is no defensible base to
+ * resolve against. Silently picking one (the cwd at the moment `create()`
+ * happens to run) is exactly how this became a bug: a relative `stagingDir`
+ * stored that way stages multi-gigabyte transcodes into wherever the
+ * service happened to be started from, on whatever device that happens to
+ * be — the very thing `CrossDeviceStagingError` exists to prevent. Failing
+ * loudly here is trivially actionable: the caller supplies an absolute path.
+ */
+export class RelativeReservedDirectoryError extends Error {
+  constructor(input: { kind: 'stagingDir' | 'trashDir'; value: string }) {
+    super(
+      `${input.kind} "${input.value}" is not an absolute path. A library can have multiple ` +
+        `roots, and the server process's working directory has no relationship to any of them, ` +
+        `so there is no correct base to resolve a relative ${input.kind} against — that ambiguity ` +
+        `is exactly how a relative ${input.kind} ends up staging transcodes into wherever the ` +
+        `service happened to be started from. Supply an absolute path, or unset ${input.kind} to ` +
+        `use the per-root default.`,
+    );
+    this.name = 'RelativeReservedDirectoryError';
+  }
+}
+
+/**
+ * Rejects a relative `stagingDir`/`trashDir` outright (see
+ * {@link RelativeReservedDirectoryError}) rather than resolving it against
+ * a cwd nobody chose. For an already-absolute path, `resolve()` only
+ * normalises redundant separators and `.`/`..` segments — it does not
+ * consult `process.cwd()` when the input is already absolute — so this
+ * still returns a clean, comparable value without reintroducing the cwd
+ * dependency.
+ */
+const requireAbsolute = (kind: 'stagingDir' | 'trashDir', value: string): string => {
+  if (!isAbsolute(value)) throw new RelativeReservedDirectoryError({ kind, value });
+  return resolve(value);
+};
 
 /**
  * Thrown when a configured `stagingDir`/`trashDir` equals or contains a
@@ -148,11 +189,12 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
         }
       }
 
-      // Resolved here, the same way roots already are (line above) — a
-      // relative stagingDir/trashDir must not resolve against whatever the
-      // server process's cwd happens to be at request time.
-      const stagingDir = input.stagingDir != null ? resolve(input.stagingDir) : null;
-      const trashDir = input.trashDir != null ? resolve(input.trashDir) : null;
+      // Validated (and normalised) before the overlap check below, so a
+      // relative path reports "must be absolute" rather than a confusing
+      // containment result derived from a cwd the user never chose.
+      const stagingDir =
+        input.stagingDir != null ? requireAbsolute('stagingDir', input.stagingDir) : null;
+      const trashDir = input.trashDir != null ? requireAbsolute('trashDir', input.trashDir) : null;
 
       // Staging/trash *inside* a root is the default shape and must stay
       // allowed; it's a staging/trash dir that equals or CONTAINS a root
