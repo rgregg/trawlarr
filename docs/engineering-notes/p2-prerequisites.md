@@ -98,6 +98,47 @@ upstream does, so matching it is correct for a compatibility project.
 
 ---
 
+### Anything trawlarr writes inside a library root must be pruned from the walk
+
+Staging and trash default to `<root>/.trawlarr/staging` and `<root>/.trawlarr/trash` — inside the
+library root, deliberately, so a move is a same-device atomic rename. The scanner walks roots and had
+no hidden-directory skip, so it ingested both as library media. Confirmed by running the real scanner
+over a root containing one real file plus one file in each directory: `added=3`, with rows for the
+staged and trashed copies.
+
+Three consequences, the third being the one that corrupts state rather than merely wasting work:
+
+1. A half-written staged transcode is probed mid-write and admitted as media.
+2. A trashed file is re-added and re-queued, so trash stops being deletion and becomes a loop that
+   resurrects what the user deleted.
+3. Identity is `(device, inode)` and a move preserves the inode. So `Replace Original File` trashing
+   an original makes the *existing* record match the trashed copy and rewrite its path into the trash,
+   while the replacement at the original path is admitted as a second, separate record.
+
+The walk therefore prunes excluded directory subtrees. The rule generalises: **any directory trawlarr
+writes into inside a library root must be excluded from the walk by construction**, which is why the
+whole `.trawlarr` directory is pruned rather than its two current children. Pruning must use the
+segment-aware containment helper — `<root>/.trawlarr-old` is not inside `<root>/.trawlarr`.
+
+Containment must also *canonicalise*, not merely resolve. A configured `stagingDir` of `/media/staging`
+where `/media` is a symlink to `/mnt/media` — the shape essentially every Docker media stack uses —
+does not match the walked path `/mnt/media/staging/...` under a `resolve`-only comparison, silently
+reopening the ingestion bug. One canonicalising helper serves the whole repo; the `realpathSync`-with-
+`resolve`-fallback in `packages/engine/src/executor/encode-target.ts` was written for the in-place-write
+incident and is the pattern to reuse. Every duplicate of a path-containment check is a latent version of
+the same bug — the weaker copy is the one that will be called.
+
+A relative `stagingDir` or `trashDir` is rejected at library-creation time rather than resolved. There is
+no defensible base to resolve against: the library has several roots and the service's cwd is meaningless
+to the user, so silently choosing one is what made this a bug — a relative value staged multi-gigabyte
+transcodes into whatever directory the service happened to be started from, on whatever device that was.
+Note that "resolve it at creation time instead" is *not* a fix, and was briefly adopted as one:
+`path.resolve` is defined against `process.cwd()`, so resolving early stores the wrong answer rather than
+computing it later. Creation also rejects a staging or trash directory that equals or
+contains a root: because containment is reflexive, such a configuration prunes the root itself and the
+library scans as permanently empty with no error at all. Staging *inside* a root remains the default and
+must stay legal.
+
 ### `ScanSummary` counters are broader than their names
 
 Two counters mean less than a CLI author would assume, and both are load-bearing for P2a Task 11's
@@ -129,6 +170,12 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
   first-party flow uses multiple inputs.
 - **Per-stream `inputArgs` are hoisted into one global preamble**, so two streams demanding different
   `-hwaccel` values both land and ffmpeg's parsing decides.
+- **`canonicalPath` falls back to `resolve` on any `realpathSync` failure**, not only `ENOENT`, unlike
+  the narrow catches elsewhere in the same module. Not exploitable: the walker only ever yields paths
+  that already exist, so the exclusion side either canonicalises to the same real path or nothing under
+  it can be walked anyway. Confirmed by running a fresh-install ordering — staging configured through a
+  symlink alias before the directory exists — which prunes correctly once the directory appears.
+  Narrowing the catch would risk throwing on the walk path for no proven gain.
 - **Plugins are arbitrary code.** Process isolation is not a security sandbox; installing a plugin
   runs its author's code as the service user. Documented in the README deliberately.
 
