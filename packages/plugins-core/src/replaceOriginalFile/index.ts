@@ -20,8 +20,9 @@ export const details = (): PluginDetails => ({
       type: 'string',
       defaultValue: '14',
       tooltip:
-        'How many days the replaced original is kept in the library trash before it is ' +
-        'eligible for permanent removal.',
+        'How many days the replaced original should be retained in the library trash. ' +
+        'Automatic purging is not implemented yet, so the trash accumulates until it is ' +
+        'cleared manually — this value records intent, it does not yet trigger cleanup.',
       inputUI: { type: 'text' },
     },
     {
@@ -31,9 +32,11 @@ export const details = (): PluginDetails => ({
       defaultValue: 'true',
       tooltip:
         'If the staging area is on a different filesystem than the library, an atomic ' +
-        'rename is not possible. When allowed, the engine falls back to a slower copy and ' +
-        'reports it in the step trace; when disallowed, cross-device replacement fails ' +
-        'this node instead.',
+        'rename is not possible. When allowed, the engine falls back to copying the new ' +
+        'file to a temporary location on the destination filesystem and finishing with an ' +
+        'atomic rename, so an interrupted copy can never leave a truncated file where the ' +
+        'original used to be; this is reported in the step trace. When disallowed, ' +
+        'cross-device replacement fails this node instead.',
       inputUI: { type: 'switch' },
     },
   ],
