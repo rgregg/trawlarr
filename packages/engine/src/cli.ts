@@ -3,9 +3,9 @@ import { parseArgs } from 'node:util';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtempSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat as fsStat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import type { ConfigVars, ProbeData } from '@trawlarr/plugin-api';
 import type { FlowDefinition } from '@trawlarr/core';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
@@ -16,6 +16,8 @@ import { buildPluginInputArgs } from './host/args.js';
 import { toPluginFileObject } from './host/file-object.js';
 import { createPluginLoader, type LoadedPlugin } from './host/loader.js';
 import { createExecuteRunner } from './executor/execute-node.js';
+import { createVerifyOutputRunner } from './executor/verify-output.js';
+import { createReplaceOriginalRunner } from './executor/replace-original.js';
 import { runFlow } from './executor/run-flow.js';
 import { runDryFlow } from './executor/dry-run.js';
 
@@ -134,11 +136,35 @@ const main = async (): Promise<number> => {
     join(workDir, `${basename(path, extname(path))}.${container || 'mkv'}`);
 
   const loader = createPluginLoader();
-  const executeRunner = createExecuteRunner({
-    ffmpegPath: values.ffmpeg!,
-    outputPathFor,
-    log,
-  });
+  const statFile = async (path: string) => {
+    const stats = await fsStat(path);
+    return { size: stats.size, nlink: stats.nlink };
+  };
+
+  // Every engine-controlled node needs a substitute here. Without one, the
+  // node falls through to its declared plugin() body, which throws on purpose
+  // — so a flow containing it would be unusable rather than merely unsafe.
+  const runners = [
+    createExecuteRunner({ ffmpegPath: values.ffmpeg!, outputPathFor, log }),
+    createVerifyOutputRunner({ probeFile: (path) => probe(values.ffprobe!, path), statFile }),
+    createReplaceOriginalRunner({
+      // This CLI runs against a single file with no library record, so trash
+      // defaults to the same reserved directory a library root would use.
+      trashDirFor: (originalPath) => join(dirname(originalPath), '.trawlarr', 'trash'),
+      // Companion handling belongs to the library layer: `findCompanions` and
+      // `moveCompanions` live in @trawlarr/server, which depends on this
+      // package, so this one-file CLI declares it manages no companions
+      // rather than growing a second copy of that logic.
+      companionExtensions: [],
+      findCompanions: async () => [],
+      moveCompanions: async () => {},
+      // The conservative default: refuse to replace a hardlinked file unless a
+      // library has deliberately allowed it.
+      allowHardlinked: false,
+      statFile,
+      nowMs: () => Date.now(),
+    }),
+  ];
 
   const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
     const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
@@ -150,7 +176,10 @@ const main = async (): Promise<number> => {
         details: firstParty.module.details(),
         module: firstParty.module,
       };
-      const substitute = executeRunner(base);
+      const substitute = runners.reduce<ReturnType<(typeof runners)[number]>>(
+        (found, runner) => found ?? runner(base),
+        null,
+      );
       return substitute === null ? base : { ...base, module: substitute };
     }
     return loader.load(node.pluginId);

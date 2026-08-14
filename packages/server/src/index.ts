@@ -10,5 +10,6 @@ export * from './fs/path-contains.js';
 export * from './fs/walk.js';
 export * from './fs/companions.js';
 export * from './library/paths.js';
+export * from './library/replace-seams.js';
 export * from './probe/ffprobe.js';
 export * from './scanner/scan-library.js';

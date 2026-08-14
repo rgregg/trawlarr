@@ -42,8 +42,15 @@ export class InPlaceOutputError extends Error {
  *
  * This allows the guard to catch cases where two different relative-path
  * spellings denote the same file, or where symlinks would cause an overwrite.
+ *
+ * Exported because Replace Original File needs the same comparison and must
+ * not grow a second, weaker copy of it — every duplicate path check is a
+ * latent version of the incident this was written for. It is the pattern
+ * `pathContains` in `@trawlarr/server` was derived from; that module stays the
+ * single containment helper, and this stays the single canonicaliser the
+ * engine can reach without depending on the server.
  */
-const canonicalPath = (path: string): string => {
+export const canonicalPath = (path: string): string => {
   try {
     return realpathSync(path);
   } catch {

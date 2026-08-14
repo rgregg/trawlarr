@@ -98,6 +98,9 @@ importers:
       '@trawlarr/core':
         specifier: workspace:*
         version: link:../core
+      '@trawlarr/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@trawlarr/plugin-api':
         specifier: workspace:*
         version: link:../plugin-api

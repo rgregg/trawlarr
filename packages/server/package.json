@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@trawlarr/core": "workspace:*",
+    "@trawlarr/engine": "workspace:*",
     "@trawlarr/plugin-api": "workspace:*",
     "better-sqlite3": "^11.3.0"
   },

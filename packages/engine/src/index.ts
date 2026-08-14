@@ -10,5 +10,7 @@ export * from './ffmpeg/run.js';
 export * from './executor/run-flow.js';
 export * from './executor/encode-target.js';
 export * from './executor/execute-node.js';
+export * from './executor/verify-output.js';
+export * from './executor/replace-original.js';
 export * from './executor/vouchable.js';
 export * from './executor/dry-run.js';

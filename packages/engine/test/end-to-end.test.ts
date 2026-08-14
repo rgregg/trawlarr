@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -301,6 +301,102 @@ describe.runIf(available)('end to end', () => {
     expect(stdout).toContain('1. Start');
     expect(stdout).not.toContain('Would run:');
   }, 60_000);
+
+  /**
+   * The destructive chain, through the real CLI: transcode, verify, replace.
+   *
+   * Its first job is to prove the live path SUBSTITUTES the two engine-
+   * controlled nodes at all. Their declared `plugin()` bodies throw on
+   * purpose, so before the runners were wired into the CLI a flow containing
+   * either node did not merely misbehave — it could not run. A unit test of a
+   * runner cannot catch that; only driving the flow the way a user does can.
+   *
+   * It works on its own copy of a sample rather than the shared fixtures,
+   * because unlike every other test here this one deliberately destroys its
+   * input.
+   */
+  it('verifies the transcode and replaces the original, keeping it in trash', async () => {
+    const replaceDir = mkdtempSync(join(tmpdir(), 'trawlarr-replace-e2e-'));
+    const replaceWorkDir = join(replaceDir, 'work');
+    mkdirSync(replaceWorkDir, { recursive: true });
+    const originalPath = join(replaceDir, 'to-replace.mkv');
+    await makeSample(originalPath, 'libx264');
+    expect(await videoCodecOf(originalPath)).toBe('h264');
+    const originalSize = statSync(originalPath).size;
+
+    const flow = join(replaceDir, 'flow.json');
+    writeFileSync(
+      flow,
+      JSON.stringify({
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'check',
+            pluginId: 'trawlarr:checkVideoCodec',
+            pluginVersion: '1.0.0',
+            inputs: { codec: 'hevc' },
+          },
+          { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'encoder',
+            pluginId: 'trawlarr:setVideoEncoder',
+            pluginVersion: '1.0.0',
+            inputs: { encoder: 'libx265', quality: '30' },
+          },
+          { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'verify',
+            pluginId: 'trawlarr:verifyOutput',
+            pluginVersion: '1.0.0',
+            inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+          },
+          {
+            id: 'replace',
+            pluginId: 'trawlarr:replaceOriginal',
+            pluginVersion: '1.0.0',
+            inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+          },
+        ],
+        edges: [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'check' },
+          { fromNodeId: 'check', outputNumber: 2, toNodeId: 'begin' },
+          { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'encoder' },
+          { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'execute' },
+          { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
+          { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+        ],
+      }),
+      'utf8',
+    );
+
+    const { stdout } = await runCli([
+      '--flow',
+      flow,
+      '--file',
+      originalPath,
+      '--work-dir',
+      replaceWorkDir,
+    ]);
+
+    expect(stdout).toContain('Stopped: end-of-flow');
+    // Both engine-controlled nodes ran and routed to their success output,
+    // rather than throwing the "must be run by the trawlarr engine" error.
+    expect(stdout).toContain('Verify Output → output 1');
+    expect(stdout).toContain('Replace Original File → output 1');
+    expect(stdout).toContain(`Result path: ${originalPath}`);
+
+    // The library path now holds the TRANSCODE.
+    expect(await videoCodecOf(originalPath)).toBe('hevc');
+
+    // And the original is in trash, intact and still h264 — recoverable, not
+    // deleted, and inside `.trawlarr`, which library scans prune.
+    const trashDir = join(replaceDir, '.trawlarr', 'trash');
+    const trashed = readdirSync(trashDir);
+    expect(trashed).toHaveLength(1);
+    const trashedPath = join(trashDir, trashed[0]!);
+    expect(await videoCodecOf(trashedPath)).toBe('h264');
+    expect(statSync(trashedPath).size).toBe(originalSize);
+  }, 180_000);
 });
 
 /**
