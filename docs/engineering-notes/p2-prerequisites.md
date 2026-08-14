@@ -63,6 +63,23 @@ the worker its own process group and kill the group.
 
 ---
 
+### Nothing purges the trash
+
+`Replace Original File` declares a `trashRetentionDays` input, but no code reads it and nothing sweeps
+`resolveTrashDir()`. Replacement therefore accumulates a full copy of every replaced original for the
+life of the library. The node's tooltip says so explicitly rather than implying cleanup that does not
+happen, but a retention sweeper is required before replacement is genuinely user-facing — on a library
+being transcoded wholesale this is unbounded growth measured in terabytes.
+
+### Cross-device replacement must copy to a temp path on the destination filesystem, then rename
+
+`allowCrossDevice` defaults to `true`, because defaulting to failure would break the common setup where
+staging sits on a different mount from the library. That default is only safe because the fallback is
+required to land the copy on a temporary path on the *destination* filesystem and finish with an atomic
+`rename(2)`. A naive copy written directly onto the destination path would leave a truncated file where
+the original used to be if it were interrupted — on the one step in the system that destroys data. The
+requirement is stated in the node's own tooltip so it cannot be quietly implemented the naive way.
+
 ## Divergences worth remembering
 
 ### `file_size`, `oldSize` and `newSize` are megabytes to plugins
