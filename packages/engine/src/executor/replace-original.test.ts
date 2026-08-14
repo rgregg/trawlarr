@@ -206,8 +206,9 @@ describe('createReplaceOriginalRunner', () => {
     expect(trashed).toHaveLength(1);
     expect(sha256(join(space.trashDir, trashed[0]!))).toBe(originalDigest);
     expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
-    // Named so two replacements of the same file cannot collide.
-    expect(trashed[0]).toContain(String(CLOCK_MS));
+    // Named so two replacements of the same file cannot collide, and named
+    // after the ORIGINAL — a human recovering from trash has to recognise it.
+    expect(trashed[0]).toBe(`movie.${CLOCK_MS}.mkv`);
     // The staged file is consumed, not left behind as a duplicate.
     expect(existsSync(space.newPath)).toBe(false);
   });
@@ -254,8 +255,8 @@ describe('createReplaceOriginalRunner', () => {
 
   it('carries a companion across a container change', async () => {
     const space = workspace({ newExtension: 'mp4' });
-    const companionPath = join(space.libraryDir, 'movie.en.srt');
-    writeFile(companionPath, 'subtitles');
+    writeFile(join(space.libraryDir, 'movie.en.srt'), 'subtitles');
+    writeFile(join(space.libraryDir, 'movie.nfo'), 'metadata');
     const moves: { oldMediaPath: string; newMediaPath: string }[] = [];
     const module = runnerFor({
       trashDir: space.trashDir,
@@ -279,17 +280,61 @@ describe('createReplaceOriginalRunner', () => {
 
     const finalPath = join(space.libraryDir, 'movie.mp4');
     expect(out.outputNumber).toBe(1);
-    // The replacement keeps the original's NAME and takes the new container.
+    // The replacement keeps the original's NAME and takes only the new
+    // container.
     expect(out.outputFileObj._id).toBe(finalPath);
-    expect(existsSync(finalPath)).toBe(true);
     expect(existsSync(space.originalPath)).toBe(false);
-    // The companion followed the media file rather than being orphaned.
+    // Asserted as the NAMES ON DISK, not merely as a call that was made.
+    expect(readdirSync(space.libraryDir).sort()).toEqual([
+      '.trawlarr',
+      'movie.en.srt',
+      'movie.mp4',
+      'movie.nfo',
+    ]);
+    // The companions sit beside the new file under their own names, with
+    // their contents intact. `moveCompanions` is asked and correctly has
+    // nothing to do: preserving the stem means each companion's computed
+    // target IS its current path. Its genuine renaming behaviour is covered
+    // in packages/server/src/fs/companions.test.ts, where the rename happens.
     expect(moves).toEqual([{ oldMediaPath: space.originalPath, newMediaPath: finalPath }]);
-    expect(existsSync(join(space.libraryDir, 'movie.en.srt'))).toBe(true);
     expect(readFileSync(join(space.libraryDir, 'movie.en.srt'), 'utf8')).toBe('subtitles');
+    expect(readFileSync(join(space.libraryDir, 'movie.nfo'), 'utf8')).toBe('metadata');
     // The file object's container follows the new extension, or every
     // container-branching plugin downstream reads a stale one.
     expect(args.inputFileObj.container).toBe('mp4');
+  });
+
+  it('keeps the ORIGINAL name when the staged file was written under another', async () => {
+    // The name belongs to the user; only the container is ours to change. An
+    // encoder that wrote "out.mp4" must not rename "Movie Title (2019).mkv" —
+    // Plex, Jellyfin, Sonarr and Radarr all identify content by filename, and
+    // an unattended worker would do this across a whole library.
+    const space = workspace();
+    const stagedUnderAnotherName = join(space.stagingDir, 'out.mp4');
+    writeFile(stagedUnderAnotherName, NEW_BODY);
+    writeFile(join(space.libraryDir, 'movie.en.srt'), 'subtitles');
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: stagedUnderAnotherName,
+        originalPath: space.originalPath,
+        jobLog: () => {},
+      }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    // The original's stem, the new file's extension. Not "out.mp4".
+    expect(out.outputFileObj._id).toBe(join(space.libraryDir, 'movie.mp4'));
+    expect(readdirSync(space.libraryDir).sort()).toEqual([
+      '.trawlarr',
+      'movie.en.srt',
+      'movie.mp4',
+    ]);
+    expect(readFileSync(join(space.libraryDir, 'movie.mp4'), 'utf8')).toBe(NEW_BODY);
+    // The companion keeps its own name too: it was never renamed to follow an
+    // encoder-chosen stem.
+    expect(readFileSync(join(space.libraryDir, 'movie.en.srt'), 'utf8')).toBe('subtitles');
   });
 
   it('refuses a hardlinked original and leaves both files untouched', async () => {
@@ -389,6 +434,31 @@ describe('createReplaceOriginalRunner', () => {
     expect(out.outputFileObj._id).toBe(space.originalPath);
     expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
     expect(existsSync(space.trashDir)).toBe(false);
+  });
+
+  it('replaces correctly when the new file already sits at its destination', async () => {
+    // Reachable without any naming trickery, whenever the work directory IS
+    // the library directory: Execute writes <work-dir>/<stem>.<container>, so
+    // a flow configured that way hands Replace a new file already standing at
+    // the exact path the replacement belongs at. The node must trash the
+    // original and leave the new file alone — not mistake it for a bystander
+    // about to be overwritten, and not try to move it onto itself.
+    const space = workspace();
+    const newInPlace = join(space.libraryDir, 'movie.mp4');
+    writeFile(newInPlace, NEW_BODY);
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: newInPlace, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(out.outputFileObj._id).toBe(newInPlace);
+    expect(readFileSync(newInPlace, 'utf8')).toBe(NEW_BODY);
+    expect(existsSync(space.originalPath)).toBe(false);
+    const trashed = readdirSync(space.trashDir);
+    expect(trashed).toHaveLength(1);
+    expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
   });
 
   it('refuses when an unrelated file already occupies the replacement path', async () => {
@@ -656,32 +726,6 @@ describe('createReplaceOriginalRunner', () => {
     expect(readFileSync(targetPath, 'utf8')).toBe('the real media, living elsewhere');
     expect(existsSync(space.newPath)).toBe(true);
     expect(existsSync(space.trashDir)).toBe(false);
-  });
-
-  it('renames companions when the replacement carries a different name', async () => {
-    // A flow that deliberately renames its output moves the library entry, and
-    // the sidecars have to follow it or they stop being sidecars at all.
-    const space = workspace();
-    const renamedOutput = join(space.stagingDir, 'movie (remastered).mp4');
-    writeFile(renamedOutput, NEW_BODY);
-    writeFile(join(space.libraryDir, 'movie.en.srt'), 'subtitles');
-    writeFile(join(space.libraryDir, 'movie.nfo'), 'metadata');
-    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
-
-    const out = await module.plugin(
-      argsFor({ newPath: renamedOutput, originalPath: space.originalPath, jobLog: () => {} }),
-    );
-
-    expect(out.outputNumber).toBe(1);
-    expect(out.outputFileObj._id).toBe(join(space.libraryDir, 'movie (remastered).mp4'));
-    // The sidecars really moved: new names hold the old contents, and the old
-    // names are gone.
-    expect(readFileSync(join(space.libraryDir, 'movie (remastered).en.srt'), 'utf8')).toBe(
-      'subtitles',
-    );
-    expect(readFileSync(join(space.libraryDir, 'movie (remastered).nfo'), 'utf8')).toBe('metadata');
-    expect(existsSync(join(space.libraryDir, 'movie.en.srt'))).toBe(false);
-    expect(existsSync(join(space.libraryDir, 'movie.nfo'))).toBe(false);
   });
 
   it('routes a partial companion failure to output 2, reporting the split', async () => {

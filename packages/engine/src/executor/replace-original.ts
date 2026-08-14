@@ -86,23 +86,33 @@ const exists = async (path: string): Promise<boolean> => {
 };
 
 /**
- * Where the replacement belongs: the new file's NAME, in the original's
- * directory.
+ * Where the replacement belongs: the original's name, carrying the new file's
+ * container. A transcode to a different container must not keep the old
+ * extension — an mp4 stream named `.mkv` misleads every tool downstream —
+ * but the *name* is the user's, and renaming their file is not this node's
+ * job.
  *
- * For an ordinary flow this is the original's own name carrying the new
- * container (`movie.mkv` + an mp4 encode -> `movie.mp4`), because Execute
- * derives its output name from the input's. A flow that deliberately renames
- * its output moves the library entry with it, and the sidecars follow via
- * `moveCompanions` — which is the only thing that makes companion handling
- * more than decoration. A new file with no extension at all keeps the
- * original's, since a media file that loses its extension misleads every tool
- * downstream.
+ * The staged file's name is an implementation detail of whatever produced it,
+ * so adopting it would hand a user back `Movie Title (2019) [1080p].mkv` as
+ * whatever the encoder happened to write — in bulk, across a whole library,
+ * from an unattended worker, and with Plex, Jellyfin, Sonarr and Radarr all
+ * identifying content by filename. Only the container is ours to change.
+ *
+ * A consequence worth stating: because the stem is preserved, a companion's
+ * computed target equals its current path, so `moveCompanions` legitimately
+ * has nothing to do here. That is the correct outcome, not a gap — the
+ * sidecars already sit beside the media file under the right names. Its
+ * genuine renaming behaviour is covered where it lives, in
+ * `packages/server/src/fs/companions.test.ts`.
  */
 export const replacementPathFor = (input: { originalPath: string; newPath: string }): string => {
+  const originalExtension = extname(input.originalPath);
   const newExtension = extname(input.newPath);
-  const extension = newExtension === '' ? extname(input.originalPath) : newExtension;
-  const stem = basename(input.newPath, newExtension);
-  return join(dirname(input.originalPath), `${stem}${extension}`);
+  const stem = basename(input.originalPath, originalExtension);
+  return join(
+    dirname(input.originalPath),
+    `${stem}${newExtension === '' ? originalExtension : newExtension}`,
+  );
 };
 
 /**
