@@ -98,6 +98,22 @@ upstream does, so matching it is correct for a compatibility project.
 
 ---
 
+### `ScanSummary` counters are broader than their names
+
+Two counters mean less than a CLI author would assume, and both are load-bearing for P2a Task 11's
+output:
+
+- **`unreadable`** conflates three distinct failures — a file that could not be read, a file whose
+  probe failed, and an `IdentityConflictError`. A user seeing "3 unreadable" cannot tell which
+  happened. Split it, or label it vaguely, when the CLI reports diagnostics.
+- **`updated`** counts rows the upsert touched, not rows whose content changed. A rescan where
+  nothing changed at all still reports every file as updated — verified end-to-end: a two-file
+  library reports `updated=2` on every scan including no-op ones. Do not print it as "N files
+  changed".
+
+`probed` is the counter that means what it says: it increments only where `probeFile` is actually
+invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
+
 ## Accepted risks
 
 - **Recycled inodes.** A deleted file's inode may be reused, so a new file can inherit an old
