@@ -2,13 +2,15 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { readdir, rename, stat } from 'node:fs/promises';
+import { link, readdir, rename, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -99,7 +101,10 @@ const replacePlugin = (): LoadedPlugin =>
 const CLOCK_MS = 1_700_000_000_000;
 
 const ORIGINAL_BODY = 'the original the user would be furious to lose';
-/** 999999 bytes: 0.999999 MB, whose megabyte round-trip is not exact. */
+/** 999999 bytes, so the reported megabyte size is a fraction rather than a
+ * whole number and a size assertion cannot pass by accident. (This particular
+ * value does survive the MB round-trip exactly; the sizes that do not are
+ * pinned in file-object.test.ts, where the conversion itself lives.) */
 const NEW_BODY = 'n'.repeat(999_999);
 
 interface Workspace {
@@ -238,8 +243,9 @@ describe('createReplaceOriginalRunner', () => {
     // Not the pre-transcode value: a size-comparison plugin must see a change.
     expect(args.inputFileObj.file_size).not.toBe(0);
     expect(args.inputFileObj.newSize).not.toBe(args.inputFileObj.oldSize);
-    // The megabyte round-trip is floating point, so a persister must round:
-    // 999999 bytes comes back as 999999.0000000001 without it.
+    // Whole bytes come back out of the megabyte projection. The conversion
+    // rounds at the producer (absorbPluginFileObject), which is where the
+    // sizes that genuinely do not round-trip are pinned.
     expect(Math.round(args.inputFileObj.newSize * 1_000_000)).toBe(NEW_BODY.length);
     // And the file object now points at the file that actually exists.
     expect(args.inputFileObj._id).toBe(space.originalPath);
@@ -264,9 +270,12 @@ describe('createReplaceOriginalRunner', () => {
       },
     })(replacePlugin())!;
 
-    const out = await module.plugin(
-      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
-    );
+    const args = argsFor({
+      newPath: space.newPath,
+      originalPath: space.originalPath,
+      jobLog: () => {},
+    });
+    const out = await module.plugin(args);
 
     const finalPath = join(space.libraryDir, 'movie.mp4');
     expect(out.outputNumber).toBe(1);
@@ -278,6 +287,9 @@ describe('createReplaceOriginalRunner', () => {
     expect(moves).toEqual([{ oldMediaPath: space.originalPath, newMediaPath: finalPath }]);
     expect(existsSync(join(space.libraryDir, 'movie.en.srt'))).toBe(true);
     expect(readFileSync(join(space.libraryDir, 'movie.en.srt'), 'utf8')).toBe('subtitles');
+    // The file object's container follows the new extension, or every
+    // container-branching plugin downstream reads a stale one.
+    expect(args.inputFileObj.container).toBe('mp4');
   });
 
   it('refuses a hardlinked original and leaves both files untouched', async () => {
@@ -403,12 +415,12 @@ describe('createReplaceOriginalRunner', () => {
 
   it('copies to a temporary path on the DESTINATION filesystem, then renames', async () => {
     const space = workspace();
-    const renames: { from: string; to: string }[] = [];
+    const links: { from: string; to: string }[] = [];
     const module = runnerFor({
       trashDir: space.trashDir,
       overrides: {
-        renameFile: async (from, to) => {
-          renames.push({ from, to });
+        linkFile: async (from, to) => {
+          links.push({ from, to });
           // Only the staging -> library move is cross-device, exactly as a
           // staging area on another filesystem behaves.
           if (dirname(from) === space.stagingDir) {
@@ -418,7 +430,7 @@ describe('createReplaceOriginalRunner', () => {
             error.code = 'EXDEV';
             throw error;
           }
-          await rename(from, to);
+          await link(from, to);
         },
       },
     })(replacePlugin())!;
@@ -437,7 +449,7 @@ describe('createReplaceOriginalRunner', () => {
     // The final step is a rename FROM the destination filesystem, never a copy
     // onto the live path: an interrupted copy must not be able to leave a
     // truncated file where the user's original used to be.
-    const last = renames.at(-1)!;
+    const last = links.at(-1)!;
     expect(last.to).toBe(space.originalPath);
     expect(dirname(last.from)).toBe(space.libraryDir);
     expect(last.from).not.toBe(space.newPath);
@@ -446,6 +458,10 @@ describe('createReplaceOriginalRunner', () => {
     expect(last.from).not.toBe(last.to);
     // No temporary file is left lying around in the library.
     expect(readdirSync(space.libraryDir).sort()).toEqual(['.trawlarr', 'movie.mkv']);
+    // Nor is the staged source: a full-size duplicate left in staging after a
+    // successful cross-device swap is a silent disk-filler.
+    expect(existsSync(space.newPath)).toBe(false);
+    expect(readdirSync(space.stagingDir)).toEqual([]);
     expect(logged.join('\n')).toMatch(/cross-device/i);
   });
 
@@ -454,7 +470,7 @@ describe('createReplaceOriginalRunner', () => {
     const module = runnerFor({
       trashDir: space.trashDir,
       overrides: {
-        renameFile: async (from, to) => {
+        linkFile: async (from, to) => {
           if (dirname(from) === space.stagingDir) {
             const error: NodeJS.ErrnoException = new Error(
               'EXDEV: cross-device link not permitted',
@@ -462,7 +478,7 @@ describe('createReplaceOriginalRunner', () => {
             error.code = 'EXDEV';
             throw error;
           }
-          await rename(from, to);
+          await link(from, to);
         },
       },
     })(replacePlugin())!;
@@ -491,13 +507,13 @@ describe('createReplaceOriginalRunner', () => {
     const module = runnerFor({
       trashDir: space.trashDir,
       overrides: {
-        renameFile: async (from, to) => {
+        linkFile: async (from, to) => {
           if (dirname(from) === space.stagingDir) {
             const error: NodeJS.ErrnoException = new Error('EACCES: permission denied');
             error.code = 'EACCES';
             throw error;
           }
-          await rename(from, to);
+          await link(from, to);
         },
       },
     })(replacePlugin())!;
@@ -517,6 +533,155 @@ describe('createReplaceOriginalRunner', () => {
     expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
     expect(readdirSync(space.trashDir)).toEqual([]);
     expect(logged.join('\n')).toContain('EACCES');
+  });
+
+  it('keeps every original when files sharing a basename are replaced at once', async () => {
+    // One trash directory serves a whole library ROOT, and duplicate basenames
+    // are ordinary — disc rips produce "Show A/S1/title00.mkv" and
+    // "Show B/S1/title00.mkv". Workers that reach the trash step together all
+    // compute the same trash name, all find it free, and a plain rename(2)
+    // silently unlinks whichever original got there first, with every job
+    // still reporting success.
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-replace-race-'));
+    const trashDir = join(root, '.trawlarr', 'trash');
+    const shows = ['A', 'B', 'C', 'D', 'E', 'F'];
+    const sources = shows.map((show) => {
+      const dir = join(root, `Show ${show}`, 'S1');
+      const stagingDir = join(root, '.trawlarr', 'staging', show);
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(stagingDir, { recursive: true });
+      const originalPath = join(dir, 'title00.mkv');
+      const newPath = join(stagingDir, 'title00.mkv');
+      writeFile(originalPath, `the ${show} original`);
+      writeFile(newPath, `the ${show} transcode`);
+      return { originalPath, newPath };
+    });
+    const module = runnerFor({ trashDir })(replacePlugin())!;
+
+    const outs = await Promise.all(
+      sources.map((source) => module.plugin(argsFor({ ...source, jobLog: () => {} }))),
+    );
+
+    expect(outs.map((out) => out.outputNumber)).toEqual(shows.map(() => 1));
+    // Every original is in the trash under a DISTINCT name. No user's file was
+    // consumed by another file's replacement.
+    const bodies = readdirSync(trashDir)
+      .map((name) => readFileSync(join(trashDir, name), 'utf8'))
+      .sort();
+    expect(bodies).toEqual(shows.map((show) => `the ${show} original`).sort());
+    // And each library path holds its own transcode, not a neighbour's.
+    for (const [index, source] of sources.entries()) {
+      expect(readFileSync(source.originalPath, 'utf8')).toBe(`the ${shows[index]!} transcode`);
+    }
+  });
+
+  it('lets only one of two flows claim the same replacement path', async () => {
+    // "movie.mkv" and "movie.avi" in one directory, both transcoding to mp4,
+    // both computing "movie.mp4". The destination check is a check-then-act,
+    // so without an exclusive create the second rename destroys the first's
+    // freshly transcoded output.
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-replace-claim-'));
+    const libraryDir = join(root, 'library');
+    mkdirSync(libraryDir, { recursive: true });
+    const trashDir = join(root, '.trawlarr', 'trash');
+    const make = (extension: string, body: string) => {
+      const originalPath = join(libraryDir, `movie.${extension}`);
+      // Each flow stages its own output, both named for the media file, so
+      // both resolve to the same destination: library/movie.mp4.
+      const stagingDir = join(root, '.trawlarr', 'staging', extension);
+      mkdirSync(stagingDir, { recursive: true });
+      const newPath = join(stagingDir, 'movie.mp4');
+      writeFile(originalPath, body);
+      writeFile(newPath, `${body} (transcoded)`);
+      return { originalPath, newPath };
+    };
+    const mkv = make('mkv', 'the mkv original');
+    const avi = make('avi', 'the avi original');
+    const module = runnerFor({ trashDir })(replacePlugin())!;
+
+    const outs = await Promise.all([
+      module.plugin(argsFor({ ...mkv, jobLog: () => {} })),
+      module.plugin(argsFor({ ...avi, jobLog: () => {} })),
+    ]);
+
+    // Exactly one wins; the other refuses rather than overwriting it.
+    expect(outs.map((out) => out.outputNumber).sort()).toEqual([1, 2]);
+    const winner = outs.findIndex((out) => out.outputNumber === 1);
+    const winnerSource = [mkv, avi][winner]!;
+    const loserSource = [mkv, avi][1 - winner]!;
+
+    // The winner's transcode is intact at the shared destination.
+    expect(readFileSync(join(libraryDir, 'movie.mp4'), 'utf8')).toBe(
+      `${winner === 0 ? 'the mkv original' : 'the avi original'} (transcoded)`,
+    );
+    // The loser gave up nothing: its original is back at its own path.
+    expect(existsSync(loserSource.originalPath)).toBe(true);
+    expect(readFileSync(loserSource.originalPath, 'utf8')).toBe(
+      winner === 0 ? 'the avi original' : 'the mkv original',
+    );
+    // And only the winner's original is in the trash.
+    const trashed = readdirSync(trashDir);
+    expect(trashed).toHaveLength(1);
+    expect(readFileSync(join(trashDir, trashed[0]!), 'utf8')).toBe(
+      winner === 0 ? 'the mkv original' : 'the avi original',
+    );
+    expect(basename(winnerSource.originalPath)).toBe(winner === 0 ? 'movie.mkv' : 'movie.avi');
+  });
+
+  it('refuses to replace a symlinked library entry', async () => {
+    // Replacing the LINK would install a regular file over it, orphaning the
+    // target the link pointed at and reclaiming none of the space the user
+    // expected. Refusing something we do not fully understand is the
+    // conservative call.
+    const space = workspace();
+    const targetPath = join(space.root, 'real-media.mkv');
+    writeFile(targetPath, 'the real media, living elsewhere');
+    const linkPath = join(space.libraryDir, 'linked.mkv');
+    symlinkSync(targetPath, linkPath);
+    const logged: string[] = [];
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: linkPath,
+        jobLog: (text) => logged.push(text),
+      }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    expect(logged.join('\n')).toMatch(/symlink/i);
+    // The link, its target and the staged file all survive untouched.
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(targetPath, 'utf8')).toBe('the real media, living elsewhere');
+    expect(existsSync(space.newPath)).toBe(true);
+    expect(existsSync(space.trashDir)).toBe(false);
+  });
+
+  it('renames companions when the replacement carries a different name', async () => {
+    // A flow that deliberately renames its output moves the library entry, and
+    // the sidecars have to follow it or they stop being sidecars at all.
+    const space = workspace();
+    const renamedOutput = join(space.stagingDir, 'movie (remastered).mp4');
+    writeFile(renamedOutput, NEW_BODY);
+    writeFile(join(space.libraryDir, 'movie.en.srt'), 'subtitles');
+    writeFile(join(space.libraryDir, 'movie.nfo'), 'metadata');
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: renamedOutput, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(out.outputFileObj._id).toBe(join(space.libraryDir, 'movie (remastered).mp4'));
+    // The sidecars really moved: new names hold the old contents, and the old
+    // names are gone.
+    expect(readFileSync(join(space.libraryDir, 'movie (remastered).en.srt'), 'utf8')).toBe(
+      'subtitles',
+    );
+    expect(readFileSync(join(space.libraryDir, 'movie (remastered).nfo'), 'utf8')).toBe('metadata');
+    expect(existsSync(join(space.libraryDir, 'movie.en.srt'))).toBe(false);
+    expect(existsSync(join(space.libraryDir, 'movie.nfo'))).toBe(false);
   });
 
   it('routes a partial companion failure to output 2, reporting the split', async () => {

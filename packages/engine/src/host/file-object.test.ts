@@ -176,6 +176,23 @@ describe('absorbPluginFileObject', () => {
     expect(absorbPluginFileObject(file).newSizeBytes).toBe(4_000_000_000);
   });
 
+  it('returns a WHOLE number of bytes for a size the MB round-trip cannot express', () => {
+    // A real 2.14 GB file: 2143639320 bytes projects to 2143.63932 MB and
+    // multiplies back to 2143639320.0000002. A byte count is a whole number
+    // by definition and the column holding it has INTEGER affinity, so the
+    // rounding belongs here, at the producer, rather than in every consumer
+    // that has to remember it. Replace Original File is what first makes such
+    // values routine: it re-stats the file after the swap and writes the real
+    // size back through this contract.
+    const bytes = 2_143_639_320;
+    expect((bytes / 1_000_000) * 1_000_000).not.toBe(bytes); // the hazard is real
+    const file = toPluginFileObject(source());
+    file.newSize = bytes / 1_000_000;
+    const absorbed = absorbPluginFileObject(file).newSizeBytes;
+    expect(absorbed).toBe(bytes);
+    expect(Number.isInteger(absorbed)).toBe(true);
+  });
+
   it('ignores nonsense values rather than corrupting state', () => {
     const file = toPluginFileObject(source());
     (file as Record<string, unknown>).HealthCheck = 'Bananas';

@@ -38,28 +38,54 @@ export const verifyOutput = (input: {
     reasons.push(`the output has ${streams.length} streams, fewer than the original's ${expected}`);
   }
 
+  // "Unknown" must never read as "fine". ffmpeg can hit a corrupt region, stop
+  // early and still exit 0, leaving a short file whose duration element was
+  // never written — and ffprobe reports a missing duration as the literal
+  // "N/A", which parses to NaN just as an absent field does. Skipping the
+  // comparison in that case is a FALSE PASS on the check standing between a
+  // truncated encode and a destroyed original, so an unreadable output
+  // duration is itself a reason.
   const outDuration = Number.parseFloat(String(input.probe.format?.duration ?? ''));
   const origDuration = Number.parseFloat(String(input.originalProbe.format?.duration ?? ''));
-  if (Number.isFinite(outDuration) && Number.isFinite(origDuration)) {
-    const drift = Math.abs(outDuration - origDuration);
-    if (drift > input.durationToleranceSeconds) {
+  if (Number.isFinite(origDuration)) {
+    if (!Number.isFinite(outDuration)) {
       reasons.push(
-        `the output runs ${outDuration.toFixed(1)}s against the original's ` +
-          `${origDuration.toFixed(1)}s, a ${drift.toFixed(1)}s difference`,
+        `the output's duration could not be read, so it cannot be checked against the ` +
+          `original's ${origDuration.toFixed(1)}s — a transcode that stopped early often ` +
+          `leaves exactly this`,
       );
+    } else {
+      const drift = Math.abs(outDuration - origDuration);
+      // `>`, not `>=`: the tolerance is how much the output MAY differ, so a
+      // drift of exactly the tolerance passes.
+      if (drift > input.durationToleranceSeconds) {
+        reasons.push(
+          `the output runs ${outDuration.toFixed(1)}s against the original's ` +
+            `${origDuration.toFixed(1)}s, a ${drift.toFixed(1)}s difference`,
+        );
+      }
     }
   }
 
   // Only a suspiciously SMALL output is a failure. A larger file is a normal
-  // outcome of a remux or a higher-quality encode.
+  // outcome of a remux or a higher-quality encode. But an original whose size
+  // is unknown or zero cannot be a basis for that judgement at all, and
+  // abstaining silently is the same false pass as above.
   if (input.originalSizeBytes > 0) {
     const ratio = input.outputSizeBytes / input.originalSizeBytes;
-    if (ratio < input.minSizeRatio) {
+    // `<=`, not `<`: a file landing exactly ON the floor is the truncated
+    // encode this check exists to catch, not a pass.
+    if (ratio <= input.minSizeRatio) {
       reasons.push(
-        `the output is ${(ratio * 100).toFixed(1)}% of the original's size, below the ` +
+        `the output is ${(ratio * 100).toFixed(1)}% of the original's size, at or below the ` +
           `${(input.minSizeRatio * 100).toFixed(1)}% floor — this usually means a truncated encode`,
       );
     }
+  } else {
+    reasons.push(
+      `the original's size is unknown (${input.originalSizeBytes} bytes), so the output's ` +
+        `size could not be sanity-checked against it`,
+    );
   }
 
   return { ok: reasons.length === 0, reasons };

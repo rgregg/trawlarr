@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, lstat, mkdir, rename, unlink } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type { PluginModule, PluginOutputArgs } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
 import { canonicalPath } from './encode-target.js';
+import { BYTES_PER_MEGABYTE } from '../host/file-object.js';
 
 /** What the runner needs from a `stat`: size for reporting, nlink for safety. */
 export interface FileStats {
@@ -37,6 +38,8 @@ export type MoveCompanionsFn = (input: {
 
 export type RenameFileFn = (from: string, to: string) => Promise<void>;
 
+export type LinkFileFn = (from: string, to: string) => Promise<void>;
+
 /**
  * Builds the error raised when replacement would have to cross a filesystem
  * boundary and the operator has forbidden the copy fallback. Defaults to a
@@ -60,6 +63,8 @@ export interface ReplaceRunnerInput {
   crossDeviceError?: CrossDeviceErrorFn;
   /** Seam for tests: simulate an `EXDEV` without a second filesystem. */
   renameFile?: RenameFileFn;
+  /** Seam for tests: the exclusive-create half of every move this node makes. */
+  linkFile?: LinkFileFn;
 }
 
 const messageOf = (error: unknown): string =>
@@ -81,40 +86,126 @@ const exists = async (path: string): Promise<boolean> => {
 };
 
 /**
- * Where the replacement belongs: the original's name, carrying the new file's
- * container. A transcode to a different container must not keep the old
- * extension — an mp4 stream named `.mkv` misleads every tool downstream —
- * but the *name* is the user's, and renaming their file is not this node's
- * job.
+ * Where the replacement belongs: the new file's NAME, in the original's
+ * directory.
+ *
+ * For an ordinary flow this is the original's own name carrying the new
+ * container (`movie.mkv` + an mp4 encode -> `movie.mp4`), because Execute
+ * derives its output name from the input's. A flow that deliberately renames
+ * its output moves the library entry with it, and the sidecars follow via
+ * `moveCompanions` — which is the only thing that makes companion handling
+ * more than decoration. A new file with no extension at all keeps the
+ * original's, since a media file that loses its extension misleads every tool
+ * downstream.
  */
 export const replacementPathFor = (input: { originalPath: string; newPath: string }): string => {
-  const originalExtension = extname(input.originalPath);
   const newExtension = extname(input.newPath);
-  const stem = basename(input.originalPath, originalExtension);
-  return join(
-    dirname(input.originalPath),
-    `${stem}${newExtension === '' ? originalExtension : newExtension}`,
-  );
+  const extension = newExtension === '' ? extname(input.originalPath) : newExtension;
+  const stem = basename(input.newPath, newExtension);
+  return join(dirname(input.originalPath), `${stem}${extension}`);
 };
 
 /**
- * A name in `trashDir` that is not already taken. The timestamp comes from the
- * injected clock so two replacements of the same file — a re-run a week later,
- * say — cannot collide, and the counter covers the case of two within the same
- * millisecond.
+ * Codes a `link(2)` returns when the filesystem cannot hardlink at all —
+ * exFAT, FAT32 and some network mounts. Only these fall back to a rename;
+ * anything else is a real failure and must surface.
  */
-const freeTrashPath = async (input: {
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP', 'EMLINK']);
+
+/**
+ * Create `to` as a second name for `from`, failing if `to` already exists.
+ *
+ * `rename(2)` silently replaces an existing destination, which is what makes
+ * every check-then-rename in this node a way to destroy a file that appeared
+ * in between. `link(2)` fails `EEXIST` atomically instead, and is same-device
+ * by construction — exactly the property the trash and the swap both need.
+ *
+ * Returns whether the source still exists afterwards, since the fallback path
+ * consumes it.
+ */
+const createExclusively = async (input: {
+  from: string;
+  to: string;
+  linkFile: LinkFileFn;
+  renameFile: RenameFileFn;
+}): Promise<'linked' | 'renamed'> => {
+  try {
+    await input.linkFile(input.from, input.to);
+    return 'linked';
+  } catch (error) {
+    const code = codeOf(error);
+    // The caller decides what an occupied destination or a device boundary
+    // means; only "this filesystem has no hardlinks" is handled here.
+    if (code === undefined || !LINK_UNSUPPORTED.has(code)) throw error;
+    // No atomic exclusive create exists on such a filesystem. Re-check as late
+    // as possible and rename: the window shrinks to the gap between these two
+    // calls rather than spanning the whole node, but it does not vanish.
+    if (await exists(input.to)) {
+      throw Object.assign(new Error(`EEXIST: "${input.to}" already exists`), { code: 'EEXIST' });
+    }
+    await input.renameFile(input.from, input.to);
+    return 'renamed';
+  }
+};
+
+/**
+ * Move `from` to `to` without ever overwriting `to`. The inode is preserved
+ * either way, so a file's `(device, inode)` identity survives the move — which
+ * is what lets the ledger follow an original into the trash.
+ *
+ * Interrupted between the link and the unlink, the file exists under BOTH
+ * names: a duplicate, never a loss.
+ */
+const moveExclusively = async (input: {
+  from: string;
+  to: string;
+  linkFile: LinkFileFn;
+  renameFile: RenameFileFn;
+}): Promise<void> => {
+  if ((await createExclusively(input)) === 'linked') await unlink(input.from);
+};
+
+/**
+ * Move the original into `trashDir` under a name nothing else holds.
+ *
+ * The timestamp keeps trash entries readable and orders them, but it is NOT
+ * what makes the name unique: one trash directory serves a whole library root,
+ * so two different files sharing a basename — `Show A/S1/title00.mkv` and
+ * `Show B/S1/title00.mkv`, which disc rips produce by the hundred — compute
+ * the same name, and workers running at the same moment compute the same
+ * millisecond too. A counter cannot fix that: it only sees what is already on
+ * disk, never what another worker has in flight. Uniqueness comes from the
+ * exclusive create, and the counter merely picks the next readable name when
+ * that create reports the collision.
+ */
+const moveToTrash = async (input: {
   trashDir: string;
   originalPath: string;
   nowMs: number;
+  linkFile: LinkFileFn;
+  renameFile: RenameFileFn;
 }): Promise<string> => {
   const extension = extname(input.originalPath);
   const stem = basename(input.originalPath, extension);
-  for (let attempt = 0; ; attempt += 1) {
+  for (let attempt = 0; attempt < 10_000; attempt += 1) {
     const suffix = attempt === 0 ? '' : `-${attempt}`;
     const candidate = join(input.trashDir, `${stem}.${input.nowMs}${suffix}${extension}`);
-    if (!(await exists(candidate))) return candidate;
+    try {
+      await moveExclusively({
+        from: input.originalPath,
+        to: candidate,
+        linkFile: input.linkFile,
+        renameFile: input.renameFile,
+      });
+      return candidate;
+    } catch (error) {
+      if (codeOf(error) !== 'EEXIST') throw error;
+    }
   }
+  throw new Error(
+    `Could not find a free name for "${input.originalPath}" in "${input.trashDir}" after ` +
+      `10000 attempts.`,
+  );
 };
 
 /** `'false'`, `false` and `'0'` are false; anything unset defaults to `true`. */
@@ -126,8 +217,6 @@ const booleanInput = (value: unknown, fallback: boolean): boolean => {
   if (text === 'true' || text === '1' || text === 'yes') return true;
   return fallback;
 };
-
-const BYTES_PER_MEGABYTE = 1_000 * 1_000;
 
 /**
  * The engine's substitute for the Replace Original File node: the one step in
@@ -144,10 +233,13 @@ const BYTES_PER_MEGABYTE = 1_000 * 1_000;
  *     silently overwrite the file this node exists to preserve. A crash in the
  *     gap leaves the library missing the file and the original intact in trash
  *     — visible and recoverable, which a clobbered file is not.
- *  3. The swap itself is a `rename(2)`, which is atomic. Across devices it
- *     becomes copy-to-a-temporary-path-on-the-destination then rename, so an
- *     interrupted copy can only ever leave a stray temp file, never a
- *     truncated file at the live path.
+ *  3. Every move is an EXCLUSIVE create — `link(2)`, which fails `EEXIST`
+ *     atomically — never a bare `rename(2)`, which replaces its destination
+ *     silently. That is what stops two concurrent replacements from consuming
+ *     each other's original or each other's output. Across devices the swap
+ *     becomes copy-to-a-temporary-path-on-the-destination then an exclusive
+ *     create, so an interrupted copy can only ever leave a stray temp file,
+ *     never a truncated file at the live path.
  *  4. If the swap fails after the original was trashed, the original is
  *     restored before routing to failure.
  */
@@ -157,6 +249,7 @@ export const createReplaceOriginalRunner =
     if (plugin.id !== 'trawlarr:replaceOriginal') return null;
 
     const renameFile: RenameFileFn = input.renameFile ?? ((from, to) => rename(from, to));
+    const linkFile: LinkFileFn = input.linkFile ?? ((from, to) => link(from, to));
     const crossDeviceError: CrossDeviceErrorFn =
       input.crossDeviceError ??
       ((crossDevice) =>
@@ -235,9 +328,45 @@ export const createReplaceOriginalRunner =
           );
         }
 
+        // A symlinked library entry is refused outright. Replacing the LINK
+        // installs a regular file over it, silently orphaning whatever the
+        // link pointed at and reclaiming none of the space the user expected
+        // to reclaim; replacing its TARGET reaches outside the library
+        // altogether. Refusing an operation we do not fully understand is the
+        // conservative call, and it can be relaxed later far more safely than
+        // it could be retracted.
+        let originalIsSymlink: boolean;
+        try {
+          originalIsSymlink = (await lstat(originalPath)).isSymbolicLink();
+        } catch (error) {
+          return refuse(
+            `the original "${originalPath}" could not be examined (${messageOf(error)}).`,
+            originalPath,
+          );
+        }
+        if (originalIsSymlink) {
+          return refuse(
+            `"${originalPath}" is a symlink. Replacing it would install a regular file over ` +
+              `the link and orphan the file it points at, freeing none of the space you are ` +
+              `expecting. Point the library at the real location of this file instead.`,
+            originalPath,
+          );
+        }
+
         const finalPath = replacementPathFor({ originalPath, newPath });
         const replacingInPlace = canonicalPath(finalPath) === canonicalPath(originalPath);
-        if (!replacingInPlace && (await exists(finalPath))) {
+        // The new file can already BE at its destination — a flow that staged
+        // its output beside the original under a different name. Then the
+        // replacement is purely the trashing of the original, and the
+        // occupied-destination check below must not mistake the new file for
+        // a bystander it is about to overwrite.
+        const alreadyInPlace = canonicalPath(finalPath) === canonicalPath(newPath);
+        // Advisory only: it reports the common case cheaply, before anything
+        // moves. The authority is the exclusive create in the swap itself,
+        // because between this check and that swap another worker can claim
+        // the same destination — two flows transcoding "movie.mkv" and
+        // "movie.avi" to mp4 both compute "movie.mp4".
+        if (!replacingInPlace && !alreadyInPlace && (await exists(finalPath))) {
           return refuse(
             `"${finalPath}" already exists and is not the file being replaced. Renaming ` +
               `onto it would destroy it.`,
@@ -265,12 +394,13 @@ export const createReplaceOriginalRunner =
         let trashPath: string;
         try {
           await mkdir(trashDir, { recursive: true });
-          trashPath = await freeTrashPath({
+          trashPath = await moveToTrash({
             trashDir,
             originalPath,
             nowMs: input.nowMs(),
+            linkFile,
+            renameFile,
           });
-          await rename(originalPath, trashPath);
         } catch (error) {
           // The original is still at its own path: nothing to undo.
           return refuse(
@@ -282,7 +412,10 @@ export const createReplaceOriginalRunner =
 
         const restoreOriginal = async (): Promise<void> => {
           try {
-            await rename(trashPath, originalPath);
+            // Exclusive, like every other move here: if anything claimed the
+            // original's path during the swap window, restoring over it would
+            // destroy that file instead.
+            await moveExclusively({ from: trashPath, to: originalPath, linkFile, renameFile });
             say(`Restored the original to "${originalPath}".`);
           } catch (error) {
             say(
@@ -299,6 +432,7 @@ export const createReplaceOriginalRunner =
             renameFile,
             crossDeviceError,
             allowCrossDevice: booleanInput(args.inputs.allowCrossDevice, true),
+            linkFile,
             say,
           });
         } catch (error) {
@@ -368,27 +502,47 @@ export const createReplaceOriginalRunner =
   };
 
 /**
- * Put the new file at `finalPath`, atomically.
+ * Put the new file at `finalPath` without ever overwriting what is there.
  *
- * The cross-device path stages a copy on the DESTINATION filesystem and
- * finishes with a rename, so the live path only ever changes in one atomic
- * step. Copying straight onto `finalPath` would mean a killed process, a full
- * disk or a power cut could leave a truncated file exactly where the user's
- * original used to be — which is the node's own tooltip promise, and the
- * reason this is not merely a slower `copyFile`.
+ * Two separate hazards, and both cost a user their data if handled loosely:
+ *
+ *  - `rename(2)` replaces an existing destination silently, so the swap is an
+ *    exclusive create. Two flows can compute the same destination — a library
+ *    holding `movie.mkv` and `movie.avi`, both transcoding to mp4 — and the
+ *    second must be told the name is taken, not hand it a way to delete the
+ *    first's freshly encoded file.
+ *  - Across devices the fallback stages a copy on the DESTINATION filesystem
+ *    and finishes with an exclusive create, so the live path only ever changes
+ *    in one atomic step. Copying straight onto `finalPath` would mean a killed
+ *    process, a full disk or a power cut could leave a truncated file exactly
+ *    where the user's original used to be — the node's own tooltip promise,
+ *    and the reason this is not merely a slower `copyFile`.
  */
 const swapIntoPlace = async (input: {
   newPath: string;
   finalPath: string;
   renameFile: RenameFileFn;
+  linkFile: LinkFileFn;
   crossDeviceError: CrossDeviceErrorFn;
   allowCrossDevice: boolean;
   say: (text: string) => void;
 }): Promise<void> => {
+  if (canonicalPath(input.newPath) === canonicalPath(input.finalPath)) return; // already there
   try {
-    await input.renameFile(input.newPath, input.finalPath);
+    await moveExclusively({
+      from: input.newPath,
+      to: input.finalPath,
+      linkFile: input.linkFile,
+      renameFile: input.renameFile,
+    });
     return;
   } catch (error) {
+    if (codeOf(error) === 'EEXIST') {
+      throw new Error(
+        `"${input.finalPath}" was claimed by something else while this replacement was in ` +
+          `progress. Refusing to overwrite it.`,
+      );
+    }
     if (codeOf(error) !== 'EXDEV') throw error;
     if (!input.allowCrossDevice) {
       throw input.crossDeviceError({
@@ -404,15 +558,28 @@ const swapIntoPlace = async (input: {
   }
 
   const extension = extname(input.finalPath);
+  // A UUID, so the staging name cannot collide with a concurrent replacement's
+  // even before the exclusive create below has a chance to say so.
   const stagedPath = join(
     dirname(input.finalPath),
     `.trawlarr-replace-${randomUUID()}${extension}`,
   );
   try {
     await copyFile(input.newPath, stagedPath);
-    await input.renameFile(stagedPath, input.finalPath);
+    await moveExclusively({
+      from: stagedPath,
+      to: input.finalPath,
+      linkFile: input.linkFile,
+      renameFile: input.renameFile,
+    });
   } catch (error) {
     await unlink(stagedPath).catch(() => {});
+    if (codeOf(error) === 'EEXIST') {
+      throw new Error(
+        `"${input.finalPath}" was claimed by something else while this replacement was in ` +
+          `progress. Refusing to overwrite it.`,
+      );
+    }
     throw error;
   }
   // The staged source is now a duplicate of a file that lives in the library.

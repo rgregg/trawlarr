@@ -175,6 +175,108 @@ describe('verifyOutput', () => {
     expect(report.reasons.some((reason) => reason.includes('size'))).toBe(true);
   });
 
+  it('accepts a duration difference exactly AT the tolerance', () => {
+    // The tolerance is how much the output MAY differ, so the boundary itself
+    // passes. Pinned because `>` and `>=` differ only here.
+    const report = verifyOutput({
+      probe: probeOf({ streams: 2, durationSeconds: 3599 }),
+      originalProbe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      outputSizeBytes: 4 * GIGABYTE,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report).toEqual({ ok: true, reasons: [] });
+  });
+
+  it('fails an output sitting exactly ON the size floor', () => {
+    // 400 MB against 8 GB is exactly 0.05. A truncated encode that lands on
+    // the boundary must not pass: the floor is the smallest ACCEPTABLE size,
+    // and `<` let this exact case through.
+    const report = verifyOutput({
+      probe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      originalProbe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      outputSizeBytes: 400 * 1_000 * 1_000,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasons).toHaveLength(1);
+    expect(report.reasons[0]).toContain('size');
+  });
+
+  it('fails an output whose duration is missing while the original has one', () => {
+    // The sequence this exists for: ffmpeg hits a corrupt region, stops early
+    // and exits 0, leaving a short file whose duration element was never
+    // written. "Unknown" must never read as "fine" — that is a false pass on
+    // the check standing between a bad encode and a destroyed original.
+    const report = verifyOutput({
+      probe: { streams: probeOf({ streams: 2, durationSeconds: 1 }).streams, format: {} },
+      originalProbe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      outputSizeBytes: 4 * GIGABYTE,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasons).toHaveLength(1);
+    expect(report.reasons[0]).toContain('duration');
+  });
+
+  it("fails an output whose duration ffprobe reported as 'N/A'", () => {
+    const report = verifyOutput({
+      probe: {
+        streams: probeOf({ streams: 2, durationSeconds: 1 }).streams,
+        format: { duration: 'N/A' },
+      },
+      originalProbe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      outputSizeBytes: 4 * GIGABYTE,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasons[0]).toContain('duration');
+  });
+
+  it('fails when the original size is unknown, rather than skipping the floor', () => {
+    const report = verifyOutput({
+      probe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      originalProbe: probeOf({ streams: 2, durationSeconds: 3600 }),
+      outputSizeBytes: 4 * GIGABYTE,
+      originalSizeBytes: 0,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasons).toHaveLength(1);
+    expect(report.reasons[0]).toContain('size');
+  });
+
+  it('fails the exact truncated-encode sequence that passed before', () => {
+    // A 90-minute 8 GB original; ffmpeg stops early at 20 minutes and 400 MB
+    // without writing a duration. Streams match, duration is unknown, and the
+    // ratio is exactly the floor. Every individual check used to abstain, so
+    // this returned ok with ZERO reasons and the good original was trashed.
+    const report = verifyOutput({
+      probe: { streams: probeOf({ streams: 2, durationSeconds: 1 }).streams, format: {} },
+      originalProbe: probeOf({ streams: 2, durationSeconds: 5400 }),
+      outputSizeBytes: 400 * 1_000 * 1_000,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasons).toHaveLength(2);
+  });
+
   it('fails an output ffprobe could not read at all', () => {
     const report = verifyOutput({
       probe: { streams: [], format: {} },

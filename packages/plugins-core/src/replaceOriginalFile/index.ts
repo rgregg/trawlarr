@@ -3,10 +3,10 @@ import type { PluginDetails, PluginInputArgs, PluginOutputArgs } from '@trawlarr
 export const details = (): PluginDetails => ({
   name: 'Replace Original File',
   description:
-    'Replace the original file with the new one produced upstream: the original and its ' +
-    'companions move to the library trash and the new file is renamed into place. This is ' +
-    'the destructive step — the engine never replaces a file implicitly, only when this ' +
-    'node is placed in the flow.',
+    'Replace the original file with the new one produced upstream: the original moves to ' +
+    'the library trash and the new file takes its place. Companion files (subtitles, .nfo) ' +
+    'are not trashed — they follow the new file to its name. This is the destructive step ' +
+    '— the engine never replaces a file implicitly, only when this node is placed in the flow.',
   style: { borderColor: '#aa3333' },
   tags: 'safety,replace',
   isStartPlugin: false,
@@ -49,10 +49,11 @@ export const details = (): PluginDetails => ({
 
 /**
  * The engine performs the actual filesystem replacement (moving the original
- * and its companions to trash, then renaming the new file into place) and
- * replaces this module's behaviour at runtime, which is what lets a dry run
- * record the planned replacement without touching the filesystem. Reaching
- * this body means the node ran outside an engine that understands it.
+ * to trash, installing the new file in its place, and renaming companion
+ * files to follow it) and replaces this module's behaviour at runtime, which
+ * is what lets a dry run record the planned replacement without touching the
+ * filesystem. Reaching this body means the node ran outside an engine that
+ * understands it.
  */
 export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> => {
   args.jobLog(

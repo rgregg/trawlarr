@@ -108,7 +108,12 @@ const numeric = (value: unknown): number => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const BYTES_PER_MEGABYTE = 1_000 * 1_000;
+/**
+ * Exported so the Replace Original File runner uses this constant — and the
+ * evidence below justifying `1000 * 1000` rather than `1024 * 1024` — instead
+ * of declaring a second copy that could drift from it.
+ */
+export const BYTES_PER_MEGABYTE = 1_000 * 1_000;
 
 /**
  * Trawlarr keeps every size internally in bytes. The Tdarr plugin contract
@@ -218,9 +223,16 @@ export const absorbPluginFileObject = (fileObject: PluginFileObject): AbsorbedCh
     // convert back to trawlarr's internal bytes representation so a plugin
     // that merely echoes the file object back doesn't silently shrink the
     // recorded size by a factor of a million.
+    //
+    // Rounded at the producer: the megabyte round-trip is floating point, so a
+    // 999,999-byte file comes back as 999999.0000000001. A byte count is a
+    // whole number by definition and the column holding it has INTEGER
+    // affinity, so rounding here is what keeps every consumer from having to
+    // remember to do it. Replace Original File is what first makes non-round
+    // values routine, by writing a re-stat-ed size back through this contract.
     newSizeBytes:
       typeof newSize === 'number' && Number.isFinite(newSize)
-        ? toBytesFromMegabytes(newSize)
+        ? Math.round(toBytesFromMegabytes(newSize))
         : null,
   };
 };

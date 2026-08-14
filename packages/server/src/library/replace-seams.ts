@@ -1,6 +1,12 @@
 import { stat } from 'node:fs/promises';
-import type { FindCompanionsFn, MoveCompanionsFn, StatFileFn } from '@trawlarr/engine';
+import type {
+  CrossDeviceErrorFn,
+  FindCompanionsFn,
+  MoveCompanionsFn,
+  StatFileFn,
+} from '@trawlarr/engine';
 import { findCompanions, moveCompanions } from '../fs/companions.js';
+import { CrossDeviceStagingError } from './paths.js';
 
 /**
  * The server-side implementations of the seams the Replace Original File
@@ -32,3 +38,11 @@ export const statFileSeam: StatFileFn = async (path) => {
   const stats = await stat(path);
   return { size: stats.size, nlink: stats.nlink };
 };
+
+/**
+ * Without this, `allowCrossDevice: false` raises a generic `Error` carrying
+ * the same words rather than the error type Task 6 defined for exactly this
+ * condition, and nothing anywhere type-checks that a caller supplied one.
+ */
+export const crossDeviceErrorSeam: CrossDeviceErrorFn = (input) =>
+  new CrossDeviceStagingError(input);

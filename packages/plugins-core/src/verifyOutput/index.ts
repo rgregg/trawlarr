@@ -42,11 +42,14 @@ export const details = (): PluginDetails => ({
 });
 
 /**
- * The engine performs the actual verification (probing the output, comparing
- * duration/streams/size, checking free space and hardlink state) and replaces
- * this module's behaviour at runtime, which is what lets a dry run record the
- * planned check without touching the filesystem. Reaching this body means the
- * node ran outside an engine that understands it.
+ * The engine performs the actual verification (probing the output and
+ * comparing its stream count, duration and size against the original) and
+ * replaces this module's behaviour at runtime, which is what lets a dry run
+ * record the planned check without touching the filesystem. Reaching this
+ * body means the node ran outside an engine that understands it.
+ *
+ * Free space and hardlink state are NOT checked here: the hardlink refusal
+ * belongs to Replace Original File, which is the node that would act on it.
  */
 export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> => {
   args.jobLog('Verify Output must be run by the trawlarr engine; refusing to run standalone.');
