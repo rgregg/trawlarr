@@ -124,7 +124,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     // AFTER the upsert would compare the new stat to itself and never
     // detect a real change, silently defeating rule 5's probe-skip.
     const existingBeforeUpsert: MediaFileRow | null =
-      isNew || match.fileId === null ? null : mediaFileRepo.getById(match.fileId);
+      match.fileId === null ? null : mediaFileRepo.getById(match.fileId);
 
     // upsertScanned preserves the existing record's identity across a
     // rename: path is deliberately not the identity key. One pathological

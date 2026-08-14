@@ -122,12 +122,26 @@ describe('scanLibrary', () => {
 
   it('re-probes only the file that changed on a rescan, not the whole library', async () => {
     await scan();
+    const repo = createMediaFileRepo(db);
+    const before = repo
+      .listByLibrary({ libraryId })
+      .map((r) => r.id)
+      .sort();
     const changedPath = join(root, 'one.mkv');
     const future = new Date(Date.now() + 60_000);
     utimesSync(changedPath, future, future);
     const summary = await scan();
     expect(summary.seen).toBe(2);
     expect(summary.probed).toBe(1);
+    // A changed file must still be the SAME record, re-probed — not a
+    // "changed" file misclassified as new (which would also leave probed
+    // at 1, but would mean rule 5 is silently broken).
+    expect(summary.added).toBe(0);
+    const after = repo
+      .listByLibrary({ libraryId })
+      .map((r) => r.id)
+      .sort();
+    expect(after).toEqual(before);
   });
 
   it('leaves a converged file alone', async () => {
@@ -226,6 +240,12 @@ describe('scanLibrary', () => {
       const summary = await scan();
       expect(summary.unreadable).toBe(1);
       expect(summary.seen).toBe(3);
+      // probeFile was still invoked for the broken file (it's readable and
+      // hashable, just not decodable) alongside the two real ones — the
+      // increment sits before the call specifically so a ProbeError still
+      // counts. If that ordering were ever inverted, this assertion would
+      // catch the resulting undercount.
+      expect(summary.probed).toBe(3);
     } finally {
       execFileAsync('rm', ['-f', join(root, 'broken.mkv')]);
     }
