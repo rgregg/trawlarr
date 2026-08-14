@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, open, rename, unlink, utimes } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
-import type { PluginModule, PluginOutputArgs } from '@trawlarr/plugin-api';
+import type { PluginInputArgs, PluginModule, PluginOutputArgs } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
 import { canonicalPath } from './encode-target.js';
 import { BYTES_PER_MEGABYTE } from '../host/file-object.js';
@@ -146,12 +146,24 @@ export const replacementPathFor = (input: { originalPath: string; newPath: strin
 const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP']);
 
 /**
- * How old an abandoned reservation must be before another worker reclaims it.
- * A live reservation exists for the duration of one rename — microseconds — so
- * an hour cannot collide with a worker still holding one; it only ever catches
- * the leftovers of a process that was killed mid-move.
+ * How long a reservation must have gone WITHOUT a heartbeat before another
+ * worker reclaims it.
+ *
+ * The obvious version of this comment — "a reservation lives for one rename,
+ * microseconds, so an hour cannot collide with a live worker" — is wrong for
+ * the deployments this branch exists to serve. A rename blocked on a hung
+ * CIFS or FUSE mount can take minutes or hours, and a merely-slow worker is
+ * otherwise indistinguishable from a dead one: reclaiming its reservation
+ * would put two workers in the critical section, which is the whole hazard.
+ *
+ * So a held reservation has its mtime refreshed while the move is in flight,
+ * and staleness means "nobody has touched this for an hour" rather than
+ * "created over an hour ago".
  */
 const RESERVATION_STALE_MS = 60 * 60 * 1000;
+
+/** Far below the staleness threshold, so a slow move stays visibly alive. */
+const RESERVATION_HEARTBEAT_MS = 60 * 1000;
 
 const eexistAt = (path: string): NodeJS.ErrnoException =>
   Object.assign(new Error(`EEXIST: "${path}" already exists`), { code: 'EEXIST' });
@@ -159,6 +171,13 @@ const eexistAt = (path: string): NodeJS.ErrnoException =>
 /** The hidden name that stands for "this destination is claimed". */
 const reservationPathFor = (finalPath: string): string =>
   join(dirname(finalPath), `.trawlarr-reserve-${basename(finalPath)}`);
+
+/** A reservation this worker holds, identified so it can only release its own. */
+interface HeldReservation {
+  path: string;
+  dev: number;
+  ino: number;
+}
 
 /**
  * Claim `finalPath` for this worker, without ever creating a file AT it.
@@ -169,25 +188,37 @@ const reservationPathFor = (finalPath: string): string =>
  * so `O_CREAT|O_EXCL` admits exactly one of them. A UUID would be unique by
  * construction and would therefore exclude nobody.
  *
- * Claiming the media path itself would be simpler and was the previous
- * approach, but a SIGKILL, OOM or container restart between the claim and the
- * rename then leaves `Movie (2019).mp4` as a 0-byte file with the real
- * original already in trash — permanently, on a container change, because the
- * pre-flight refuses every retry. A crash here leaves only a hidden, empty
- * lock file: the user's media path is untouched, and the next run reclaims the
- * lock once it is provably abandoned.
+ * Claiming the media path itself would be simpler, but a SIGKILL, OOM or
+ * container restart between the claim and the rename then leaves
+ * `Movie (2019).mp4` as a 0-byte file with the real original already in trash
+ * — permanently, on a container change, because the pre-flight refuses every
+ * retry. A crash here leaves only a hidden, empty lock file.
+ *
+ * Reclaiming an abandoned lock is a COMPARE-AND-SWAP, not an unlink followed
+ * by a create. Those are two syscalls with an await between them: a second
+ * worker's unlink can land after the first worker's create, deleting a live
+ * reservation and admitting them both. `rename(2)` is the atomic primitive
+ * here — exactly one racer can move the abandoned file aside, and the losers
+ * get `ENOENT` and back off.
  */
 const reserveDestination = async (input: {
   finalPath: string;
   openExclusive: OpenExclusiveFn;
+  renameFile: RenameFileFn;
   unlinkFile: UnlinkFileFn;
   nowMs: () => number;
   note?: (text: string) => void;
-}): Promise<string> => {
+}): Promise<HeldReservation> => {
   const reservationPath = reservationPathFor(input.finalPath);
-  try {
+
+  const claim = async (): Promise<HeldReservation> => {
     await input.openExclusive(reservationPath);
-    return reservationPath;
+    const stats = await lstat(reservationPath);
+    return { path: reservationPath, dev: stats.dev, ino: stats.ino };
+  };
+
+  try {
+    return await claim();
   } catch (error) {
     if (codeOf(error) !== 'EEXIST') throw error;
   }
@@ -198,20 +229,51 @@ const reserveDestination = async (input: {
     abandoned.size > 0 ||
     input.nowMs() - abandoned.mtimeMs < RESERVATION_STALE_MS
   ) {
-    // Someone else holds this destination right now.
+    // Held by a worker that is alive, or gone before we could look: either
+    // way this destination is not ours to take.
     throw eexistAt(input.finalPath);
   }
 
-  // Abandoned by a process that died mid-move. Reclaiming is safe even if two
-  // workers do it at once: both may remove it, but the exclusive create below
-  // still admits exactly one of them.
+  // Compare-and-swap: whoever renames the abandoned reservation away wins the
+  // right to reclaim it. Everyone else gets ENOENT and must back off.
+  const displaced = `${reservationPath}.${randomUUID()}`;
+  try {
+    await input.renameFile(reservationPath, displaced);
+  } catch {
+    throw eexistAt(input.finalPath);
+  }
+  await input.unlinkFile(displaced).catch(() => {});
   input.note?.(
-    `Reclaiming an abandoned reservation at "${reservationPath}", left behind by a run ` +
-      `that did not finish.`,
+    `Reclaimed an abandoned reservation at "${reservationPath}", left behind by a run that ` +
+      `did not finish.`,
   );
-  await input.unlinkFile(reservationPath).catch(() => {});
-  await input.openExclusive(reservationPath);
-  return reservationPath;
+  // Still an exclusive create: another worker may have claimed the freed name
+  // between the swap and here, and if so this throws EEXIST and backs off.
+  return await claim();
+};
+
+/**
+ * Release a reservation, but only if it is still the one this worker created.
+ *
+ * Comparing `(device, inode)` rather than the path: if this reservation was
+ * reclaimed as abandoned while the move ran, the file now at that path belongs
+ * to another worker, and deleting it would break the lock it is relying on —
+ * and produce a "delete it by hand" message about a file that is not ours.
+ */
+const releaseReservation = async (input: {
+  reservation: HeldReservation;
+  unlinkFile: UnlinkFileFn;
+  note?: (text: string) => void;
+}): Promise<void> => {
+  const current = await lstat(input.reservation.path).catch(() => null);
+  if (current === null) return;
+  if (current.dev !== input.reservation.dev || current.ino !== input.reservation.ino) return;
+  await input.unlinkFile(input.reservation.path).catch((cause: unknown) => {
+    input.note?.(
+      `The reservation at "${input.reservation.path}" could not be removed ` +
+        `(${messageOf(cause)}); delete it by hand.`,
+    );
+  });
 };
 
 /**
@@ -255,22 +317,33 @@ const createExclusively = async (input: {
     );
   }
 
-  const reservationPath = await reserveDestination({
+  const reservation = await reserveDestination({
     finalPath: input.to,
     openExclusive: input.openExclusive,
+    renameFile: input.renameFile,
     unlinkFile: input.unlinkFile,
     nowMs: input.nowMs,
     note: input.note,
   });
+  // Keep the reservation visibly alive while the move runs, so a rename that
+  // blocks for a long time on a hung mount is not mistaken for a dead worker.
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    void utimes(reservation.path, now, now).catch(() => {});
+  }, RESERVATION_HEARTBEAT_MS);
+  heartbeat.unref?.();
   try {
+    // Not a check-then-act race: no other worker can be between these two
+    // lines, because no other worker holds the reservation. It is here to
+    // catch a file something OUTSIDE trawlarr put at the destination.
     if (await exists(input.to)) throw eexistAt(input.to);
     await input.renameFile(input.from, input.to);
   } finally {
-    await input.unlinkFile(reservationPath).catch((cause: unknown) => {
-      input.note?.(
-        `The reservation at "${reservationPath}" could not be removed ` +
-          `(${messageOf(cause)}); delete it by hand.`,
-      );
+    clearInterval(heartbeat);
+    await releaseReservation({
+      reservation,
+      unlinkFile: input.unlinkFile,
+      note: input.note,
     });
   }
   return 'renamed';
@@ -341,13 +414,24 @@ const moveExclusively = async (input: {
  * Decided on IDENTITY, not on size: two flows racing for the same destination
  * hold files of the same length far too often for a size comparison to mean
  * anything (a losing flow would otherwise see the winner's file and claim the
- * win). If the new file is still present, the destination counts as ours only
- * when it is the same `(device, inode)` — which is exactly what a completed
- * link-then-failed-unlink leaves behind. Only when the new file is already
- * gone does size stand in, since there is no longer an inode to compare.
+ * win). The destination counts as ours when it shares `(device, inode)` with
+ * either source it could have come from:
+ *
+ *  - `newPath`, when the file was linked or renamed into place directly;
+ *  - `stagedPath`, when it crossed a device boundary and therefore descends
+ *    from the COPY. Checking only `newPath` made this function structurally
+ *    incapable of returning true on the cross-device path — a different inode
+ *    by construction, on a different device — so every failure after a
+ *    successful cross-device install was reported as "did not land", and the
+ *    runner restored the original over a media path already holding the
+ *    correct new file.
+ *
+ * Size stands in only when neither source still exists, since there is then no
+ * inode left to compare.
  */
 const swapLanded = async (input: {
   newPath: string;
+  stagedPath: string | null;
   finalPath: string;
   expectedSize: number;
 }): Promise<boolean> => {
@@ -357,12 +441,17 @@ const swapLanded = async (input: {
   } catch {
     return false;
   }
-  try {
-    const source = await lstat(input.newPath);
-    return source.dev === destination.dev && source.ino === destination.ino;
-  } catch {
-    return destination.size === input.expectedSize;
+
+  const sources = [input.newPath, ...(input.stagedPath === null ? [] : [input.stagedPath])];
+  let anySourceExists = false;
+  for (const source of sources) {
+    const stats = await lstat(source).catch(() => null);
+    if (stats === null) continue;
+    anySourceExists = true;
+    if (stats.dev === destination.dev && stats.ino === destination.ino) return true;
   }
+
+  return anySourceExists ? false : destination.size === input.expectedSize;
 };
 
 /**
@@ -425,6 +514,55 @@ const booleanInput = (value: unknown, fallback: boolean): boolean => {
   if (text === 'false' || text === '0' || text === 'no') return false;
   if (text === 'true' || text === '1' || text === 'yes') return true;
   return fallback;
+};
+
+/**
+ * Re-stat the replacement and describe it on the file object.
+ *
+ * The re-stat is the point: nothing else does one, so without it every size
+ * the flow reports — `file_size`, `oldSize`, `newSize` — would still describe
+ * the pre-transcode file and every size-comparison plugin downstream would
+ * compute a saving of exactly zero. Sizes cross the plugin boundary in
+ * MEGABYTES while trawlarr stores bytes (see `toPluginFileObject`); anything
+ * persisting them back must round to whole bytes, because the round-trip is
+ * floating point.
+ *
+ * Used by the success route AND by the "landed but left hardlinked" failure
+ * route: both end with a real file at `finalPath`, and a downstream node must
+ * not read a container or a size belonging to the file this one replaced.
+ */
+const describeReplacement = async (input: {
+  args: PluginInputArgs;
+  finalPath: string;
+  originalSizeBytes: number;
+  fallbackStats: FileStats;
+  statFile: StatFileFn;
+  say: (text: string) => void;
+}): Promise<void> => {
+  let finalStats: FileStats;
+  try {
+    finalStats = await input.statFile(input.finalPath);
+  } catch (error) {
+    // The swap happened; only the measurement failed. Report the truth on
+    // disk rather than a stale size.
+    input.say(
+      `"${input.finalPath}" is in place, but its new size could not be read: ` +
+        `${messageOf(error)}`,
+    );
+    finalStats = input.fallbackStats;
+  }
+
+  const file = input.args.inputFileObj;
+  file._id = input.finalPath;
+  file.file = input.finalPath;
+  file.container = extname(input.finalPath).slice(1).toLowerCase();
+  file.file_size = finalStats.size / BYTES_PER_MEGABYTE;
+  file.newSize = finalStats.size / BYTES_PER_MEGABYTE;
+  file.oldSize = input.originalSizeBytes / BYTES_PER_MEGABYTE;
+  input.say(
+    `"${input.finalPath}" now holds the replacement: ` +
+      `${input.originalSizeBytes} bytes -> ${finalStats.size} bytes.`,
+  );
 };
 
 /**
@@ -637,9 +775,22 @@ export const createReplaceOriginalRunner =
             noteLinkFallback,
           });
         } catch (error) {
-          // The original is still at its own path: nothing to undo.
+          // Usually the original never moved and there is nothing to undo. But
+          // a link that succeeded, an unlink that failed and a rollback that
+          // also failed leaves it with a twin in trash — reporting that as a
+          // clean no-op would hide the state that makes every later run refuse
+          // this file.
+          const stranded = await input
+            .statFile(originalPath)
+            .then((stats) => stats.nlink > 1)
+            .catch(() => false);
           return refuse(
-            `the original could not be moved to "${trashDir}" (${messageOf(error)}).`,
+            stranded
+              ? `the original could not be moved to "${trashDir}" (${messageOf(error)}), and ` +
+                  `it is now reachable under more than one name, so it will be refused as ` +
+                  `hardlinked until the duplicate under "${trashDir}" is deleted.`
+              : `the original could not be moved to "${trashDir}" (${messageOf(error)}). ` +
+                  `It is still at its own path and nothing was changed.`,
             originalPath,
           );
         }
@@ -673,10 +824,12 @@ export const createReplaceOriginalRunner =
           }
         };
 
+        const swapState: { stagedPath: string | null } = { stagedPath: null };
         try {
           await swapIntoPlace({
             newPath,
             finalPath,
+            state: swapState,
             renameFile,
             crossDeviceError,
             allowCrossDevice: booleanInput(args.inputs.allowCrossDevice, true),
@@ -697,6 +850,7 @@ export const createReplaceOriginalRunner =
           // sitting exactly where it belongs.
           const landed = await swapLanded({
             newPath,
+            stagedPath: swapState.stagedPath,
             finalPath,
             expectedSize: newStats.size,
           });
@@ -727,8 +881,17 @@ export const createReplaceOriginalRunner =
                 `hardlinked until the duplicate is deleted. Reporting this as a failure ` +
                 `rather than leaving a file that cannot be processed again.`,
             );
-            args.inputFileObj._id = finalPath;
-            args.inputFileObj.file = finalPath;
+            // Described as it actually is on disk: a downstream node on output
+            // 2 must not read a container and sizes belonging to the file this
+            // one replaced.
+            await describeReplacement({
+              args,
+              finalPath,
+              originalSizeBytes: originalStats.size,
+              fallbackStats: newStats,
+              statFile: input.statFile,
+              say,
+            });
             return {
               outputNumber: 2,
               outputFileObj: { _id: finalPath },
@@ -737,36 +900,14 @@ export const createReplaceOriginalRunner =
           }
         }
 
-        // Re-stat AFTER the swap. Nothing else does, so without this every
-        // size the flow reports — file_size, oldSize, newSize — would still
-        // describe the pre-transcode file and every size-comparison plugin
-        // downstream would compute a saving of exactly zero.
-        let finalStats: FileStats;
-        try {
-          finalStats = await input.statFile(finalPath);
-        } catch (error) {
-          // The swap succeeded; only the measurement failed. Report the truth
-          // on disk rather than a stale size.
-          say(
-            `Replaced "${originalPath}", but its new size could not be read: ${messageOf(error)}`,
-          );
-          finalStats = newStats;
-        }
-
-        // The plugin contract carries sizes in MEGABYTES while trawlarr stores
-        // bytes (see toPluginFileObject). Anything persisting these back must
-        // round to whole bytes: the round-trip is floating point, so 999999
-        // bytes returns as 999999.0000000001.
-        args.inputFileObj._id = finalPath;
-        args.inputFileObj.file = finalPath;
-        args.inputFileObj.container = extname(finalPath).slice(1).toLowerCase();
-        args.inputFileObj.file_size = finalStats.size / BYTES_PER_MEGABYTE;
-        args.inputFileObj.newSize = finalStats.size / BYTES_PER_MEGABYTE;
-        args.inputFileObj.oldSize = originalStats.size / BYTES_PER_MEGABYTE;
-        say(
-          `Replaced "${originalPath}" with "${finalPath}": ` +
-            `${originalStats.size} bytes -> ${finalStats.size} bytes.`,
-        );
+        await describeReplacement({
+          args,
+          finalPath,
+          originalSizeBytes: originalStats.size,
+          fallbackStats: newStats,
+          statFile: input.statFile,
+          say,
+        });
 
         try {
           await input.moveCompanions({
@@ -822,6 +963,9 @@ const swapIntoPlace = async (input: {
   allowCrossDevice: boolean;
   say: (text: string) => void;
   noteLinkFallback: (text: string) => void;
+  /** Filled in when the cross-device path stages a copy, so a failure
+   * afterwards can still be recognised as a completed replacement. */
+  state: { stagedPath: string | null };
 }): Promise<void> => {
   if (canonicalPath(input.newPath) === canonicalPath(input.finalPath)) return; // already there
   try {
@@ -865,6 +1009,7 @@ const swapIntoPlace = async (input: {
     dirname(input.finalPath),
     `.trawlarr-replace-${randomUUID()}${extension}`,
   );
+  input.state.stagedPath = stagedPath;
   try {
     await copyFile(input.newPath, stagedPath);
     await moveExclusively({
@@ -897,5 +1042,10 @@ const swapIntoPlace = async (input: {
     throw error;
   }
   // The staged source is now a duplicate of a file that lives in the library.
-  await input.unlinkFile(input.newPath).catch(() => {});
+  await input.unlinkFile(input.newPath).catch((cause: unknown) => {
+    input.say(
+      `The new file at "${input.newPath}" was copied into place but could not be removed ` +
+        `from staging (${messageOf(cause)}); it is a full-size duplicate, delete it by hand.`,
+    );
+  });
 };

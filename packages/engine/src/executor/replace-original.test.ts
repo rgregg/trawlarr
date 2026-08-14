@@ -8,10 +8,12 @@ import {
   readdirSync,
   readFileSync,
   statSync,
+  renameSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { link, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { link, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -35,6 +37,9 @@ const realStat = async (path: string): Promise<{ size: number; nlink: number }> 
 };
 
 const stemOf = (path: string): string => basename(path, extname(path));
+
+const codeOfError = (error: unknown): string | undefined =>
+  (error as NodeJS.ErrnoException | undefined)?.code;
 
 const findCompanionsHere = async (input: {
   filePath: string;
@@ -895,13 +900,20 @@ describe('createReplaceOriginalRunner', () => {
       },
     })(replacePlugin())!;
 
-    const out = await module.plugin(
-      argsFor({
-        newPath: space.newPath,
-        originalPath: space.originalPath,
-        jobLog: (text) => logged.push(text),
-      }),
-    );
+    const args = argsFor({
+      newPath: space.newPath,
+      originalPath: space.originalPath,
+      jobLog: (text) => logged.push(text),
+    });
+    const out = await module.plugin(args);
+
+    // Even on this failure route the file object describes what is ON DISK: a
+    // downstream node reading a stale container or a pre-swap size would be
+    // reasoning about the file this one replaced.
+    expect(args.inputFileObj.container).toBe('mp4');
+    expect(args.inputFileObj.file_size).toBeCloseTo(NEW_BODY.length / 1_000_000, 9);
+    expect(args.inputFileObj.newSize).toBeCloseTo(NEW_BODY.length / 1_000_000, 9);
+    expect(args.inputFileObj.oldSize).toBeCloseTo(ORIGINAL_BODY.length / 1_000_000, 9);
 
     // The replacement did land, and the reported path is the truth on disk...
     expect(out.outputFileObj._id).toBe(finalPath);
@@ -997,6 +1009,282 @@ describe('createReplaceOriginalRunner', () => {
     expect(readdirSync(space.libraryDir).sort()).toEqual(['.trawlarr', 'movie.mkv']);
     // The original came back.
     expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+  });
+
+  it('lets only one worker reclaim an abandoned reservation', async () => {
+    // The reclaim used to be unlink-then-create: two syscalls with an await
+    // between them, which is not a lock. B's unlink can land AFTER A's
+    // exclusive create, deleting A's brand-new reservation, after which B's
+    // create succeeds too. Both are then inside the critical section and the
+    // exists/rename pair degrades to check-then-rename — C3 again, reached
+    // through the one path C3's fix never touched.
+    //
+    // The interleaving is forced through the seams rather than left to the
+    // scheduler: run naturally, the two workers usually miss each other and
+    // the test passes against the broken code.
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-replace-reclaim-'));
+    const libraryDir = join(root, 'library');
+    mkdirSync(libraryDir, { recursive: true });
+    const trashDir = join(root, '.trawlarr', 'trash');
+    const finalPath = join(libraryDir, 'movie.mp4');
+    const reservationPath = join(libraryDir, '.trawlarr-reserve-movie.mp4');
+
+    const make = (extension: string, body: string) => {
+      const originalPath = join(libraryDir, `movie.${extension}`);
+      const stagingDir = join(root, '.trawlarr', 'staging', extension);
+      mkdirSync(stagingDir, { recursive: true });
+      const newPath = join(stagingDir, 'movie.mp4');
+      writeFile(originalPath, body);
+      writeFile(newPath, `${body} (transcoded)`);
+      return { originalPath, newPath };
+    };
+    const mkv = make('mkv', 'the mkv original');
+    const avi = make('avi', 'the avi original');
+
+    // Left behind by a run killed two hours ago.
+    writeFile(reservationPath, '');
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(reservationPath, twoHoursAgo, twoHoursAgo);
+
+    let resolveFirstClaim = () => {};
+    const firstClaim = new Promise<void>((resolve) => {
+      resolveFirstClaim = resolve;
+    });
+    let releaseBothSaw = () => {};
+    const bothSawItOccupied = new Promise<void>((resolve) => {
+      releaseBothSaw = resolve;
+    });
+    let occupiedObservations = 0;
+    let reservationUnlinks = 0;
+    let reservationClaims = 0;
+
+    const module = runnerFor({
+      trashDir,
+      overrides: {
+        // Hardlinking unavailable: the only way to reach the reservation.
+        linkFile: () => {
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        // The suite's fixed CLOCK_MS predates every real file mtime, which
+        // would make staleness evaluate negative and leave this branch
+        // unreachable.
+        nowMs: () => Date.now(),
+        unlinkFile: async (path) => {
+          if (path === reservationPath) {
+            reservationUnlinks += 1;
+            // The second racer's removal lands after the first has claimed:
+            // the exact ordering that breaks an unlink-then-create "lock".
+            if (reservationUnlinks === 2) await firstClaim;
+          }
+          await unlink(path).catch(() => {});
+        },
+        openExclusive: async (path) => {
+          let handle;
+          try {
+            handle = await open(path, 'wx');
+          } catch (error) {
+            if (path === reservationPath && codeOfError(error) === 'EEXIST') {
+              // Hold both workers here until each has seen the abandoned
+              // reservation, so neither can quietly miss the race.
+              occupiedObservations += 1;
+              if (occupiedObservations >= 2) releaseBothSaw();
+              else await bothSawItOccupied;
+            }
+            throw error;
+          }
+          await handle.close();
+          if (path === reservationPath) {
+            reservationClaims += 1;
+            if (reservationClaims === 1) resolveFirstClaim();
+          }
+        },
+      },
+    })(replacePlugin())!;
+
+    const outs = await Promise.all([
+      module.plugin(argsFor({ ...mkv, jobLog: () => {} })),
+      module.plugin(argsFor({ ...avi, jobLog: () => {} })),
+    ]);
+
+    // THE invariant: a reclaim is a lock, so exactly one worker may end up
+    // holding the reservation. With both inside the critical section the
+    // exists/rename pair is a check-then-rename again, and whether data
+    // survives comes down to which syscall lands first.
+    expect(reservationClaims).toBe(1);
+    expect(outs.map((out) => out.outputNumber).sort()).toEqual([1, 2]);
+    const winner = outs.findIndex((out) => out.outputNumber === 1);
+    const loser = [mkv, avi][1 - winner]!;
+
+    // The winner's transcode is intact, not consumed by the loser's rename.
+    expect(readFileSync(finalPath, 'utf8')).toBe(
+      winner === 0 ? 'the mkv original (transcoded)' : 'the avi original (transcoded)',
+    );
+    // The loser gave up nothing: its original is still its own.
+    expect(readFileSync(loser.originalPath, 'utf8')).toBe(
+      winner === 0 ? 'the avi original' : 'the mkv original',
+    );
+    // Two library entries went in; two came out.
+    expect(readdirSync(trashDir)).toHaveLength(1);
+  });
+
+  it("never releases a reservation that has become another worker's", async () => {
+    // If this worker's reservation is reclaimed as abandoned while its move
+    // runs, the file at that path now belongs to somebody else. Deleting it on
+    // the way out would break the lock that worker is relying on — and produce
+    // a "delete it by hand" message about a file that was never ours.
+    const space = workspace({ newExtension: 'mp4' });
+    const finalPath = join(space.libraryDir, 'movie.mp4');
+    const reservationPath = join(space.libraryDir, '.trawlarr-reserve-movie.mp4');
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: () => {
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        nowMs: () => Date.now(),
+        renameFile: async (from, to) => {
+          if (to === finalPath) {
+            // Stand in for another worker reclaiming ours: same path, DIFFERENT
+            // inode. Written as create-then-rename because unlink-then-create
+            // hands back the inode just freed — the substitute would then be
+            // indistinguishable from our own reservation and the test would be
+            // asserting nothing.
+            writeFileSync(`${reservationPath}.other`, '', 'utf8');
+            renameSync(`${reservationPath}.other`, reservationPath);
+          }
+          await rename(from, to);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(readFileSync(finalPath, 'utf8')).toBe(NEW_BODY);
+    // The other worker's reservation is still standing.
+    expect(existsSync(reservationPath)).toBe(true);
+  });
+
+  it('reclaims an abandoned reservation rather than refusing forever', async () => {
+    const space = workspace({ newExtension: 'mp4' });
+    const finalPath = join(space.libraryDir, 'movie.mp4');
+    const reservationPath = join(space.libraryDir, '.trawlarr-reserve-movie.mp4');
+    writeFile(reservationPath, '');
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(reservationPath, twoHoursAgo, twoHoursAgo);
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: () => {
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        nowMs: () => Date.now(),
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(readFileSync(finalPath, 'utf8')).toBe(NEW_BODY);
+    // Neither the abandoned reservation nor the one taken to replace it.
+    expect(readdirSync(space.libraryDir).sort()).toEqual(['.trawlarr', 'movie.mp4']);
+  });
+
+  it('refuses while another worker is genuinely holding the reservation', async () => {
+    const space = workspace({ newExtension: 'mp4' });
+    // Fresh, not abandoned: a live worker is mid-move.
+    writeFile(join(space.libraryDir, '.trawlarr-reserve-movie.mp4'), '');
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: () => {
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        nowMs: () => Date.now(),
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    // Untouched: the original is back and the live reservation still stands.
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(existsSync(join(space.libraryDir, '.trawlarr-reserve-movie.mp4'))).toBe(true);
+  });
+
+  it('knows the replacement landed even when it arrived by cross-device copy', async () => {
+    // swapLanded decided on (dev, ino) identity against the STAGED file, but a
+    // cross-device replacement descends from the copy — a different inode by
+    // construction. So on that path it always answered "did not land", the
+    // runner restored over a media path already holding the correct new file,
+    // and told the user to move the trash copy back over it.
+    const space = workspace({ newExtension: 'mp4' });
+    const finalPath = join(space.libraryDir, 'movie.mp4');
+    const logged: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) {
+            throw Object.assign(new Error('EXDEV: cross-device link not permitted'), {
+              code: 'EXDEV',
+            });
+          }
+          await link(from, to);
+        },
+        unlinkFile: async (path) => {
+          // The staged copy cannot be removed, and neither can the link made
+          // from it — so the rollback fails and the replacement stands.
+          if (basename(path).startsWith('.trawlarr-replace-') || path === finalPath) {
+            throw Object.assign(new Error(`EACCES: permission denied, unlink '${path}'`), {
+              code: 'EACCES',
+            });
+          }
+          await unlink(path);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => logged.push(text),
+      }),
+    );
+
+    const log = logged.join('\n');
+    // The new file really is at the media path...
+    expect(readFileSync(finalPath, 'utf8')).toBe(NEW_BODY);
+    // ...so nothing may tell the user to move the trash copy back over it.
+    expect(log).not.toMatch(/URGENT/);
+    // ...and the original must NOT be restored on top of it: doing so leaves
+    // the library holding the same title twice, one under each container,
+    // with the ledger pointing two records at one replacement.
+    expect(existsSync(space.originalPath)).toBe(false);
+    // It carries an extra name, so it is reported as a failure with the reason
+    // said out loud rather than left silently unprocessable.
+    expect(out.outputNumber).toBe(2);
+    expect(out.outputFileObj._id).toBe(finalPath);
+    expect(log).toMatch(/two names|hardlinked/i);
+    // The original stays recoverable in trash.
+    const trashed = readdirSync(space.trashDir);
+    expect(trashed).toHaveLength(1);
+    expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
   });
 
   it('routes a partial companion failure to output 2, reporting the split', async () => {
