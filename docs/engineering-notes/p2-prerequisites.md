@@ -63,6 +63,72 @@ the worker its own process group and kill the group.
 
 ---
 
+### The filename belongs to the user; only the container is ours
+
+`Replace Original File` takes the **original's stem and the new file's extension**. It must never adopt
+the staged file's name: that name is an implementation detail of whatever produced it, and Plex,
+Jellyfin, Sonarr and Radarr all identify content by filename, so adopting it renames the user's library
+in bulk under an unattended worker. This was briefly changed and caught by running it — `movie.mkv`
+came back as `out.mp4` with the sidecars renamed to `out.en.srt`/`out.nfo`.
+
+The change was made to give a test something to observe, because preserving the stem means
+`moveCompanions` computes `target === companion` and correctly does nothing. That is the tell: when a
+test can only be made meaningful by changing the behaviour it tests, the test is wrong, not the
+behaviour. Companion *moving* belongs to `moveCompanions`' own unit tests, where a rename really
+happens; the replacement-level test asserts the outcome — companions still beside the new file under
+their original names.
+
+The trash entry keeps the original's own name and extension, because a human recovering from trash has
+to recognise it.
+
+### A verification check that cannot run is a failure, not a pass
+
+`Verify Output` originally skipped its duration comparison whenever the value was unreadable —
+`parseFloat` of a missing field is `NaN`, ffprobe writes a literal `"N/A"`, and a zero-byte original
+skipped the size-ratio check too. Each skip was silent, producing `ok` with *zero* reasons. An ffmpeg
+run that hits a corrupt region, stops early and exits 0 leaves a truncated output whose duration
+element was never written: streams pass, duration is skipped, and a size ratio sitting exactly on the
+floor passed a strict `<`. Verification approved it and Replace trashed the good original.
+
+The rule is general: for a gate protecting a destructive step, "I could not check this" must produce a
+reason, never a pass, and boundary comparisons must be inclusive on the failing side. This one was
+mandated verbatim by the implementation plan and reproduced faithfully — a plan defect, not an
+implementer defect, which is why reviewing against the plan is not sufficient on its own.
+
+### Concurrency: check-then-act on a filesystem path is not safe, and `rename(2)` replaces silently
+
+Two failures of this exact shape reached review in one task. The trash directory is per library *root*,
+so the trash name derives from the file's basename — and two different files sharing a basename
+(`title00.mkv` under two show folders is ordinary for disc rips) collide. Both workers `lstat` the same
+candidate, both see `ENOENT`, and the second `rename` unlinks the first original. Both then report
+success. A retry counter does not help: it only sees what is already on disk, never what is in flight.
+The same shape appears when two files converge on one replacement path (`movie.mkv` and `movie.avi`
+both targeting mp4) — the second swap destroys the first's freshly-transcoded output.
+
+Create exclusively instead. Anywhere a destructive step chooses a path by checking whether it is free,
+assume two workers choose it simultaneously.
+
+`link(2)` is a tempting primitive here — it fails `EEXIST` atomically and is same-device by construction
+— but it needs a fallback, and the fallback is where the bug comes back. Two trigger classes are
+ordinary rather than exotic:
+
+- Filesystems without hardlinks: SMB/CIFS without unix extensions, exFAT/FAT32, several FUSE mounts —
+  exactly where media libraries live.
+- **`EPERM` does not mean "no hardlinks".** With `fs.protected_hardlinks=1`, the kernel default,
+  `link(2)` returns `EPERM` whenever the caller neither owns the source nor has read+write on it. A
+  container running as PUID 1000 over media owned by another uid at 0644, on plain ext4, hits this on
+  every move.
+
+A fallback that degrades to check-then-rename therefore reopens the race permanently, silently, for a
+large class of real deployments, while the code reads as safe. Reserve the destination with
+`open(path, 'wx')` (`O_CREAT|O_EXCL`) and rename over your own placeholder instead.
+
+`link`-then-`unlink` also has an interruption profile `rename(2)` does not: if the unlink fails or the
+process dies between them, the file exists under both names. That is safe for data but not inert — a
+later run sees `nlink=2`, refuses the file as hardlinked, and blames the user for a link trawlarr
+created. Clean up the link you just made on the failure path, and never report a failure for a
+replacement that actually landed.
+
 ### Nothing purges the trash
 
 `Replace Original File` declares a `trashRetentionDays` input, but no code reads it and nothing sweeps
