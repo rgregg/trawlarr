@@ -28,6 +28,12 @@ export interface ScanSummary {
   skippedHardlinked: number;
   unreadable: number;
   alreadyGood: number;
+  /**
+   * Number of files `probeFile` was actually invoked for — the count that
+   * proves the expensive step (rule 5) was skipped for unchanged files
+   * rather than merely producing the same downstream numbers by chance.
+   */
+  probed: number;
 }
 
 export interface ScanLibraryInput {
@@ -74,6 +80,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     skippedHardlinked: 0,
     unreadable: 0,
     alreadyGood: 0,
+    probed: 0,
   };
 
   interface Decision {
@@ -112,6 +119,13 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     const match = matchIdentity(identity, lookup);
     const isNew = match.fileId === null;
 
+    // Read the PRE-scan row now, before upsertScanned overwrites
+    // size_bytes/mtime_ms with this scan's stat: comparing against the row
+    // AFTER the upsert would compare the new stat to itself and never
+    // detect a real change, silently defeating rule 5's probe-skip.
+    const existingBeforeUpsert: MediaFileRow | null =
+      isNew || match.fileId === null ? null : mediaFileRepo.getById(match.fileId);
+
     // upsertScanned preserves the existing record's identity across a
     // rename: path is deliberately not the identity key. One pathological
     // file must not abort the whole scan, so a conflict is counted and
@@ -148,12 +162,11 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       continue;
     }
 
-    const existing: MediaFileRow | null = isNew ? null : mediaFileRepo.getById(fileId);
     const doProbe =
       isNew ||
-      existing === null ||
-      existing.size_bytes !== entry.stat.size ||
-      existing.mtime_ms !== entry.stat.mtimeMs;
+      existingBeforeUpsert === null ||
+      existingBeforeUpsert.size_bytes !== entry.stat.size ||
+      existingBeforeUpsert.mtime_ms !== entry.stat.mtimeMs;
 
     decisions.push({
       fileId,
@@ -189,6 +202,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       });
       continue;
     }
+    summary.probed += 1;
     try {
       const probe = await probeFile({ ffprobePath, path: decision.path });
       const facts = extractFacts({

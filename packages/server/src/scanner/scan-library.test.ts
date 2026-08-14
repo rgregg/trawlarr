@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { linkSync, mkdirSync, mkdtempSync, renameSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, mkdtempSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -96,6 +96,9 @@ describe('scanLibrary', () => {
     expect(summary.seen).toBe(2);
     expect(summary.added).toBe(2);
     expect(summary.queued).toBe(2);
+    // Both are new, so both must have gone through an actual probe — proves
+    // `probed` counts something real rather than sitting at zero.
+    expect(summary.probed).toBe(2);
     expect(createMediaFileRepo(db).listByLibrary({ libraryId, state: 'queued' })).toHaveLength(2);
   });
 
@@ -111,7 +114,20 @@ describe('scanLibrary', () => {
     const second = await scan();
     expect(second.added).toBe(0);
     expect(second.seen).toBe(2);
+    // The counter that actually distinguishes "skipped the probe" from
+    // "probed again and happened to get the same answer".
+    expect(second.probed).toBe(0);
     expect(createMediaFileRepo(db).listByLibrary({ libraryId })).toHaveLength(2);
+  });
+
+  it('re-probes only the file that changed on a rescan, not the whole library', async () => {
+    await scan();
+    const changedPath = join(root, 'one.mkv');
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(changedPath, future, future);
+    const summary = await scan();
+    expect(summary.seen).toBe(2);
+    expect(summary.probed).toBe(1);
   });
 
   it('leaves a converged file alone', async () => {
