@@ -302,6 +302,11 @@ instead of a bug hunt.
 
 ### 2.10 Version reporting
 
+**Not yet implemented.** This section describes the intended design, belonging to P1
+(Engine, plugin host) in [§10](#10-milestones). Today `requiresVersion` is read off each
+plugin's `details()` and stored, but never compared against anything — a plugin that
+requires a newer contract than trawlarr implements runs with no warning at all.
+
 Plugins declare `requiresVersion`. Trawlarr reports its own version plus a declared
 **contract level** — the Tdarr plugin-contract revision it implements. When a plugin
 requires more than the declared level, trawlarr runs it anyway but records a warning in
@@ -640,13 +645,30 @@ this file?" is not possible: asking means running, and running means the Execute
 transcodes the file again.
 
 After each run that reports success and claims to have modified the file, compare the
-pre-run and post-run fact sets. If they are equivalent within tolerance, the run
-accomplished nothing → `consecutive_noop_count++`. At **2**, set `not_converging` and
-stop queueing the file.
+pre-run and post-run fact sets by **exact** equality on `factsHash` — not the tolerant
+comparison `factsEquivalent` uses for the *Verify Output* node (see [§6](#6-flows-and-safety)).
+If they are identical, the run accomplished nothing → `not_converging`, immediately, on
+the **first** such run.
+
+This is a one-strike rule, not the two-strike rule an earlier draft of this spec
+described. The two-strike version was unreachable: after the first no-op run a file is
+marked `good` with a matching signature, which is terminal — nothing re-queues it, so
+`consecutive_noop_count` could never reach 2 within a single flow's lifetime. The count
+could only ever have hit 2 by carrying a no-op recorded under a stale flow forward
+against a run made under a newer one, which is not a signal worth waiting for.
+
+The comparison also has to be exact, not tolerant. A metadata-only flow — retagging
+subtitle languages, setting a title — does real work while leaving codecs, streams,
+container and duration untouched. A tolerant comparison calls that "no change" and would
+flag every such file as non-converging, which is worse than the failure mode it exists to
+catch. A run that claims it modified the file but leaves the exact fact set identical is
+therefore marked `not_converging` on the spot; so is a run that claims to have modified
+the file but leaves no post-run probe to compare against, since unverified progress must
+not be assumed — assuming it is how an infinite loop starts.
 
 This detects the real failure — work that changes nothing — rather than a proxy for it,
-and it turns Tdarr's silent infinite-loop failure mode into a visible count on the
-dashboard.
+and it turns Tdarr's silent infinite-loop failure mode into a visible, one-run count on
+the dashboard instead of a silent retry loop.
 
 **Recovery:** `not_converging` and `failed` are both terminal until acted on. A manual
 requeue — per file, or bulk from a filtered table view — resets `consecutive_noop_count`
@@ -783,7 +805,7 @@ Two requirements rather than polish:
 
 | Layer | Approach |
 | --- | --- |
-| Domain | Pure unit tests: signature computation, fact-set equivalence, two-strike convergence rule, identity resolution, queue ordering, path mapping |
+| Domain | Pure unit tests: signature computation, fact-set equivalence, one-strike convergence rule, identity resolution, queue ordering, path mapping |
 | Engine | Fake plugins: routing by output number, cycles, Begin/Execute state machine, `onFlowError`, mid-flow crashes, atomic claiming under contention |
 | ffmpeg compiler | Golden tests — stream fixtures in, exact argv asserted |
 | Compatibility | Real community plugins against probe fixtures, asserting output number and generated argv |
