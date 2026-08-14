@@ -266,6 +266,19 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
 
 ## Testing lessons that cost real time
 
+- **A concurrency test that lets the scheduler interleave usually passes against broken code**, because
+  racers mostly miss each other. A first attempt at the reservation-race test passed against a lock that
+  was provably broken; it was caught only because the result contradicted the prediction. Force the
+  interleaving through seams and assert the *invariant* — "exactly one worker claimed the reservation" —
+  not the outcome. Asserting the outcome makes the test non-deterministic in both directions.
+- **A test that constructs an identity collision cannot test an identity check.** A substitute
+  reservation built with `unlink` then `create` got the just-freed inode back from tmpfs, so the "other
+  worker's" lock had an identical `(device, inode)` and the ownership check correctly treated it as its
+  own. Build the rival by creating a sibling and renaming it over.
+- **A frozen clock can make a whole branch unreachable.** The abandoned-reservation reclamation had no
+  test at all, and the suite's fixed `CLOCK_MS` (Nov 2023) made `now - mtime` negative against real file
+  mtimes, so the branch could not be entered even by accident. Whenever a fixed clock meets a real
+  filesystem timestamp, check which direction the subtraction runs.
 - **A rare flake is invisible to single-run verification.** A test asserting that a 1 ms timer had
   ticked failed about one run in fifteen and survived five reviews. When a test asserts a timing side
   effect, assert *order* instead.
