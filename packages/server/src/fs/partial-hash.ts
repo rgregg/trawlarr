@@ -19,6 +19,42 @@ export const HASH_WINDOW_BYTES = 65_536;
 
 const digest = (buffer: Buffer): string => createHash('sha256').update(buffer).digest('hex');
 
+/**
+ * The subset of `FileHandle.read` this module depends on, extracted so tests
+ * can inject a reader that deliberately returns short reads.
+ */
+export type ReadFn = (
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number,
+) => Promise<{ bytesRead: number }>;
+
+/**
+ * Fills a `size`-byte buffer starting at `position` in the source, looping
+ * over the given `read` until the buffer is full or EOF is reached.
+ *
+ * A single `read` call is not guaranteed to fill the requested length —
+ * interrupted syscalls and network filesystems (NFS/SMB, a realistic
+ * deployment target for a library scanner) can return fewer bytes than
+ * asked for. Because `Buffer.alloc` pre-zeros memory, failing to loop would
+ * silently leave the unfilled remainder as zeros: the digest for identical
+ * content could vary between calls (producing duplicate identities for the
+ * same file), and a genuinely short tail read could zero-pad into a
+ * collision with an unrelated file. Looping and returning only the bytes
+ * actually read avoids both.
+ */
+export const readWindow = async (read: ReadFn, size: number, position: number): Promise<Buffer> => {
+  const buffer = Buffer.alloc(size);
+  let readSoFar = 0;
+  while (readSoFar < size) {
+    const { bytesRead } = await read(buffer, readSoFar, size - readSoFar, position + readSoFar);
+    if (bytesRead === 0) break; // EOF before the window was filled.
+    readSoFar += bytesRead;
+  }
+  return buffer.subarray(0, readSoFar);
+};
+
 export const partialHashFile = async (path: string): Promise<PartialHashParts> => {
   let size: number;
   try {
@@ -30,13 +66,15 @@ export const partialHashFile = async (path: string): Promise<PartialHashParts> =
   const handle = await open(path, 'r');
   try {
     const window = Math.min(HASH_WINDOW_BYTES, size);
-    const head = Buffer.alloc(window);
-    if (window > 0) await handle.read(head, 0, window, 0);
+    const read: ReadFn = (buffer, offset, length, position) =>
+      handle.read(buffer, offset, length, position);
+
+    const head = window > 0 ? await readWindow(read, window, 0) : Buffer.alloc(0);
 
     // For a file at or below one window, head and tail cover the same bytes.
     // That is correct rather than wasteful: the pair still identifies it.
-    const tail = Buffer.alloc(window);
-    if (window > 0) await handle.read(tail, 0, window, Math.max(0, size - window));
+    const tail =
+      window > 0 ? await readWindow(read, window, Math.max(0, size - window)) : Buffer.alloc(0);
 
     return { sizeBytes: size, headHex: digest(head), tailHex: digest(tail) };
   } finally {
@@ -45,9 +83,13 @@ export const partialHashFile = async (path: string): Promise<PartialHashParts> =
 };
 
 /**
- * `fs.stat` reports `dev`/`ino` as numbers here; large inode values would lose
- * precision as doubles, so identity keys are built from their string forms in
- * `@trawlarr/core`.
+ * `fs.stat` (non-bigint form) reports `dev`/`ino` as JS numbers, which lose
+ * precision above `Number.MAX_SAFE_INTEGER`. That narrowing happens before
+ * this function ever sees the values — building the identity key from their
+ * string form afterward cannot recover precision already lost. The actual
+ * mitigation would be reading stats with `{ bigint: true }` and threading
+ * bigint device/inode through to `buildIdentityCandidate`; that is not wired
+ * up here.
  */
 export const identityFromStat = (input: {
   stat: Stats;

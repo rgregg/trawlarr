@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HASH_WINDOW_BYTES, partialHashFile } from './partial-hash.js';
+import { HASH_WINDOW_BYTES, partialHashFile, readWindow, type ReadFn } from './partial-hash.js';
 
 const write = (name: string, contents: Buffer | string): string => {
   const dir = mkdtempSync(join(tmpdir(), 'trawlarr-hash-'));
@@ -67,5 +68,49 @@ describe('partialHashFile', () => {
 
   it('rejects a path that does not exist, naming it', async () => {
     await expect(partialHashFile('/nope/missing.bin')).rejects.toThrow(/missing\.bin/);
+  });
+});
+
+describe('readWindow', () => {
+  // A reader that never fills more than `chunkLimit` bytes per call, to
+  // simulate interrupted syscalls / network filesystems that hand back
+  // fewer bytes than requested.
+  const shortReadingReaderFor = (content: Buffer, chunkLimit: number): ReadFn => {
+    return async (buffer, offset, length, position) => {
+      const remaining = content.length - position;
+      if (remaining <= 0) return { bytesRead: 0 };
+      const n = Math.min(chunkLimit, length, remaining);
+      content.copy(buffer, offset, position, position + n);
+      return { bytesRead: n };
+    };
+  };
+
+  it('assembles the full window across many short reads', async () => {
+    const content = Buffer.from('the quick brown fox jumps over the lazy dog. '.repeat(200));
+    const result = await readWindow(shortReadingReaderFor(content, 3), content.length, 0);
+    expect(result).toEqual(content);
+  });
+
+  it('produces the same digest whether the source reads in one call or many short ones', async () => {
+    const content = Buffer.alloc(10_000, 42);
+    const fullRead = await readWindow(shortReadingReaderFor(content, content.length), 10_000, 0);
+    const chunkyRead = await readWindow(shortReadingReaderFor(content, 7), 10_000, 0);
+
+    const digestOf = (buf: Buffer) => createHash('sha256').update(buf).digest('hex');
+    expect(digestOf(chunkyRead)).toBe(digestOf(fullRead));
+  });
+
+  it('stops at EOF without zero-padding when the source is shorter than the requested window', async () => {
+    const content = Buffer.from('short');
+    const result = await readWindow(shortReadingReaderFor(content, 2), 100, 0);
+    // Not zero-padded to 100 bytes -- only the 5 real bytes came back.
+    expect(result).toEqual(content);
+    expect(result).toHaveLength(5);
+  });
+
+  it('reads starting at the given position', async () => {
+    const content = Buffer.from('0123456789');
+    const result = await readWindow(shortReadingReaderFor(content, 2), 4, 6);
+    expect(result).toEqual(Buffer.from('6789'));
   });
 });
