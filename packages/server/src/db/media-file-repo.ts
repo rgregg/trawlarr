@@ -98,6 +98,14 @@ export interface MediaFileRepo {
     holdUntilMs?: number | null;
   }): void;
   getById(fileId: string): MediaFileRow | null;
+  /**
+   * Stores `probe_json` verbatim and derives the denormalised filter columns
+   * (`video_codec`, `audio_codec`, `resolution`, `duration_ms`, `bitrate`)
+   * from `facts`. The `facts` argument itself is NOT persisted — the schema
+   * has no column for a scan-time fact set — so it only ever influences
+   * these five columns. See `getProbe` for what that means for callers that
+   * later ask for "the facts as of this probe".
+   */
   setProbe(input: { fileId: string; probe: ProbeData; facts: FactSet }): void;
   setLedger(input: {
     fileId: string;
@@ -107,6 +115,18 @@ export interface MediaFileRepo {
     lastRunId?: string | null;
   }): void;
   getLedger(fileId: string): LedgerRecord | null;
+  /**
+   * Returns the stored `probe_json` and a `FactSet` recomputed from it
+   * against the row's CURRENT `container` and `size_bytes` — not the ones
+   * in effect when `setProbe` was last called. If nothing has touched the
+   * row since, this is identical to the fact set `setProbe` was given. But
+   * `upsertScanned` can change `container`/`size_bytes` on a rescan without
+   * a re-probe (e.g. before the file is queued for probing again), and this
+   * method does not notice: it always answers "facts as of now, read
+   * through the last stored probe", never "facts as of probe time". A
+   * caller that needs the latter must extract facts itself from the probe
+   * it already has in hand rather than trusting this method.
+   */
   getProbe(fileId: string): { probe: ProbeData; facts: FactSet } | null;
   listByLibrary(input: { libraryId: string; state?: FileState }): MediaFileRow[];
   requeue(fileId: string): void;
@@ -137,15 +157,25 @@ const numericBitrate = (probe: ProbeData): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-const ALL_STATES: readonly FileState[] = [
-  'unknown',
-  'queued',
-  'running',
-  'good',
-  'failed',
-  'not_converging',
-  'held',
-];
+/**
+ * Every `FileState`, zero-filled by `countsByState`. `FileState` (in
+ * `@trawlarr/core`) is a bare union with no exported canonical array, so
+ * this list is hand-maintained — the `satisfies Record<FileState, true>`
+ * below is a compile-time tripwire: adding a state to the union without
+ * adding it here (or vice versa) is a type error, not a silently
+ * under-reporting dashboard.
+ */
+const ALL_STATES_MAP = {
+  unknown: true,
+  queued: true,
+  running: true,
+  good: true,
+  failed: true,
+  not_converging: true,
+  held: true,
+} satisfies Record<FileState, true>;
+
+const ALL_STATES: readonly FileState[] = Object.keys(ALL_STATES_MAP) as FileState[];
 
 const isUniqueConstraintError = (err: unknown): boolean =>
   err instanceof Error &&
@@ -313,6 +343,9 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       return (selectById.get(fileId) as MediaFileRow | undefined) ?? null;
     },
 
+    // `input.facts` is used ONLY to derive the five denormalised columns
+    // below; it is never itself written to a column (there is no schema
+    // column for it). See the `setProbe` doc comment on the interface.
     setProbe(input) {
       db.prepare(
         `UPDATE media_file
@@ -330,6 +363,11 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       );
     },
 
+    // Recomputes facts from the stored probe against the row's CURRENT
+    // container/size_bytes, not the values in effect when setProbe was
+    // called — see the `getProbe` doc comment on the interface for why that
+    // can diverge from "facts as of probe time" and what callers who need
+    // the latter must do instead.
     getProbe(fileId) {
       const current = selectById.get(fileId) as MediaFileRow | undefined;
       if (current === undefined || current.probe_json === null) return null;

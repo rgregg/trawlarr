@@ -365,6 +365,24 @@ describe('probe, facts and ledger persistence', () => {
     expect(repo.getProbe(scan())).toBeNull();
   });
 
+  it('reflects the row current container, not the container at probe time, when the row changes without a re-probe', () => {
+    const id = scan();
+    const facts = extractFacts({ probe: probe as never, container: 'mkv', sizeBytes: 4096 });
+    repo.setProbe({ fileId: id, probe: probe as never, facts });
+    expect(repo.getProbe(id)?.facts.container).toBe('mkv');
+
+    // Rescan the same identity but report a different container, without a
+    // re-probe. upsertScanned updates container/size_bytes independently of
+    // probe_json, so getProbe's recomputed facts pick up the new container —
+    // this is "facts as of now, read through the stored probe", not "facts
+    // as of probe time". A caller needing the latter must extract facts
+    // itself from the probe it has in hand.
+    scan({ container: 'avi' });
+
+    expect(repo.getProbe(id)?.facts.container).toBe('avi');
+    expect(repo.getProbe(id)?.probe).toEqual(probe);
+  });
+
   it('round-trips a ledger record', () => {
     const id = scan();
     const record = {
