@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { buildIdentityCandidate, matchIdentity } from '@trawlarr/core';
+import {
+  buildIdentityCandidate,
+  extractFacts,
+  matchIdentity,
+  newLedgerRecord,
+} from '@trawlarr/core';
 import { openDatabase, type Db } from './connection.js';
 import { migrate } from './migrate.js';
 import { createMediaFileRepo, type MediaFileRepo } from './media-file-repo.js';
@@ -324,5 +329,119 @@ describe('claimNext', () => {
     expect(
       repo.claimNext({ workerClass: 'transcode', nowMs: NOW, libraryIds: [LIB] }),
     ).not.toBeNull();
+  });
+});
+
+describe('probe, facts and ledger persistence', () => {
+  const probe = {
+    format: { duration: '1440.5', bit_rate: '8000000' },
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+      { index: 1, codec_type: 'audio', codec_name: 'eac3' },
+    ],
+  };
+
+  it('stores the probe and the denormalised columns used for filtering', () => {
+    const id = scan();
+    const facts = extractFacts({ probe: probe as never, container: 'mkv', sizeBytes: 4096 });
+    repo.setProbe({ fileId: id, probe: probe as never, facts });
+
+    const stored = repo.getProbe(id);
+    expect(stored?.probe).toEqual(probe);
+    expect(stored?.facts).toEqual(facts);
+
+    const row = db.prepare(`SELECT * FROM media_file WHERE id = ?`).get(id) as Record<
+      string,
+      unknown
+    >;
+    expect(row.video_codec).toBe('h264');
+    expect(row.audio_codec).toBe('eac3');
+    expect(row.resolution).toBe('1080p');
+    expect(row.duration_ms).toBe(1_440_500);
+    expect(row.bitrate).toBe(8_000_000);
+  });
+
+  it('returns null for a file that has never been probed', () => {
+    expect(repo.getProbe(scan())).toBeNull();
+  });
+
+  it('round-trips a ledger record', () => {
+    const id = scan();
+    const record = {
+      state: 'held' as const,
+      signature: 'sig-1',
+      attemptCount: 2,
+      consecutiveNoopCount: 1,
+      holdUntilMs: NOW + 5000,
+    };
+    repo.setLedger({ fileId: id, record });
+    expect(repo.getLedger(id)).toEqual(record);
+  });
+
+  it('stores the pre and post fact sets a run recorded', () => {
+    const id = scan();
+    const pre = extractFacts({ probe: probe as never, container: 'mkv', sizeBytes: 4096 });
+    const post = extractFacts({ probe: probe as never, container: 'mkv', sizeBytes: 2048 });
+    repo.setLedger({
+      fileId: id,
+      record: newLedgerRecord(),
+      preFacts: pre,
+      postFacts: post,
+      lastRunId: 'job-1',
+    });
+    const row = db.prepare(`SELECT * FROM media_file WHERE id = ?`).get(id) as Record<
+      string,
+      string
+    >;
+    expect(JSON.parse(row.pre_facts_json!)).toEqual(pre);
+    expect(JSON.parse(row.post_facts_json!)).toEqual(post);
+    expect(row.last_run_id).toBe('job-1');
+  });
+
+  it('lists a library, optionally filtered by state', () => {
+    const a = scan();
+    repo.setState({ fileId: a, state: 'good' });
+    const b = scan({
+      identity: buildIdentityCandidate({
+        deviceId: 2049,
+        inode: 43,
+        hash: { ...hash, headHex: 'cc' },
+      }),
+      path: '/media/movies/Other.mkv',
+    });
+    repo.setState({ fileId: b, state: 'queued' });
+
+    expect(repo.listByLibrary({ libraryId: LIB })).toHaveLength(2);
+    expect(repo.listByLibrary({ libraryId: LIB, state: 'queued' }).map((r) => r.id)).toEqual([b]);
+  });
+
+  it('counts by state, reporting zero for states with no files', () => {
+    const a = scan();
+    repo.setState({ fileId: a, state: 'good' });
+    const counts = repo.countsByState(LIB);
+    expect(counts.good).toBe(1);
+    expect(counts.queued).toBe(0);
+    expect(counts.not_converging).toBe(0);
+  });
+
+  it('requeue clears both counters and returns the file to the queue', () => {
+    const id = scan();
+    repo.setLedger({
+      fileId: id,
+      record: {
+        state: 'not_converging',
+        signature: 'sig',
+        attemptCount: 3,
+        consecutiveNoopCount: 1,
+        holdUntilMs: NOW,
+      },
+    });
+    repo.requeue(id);
+    expect(repo.getLedger(id)).toMatchObject({
+      state: 'queued',
+      attemptCount: 0,
+      consecutiveNoopCount: 0,
+      holdUntilMs: null,
+    });
   });
 });

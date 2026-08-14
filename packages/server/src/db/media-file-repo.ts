@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type { FileState, IdentityCandidate, IdentityLookup } from '@trawlarr/core';
+import type {
+  FactSet,
+  FileState,
+  IdentityCandidate,
+  IdentityLookup,
+  LedgerRecord,
+} from '@trawlarr/core';
+import { applyRequeue, extractFacts } from '@trawlarr/core';
+import type { ProbeData } from '@trawlarr/plugin-api';
 import type { Db } from './connection.js';
 
 /**
@@ -35,13 +43,24 @@ export interface MediaFileRow {
   mtime_ms: number;
   ctime_ms: number;
   container: string;
+  probe_json: string | null;
+  video_codec: string | null;
+  audio_codec: string | null;
+  resolution: string | null;
+  duration_ms: number | null;
+  bitrate: number | null;
   state: FileState;
   signature: string | null;
   attempt_count: number;
   consecutive_noop_count: number;
   hold_until_ms: number | null;
+  pre_facts_json: string | null;
+  post_facts_json: string | null;
+  original_size_bytes: number | null;
+  last_run_id: string | null;
   priority: number;
   discovered_at: number;
+  updated_at: number;
 }
 
 export interface UpsertScannedInput {
@@ -79,7 +98,54 @@ export interface MediaFileRepo {
     holdUntilMs?: number | null;
   }): void;
   getById(fileId: string): MediaFileRow | null;
+  setProbe(input: { fileId: string; probe: ProbeData; facts: FactSet }): void;
+  setLedger(input: {
+    fileId: string;
+    record: LedgerRecord;
+    preFacts?: FactSet | null;
+    postFacts?: FactSet | null;
+    lastRunId?: string | null;
+  }): void;
+  getLedger(fileId: string): LedgerRecord | null;
+  getProbe(fileId: string): { probe: ProbeData; facts: FactSet } | null;
+  listByLibrary(input: { libraryId: string; state?: FileState }): MediaFileRow[];
+  requeue(fileId: string): void;
+  countsByState(libraryId: string): Record<FileState, number>;
 }
+
+const RESOLUTION_LABELS: ReadonlyArray<{ minWidth: number; label: string }> = [
+  { minWidth: 7000, label: '8KUHD' },
+  { minWidth: 3000, label: '4KUHD' },
+  { minWidth: 1800, label: '1080p' },
+  { minWidth: 1200, label: '720p' },
+  { minWidth: 1000, label: '576p' },
+  { minWidth: 700, label: '480p' },
+];
+
+/** Matches the `video_resolution` vocabulary community plugins compare against. */
+const resolutionOf = (width: number | null): string | null => {
+  if (width === null) return null;
+  return RESOLUTION_LABELS.find((entry) => width >= entry.minWidth)?.label ?? 'other';
+};
+
+/** ffprobe reports bit_rate as a numeric string; the column is an integer. */
+const numericBitrate = (probe: ProbeData): number | null => {
+  const raw = probe.format?.bit_rate;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const ALL_STATES: readonly FileState[] = [
+  'unknown',
+  'queued',
+  'running',
+  'good',
+  'failed',
+  'not_converging',
+  'held',
+];
 
 const isUniqueConstraintError = (err: unknown): boolean =>
   err instanceof Error &&
@@ -245,6 +311,122 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
 
     getById(fileId) {
       return (selectById.get(fileId) as MediaFileRow | undefined) ?? null;
+    },
+
+    setProbe(input) {
+      db.prepare(
+        `UPDATE media_file
+            SET probe_json = ?, video_codec = ?, audio_codec = ?,
+                resolution = ?, duration_ms = ?, bitrate = ?
+          WHERE id = ?`,
+      ).run(
+        JSON.stringify(input.probe),
+        input.facts.streams.find((s) => s.codecType === 'video')?.codecName ?? null,
+        input.facts.streams.find((s) => s.codecType === 'audio')?.codecName ?? null,
+        resolutionOf(input.facts.width),
+        input.facts.durationMs,
+        numericBitrate(input.probe),
+        input.fileId,
+      );
+    },
+
+    getProbe(fileId) {
+      const current = selectById.get(fileId) as MediaFileRow | undefined;
+      if (current === undefined || current.probe_json === null) return null;
+      const probe = JSON.parse(current.probe_json) as ProbeData;
+      const facts = extractFacts({
+        probe,
+        container: current.container,
+        sizeBytes: current.size_bytes,
+      });
+      return { probe, facts };
+    },
+
+    setLedger(input) {
+      const current = selectById.get(input.fileId) as MediaFileRow | undefined;
+      if (current === undefined) throw new Error(`Unknown media file: ${input.fileId}`);
+
+      db.prepare(
+        `UPDATE media_file
+            SET state = ?, signature = ?, attempt_count = ?,
+                consecutive_noop_count = ?, hold_until_ms = ?,
+                pre_facts_json = ?, post_facts_json = ?, last_run_id = ?
+          WHERE id = ?`,
+      ).run(
+        input.record.state,
+        input.record.signature,
+        input.record.attemptCount,
+        input.record.consecutiveNoopCount,
+        input.record.holdUntilMs,
+        input.preFacts === undefined
+          ? current.pre_facts_json
+          : input.preFacts === null
+            ? null
+            : JSON.stringify(input.preFacts),
+        input.postFacts === undefined
+          ? current.post_facts_json
+          : input.postFacts === null
+            ? null
+            : JSON.stringify(input.postFacts),
+        input.lastRunId === undefined ? current.last_run_id : input.lastRunId,
+        input.fileId,
+      );
+    },
+
+    getLedger(fileId) {
+      const row = selectById.get(fileId) as MediaFileRow | undefined;
+      if (row === undefined) return null;
+      return {
+        state: row.state,
+        signature: row.signature,
+        attemptCount: row.attempt_count,
+        consecutiveNoopCount: row.consecutive_noop_count,
+        holdUntilMs: row.hold_until_ms,
+      };
+    },
+
+    listByLibrary(input) {
+      if (input.state === undefined) {
+        return db
+          .prepare(`SELECT * FROM media_file WHERE library_id = ?`)
+          .all(input.libraryId) as MediaFileRow[];
+      }
+      return db
+        .prepare(`SELECT * FROM media_file WHERE library_id = ? AND state = ?`)
+        .all(input.libraryId, input.state) as MediaFileRow[];
+    },
+
+    requeue(fileId) {
+      const current = selectById.get(fileId) as MediaFileRow | undefined;
+      if (current === undefined) throw new Error(`Unknown media file: ${fileId}`);
+      const record: LedgerRecord = {
+        state: current.state,
+        signature: current.signature,
+        attemptCount: current.attempt_count,
+        consecutiveNoopCount: current.consecutive_noop_count,
+        holdUntilMs: current.hold_until_ms,
+      };
+      const requeued = applyRequeue(record);
+      db.prepare(
+        `UPDATE media_file
+            SET state = ?, attempt_count = ?, consecutive_noop_count = ?, hold_until_ms = ?
+          WHERE id = ?`,
+      ).run(
+        requeued.state,
+        requeued.attemptCount,
+        requeued.consecutiveNoopCount,
+        requeued.holdUntilMs,
+        fileId,
+      );
+    },
+
+    countsByState(libraryId) {
+      const counts = Object.fromEntries(ALL_STATES.map((s) => [s, 0])) as Record<FileState, number>;
+      const rows = db
+        .prepare(`SELECT state, COUNT(*) AS c FROM media_file WHERE library_id = ? GROUP BY state`)
+        .all(libraryId) as Array<{ state: FileState; c: number }>;
+      for (const row of rows) counts[row.state] = row.c;
+      return counts;
     },
   };
 };
