@@ -302,10 +302,11 @@ instead of a bug hunt.
 
 ### 2.10 Version reporting
 
-**Not yet implemented.** This section describes the intended design, belonging to P1
-(Engine, plugin host) in [§10](#10-milestones). Today `requiresVersion` is read off each
-plugin's `details()` and stored, but never compared against anything — a plugin that
-requires a newer contract than trawlarr implements runs with no warning at all.
+**Not yet implemented.** This section describes the intended design, specified as part of
+P1's plugin-host work in [§10](#10-milestones) but not delivered there and not yet
+scheduled to any phase. Today `requiresVersion` is read off each plugin's `details()` and
+stored, but never compared against anything — a plugin that requires a newer contract
+than trawlarr implements runs with no warning at all.
 
 Plugins declare `requiresVersion`. Trawlarr reports its own version plus a declared
 **contract level** — the Tdarr plugin-contract revision it implements. When a plugin
