@@ -150,3 +150,46 @@ describe('trawlarr:setVideoEncoder', () => {
     });
   });
 });
+
+describe('trawlarr:verifyOutput', () => {
+  const plugin = () => FIRST_PARTY_PLUGINS['trawlarr:verifyOutput']!.module;
+
+  it('declares pass and fail outputs so a flow can branch on verification', () => {
+    const details = plugin().details();
+    expect(details.outputs.map((o) => o.number)).toEqual([1, 2]);
+    expect(details.outputs[1]?.tooltip.toLowerCase()).toMatch(/fail|did not/);
+  });
+
+  it('exposes the tolerances as inputs rather than hard-coding them', () => {
+    const names = plugin()
+      .details()
+      .inputs.map((i) => i.name);
+    expect(names).toContain('durationToleranceSeconds');
+    expect(names).toContain('minSizeRatio');
+  });
+
+  it('refuses to run outside an engine that supplies its behaviour', async () => {
+    await expect(plugin().plugin(argsFor())).rejects.toThrow(/engine/i);
+  });
+});
+
+describe('trawlarr:replaceOriginal', () => {
+  const plugin = () => FIRST_PARTY_PLUGINS['trawlarr:replaceOriginal']!.module;
+
+  it('declares success and failure outputs', () => {
+    expect(
+      plugin()
+        .details()
+        .outputs.map((o) => o.number),
+    ).toEqual([1, 2]);
+  });
+
+  it('says plainly in its description that it replaces the original', () => {
+    // A flow author reading the palette must not be surprised by this node.
+    expect(plugin().details().description.toLowerCase()).toMatch(/replace|original/);
+  });
+
+  it('refuses to run outside an engine that supplies its behaviour', async () => {
+    await expect(plugin().plugin(argsFor())).rejects.toThrow(/engine/i);
+  });
+});

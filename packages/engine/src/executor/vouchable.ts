@@ -25,7 +25,11 @@ export const FIRST_PARTY_INERT = new Set([
 ]);
 
 /** First-party nodes whose effects the engine performs, so it can withhold them. */
-export const FIRST_PARTY_ENGINE_CONTROLLED = new Set(['trawlarr:execute']);
+export const FIRST_PARTY_ENGINE_CONTROLLED = new Set([
+  'trawlarr:execute',
+  'trawlarr:verifyOutput',
+  'trawlarr:replaceOriginal',
+]);
 
 /**
  * Can the engine guarantee this node performs no side effect during a dry run?
