@@ -1,6 +1,7 @@
 import { mkdir, stat } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { LibraryRecord } from '../db/library-repo.js';
+import { pathContains } from '../fs/path-contains.js';
 
 /**
  * Thrown when a *configured* staging directory turns out to live on a
@@ -23,26 +24,6 @@ export class CrossDeviceStagingError extends Error {
     this.name = 'CrossDeviceStagingError';
   }
 }
-
-/**
- * Whether `child` is `parent` or a path underneath it, comparing resolved
- * path *segments* rather than raw strings.
- *
- * A plain `child.startsWith(parent)` is not sufficient: "/library-old" and
- * "/library" share a string prefix without one directory containing the
- * other. An in-place-write guard in this codebase once compared paths this
- * way and let a working-directory argument slip past it, overwriting a
- * source file. Every containment check in this codebase should go through
- * this function rather than adding a second, weaker comparison.
- */
-export const pathContains = (parent: string, child: string): boolean => {
-  const resolvedParent = resolve(parent);
-  const resolvedChild = resolve(child);
-  return (
-    resolvedChild === resolvedParent ||
-    resolvedChild.startsWith(resolvedParent.endsWith(sep) ? resolvedParent : resolvedParent + sep)
-  );
-};
 
 /** Root of `library` whose directory tree actually contains `filePath`. */
 const rootContaining = (library: LibraryRecord, filePath: string): string => {
@@ -141,6 +122,14 @@ export const ensureDir = async (path: string): Promise<void> => {
  * Nearest ancestor of `path` (possibly `path` itself) that currently
  * exists, for stat-ing the device of a destination that has not been
  * created yet.
+ *
+ * Only `ENOENT` is treated as "keep walking up" — anything else (`EACCES`
+ * on a directory this process can't traverse, most notably) is a real
+ * failure and must surface, not be silently swallowed into walking past a
+ * mount point and reporting the wrong device. `isSameFilesystem` is the
+ * only thing standing between a configured staging directory and a copy
+ * silently substituted for what must be an atomic rename; a caller has no
+ * way to defend against this function lying to it.
  */
 const nearestExistingAncestor = async (path: string): Promise<string> => {
   let current = resolve(path);
@@ -148,7 +137,8 @@ const nearestExistingAncestor = async (path: string): Promise<string> => {
     try {
       await stat(current);
       return current;
-    } catch {
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
       const parent = dirname(current);
       if (parent === current) return current; // filesystem root; let the caller's stat surface the error
       current = parent;

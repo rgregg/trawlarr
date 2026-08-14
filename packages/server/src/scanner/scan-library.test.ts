@@ -1,5 +1,13 @@
 import { execFile } from 'node:child_process';
-import { linkSync, mkdirSync, mkdtempSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -333,4 +341,44 @@ describe('scanLibrary excludes reserved staging/trash directories', () => {
     });
     expect(summary.added).toBe(2);
   }, 60_000);
+
+  it(
+    'excludes a configured staging directory reached through a symlink alias of the root ' +
+      '(the "/media -> /mnt/media" Docker shape)',
+    async () => {
+      const realRoot = mkdtempSync(join(tmpdir(), 'trawlarr-scan-real-'));
+      const aliasParent = mkdtempSync(join(tmpdir(), 'trawlarr-scan-aliasparent-'));
+      const alias = join(aliasParent, 'media');
+      symlinkSync(realRoot, alias, 'dir');
+
+      mkdirSync(join(realRoot, 'staging'), { recursive: true });
+      await makeMedia(join(realRoot, 'keep.mkv'));
+      await makeMedia(join(realRoot, 'staging', 'half-written.mkv'));
+
+      const flow = createFlowRepo(db).create({ name: 'HEVC-alias', definition, nowMs: NOW });
+      const library = createLibraryRepo(db).create({
+        name: 'MoviesAliasedStaging',
+        // The library's root is the REAL path...
+        roots: [realRoot],
+        extensions: ['mkv'],
+        // ...but staging is configured through the symlinked alias, exactly
+        // the shape a Docker media stack produces ("/media" mounted, backed
+        // by "/mnt/media" underneath, or vice versa).
+        stagingDir: join(alias, 'staging'),
+        flowId: flow.id,
+        nowMs: NOW,
+      });
+
+      const summary = await scanLibrary({
+        db,
+        libraryId: library.id,
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
+      expect(summary.added).toBe(1);
+      const rows = createMediaFileRepo(db).listByLibrary({ libraryId: library.id });
+      expect(rows.map((r) => r.path)).toEqual([join(realRoot, 'keep.mkv')]);
+    },
+    60_000,
+  );
 });

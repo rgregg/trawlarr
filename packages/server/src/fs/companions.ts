@@ -1,4 +1,4 @@
-import { readdir, rename, stat } from 'node:fs/promises';
+import { lstat, readdir, rename } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 
 /** `movie.mkv` -> `movie`. Basename with its final extension stripped. */
@@ -28,21 +28,23 @@ export const findCompanions = async (input: {
   const wanted = new Set(input.companionExtensions.map((extension) => extension.toLowerCase()));
   if (wanted.size === 0) return [];
 
-  let entries: string[];
+  let entries;
   try {
-    entries = await readdir(dir);
+    entries = await readdir(dir, { withFileTypes: true });
   } catch {
     return [];
   }
 
   const found: string[] = [];
-  for (const name of entries) {
+  for (const entry of entries) {
+    const name = entry.name;
+    if (!entry.isFile()) continue; // a directory (or anything else) sharing the stem is not a sidecar
     if (name === mediaBase) continue;
     if (!name.startsWith(stem)) continue;
     const remainder = name.slice(stem.length);
     if (remainder.length === 0 || remainder[0] !== '.') continue;
 
-    const extension = extname(name).replace('.', '').toLowerCase();
+    const extension = extname(name).slice(1).toLowerCase();
     if (!wanted.has(extension)) continue;
 
     found.push(join(dir, name));
@@ -79,6 +81,13 @@ export const companionTargetFor = (input: {
  * currently exist. Used so a companion move never overwrites a file that
  * happens to already be sitting at the destination name — losing a file to
  * a silent overwrite is worse than a slightly odd name.
+ *
+ * Uses `lstat`, not `stat`, and only treats `ENOENT` as "nothing there":
+ * `stat` follows symlinks, so a *dangling* symlink at the destination would
+ * make `stat` fail the same way an empty destination does, and this would
+ * happily rename over it — destroying the symlink itself, which is a real
+ * filesystem entry, not nothing. Any other error (e.g. `EACCES`) must
+ * surface rather than be read as "free to use".
  */
 const uniqueDestination = async (target: string): Promise<string> => {
   const { dir, name, ext } = parse(target);
@@ -86,9 +95,10 @@ const uniqueDestination = async (target: string): Promise<string> => {
   let attempt = 1;
   for (;;) {
     try {
-      await stat(candidate);
-    } catch {
-      return candidate; // nothing there: safe to use
+      await lstat(candidate);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return candidate; // nothing there: safe to use
+      throw cause;
     }
     candidate = join(dir, `${name} (${attempt})${ext}`);
     attempt += 1;

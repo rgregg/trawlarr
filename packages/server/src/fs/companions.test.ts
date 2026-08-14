@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -106,11 +106,16 @@ describe('moveCompanions', () => {
       oldMediaPath: join(dir, 'movie.mkv'),
       newMediaPath: join(dir, 'film.mkv'),
     });
-    // The pre-existing film.srt must survive untouched...
+    // The pre-existing film.srt must survive untouched, WITH its own
+    // content — not merely exist under that name, which an implementation
+    // that swapped the two files' contents would also satisfy.
     expect(existsSync(join(dir, 'film.srt'))).toBe(true);
+    expect(readFileSync(join(dir, 'film.srt'), 'utf8')).toBe('already-here');
     // ...and the incoming companion must still exist somewhere, under a
-    // disambiguated name rather than being dropped.
+    // disambiguated name rather than being dropped, carrying its own
+    // content along with it.
     expect(existsSync(join(dir, 'movie.srt'))).toBe(false);
     expect(existsSync(join(dir, 'film (1).srt'))).toBe(true);
+    expect(readFileSync(join(dir, 'film (1).srt'), 'utf8')).toBe('incoming');
   });
 });

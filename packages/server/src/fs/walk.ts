@@ -1,7 +1,7 @@
 import { opendir, stat } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { extname, join } from 'node:path';
-import { pathContains } from '../library/paths.js';
+import { pathContains } from './path-contains.js';
 
 /**
  * Yield every file under `roots` whose extension matches, with its stat.
@@ -52,7 +52,7 @@ export async function* walkFiles(input: {
       }
       if (!entry.isFile()) continue;
 
-      const extension = extname(entry.name).replace('.', '').toLowerCase();
+      const extension = extname(entry.name).slice(1).toLowerCase();
       if (!wanted.has(extension)) continue;
 
       try {

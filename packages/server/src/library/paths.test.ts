@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,7 +29,7 @@ describe('resolveStagingDir', () => {
     const root = mkdtempSync(join(tmpdir(), 'trawlarr-paths-'));
     const library = makeLibrary({ roots: [root], stagingDir: '/config/staging' });
     expect(resolveStagingDir({ library, filePath: join(root, 'movie.mkv') })).toBe(
-      join('/config/staging'),
+      '/config/staging',
     );
   });
 
@@ -63,9 +63,7 @@ describe('resolveTrashDir', () => {
   it('uses the configured trashDir when set', () => {
     const root = mkdtempSync(join(tmpdir(), 'trawlarr-paths-'));
     const library = makeLibrary({ roots: [root], trashDir: '/config/trash' });
-    expect(resolveTrashDir({ library, filePath: join(root, 'movie.mkv') })).toBe(
-      join('/config/trash'),
-    );
+    expect(resolveTrashDir({ library, filePath: join(root, 'movie.mkv') })).toBe('/config/trash');
   });
 
   it('defaults to a hidden directory under the root that contains the file', () => {
@@ -105,5 +103,23 @@ describe('isSameFilesystem', () => {
     const notYetCreated = join(root, 'does', 'not', 'exist', 'yet');
 
     expect(await isSameFilesystem(root, notYetCreated)).toBe(true);
+  });
+
+  it('returns false for two paths that are genuinely on different devices', async () => {
+    // Guarded rather than asserted unconditionally: /dev/shm is a Linux-only
+    // tmpfs mount, and even where it exists it isn't guaranteed to sit on a
+    // different device than the OS temp dir. Skip instead of failing on a
+    // platform/config where the premise doesn't hold — but where it does
+    // (this machine: /tmp is dev 2050, /dev/shm is dev 26), this is the one
+    // test in the file that would catch `isSameFilesystem` degrading into
+    // `async () => true`.
+    if (!existsSync('/dev/shm')) return;
+    const [tmpDev, shmDev] = await Promise.all([
+      stat(tmpdir()).then((s) => s.dev),
+      stat('/dev/shm').then((s) => s.dev),
+    ]);
+    if (tmpDev === shmDev) return;
+
+    expect(await isSameFilesystem(tmpdir(), '/dev/shm')).toBe(false);
   });
 });

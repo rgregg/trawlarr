@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from './connection.js';
 import { migrate } from './migrate.js';
@@ -5,6 +6,7 @@ import {
   DEFAULT_COMPANION_EXTENSIONS,
   DEFAULT_EXTENSIONS,
   OverlappingRootsError,
+  ReservedDirectoryOverlapsRootError,
   createLibraryRepo,
   type LibraryRepo,
 } from './library-repo.js';
@@ -92,6 +94,65 @@ describe('create', () => {
     expect(() => repo.create({ name: 'Dup', roots: ['/media/movies/./'], nowMs: NOW })).toThrow(
       OverlappingRootsError,
     );
+  });
+
+  it('rejects a stagingDir that equals a library root', () => {
+    // pathContains(root, root) is true by design, so an unvalidated equal
+    // stagingDir would prune the root itself out of every scan — the
+    // library would look permanently, silently empty.
+    expect(() =>
+      repo.create({
+        name: 'Movies',
+        roots: ['/media/movies'],
+        stagingDir: '/media/movies',
+        nowMs: NOW,
+      }),
+    ).toThrow(ReservedDirectoryOverlapsRootError);
+  });
+
+  it('rejects a stagingDir that contains a library root', () => {
+    expect(() =>
+      repo.create({
+        name: 'Movies4k',
+        roots: ['/media/movies/4k'],
+        stagingDir: '/media/movies',
+        nowMs: NOW,
+      }),
+    ).toThrow(ReservedDirectoryOverlapsRootError);
+  });
+
+  it('rejects a trashDir that contains a library root', () => {
+    expect(() =>
+      repo.create({
+        name: 'Movies',
+        roots: ['/media/movies'],
+        trashDir: '/media',
+        nowMs: NOW,
+      }),
+    ).toThrow(ReservedDirectoryOverlapsRootError);
+  });
+
+  it('allows a stagingDir inside a root — the legitimate, default shape', () => {
+    expect(() =>
+      repo.create({
+        name: 'Movies',
+        roots: ['/media/movies'],
+        stagingDir: '/media/movies/.trawlarr/staging',
+        nowMs: NOW,
+      }),
+    ).not.toThrow();
+  });
+
+  it('resolves a relative stagingDir/trashDir the same way roots are resolved', () => {
+    const created = repo.create({
+      name: 'Movies',
+      roots: ['/media/movies'],
+      stagingDir: 'staging',
+      trashDir: 'trash',
+      nowMs: NOW,
+    });
+    expect(created.stagingDir).toBe(resolve('staging'));
+    expect(created.trashDir).toBe(resolve('trash'));
   });
 });
 

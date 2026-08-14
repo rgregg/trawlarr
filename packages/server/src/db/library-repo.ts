@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { resolve, sep } from 'node:path';
+import { resolve } from 'node:path';
 import type { Db } from './connection.js';
+import { pathContains } from '../fs/path-contains.js';
 
 export interface LibraryRecord {
   id: string;
@@ -59,11 +60,29 @@ export class OverlappingRootsError extends Error {
   }
 }
 
-/** Compare as path segments so '/media/movies-4k' is not "inside" '/media/movies'. */
-const contains = (parent: string, child: string): boolean =>
-  child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+const overlaps = (a: string, b: string): boolean => pathContains(a, b) || pathContains(b, a);
 
-const overlaps = (a: string, b: string): boolean => contains(a, b) || contains(b, a);
+/**
+ * Thrown when a configured `stagingDir`/`trashDir` equals or contains a
+ * library root. Staging *inside* a root (the default shape) is fine and
+ * deliberately not rejected here — it's the reverse, a reserved directory
+ * that a root sits under, that silently prunes the whole root from every
+ * scan (`pathContains(root, root)` is true, so the root itself is the
+ * first thing excluded) and leaves the library looking permanently empty
+ * with no error.
+ */
+export class ReservedDirectoryOverlapsRootError extends Error {
+  constructor(input: { kind: 'stagingDir' | 'trashDir'; dir: string; root: string }) {
+    super(
+      `Configured ${input.kind} "${input.dir}" contains or equals library root "${input.root}". ` +
+        `A staging/trash directory must not contain a root it is meant to serve — that would ` +
+        `prune the root itself out of every scan, leaving the library silently empty. Point ` +
+        `${input.kind} somewhere that doesn't contain a root (inside a root is fine, and is the ` +
+        `default), or unset it.`,
+    );
+    this.name = 'ReservedDirectoryOverlapsRootError';
+  }
+}
 
 interface LibraryRow {
   id: string;
@@ -129,6 +148,27 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
         }
       }
 
+      // Resolved here, the same way roots already are (line above) — a
+      // relative stagingDir/trashDir must not resolve against whatever the
+      // server process's cwd happens to be at request time.
+      const stagingDir = input.stagingDir != null ? resolve(input.stagingDir) : null;
+      const trashDir = input.trashDir != null ? resolve(input.trashDir) : null;
+
+      // Staging/trash *inside* a root is the default shape and must stay
+      // allowed; it's a staging/trash dir that equals or CONTAINS a root
+      // that silently prunes the root itself out of every scan.
+      for (const [kind, dir] of [
+        ['stagingDir', stagingDir],
+        ['trashDir', trashDir],
+      ] as const) {
+        if (dir === null) continue;
+        for (const root of roots) {
+          if (pathContains(dir, root)) {
+            throw new ReservedDirectoryOverlapsRootError({ kind, dir, root });
+          }
+        }
+      }
+
       const id = randomUUID();
       db.prepare(
         `INSERT INTO library (
@@ -141,8 +181,8 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
         JSON.stringify(roots),
         JSON.stringify(input.extensions ?? [...DEFAULT_EXTENSIONS]),
         JSON.stringify(input.companionExtensions ?? [...DEFAULT_COMPANION_EXTENSIONS]),
-        input.stagingDir ?? null,
-        input.trashDir ?? null,
+        stagingDir,
+        trashDir,
         input.flowId ?? null,
         input.allowHardlinked === true ? 1 : 0,
         input.nowMs,
