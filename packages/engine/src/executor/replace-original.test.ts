@@ -870,11 +870,12 @@ describe('createReplaceOriginalRunner', () => {
     expect(logged.join('\n')).not.toMatch(/URGENT/);
   });
 
-  it('reports success when the new file did land, even though cleanup failed', async () => {
-    // The rollback itself fails too, so the destination really does hold the
-    // new content. Reporting failure here would be a lie that also sends
-    // restoreOriginal into an EEXIST and logs an URGENT about a file that is
-    // exactly where it should be.
+  it('refuses when the replacement landed but is left under two names', async () => {
+    // The rollback itself fails too, so the destination holds the new content
+    // AND still carries the staged file's link. Reporting success here leaves
+    // a library file at nlink=2 that the hardlink guard refuses on every
+    // later run — I4's failure mode, relocated — while the log claims the
+    // extra link was removed and nothing was lost. Both halves are lies.
     const space = workspace({ newExtension: 'mp4' });
     const finalPath = join(space.libraryDir, 'movie.mp4');
     const logged: string[] = [];
@@ -902,14 +903,100 @@ describe('createReplaceOriginalRunner', () => {
       }),
     );
 
-    expect(out.outputNumber).toBe(1);
+    // The replacement did land, and the reported path is the truth on disk...
     expect(out.outputFileObj._id).toBe(finalPath);
     expect(readFileSync(finalPath, 'utf8')).toBe(NEW_BODY);
-    // The original is still recoverable, and nothing claims a lost file.
+    expect(statSync(finalPath).nlink).toBe(2);
+    // ...but a file we know every future run will refuse is not a success.
+    expect(out.outputNumber).toBe(2);
+    // And the log says what is actually true, not that the link was removed.
+    const log = logged.join('\n');
+    expect(log).not.toMatch(/extra link has been removed/);
+    expect(log).not.toMatch(/nothing was lost/);
+    expect(log).toMatch(/two names/i);
+    expect(log).toContain(space.newPath);
+    // The original is still recoverable, and nothing claims it is lost.
     const trashed = readdirSync(space.trashDir);
     expect(trashed).toHaveLength(1);
     expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
-    expect(logged.join('\n')).not.toMatch(/URGENT/);
+    expect(log).not.toMatch(/URGENT/);
+  });
+
+  it('never puts an empty placeholder at the user-visible media path', async () => {
+    // On the EPERM/no-hardlink path the destination has to be claimed before
+    // the content is moved into it. If the claim is made AT the media path, a
+    // SIGKILL, OOM or container restart in that gap leaves "Movie (2019).mp4"
+    // as a 0-byte file with the real original in trash — and on a container
+    // change that is permanent, because the pre-flight refuses every retry
+    // with "already exists and is not the file being replaced".
+    //
+    // Observed from inside the window: the rename seam looks at the media path
+    // at the exact moment the claim is held.
+    const space = workspace({ newExtension: 'mp4' });
+    const finalPath = join(space.libraryDir, 'movie.mp4');
+    let emptyFileAtMediaPath: boolean | null = null;
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: () => {
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        renameFile: async (from, to) => {
+          if (to === finalPath) {
+            emptyFileAtMediaPath = existsSync(finalPath) && statSync(finalPath).size === 0;
+          }
+          await rename(from, to);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    // The window was entered — this is not vacuously true.
+    expect(emptyFileAtMediaPath).not.toBeNull();
+    // ...and the user's media path was never an empty file.
+    expect(emptyFileAtMediaPath).toBe(false);
+    expect(readFileSync(finalPath, 'utf8')).toBe(NEW_BODY);
+    // No reservation left behind, hidden or otherwise.
+    expect(readdirSync(space.libraryDir).sort()).toEqual(['.trawlarr', 'movie.mp4']);
+  });
+
+  it('leaves no reservation behind when the fallback rename fails', async () => {
+    // The placeholder cleanup was dead code: deleting it broke nothing.
+    const space = workspace({ newExtension: 'mp4' });
+    const finalPath = join(space.libraryDir, 'movie.mp4');
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: () => {
+          throw Object.assign(new Error('EPERM: operation not permitted, link'), {
+            code: 'EPERM',
+          });
+        },
+        renameFile: async (from, to) => {
+          if (to === finalPath) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+          }
+          await rename(from, to);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    // The destination name is free for the retry, and nothing was orphaned.
+    expect(existsSync(finalPath)).toBe(false);
+    expect(readdirSync(space.libraryDir).sort()).toEqual(['.trawlarr', 'movie.mkv']);
+    // The original came back.
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
   });
 
   it('routes a partial companion failure to output 2, reporting the split', async () => {

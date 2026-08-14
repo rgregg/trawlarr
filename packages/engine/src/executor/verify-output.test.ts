@@ -303,6 +303,39 @@ describe('verifyOutput', () => {
     expect(report.reasons[0]).toContain('duration');
   });
 
+  it('falls back to the video stream when the container is not timed', () => {
+    // Containers that report N/A at format level while every stream inside is
+    // timed are common, and the probe already carries the streams — so this
+    // must be a real comparison, not a refusal for want of a number in hand.
+    const timedStreams = (seconds: number) => [
+      { index: 0, codec_type: 'video', codec_name: 'hevc', duration: seconds },
+      { index: 1, codec_type: 'audio', codec_name: 'aac', duration: seconds },
+    ];
+
+    const good = verifyOutput({
+      probe: { streams: timedStreams(3600), format: { duration: 'N/A' } },
+      originalProbe: { streams: timedStreams(3600), format: { duration: 'N/A' } },
+      outputSizeBytes: 4 * GIGABYTE,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+    expect(good).toEqual({ ok: true, reasons: [] });
+
+    // And the check really is being performed, not merely skipped quietly: a
+    // truncated output with the same untimed container still fails.
+    const truncated = verifyOutput({
+      probe: { streams: timedStreams(1200), format: { duration: 'N/A' } },
+      originalProbe: { streams: timedStreams(3600), format: { duration: 'N/A' } },
+      outputSizeBytes: 4 * GIGABYTE,
+      originalSizeBytes: 8 * GIGABYTE,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+    });
+    expect(truncated.ok).toBe(false);
+    expect(truncated.reasons[0]).toContain('1200.0s');
+  });
+
   it('fails an output ffprobe could not read at all', () => {
     const report = verifyOutput({
       probe: { streams: [], format: {} },

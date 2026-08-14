@@ -43,6 +43,12 @@ export type LinkFileFn = (from: string, to: string) => Promise<void>;
 export type UnlinkFileFn = (path: string) => Promise<void>;
 
 /**
+ * Create `path` and fail with `EEXIST` if it already exists — `O_CREAT|O_EXCL`.
+ * A seam like the others so reservation failures can be driven from tests.
+ */
+export type OpenExclusiveFn = (path: string) => Promise<void>;
+
+/**
  * Builds the error raised when replacement would have to cross a filesystem
  * boundary and the operator has forbidden the copy fallback. Defaults to a
  * plain `Error`; the server passes a factory for its own
@@ -69,6 +75,8 @@ export interface ReplaceRunnerInput {
   linkFile?: LinkFileFn;
   /** Seam for tests: the "remove the old name" half of every move. */
   unlinkFile?: UnlinkFileFn;
+  /** Seam for tests: the exclusive reservation used where linking is absent. */
+  openExclusive?: OpenExclusiveFn;
 }
 
 const messageOf = (error: unknown): string =>
@@ -138,19 +146,88 @@ export const replacementPathFor = (input: { originalPath: string; newPath: strin
 const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP']);
 
 /**
+ * How old an abandoned reservation must be before another worker reclaims it.
+ * A live reservation exists for the duration of one rename — microseconds — so
+ * an hour cannot collide with a worker still holding one; it only ever catches
+ * the leftovers of a process that was killed mid-move.
+ */
+const RESERVATION_STALE_MS = 60 * 60 * 1000;
+
+const eexistAt = (path: string): NodeJS.ErrnoException =>
+  Object.assign(new Error(`EEXIST: "${path}" already exists`), { code: 'EEXIST' });
+
+/** The hidden name that stands for "this destination is claimed". */
+const reservationPathFor = (finalPath: string): string =>
+  join(dirname(finalPath), `.trawlarr-reserve-${basename(finalPath)}`);
+
+/**
+ * Claim `finalPath` for this worker, without ever creating a file AT it.
+ *
+ * The claim is an exclusive create of a HIDDEN name derived from the
+ * destination. Deriving it (rather than using a UUID) is what makes it a lock
+ * at all: every worker targeting the same destination computes the same name,
+ * so `O_CREAT|O_EXCL` admits exactly one of them. A UUID would be unique by
+ * construction and would therefore exclude nobody.
+ *
+ * Claiming the media path itself would be simpler and was the previous
+ * approach, but a SIGKILL, OOM or container restart between the claim and the
+ * rename then leaves `Movie (2019).mp4` as a 0-byte file with the real
+ * original already in trash — permanently, on a container change, because the
+ * pre-flight refuses every retry. A crash here leaves only a hidden, empty
+ * lock file: the user's media path is untouched, and the next run reclaims the
+ * lock once it is provably abandoned.
+ */
+const reserveDestination = async (input: {
+  finalPath: string;
+  openExclusive: OpenExclusiveFn;
+  unlinkFile: UnlinkFileFn;
+  nowMs: () => number;
+  note?: (text: string) => void;
+}): Promise<string> => {
+  const reservationPath = reservationPathFor(input.finalPath);
+  try {
+    await input.openExclusive(reservationPath);
+    return reservationPath;
+  } catch (error) {
+    if (codeOf(error) !== 'EEXIST') throw error;
+  }
+
+  const abandoned = await lstat(reservationPath).catch(() => null);
+  if (
+    abandoned === null ||
+    abandoned.size > 0 ||
+    input.nowMs() - abandoned.mtimeMs < RESERVATION_STALE_MS
+  ) {
+    // Someone else holds this destination right now.
+    throw eexistAt(input.finalPath);
+  }
+
+  // Abandoned by a process that died mid-move. Reclaiming is safe even if two
+  // workers do it at once: both may remove it, but the exclusive create below
+  // still admits exactly one of them.
+  input.note?.(
+    `Reclaiming an abandoned reservation at "${reservationPath}", left behind by a run ` +
+      `that did not finish.`,
+  );
+  await input.unlinkFile(reservationPath).catch(() => {});
+  await input.openExclusive(reservationPath);
+  return reservationPath;
+};
+
+/**
  * Create `to` as a second name for `from`, failing if `to` already exists.
  *
  * `rename(2)` replaces an existing destination silently, which is what makes
  * every check-then-rename a way to destroy a file that appeared in between.
- * Both branches here are therefore atomic reservations:
+ * Both branches here are therefore exclusive:
  *
  *  - `link(2)` fails `EEXIST` atomically and is same-device by construction.
- *  - Where linking is unavailable, `open(to, 'wx')` — `O_CREAT|O_EXCL` — is
- *    the same guarantee: exactly one worker can create the name, and the
- *    others get `EEXIST`. The rename then lands on a placeholder this call
- *    owns, so it can never overwrite another file. Checking `exists()` and
- *    renaming would be the original race with a shorter window, and a shorter
- *    window is not a fix.
+ *  - Where linking is unavailable, a hidden reservation derived from the
+ *    destination serves as the lock (see {@link reserveDestination}), and the
+ *    rename happens while it is held. The `exists` check under that lock is
+ *    not a check-then-act race: no other worker can be between the two lines,
+ *    because no other worker holds the reservation. It is there to catch a
+ *    file that something OUTSIDE trawlarr put at the destination.
  */
 const createExclusively = async (input: {
   from: string;
@@ -158,7 +235,10 @@ const createExclusively = async (input: {
   linkFile: LinkFileFn;
   renameFile: RenameFileFn;
   unlinkFile: UnlinkFileFn;
+  openExclusive: OpenExclusiveFn;
+  nowMs: () => number;
   note?: (text: string) => void;
+  noteLinkFallback?: (text: string) => void;
 }): Promise<'linked' | 'renamed'> => {
   try {
     await input.linkFile(input.from, input.to);
@@ -168,21 +248,30 @@ const createExclusively = async (input: {
     // The caller decides what an occupied destination or a device boundary
     // means; only "hardlinking is unavailable here" is handled below.
     if (code === undefined || !LINK_UNSUPPORTED.has(code)) throw error;
-    input.note?.(
-      `Hardlinking is unavailable for "${input.from}" (${code}), so "${input.to}" is being ` +
-        `reserved with an exclusive create instead.`,
+    input.noteLinkFallback?.(
+      `Hardlinking is unavailable here (${code}), so destinations are being claimed with ` +
+        `an exclusive reservation instead. This is expected on SMB/CIFS, exFAT and FUSE ` +
+        `mounts, and whenever this process does not own the media it is replacing.`,
     );
   }
 
-  // Reserve the name. EEXIST here means another worker won it.
-  const handle = await open(input.to, 'wx');
-  await handle.close();
+  const reservationPath = await reserveDestination({
+    finalPath: input.to,
+    openExclusive: input.openExclusive,
+    unlinkFile: input.unlinkFile,
+    nowMs: input.nowMs,
+    note: input.note,
+  });
   try {
+    if (await exists(input.to)) throw eexistAt(input.to);
     await input.renameFile(input.from, input.to);
-  } catch (error) {
-    // Do not leave the empty placeholder behind holding a name.
-    await input.unlinkFile(input.to).catch(() => {});
-    throw error;
+  } finally {
+    await input.unlinkFile(reservationPath).catch((cause: unknown) => {
+      input.note?.(
+        `The reservation at "${reservationPath}" could not be removed ` +
+          `(${messageOf(cause)}); delete it by hand.`,
+      );
+    });
   }
   return 'renamed';
 };
@@ -212,8 +301,11 @@ const moveExclusively = async (input: {
   linkFile: LinkFileFn;
   renameFile: RenameFileFn;
   unlinkFile: UnlinkFileFn;
+  openExclusive: OpenExclusiveFn;
+  nowMs: () => number;
   onSourceRemovalFailure?: 'rollback' | 'keep';
   note?: (text: string) => void;
+  noteLinkFallback?: (text: string) => void;
 }): Promise<void> => {
   if ((await createExclusively(input)) === 'renamed') return; // rename consumed the old name
   try {
@@ -227,11 +319,18 @@ const moveExclusively = async (input: {
       );
       return;
     }
-    await input.unlinkFile(input.to).catch(() => {});
+    let rolledBack = true;
+    await input.unlinkFile(input.to).catch(() => {
+      rolledBack = false;
+    });
     throw new Error(
-      `"${input.from}" was linked to "${input.to}" but could not be removed from its old ` +
-        `name (${messageOf(error)}). The extra link has been removed, so the file is back ` +
-        `to a single name and nothing was lost.`,
+      rolledBack
+        ? `"${input.from}" was linked to "${input.to}" but could not be removed from its ` +
+            `old name (${messageOf(error)}). The extra link has been removed, so the file is ` +
+            `back to a single name and nothing was lost.`
+        : `"${input.from}" was linked to "${input.to}" and NEITHER could be removed ` +
+            `(${messageOf(error)}). The file now has two names — "${input.from}" and ` +
+            `"${input.to}" — and will be refused as hardlinked until one of them is deleted.`,
     );
   }
 };
@@ -286,7 +385,9 @@ const moveToTrash = async (input: {
   linkFile: LinkFileFn;
   renameFile: RenameFileFn;
   unlinkFile: UnlinkFileFn;
+  openExclusive: OpenExclusiveFn;
   note?: (text: string) => void;
+  noteLinkFallback?: (text: string) => void;
 }): Promise<string> => {
   const extension = extname(input.originalPath);
   const stem = basename(input.originalPath, extension);
@@ -300,7 +401,10 @@ const moveToTrash = async (input: {
         linkFile: input.linkFile,
         renameFile: input.renameFile,
         unlinkFile: input.unlinkFile,
+        openExclusive: input.openExclusive,
+        nowMs: () => input.nowMs,
         note: input.note,
+        noteLinkFallback: input.noteLinkFallback,
       });
       return candidate;
     } catch (error) {
@@ -356,6 +460,19 @@ export const createReplaceOriginalRunner =
     const renameFile: RenameFileFn = input.renameFile ?? ((from, to) => rename(from, to));
     const linkFile: LinkFileFn = input.linkFile ?? ((from, to) => link(from, to));
     const unlinkFile: UnlinkFileFn = input.unlinkFile ?? ((path) => unlink(path));
+    const openExclusive: OpenExclusiveFn =
+      input.openExclusive ??
+      (async (path) => {
+        const handle = await open(path, 'wx');
+        try {
+          await handle.close();
+        } catch (error) {
+          // A close that rejects would otherwise orphan the reservation with
+          // nothing holding a reference to clean it up.
+          await unlink(path).catch(() => {});
+          throw error;
+        }
+      });
     const crossDeviceError: CrossDeviceErrorFn =
       input.crossDeviceError ??
       ((crossDevice) =>
@@ -371,6 +488,14 @@ export const createReplaceOriginalRunner =
         const say = (text: string) => {
           args.jobLog(text);
           input.log?.(text);
+        };
+        // Every move takes the fallback on such a deployment, and every trash
+        // name retried inside one. Said once per file rather than three times.
+        let linkFallbackNoted = false;
+        const noteLinkFallback = (text: string) => {
+          if (linkFallbackNoted) return;
+          linkFallbackNoted = true;
+          say(text);
         };
         const newPath = args.inputFileObj._id;
         const originalPath = args.originalLibraryFile._id;
@@ -507,7 +632,9 @@ export const createReplaceOriginalRunner =
             linkFile,
             renameFile,
             unlinkFile,
+            openExclusive,
             note: say,
+            noteLinkFallback,
           });
         } catch (error) {
           // The original is still at its own path: nothing to undo.
@@ -529,10 +656,13 @@ export const createReplaceOriginalRunner =
               linkFile,
               renameFile,
               unlinkFile,
+              openExclusive,
+              nowMs: input.nowMs,
               // Being back at its own path is what matters here; a leftover
               // link in the trash is reported, not treated as a failure.
               onSourceRemovalFailure: 'keep',
               note: say,
+              noteLinkFallback,
             });
             say(`Restored the original to "${originalPath}".`);
           } catch (error) {
@@ -552,7 +682,10 @@ export const createReplaceOriginalRunner =
             allowCrossDevice: booleanInput(args.inputs.allowCrossDevice, true),
             linkFile,
             unlinkFile,
+            openExclusive,
+            nowMs: input.nowMs,
             say,
+            noteLinkFallback,
           });
         } catch (error) {
           // The move can complete even though the call reported failure — the
@@ -580,6 +713,28 @@ export const createReplaceOriginalRunner =
             `The new file is in place at "${finalPath}", but cleaning up afterwards failed: ` +
               `${messageOf(error)}`,
           );
+          // The replacement landed, but if it landed carrying an extra link
+          // then the hardlink guard will refuse this file on every future run
+          // — the same dead end a failed trash-move rollback creates. Leaving
+          // that behind is not a success, whatever the bytes at the path say.
+          const leftLinked = await input
+            .statFile(finalPath)
+            .then((stats) => stats.nlink > 1)
+            .catch(() => false);
+          if (leftLinked) {
+            say(
+              `"${finalPath}" now has more than one name, so it will be refused as ` +
+                `hardlinked until the duplicate is deleted. Reporting this as a failure ` +
+                `rather than leaving a file that cannot be processed again.`,
+            );
+            args.inputFileObj._id = finalPath;
+            args.inputFileObj.file = finalPath;
+            return {
+              outputNumber: 2,
+              outputFileObj: { _id: finalPath },
+              variables: args.variables,
+            };
+          }
         }
 
         // Re-stat AFTER the swap. Nothing else does, so without this every
@@ -661,9 +816,12 @@ const swapIntoPlace = async (input: {
   renameFile: RenameFileFn;
   linkFile: LinkFileFn;
   unlinkFile: UnlinkFileFn;
+  openExclusive: OpenExclusiveFn;
+  nowMs: () => number;
   crossDeviceError: CrossDeviceErrorFn;
   allowCrossDevice: boolean;
   say: (text: string) => void;
+  noteLinkFallback: (text: string) => void;
 }): Promise<void> => {
   if (canonicalPath(input.newPath) === canonicalPath(input.finalPath)) return; // already there
   try {
@@ -673,7 +831,10 @@ const swapIntoPlace = async (input: {
       linkFile: input.linkFile,
       renameFile: input.renameFile,
       unlinkFile: input.unlinkFile,
+      openExclusive: input.openExclusive,
+      nowMs: input.nowMs,
       note: input.say,
+      noteLinkFallback: input.noteLinkFallback,
     });
     return;
   } catch (error) {
@@ -712,10 +873,21 @@ const swapIntoPlace = async (input: {
       linkFile: input.linkFile,
       renameFile: input.renameFile,
       unlinkFile: input.unlinkFile,
+      openExclusive: input.openExclusive,
+      nowMs: input.nowMs,
       note: input.say,
+      noteLinkFallback: input.noteLinkFallback,
     });
   } catch (error) {
-    await input.unlinkFile(stagedPath).catch(() => {});
+    await input.unlinkFile(stagedPath).catch((cause: unknown) => {
+      // An orphaned full-size copy in the library directory is a silent
+      // disk-filler; naming it is the difference between a stray file someone
+      // can delete and one nobody knows about.
+      input.say(
+        `The cross-device staging copy at "${stagedPath}" could not be removed ` +
+          `(${messageOf(cause)}); delete it by hand.`,
+      );
+    });
     if (codeOf(error) === 'EEXIST') {
       throw new Error(
         `"${input.finalPath}" was claimed by something else while this replacement was in ` +

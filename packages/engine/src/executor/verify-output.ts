@@ -48,8 +48,8 @@ export const verifyOutput = (input: {
   // floor comfortably. Either way the length check did not happen, and saying
   // nothing about that is a false pass on the gate protecting a destructive
   // step.
-  const outDuration = Number.parseFloat(String(input.probe.format?.duration ?? ''));
-  const origDuration = Number.parseFloat(String(input.originalProbe.format?.duration ?? ''));
+  const outDuration = durationSecondsOf(input.probe);
+  const origDuration = durationSecondsOf(input.originalProbe);
   if (!Number.isFinite(origDuration)) {
     reasons.push(
       `the original's duration could not be read, so the output's length could not be ` +
@@ -95,6 +95,31 @@ export const verifyOutput = (input: {
   }
 
   return { ok: reasons.length === 0, reasons };
+};
+
+/**
+ * How long the media runs, in seconds, or `NaN` if nothing says.
+ *
+ * `format.duration` first, then the video stream's own duration. The fallback
+ * matters: plenty of containers report `N/A` at format level while every
+ * stream inside is timed, and `probeFile` already asks for `-show_streams`, so
+ * the baseline is sitting in the data we hold. Without it, such a file fails
+ * verification for want of a number that was right there — and since an
+ * unreadable duration is (correctly) a refusal on a gate in front of a
+ * destructive step, that refusal would land on files we could perfectly well
+ * have checked.
+ */
+const durationSecondsOf = (probe: ProbeData): number => {
+  const fromFormat = Number.parseFloat(String(probe.format?.duration ?? ''));
+  if (Number.isFinite(fromFormat)) return fromFormat;
+
+  const streams = probe.streams ?? [];
+  const video = streams.filter((stream) => stream.codec_type === 'video');
+  for (const stream of [...video, ...streams]) {
+    const fromStream = Number.parseFloat(String(stream.duration ?? ''));
+    if (Number.isFinite(fromStream)) return fromStream;
+  }
+  return Number.NaN;
 };
 
 /** A node input the user typed, read as a number with a documented default. */
