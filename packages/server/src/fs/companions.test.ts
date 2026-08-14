@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -47,6 +55,57 @@ describe('findCompanions', () => {
     const found = await findCompanions({
       filePath: join(dir, 'movie.mkv'),
       companionExtensions: ['mkv', 'srt'],
+    });
+    expect(found).toEqual([]);
+  });
+
+  it('does not treat a directory sharing the media stem as a companion', async () => {
+    // A directory literally named "movie.nfo" beside "movie.mkv" is not a
+    // sidecar file — without a type guard it would be returned and later
+    // handed to `rename`, which silently moves the whole directory.
+    const dir = libraryDir(['movie.mkv', 'movie.srt']);
+    mkdirSync(join(dir, 'movie.nfo'));
+    const found = await findCompanions({
+      filePath: join(dir, 'movie.mkv'),
+      companionExtensions: EXTENSIONS,
+    });
+    expect(found.map((p) => p.slice(dir.length + 1))).toEqual(['movie.srt']);
+  });
+
+  it('finds a companion that is itself a symlink to a regular file', async () => {
+    // Users plausibly share a subtitle file across libraries via a
+    // symlink. `Dirent.isFile()` is false for a symlink regardless of what
+    // it points at, so this only passes if symlinks are followed rather
+    // than rejected outright.
+    const dir = libraryDir(['movie.mkv']);
+    const realFile = join(dir, 'shared.srt');
+    writeFileSync(realFile, 'subs');
+    symlinkSync(realFile, join(dir, 'movie.srt'));
+    const found = await findCompanions({
+      filePath: join(dir, 'movie.mkv'),
+      companionExtensions: EXTENSIONS,
+    });
+    expect(found.map((p) => p.slice(dir.length + 1))).toEqual(['movie.srt']);
+  });
+
+  it('does not treat a symlink to a directory as a companion', async () => {
+    const dir = libraryDir(['movie.mkv']);
+    const realDir = join(dir, 'real-dir');
+    mkdirSync(realDir);
+    symlinkSync(realDir, join(dir, 'movie.nfo'));
+    const found = await findCompanions({
+      filePath: join(dir, 'movie.mkv'),
+      companionExtensions: EXTENSIONS,
+    });
+    expect(found).toEqual([]);
+  });
+
+  it('does not treat a dangling symlink as a companion', async () => {
+    const dir = libraryDir(['movie.mkv']);
+    symlinkSync(join(dir, 'nonexistent-target.srt'), join(dir, 'movie.srt'));
+    const found = await findCompanions({
+      filePath: join(dir, 'movie.mkv'),
+      companionExtensions: EXTENSIONS,
     });
     expect(found).toEqual([]);
   });
@@ -117,5 +176,25 @@ describe('moveCompanions', () => {
     expect(existsSync(join(dir, 'movie.srt'))).toBe(false);
     expect(existsSync(join(dir, 'film (1).srt'))).toBe(true);
     expect(readFileSync(join(dir, 'film (1).srt'), 'utf8')).toBe('incoming');
+  });
+
+  it('does not destroy a dangling symlink sitting at the destination name', async () => {
+    // `stat` follows symlinks, so a *dangling* one fails `stat` the same
+    // way an empty destination does — the destination check must use
+    // `lstat` (or otherwise treat the link itself as "something is here"),
+    // or this renames straight over the symlink and destroys it.
+    const dir = libraryDir(['movie.mkv', 'movie.srt']);
+    symlinkSync(join(dir, 'nonexistent-target.srt'), join(dir, 'film.srt'));
+
+    await moveCompanions({
+      companions: [join(dir, 'movie.srt')],
+      oldMediaPath: join(dir, 'movie.mkv'),
+      newMediaPath: join(dir, 'film.mkv'),
+    });
+
+    // The dangling symlink itself must survive as a symlink, untouched...
+    expect(lstatSync(join(dir, 'film.srt')).isSymbolicLink()).toBe(true);
+    // ...and the incoming companion must land at a disambiguated name.
+    expect(existsSync(join(dir, 'film (1).srt'))).toBe(true);
   });
 });

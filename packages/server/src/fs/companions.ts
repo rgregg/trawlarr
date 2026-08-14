@@ -1,4 +1,5 @@
-import { lstat, readdir, rename } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { lstat, readdir, rename, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 
 /** `movie.mkv` -> `movie`. Basename with its final extension stripped. */
@@ -6,6 +7,31 @@ const stemOf = (path: string): string => {
   const base = basename(path);
   const ext = extname(base);
   return ext === '' ? base : base.slice(0, -ext.length);
+};
+
+/**
+ * Whether `entry` (already known to share the media stem and a wanted
+ * extension) is actually a sidecar file rather than, say, a directory that
+ * happens to share the name.
+ *
+ * A plain directory is never a companion. A symlink is more subtle: users
+ * plausibly share subtitle files across libraries via a symlink, so a
+ * symlinked `.srt` must still be found — but `Dirent.isFile()` is false for
+ * *any* symlink, companion or not, so treating every symlink as "not a
+ * file" would silently stop matching a real, working sidecar as a side
+ * effect of rejecting directories. Instead, a symlink is followed with
+ * `stat` (not `lstat`, which would report the link itself): a link to a
+ * regular file counts, a link to a directory does not, and a broken link
+ * — `stat` throwing — does not either.
+ */
+const isCompanionFile = async (entry: Dirent, entryPath: string): Promise<boolean> => {
+  if (entry.isFile()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  try {
+    return (await stat(entryPath)).isFile();
+  } catch {
+    return false; // dangling symlink
+  }
 };
 
 /**
@@ -38,7 +64,6 @@ export const findCompanions = async (input: {
   const found: string[] = [];
   for (const entry of entries) {
     const name = entry.name;
-    if (!entry.isFile()) continue; // a directory (or anything else) sharing the stem is not a sidecar
     if (name === mediaBase) continue;
     if (!name.startsWith(stem)) continue;
     const remainder = name.slice(stem.length);
@@ -47,7 +72,10 @@ export const findCompanions = async (input: {
     const extension = extname(name).slice(1).toLowerCase();
     if (!wanted.has(extension)) continue;
 
-    found.push(join(dir, name));
+    const entryPath = join(dir, name);
+    if (!(await isCompanionFile(entry, entryPath))) continue;
+
+    found.push(entryPath);
   }
   return found.sort();
 };
