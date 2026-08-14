@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { FlowDefinition } from '@trawlarr/core';
+import { computeSignature, extractFacts, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
-import { createMediaFileRepo } from '../db/media-file-repo.js';
+import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
 import { scanLibrary } from './scan-library.js';
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +71,25 @@ beforeEach(() => {
 
 const scan = () => scanLibrary({ db, libraryId, ffprobePath: 'ffprobe', nowMs: now });
 
+/**
+ * The signature a successful run against `flowDefinitionHash` would have
+ * stamped for `row`, computed the same way the scanner does: facts
+ * extracted directly from the stored probe together with the row's own
+ * container/size, never read back out of `getProbe` (see its doc comment —
+ * its recomputed facts track the row's CURRENT container/size, not the ones
+ * a specific run actually converged against).
+ */
+const convergedSignature = (row: MediaFileRow, flowDefinitionHash: string): string => {
+  const probeInfo = createMediaFileRepo(db).getProbe(row.id);
+  if (probeInfo === null) throw new Error(`No probe stored for ${row.id}`);
+  const facts = extractFacts({
+    probe: probeInfo.probe,
+    container: row.container,
+    sizeBytes: row.size_bytes,
+  });
+  return computeSignature({ flowDefinitionHash, facts });
+};
+
 describe('scanLibrary', () => {
   it('finds media, ignores non-media, and queues what is not yet converged', async () => {
     const summary = await scan();
@@ -98,11 +117,14 @@ describe('scanLibrary', () => {
   it('leaves a converged file alone', async () => {
     await scan();
     const repo = createMediaFileRepo(db);
+    const flowDefinitionHash = createFlowRepo(db).getByName('HEVC')!.definitionHash;
     const files = repo.listByLibrary({ libraryId });
-    // Mark both good with their current signature, as a successful run would.
+    // Mark both good with the signature they actually converged against,
+    // exactly as applyRunOutcome would on a successful run.
     for (const file of files) {
       const ledger = repo.getLedger(file.id)!;
-      repo.setLedger({ fileId: file.id, record: { ...ledger, state: 'good' } });
+      const signature = convergedSignature(file, flowDefinitionHash);
+      repo.setLedger({ fileId: file.id, record: { ...ledger, state: 'good', signature } });
     }
     const summary = await scan();
     expect(summary.alreadyGood).toBe(2);
@@ -113,9 +135,11 @@ describe('scanLibrary', () => {
     // The step the whole convergence design depends on.
     await scan();
     const repo = createMediaFileRepo(db);
+    const flowDefinitionHash = createFlowRepo(db).getByName('HEVC')!.definitionHash;
     for (const file of repo.listByLibrary({ libraryId })) {
       const ledger = repo.getLedger(file.id)!;
-      repo.setLedger({ fileId: file.id, record: { ...ledger, state: 'good' } });
+      const signature = convergedSignature(file, flowDefinitionHash);
+      repo.setLedger({ fileId: file.id, record: { ...ledger, state: 'good', signature } });
     }
     createFlowRepo(db).update({
       id: createFlowRepo(db).getByName('HEVC')!.id,

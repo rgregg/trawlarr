@@ -262,13 +262,15 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
         return;
       }
 
-      // Signature doesn't match (or file was never converged): (re-)queue it,
-      // recording the signature it is now being evaluated against so a
-      // later successful run can be recognised as converged on it. This is
-      // the step the whole convergence design depends on.
+      // Signature doesn't match (or file was never converged): (re-)queue it.
+      // `signature` is deliberately NOT written here — it records the
+      // signature the file last converged under, and only applyRunOutcome
+      // (a successful run) is entitled to set it. Leaving it unchanged is
+      // rule 7's "resetting nothing else". This is the step the whole
+      // convergence design depends on.
       mediaFileRepo.setLedger({
         fileId: item.fileId,
-        record: { ...ledger, state: 'queued', signature },
+        record: { ...ledger, state: 'queued' },
       });
       summary.queued += 1;
     },
