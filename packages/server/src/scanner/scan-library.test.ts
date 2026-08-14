@@ -251,3 +251,86 @@ describe('scanLibrary', () => {
     }
   });
 });
+
+describe('scanLibrary excludes reserved staging/trash directories', () => {
+  it('does not admit files under the default .trawlarr staging or trash directories', async () => {
+    const libRoot = mkdtempSync(join(tmpdir(), 'trawlarr-scan-reserved-'));
+    mkdirSync(join(libRoot, '.trawlarr', 'trash'), { recursive: true });
+    mkdirSync(join(libRoot, '.trawlarr', 'staging'), { recursive: true });
+    await makeMedia(join(libRoot, 'keep.mkv'));
+    await makeMedia(join(libRoot, '.trawlarr', 'trash', 'deleted.mkv'));
+    await makeMedia(join(libRoot, '.trawlarr', 'staging', 'inprogress.mkv'));
+
+    const flow = createFlowRepo(db).create({ name: 'HEVC-reserved', definition, nowMs: NOW });
+    const library = createLibraryRepo(db).create({
+      name: 'MoviesReserved',
+      roots: [libRoot],
+      extensions: ['mkv'],
+      flowId: flow.id,
+      nowMs: NOW,
+    });
+
+    const summary = await scanLibrary({
+      db,
+      libraryId: library.id,
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    expect(summary.added).toBe(1);
+    const rows = createMediaFileRepo(db).listByLibrary({ libraryId: library.id });
+    expect(rows.map((r) => r.path)).toEqual([join(libRoot, 'keep.mkv')]);
+  }, 60_000);
+
+  it('does not break when the configured staging directory sits outside every root', async () => {
+    const libRoot = mkdtempSync(join(tmpdir(), 'trawlarr-scan-reserved-'));
+    const outsideStaging = mkdtempSync(join(tmpdir(), 'trawlarr-scan-staging-'));
+    await makeMedia(join(libRoot, 'keep.mkv'));
+    await makeMedia(join(outsideStaging, 'not-in-library.mkv'));
+
+    const flow = createFlowRepo(db).create({ name: 'HEVC-outside', definition, nowMs: NOW });
+    const library = createLibraryRepo(db).create({
+      name: 'MoviesOutsideStaging',
+      roots: [libRoot],
+      extensions: ['mkv'],
+      stagingDir: outsideStaging,
+      flowId: flow.id,
+      nowMs: NOW,
+    });
+
+    const summary = await scanLibrary({
+      db,
+      libraryId: library.id,
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    expect(summary.added).toBe(1);
+    const rows = createMediaFileRepo(db).listByLibrary({ libraryId: library.id });
+    expect(rows.map((r) => r.path)).toEqual([join(libRoot, 'keep.mkv')]);
+  }, 60_000);
+
+  it('does not prune a sibling directory that merely shares ".trawlarr" as a string prefix', async () => {
+    // The prefix-vs-segment trap: "/root/.trawlarr-old" starts with the
+    // string "/root/.trawlarr" without being inside it.
+    const libRoot = mkdtempSync(join(tmpdir(), 'trawlarr-scan-reserved-'));
+    mkdirSync(join(libRoot, '.trawlarr-old'), { recursive: true });
+    await makeMedia(join(libRoot, 'keep.mkv'));
+    await makeMedia(join(libRoot, '.trawlarr-old', 'legacy.mkv'));
+
+    const flow = createFlowRepo(db).create({ name: 'HEVC-oldsuffix', definition, nowMs: NOW });
+    const library = createLibraryRepo(db).create({
+      name: 'MoviesOldSuffix',
+      roots: [libRoot],
+      extensions: ['mkv'],
+      flowId: flow.id,
+      nowMs: NOW,
+    });
+
+    const summary = await scanLibrary({
+      db,
+      libraryId: library.id,
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    expect(summary.added).toBe(2);
+  }, 60_000);
+});

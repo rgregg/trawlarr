@@ -32,9 +32,10 @@ export class CrossDeviceStagingError extends Error {
  * "/library" share a string prefix without one directory containing the
  * other. An in-place-write guard in this codebase once compared paths this
  * way and let a working-directory argument slip past it, overwriting a
- * source file. Every containment check here goes through this function.
+ * source file. Every containment check in this codebase should go through
+ * this function rather than adding a second, weaker comparison.
  */
-const contains = (parent: string, child: string): boolean => {
+export const pathContains = (parent: string, child: string): boolean => {
   const resolvedParent = resolve(parent);
   const resolvedChild = resolve(child);
   return (
@@ -46,7 +47,7 @@ const contains = (parent: string, child: string): boolean => {
 /** Root of `library` whose directory tree actually contains `filePath`. */
 const rootContaining = (library: LibraryRecord, filePath: string): string => {
   const resolvedFile = resolve(filePath);
-  const root = library.roots.find((candidate) => contains(candidate, resolvedFile));
+  const root = library.roots.find((candidate) => pathContains(candidate, resolvedFile));
   if (root === undefined) {
     throw new Error(
       `"${filePath}" is not under any root of library "${library.name}" (roots: ` +
@@ -55,6 +56,15 @@ const rootContaining = (library: LibraryRecord, filePath: string): string => {
   }
   return root;
 };
+
+/**
+ * Name of the hidden directory holding the default staging and trash
+ * subdirectories under a library root. Exported as a single constant so
+ * that everything trawlarr puts under it in the future — staging, trash,
+ * or anything else — is pruned from library scans by construction, rather
+ * than by remembering to list each subdirectory individually.
+ */
+export const RESERVED_DIR_NAME = '.trawlarr';
 
 const resolveConfiguredOrDefault = (input: {
   library: LibraryRecord;
@@ -79,7 +89,7 @@ export const resolveStagingDir = (input: { library: LibraryRecord; filePath: str
     library: input.library,
     filePath: input.filePath,
     configured: input.library.stagingDir,
-    defaultSubdirs: ['.trawlarr', 'staging'],
+    defaultSubdirs: [RESERVED_DIR_NAME, 'staging'],
   });
 
 /**
@@ -93,8 +103,34 @@ export const resolveTrashDir = (input: { library: LibraryRecord; filePath: strin
     library: input.library,
     filePath: input.filePath,
     configured: input.library.trashDir,
-    defaultSubdirs: ['.trawlarr', 'trash'],
+    defaultSubdirs: [RESERVED_DIR_NAME, 'trash'],
   });
+
+/**
+ * Every directory a library scan must never descend into: the whole
+ * `.trawlarr` reserved directory under each root (covering the default
+ * staging and trash locations, and anything added under it later, by
+ * construction) plus any explicitly configured `stagingDir`/`trashDir`,
+ * wherever they happen to live.
+ *
+ * `resolveStagingDir`/`resolveTrashDir` take a single `filePath` because
+ * they answer "where does *this* file's staging/trash directory live",
+ * which only needs the one root containing it. Pruning a scan needs the
+ * opposite: every reserved directory across every root, before any file
+ * has been seen. Rather than force a fake `filePath` through the
+ * per-file resolvers (or worse, re-deriving the default subdirs a second
+ * time), this walks `library.roots` directly and applies the same
+ * `RESERVED_DIR_NAME` constant those resolvers use.
+ */
+export const reservedDirsForLibrary = (library: LibraryRecord): string[] => {
+  const dirs = new Set<string>();
+  for (const root of library.roots) {
+    dirs.add(join(resolve(root), RESERVED_DIR_NAME));
+  }
+  if (library.stagingDir !== null) dirs.add(resolve(library.stagingDir));
+  if (library.trashDir !== null) dirs.add(resolve(library.trashDir));
+  return [...dirs];
+};
 
 /** Creates `path` and any missing parents. A no-op if it already exists. */
 export const ensureDir = async (path: string): Promise<void> => {

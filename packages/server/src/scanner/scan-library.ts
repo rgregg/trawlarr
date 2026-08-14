@@ -8,6 +8,7 @@ import {
   type LedgerRecord,
 } from '@trawlarr/core';
 import { walkFiles } from '../fs/walk.js';
+import { reservedDirsForLibrary } from '../library/paths.js';
 import { partialHashFile, identityFromStat } from '../fs/partial-hash.js';
 import { probeFile, ProbeError } from '../probe/ffprobe.js';
 import { runChunked } from '../db/chunked.js';
@@ -99,7 +100,11 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   // whether it is new, changed, or unchanged, and whether it needs probing.
   // Kept out of runChunked's transactions because probing (phase 2) does
   // filesystem/process IO that must never happen inside a sqlite transaction.
-  for await (const entry of walkFiles({ roots: library.roots, extensions: library.extensions })) {
+  for await (const entry of walkFiles({
+    roots: library.roots,
+    extensions: library.extensions,
+    exclude: reservedDirsForLibrary(library),
+  })) {
     summary.seen += 1;
     onProgress?.(summary.seen);
 
