@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,21 +16,15 @@ import { scanLibrary, type ScanSummary } from '../scanner/scan-library.js';
 import { probeFile } from '../probe/ffprobe.js';
 import { moveCompanions as moveCompanionsReal } from '../fs/companions.js';
 import { runJob } from './run-job.js';
+import { toolAvailableSync } from '../../../../test-support/tool-availability.js';
 
 const execFileAsync = promisify(execFile);
 const NOW = 1_700_000_000_000;
 const now = () => NOW;
 
-const hasFfmpegSync = (): boolean => {
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const available = hasFfmpegSync();
+// See `toolAvailableSync`: only ENOENT means "not installed" and skips;
+// a check that could not be trusted throws instead of skipping silently.
+const available = toolAvailableSync('ffmpeg');
 
 const makeSample = (path: string, videoCodec: string) =>
   execFileAsync('ffmpeg', [

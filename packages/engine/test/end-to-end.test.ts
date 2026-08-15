@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
+import { toolAvailableSync } from '../../../test-support/tool-availability.js';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 
 const execFileAsync = promisify(execFile);
@@ -14,16 +15,9 @@ const execFileAsync = promisify(execFile);
 // beforeAll runs — so the ffmpeg check must be synchronous and done at
 // module scope. An async check gated behind beforeAll would always read as
 // unavailable and skip the whole suite regardless of whether ffmpeg exists.
-const hasFfmpegSync = (): boolean => {
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const available = hasFfmpegSync();
+// See `toolAvailableSync`: only ENOENT means "not installed" and skips;
+// a check that could not be trusted throws instead of skipping silently.
+const available = toolAvailableSync('ffmpeg');
 let workDir: string;
 let sourceDir: string;
 let mediaPath: string;

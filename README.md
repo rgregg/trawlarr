@@ -120,6 +120,22 @@ briefly offline never causes a library-wide purge. `scan
 --allow-empty-roots` is the explicit override for a root that really is
 empty now; `trawlarr status --library Movies --missing` lists what is gone.
 
+A library churns, so missing rows would otherwise pile up for ever. Discard
+them — and the job history attached to them — deliberately:
+
+```bash
+trawlarr forget --missing --library Movies --dry-run
+trawlarr forget --file <id>
+```
+
+Each row is re-verified as missing at the moment of deletion, comparing the
+file's content identity rather than merely whether its path is free (a better
+rip at the same name is a different file, and correctly a different row). A
+row whose own file turns out to be back has its mark cleared instead. Rows in
+a terminal state (`failed`/`not_converging`) are kept unless asked for with
+`--include-terminal` or named with `--file`: their attempt history is the only
+record of why trawlarr gave up on that file.
+
 **Trash retention.** Replace Original File moves the original into a
 per-library `.trawlarr/trash` directory rather than deleting it, and its
 `trashRetentionDays` input (default 14) says how long it is kept. The sweep

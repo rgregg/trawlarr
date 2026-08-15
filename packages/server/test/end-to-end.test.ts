@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -18,6 +18,7 @@ import { migrate } from '../src/db/migrate.js';
 import { createFlowRepo } from '../src/db/flow-repo.js';
 import { createLibraryRepo } from '../src/db/library-repo.js';
 import { createMediaFileRepo } from '../src/db/media-file-repo.js';
+import { ffmpegAvailableSync } from '../../../test-support/tool-availability.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,17 +27,11 @@ const execFileAsync = promisify(execFile);
 // skipped every run for several commits because its ffmpeg check lived
 // behind an async `beforeAll` instead of here. Computed synchronously, at
 // module scope, on purpose.
-const hasFfmpegSync = (): boolean => {
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    execFileSync('ffprobe', ['-version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const available = hasFfmpegSync();
+// Only a genuine ENOENT skips: `ffmpegAvailableSync` THROWS when the check
+// itself could not be trusted (a spawn that failed under load, a non-zero
+// exit), because answering "unavailable" there would silently skip this
+// suite — the phase's headline deliverable — and report green.
+const available = ffmpegAvailableSync();
 
 // The CLI runs against its BUILT output, exactly like a real install would
 // (`node .../dist/cli.js ...`) — the same convention `packages/engine/test/

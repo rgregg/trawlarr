@@ -5,3 +5,8 @@ cache/
 *.tsbuildinfo
 .DS_Store
 .superpowers/
+
+# Written by vitest's typecheck pass at the repo root; a run that is interrupted
+# leaves it behind, and `prettier --check .` then fails the gate on a file no
+# one wrote.
+tsconfig.vitest-temp.json

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +8,7 @@ import { migrate } from './db/migrate.js';
 import { createLibraryRepo } from './db/library-repo.js';
 import { createFlowRepo } from './db/flow-repo.js';
 import { main } from './cli.js';
+import { toolAvailableSync } from '../../../test-support/tool-availability.js';
 
 /**
  * Unit-level coverage for every error path, exit code, and validation rule
@@ -17,15 +17,9 @@ import { main } from './cli.js';
  * (never as a subprocess), so these run fast and need no built `dist/`.
  */
 
-const hasFfmpegSync = (): boolean => {
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-};
-const ffmpegAvailable = hasFfmpegSync();
+// See `toolAvailableSync`: only ENOENT means "not installed" and skips;
+// a check that could not be trusted throws instead of skipping silently.
+const ffmpegAvailable = toolAvailableSync('ffmpeg');
 
 let logSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
@@ -70,6 +64,25 @@ describe('cli: dispatch', () => {
     const dataDir = newDataDir();
     expect(await main(['--data-dir', dataDir, 'library', 'add'])).not.toBe(0);
     expect(stderr()).toContain('Unrecognized option "--data-dir"');
+    expect(stderr()).toContain('must come AFTER the command');
+  });
+
+  it('treats --help/-h/help as a request, not a mistake', async () => {
+    for (const argv of [['--help'], ['-h'], ['help']]) {
+      logSpy.mockClear();
+      errorSpy.mockClear();
+      // The most common first command anyone types must not answer with an
+      // error line and a non-zero exit.
+      expect(await main(argv)).toBe(0);
+      expect(stdout()).toContain('Usage:');
+      expect(stdout()).toContain('trawlarr scan --library');
+      expect(stderr()).toBe('');
+    }
+  });
+
+  it('still explains a genuinely misplaced option', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['--data-dir', dataDir, 'scan'])).not.toBe(0);
     expect(stderr()).toContain('must come AFTER the command');
   });
 
@@ -583,6 +596,113 @@ describe('cli: reap', () => {
     expect(await main(['reap', '--stale-after-hours', '0', '--data-dir', dataDir])).not.toBe(0);
     expect(stderr()).toContain('too short');
     expect(stateOf(dataDir, stranded)).toBe('running');
+  });
+});
+
+describe('cli: forget', () => {
+  /** A tracked row for a real file, marked missing after the file is deleted. */
+  const seedMissing = (
+    dataDir: string,
+    libraryName: string,
+    name: string,
+    state: string,
+  ): { fileId: string; path: string } => {
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    const library = createLibraryRepo(db).getByName(libraryName)!;
+    const path = join(library.roots[0]!, name);
+    const fileId = `missing-${name}`;
+    db.prepare(
+      `INSERT INTO media_file (
+         id, library_id, content_key, path, size_bytes, mtime_ms, ctime_ms,
+         container, state, missing_since_ms, discovered_at, updated_at
+       ) VALUES (?, ?, ?, ?, 0, 0, 0, 'mkv', ?, ?, 0, 0)`,
+    ).run(fileId, library.id, `content-${name}`, path, state, 1_700_000_000_000);
+    db.prepare(
+      `INSERT INTO job (id, file_id, flow_id, flow_hash, state, started_at)
+       VALUES (?, ?, 'f', 'h', 'succeeded', 0)`,
+    ).run(`job-${name}`, fileId);
+    db.close();
+    return { fileId, path };
+  };
+
+  const rowExists = (dataDir: string, fileId: string): boolean => {
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    const row = db.prepare('SELECT id FROM media_file WHERE id = ?').get(fileId);
+    db.close();
+    return row !== undefined;
+  };
+
+  it('requires something to forget', async () => {
+    expect(await main(['forget', '--data-dir', newDataDir()])).not.toBe(0);
+    expect(stderr()).toContain('name what to forget');
+  });
+
+  it('forgets a confirmed-missing row, and says the job history goes with it', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const { fileId } = seedMissing(dataDir, 'Movies', 'gone.mkv', 'good');
+
+    expect(await main(['forget', '--missing', '--library', 'Movies', '--data-dir', dataDir])).toBe(
+      0,
+    );
+    expect(stdout()).toContain('job record(s) and their step traces');
+    expect(rowExists(dataDir, fileId)).toBe(false);
+  });
+
+  it('keeps a terminal row for inspection until it is asked for', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const { fileId } = seedMissing(dataDir, 'Movies', 'failed.mkv', 'failed');
+
+    expect(await main(['forget', '--missing', '--library', 'Movies', '--data-dir', dataDir])).toBe(
+      0,
+    );
+    expect(rowExists(dataDir, fileId)).toBe(true);
+    expect(stdout()).toContain('--include-terminal');
+
+    expect(
+      await main([
+        'forget',
+        '--missing',
+        '--library',
+        'Movies',
+        '--include-terminal',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+    expect(rowExists(dataDir, fileId)).toBe(false);
+  });
+
+  it('changes nothing under --dry-run', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const { fileId } = seedMissing(dataDir, 'Movies', 'gone.mkv', 'good');
+
+    expect(
+      await main([
+        'forget',
+        '--missing',
+        '--dry-run',
+        '--library',
+        'Movies',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+    expect(stdout()).toContain('Nothing was changed');
+    expect(rowExists(dataDir, fileId)).toBe(true);
+  });
+
+  it('refuses to forget a row nothing has confirmed missing', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const ids = seedFiles(dataDir, 'Movies', ['queued']);
+
+    expect(await main(['forget', '--file', ids[0]!, '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('not marked missing');
+    expect(rowExists(dataDir, ids[0]!)).toBe(true);
   });
 });
 

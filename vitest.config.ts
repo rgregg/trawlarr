@@ -14,7 +14,11 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['packages/*/src/**/*.test.ts', 'packages/*/test/**/*.test.ts'],
+    include: [
+      'packages/*/src/**/*.test.ts',
+      'packages/*/test/**/*.test.ts',
+      'test-support/**/*.test.ts',
+    ],
     environment: 'node',
     typecheck: {
       // Each package's build tsconfig excludes *.test.ts so `dist/` never
@@ -25,7 +29,11 @@ export default defineConfig({
       // a type error (e.g. an object literal assigned the wrong shape)
       // fails `pnpm test` just like a failed assertion would.
       enabled: true,
-      include: ['packages/*/src/**/*.test.ts', 'packages/*/test/**/*.test.ts'],
+      include: [
+        'packages/*/src/**/*.test.ts',
+        'packages/*/test/**/*.test.ts',
+        'test-support/**/*.test.ts',
+      ],
       tsconfig: './tsconfig.typecheck.json',
     },
   },

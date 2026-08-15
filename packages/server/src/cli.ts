@@ -16,6 +16,7 @@ import {
 import { createFlowRepo } from './db/flow-repo.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
+import { forgetMissing } from './scanner/forget-missing.js';
 import { runQueue } from './worker/loop.js';
 import { DEFAULT_STALE_AFTER_MS, reapStalled } from './worker/reap-stalled.js';
 
@@ -543,7 +544,8 @@ const cmdStatus = async (args: string[]): Promise<number> => {
         `  ${missing} file(s) are gone from disk. Their rows (and job history) are kept and ` +
           `excluded from the count above; putting a file back makes the next scan pick it up ` +
           `exactly where it left off. List them with "trawlarr status --library ` +
-          `${library.name} --missing".`,
+          `${library.name} --missing", or discard them for good with "trawlarr forget ` +
+          `--missing --library ${library.name}".`,
       );
     }
 
@@ -736,6 +738,105 @@ const cmdReap = async (args: string[]): Promise<number> => {
 };
 
 // ---------------------------------------------------------------------------
+// forget
+// ---------------------------------------------------------------------------
+
+/**
+ * Discard rows whose file is gone for good. The counterpart to the scanner's
+ * deliberate decision to MARK rather than delete: a media library churns —
+ * files are replaced by better rips constantly — so without this, dead rows
+ * accumulate for ever, merely labelled instead of miscounted.
+ *
+ * Explicit by design, and never something a scan does on its own: nothing
+ * that runs unattended should be able to destroy a record.
+ */
+const cmdForget = async (args: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'data-dir': { type: 'string', default: './trawlarr-data' },
+      library: { type: 'string' },
+      missing: { type: 'boolean', default: false },
+      file: { type: 'string', multiple: true },
+      'include-terminal': { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false },
+    },
+  });
+
+  const byFile = values.file !== undefined && values.file.length > 0;
+  if (!byFile && !values.missing) {
+    throw new CliError(
+      'forget: name what to forget — either "--missing" (every row whose file this library ' +
+        'has confirmed gone; add --library to scope it) or "--file <id>" (repeatable, ids ' +
+        'come from "trawlarr status --missing").',
+    );
+  }
+  if (byFile && values.missing) {
+    throw new CliError('forget: use either --file or --missing, not both.');
+  }
+
+  const db = await openDb(values['data-dir']!);
+  const libraries =
+    values.library !== undefined
+      ? [requireLibrary(db, values.library)]
+      : createLibraryRepo(db).list();
+
+  let forgotten = 0;
+  for (const library of libraries) {
+    const summary = await forgetMissing({
+      db,
+      library,
+      fileIds: byFile ? values.file : undefined,
+      includeTerminal: values['include-terminal'],
+      dryRun: values['dry-run'],
+    });
+
+    for (const file of summary.files) {
+      console.log(
+        `  ${values['dry-run'] ? 'would forget' : 'forgot'} ${file.fileId}  ${file.state}  ` +
+          `${file.path}  (discarding ${file.jobCount} job record(s) and their step traces)`,
+      );
+    }
+    forgotten += summary.forgotten;
+
+    if (summary.restored > 0) {
+      console.log(
+        `  ${summary.restored} row(s) in "${library.name}" turned out to have their file back ` +
+          `after all; their missing mark was cleared instead of being forgotten.`,
+      );
+    }
+    if (summary.unconfirmed > 0) {
+      console.log(
+        `  ${summary.unconfirmed} row(s) in "${library.name}" left alone: their path could not ` +
+          `be examined just now, and "I could not check" is not "it is gone".`,
+      );
+    }
+    if (summary.keptTerminal > 0) {
+      console.log(
+        `  ${summary.keptTerminal} missing row(s) in "${library.name}" are in a terminal state ` +
+          `(failed / not_converging) and were KEPT: their attempt history is the only record ` +
+          `of why trawlarr gave up on that file. Add --include-terminal, or name them with ` +
+          `--file <id>, to forget those too.`,
+      );
+    }
+    if (summary.notMissing > 0) {
+      console.log(
+        `  ${summary.notMissing} named row(s) are not marked missing and were left alone: only ` +
+          `a scan that confirmed the file gone can authorise forgetting it.`,
+      );
+    }
+  }
+
+  console.log(
+    values['dry-run']
+      ? `${forgotten} row(s) would be forgotten. Nothing was changed.`
+      : `Forgot ${forgotten} row(s). Their ledger entries and job history are gone for good; ` +
+          `the files themselves were already gone.`,
+  );
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -750,11 +851,24 @@ const USAGE = `Usage:
   trawlarr requeue --library <name> --state <state>
   trawlarr trash purge [--library <name>] [--days <n>] [--dry-run]
   trawlarr reap [--library <name>] [--stale-after-hours <n>] [--dry-run]
+  trawlarr forget --missing [--library <name>] [--include-terminal] [--dry-run]
+  trawlarr forget --file <id> [--file <id>...] [--dry-run]
 
 All commands accept --data-dir <path> (default ./trawlarr-data).`;
 
 const dispatch = async (argv: string[]): Promise<number> => {
   const [cmd, ...rest] = argv;
+
+  // Asking for help is a request, not a mistake. `--help` is the single most
+  // common first command anyone types, and answering it with "Unrecognized
+  // option" on stderr and a non-zero exit tells a new user they got it
+  // wrong while printing exactly what they asked for underneath. The
+  // "options must come AFTER the command" diagnostic below is kept intact
+  // for what it was written for: a genuinely misplaced option.
+  if (cmd === '--help' || cmd === '-h' || cmd === 'help') {
+    console.log(USAGE);
+    return 0;
+  }
 
   if (cmd === 'library') {
     const [sub, ...subRest] = rest;
@@ -777,6 +891,7 @@ const dispatch = async (argv: string[]): Promise<number> => {
   if (cmd === 'status') return cmdStatus(rest);
   if (cmd === 'requeue') return cmdRequeue(rest);
   if (cmd === 'reap') return cmdReap(rest);
+  if (cmd === 'forget') return cmdForget(rest);
 
   if (cmd === undefined) throw new CliError(`No command given.\n\n${USAGE}`);
   if (cmd.startsWith('-')) {
