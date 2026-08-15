@@ -1,7 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
-  "references": [{ "path": "../core" }, { "path": "../engine" }, { "path": "../plugin-api" }],
+  "references": [
+    { "path": "../core" },
+    { "path": "../engine" },
+    { "path": "../plugin-api" },
+    { "path": "../plugins-core" }
+  ],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]
 }
