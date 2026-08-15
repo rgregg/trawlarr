@@ -11,6 +11,26 @@ intent. This file records only what execution learned.
 
 ---
 
+## The loop itself must be tested, not only its parts
+
+Tasks 1-9 each shipped with a green suite, a passing review, and empirical verification of their own
+behaviour. Then the first end-to-end run of the actual loop — scan, claim, run, scan again — showed the
+library **never converges**: a file transcoded to hevc in round 1 was re-queued and re-transcoded in
+rounds 2, 3 and 4, indefinitely, with `alreadyGood` stuck at 0 and the stored signature stable the whole
+time. On a real library that is an unattended worker re-encoding everything forever, with generational
+quality loss on files that were already correct.
+
+Nothing in 987 tests caught it, because every test verified a component against its own contract and the
+defect lived in the agreement *between* two components — the signature the runner stores and the
+signature the scanner recomputes never matched. This is the third seam bug in this project (scanner vs
+trash directories, engine vs server dependency direction, and now runner vs scanner signatures), and the
+most damaging, because it disables the feature the whole system exists to provide while every part
+reports success.
+
+Keep a test that drives the real loop over a real file for several rounds and asserts it goes quiet —
+and asserts the other direction too, that editing the flow makes it noisy again. A fix that converges by
+never re-queueing passes the first assertion and destroys the feature just as thoroughly.
+
 ## Load-bearing — a P2 component is wrong without these
 
 ### The scanner must recompute signatures and move converged files out of `good`
