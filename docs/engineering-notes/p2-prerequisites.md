@@ -29,6 +29,53 @@ fixed:
 Derive "the library file changed" from the replace step's own output path and identity differing from
 the original — never from an output number, and never from whether the job as a whole succeeded.
 
+A fourth instance of the same family surfaced in the P2a final review, and it is the one that
+generalises: the fix for the second bullet above was written as a **hard-coded allow-list of two
+plugin ids** (Verify Output, Replace Original File). `trawlarr:execute` routes ffmpeg's non-zero exit
+to output 2 as well and was not on the list, so a missing hardware encoder — `hevc_nvenc` on a CPU-only
+host, the most common first-run misconfiguration for this class of tool — ended the flow at
+`end-of-flow`, scored `success = true`, and stored the **pre-transcode** signature as `good`, which
+`isKnownGood` then matched forever. A whole library reported "100% converged" with nothing transcoded
+and **zero errors anywhere**. Same for a corrupt source, ENOSPC in staging, or an unsupported pixel
+format.
+
+The rule that replaced it: *a terminal output the flow author did not route, on a node that is
+reporting failure, is not success.* Both halves come from things that already exist — `stopReason ===
+'end-of-flow'` is exactly "no edge leaves the output this node took", and the node's own `details()`
+declares what its outputs mean (`PluginOutputDescriptor.outcome: 'failure'`, carried onto the step by
+`runFlow`). An id list has to be extended for every future first-party node and can never cover a
+community plugin at all; a declaration travels with the node that owns the meaning. Undeclared outputs
+stay neutral deliberately: inferring "failure" from a tooltip would read a filter node's "no, this file
+is not hevc" as a failure and hold files that had genuinely converged.
+
+Also, wire a runner's `log` seam through to the step's `jobLog`. `createExecuteRunner` was built without
+one, so `ffmpeg failed (code N): <stderrTail>` — the only record of *why* an encode failed — was
+discarded and `job_step.log_excerpt` was empty for the one step that had something to say.
+
+## Scanning and running are separate processes against the same database
+
+`Replace Original File` renames the new file into place, `runJob` probes it, and only then does
+`updateAfterRun` record the new identity. **Between those points the on-disk file has an identity no row
+claims** — and `trawlarr scan` and `trawlarr run` are separate processes against one WAL database, which
+is the normal deployment. A scan landing in that window matched nothing, inserted a second row, and
+`updateAfterRun` then hit `UNIQUE (library_id, content_key)` and unwound the run: a ghost row keeping the
+**pre-transcode** probe (claimed again after its backoff, re-transcoding the already-hevc file with
+generational loss and pushing the good result into trash) beside a second row for the same file, both
+eventually `good`. `NEVER_REQUEUE_STATES` cannot help — the file the scanner walked is associated with no
+row at all, let alone the `running` one.
+
+Closed in the scanner: a walked file that **no row claims**, at a path an **in-flight run is entitled to
+produce** (same directory and stem as a `running` row's path — `Replace Original File` keeps the user's
+stem and may only change the container), is not a new file and is left entirely alone. The ordering that
+makes it sound: `claimNext` commits `running` strictly before the run can put anything on disk, so any
+file a scanner can *see* inside the window is already covered by a `running` row it can read. The
+in-flight set is therefore queried **per walked file**, never cached for the length of a scan.
+
+Reserving the identity before the swap was rejected: the pre-swap content key is a guess (a cross-device
+replacement copies, a guard can refuse after staging, a run can die mid-swap), and the ledger would stop
+being a record of what is on disk. Putting the identity update in "the same transaction as the
+observation" closes nothing — the swap is a filesystem operation no sqlite transaction contains.
+
 ## An allow-list is not a rule
 
 "A terminal output the flow author did not route is not success" was implemented as a hard-coded list of
