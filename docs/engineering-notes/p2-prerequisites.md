@@ -11,6 +11,24 @@ intent. This file records only what execution learned.
 
 ---
 
+## "The job succeeded" and "the file on disk changed" are different questions
+
+Conflating them caused three separate defects in one task, each rediscovered after the previous was
+fixed:
+
+- Persistence was gated on `success && claimedModified`, so a failure *after* a successful Replace threw
+  away every record of the replacement. The retry then re-transcoded an already-transcoded file at full
+  cost, with generational loss, and pushed the good result into trash.
+- `success` was `!result.failed`, but `runFlow` reports `end-of-flow` whenever a node routes to an output
+  with no outgoing edge — exactly what `verifyOutput` rejecting or `replaceOriginal` refusing does. Files
+  the flow had explicitly rejected were marked `good` on their *pre-transcode* signature, permanently.
+- `claimedModified` was derived from Replace reaching output 1, but Replace can swap the file in and
+  still return output 2 (swap landed but left hardlinked; media swapped but companions split). Those
+  branches changed the filesystem while the row was never updated.
+
+Derive "the library file changed" from the replace step's own output path and identity differing from
+the original — never from an output number, and never from whether the job as a whole succeeded.
+
 ## The loop itself must be tested, not only its parts
 
 Tasks 1-9 each shipped with a green suite, a passing review, and empirical verification of their own
