@@ -317,6 +317,18 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
   test at all, and the suite's fixed `CLOCK_MS` (Nov 2023) made `now - mtime` negative against real file
   mtimes, so the branch could not be entered even by accident. Whenever a fixed clock meets a real
   filesystem timestamp, check which direction the subtraction runs.
+- **A proxy test can fail the caricature of a bug and not the bug.** After the "Replace changed the file
+  but reported failure" defect, the branch was unreachable black-box, so a proxy test was written
+  instead. It failed a *last-step-output-number* implementation but passed the shape that had actually
+  shipped — so the defect class stayed unpinned while looking covered. Before accepting a proxy, revert
+  to the real previous implementation and confirm the proxy goes red. If it does not, inject at the
+  composition root instead: the seams passed into the runner are overridable there even when the branch
+  is unreachable from outside.
+- **"This mutant is unkillable without a brittle test" is usually wrong.** A surviving start-of-job
+  heartbeat mutant was accepted on the grounds that only an exact-tick or timing assertion could catch
+  it. It could not — a flow with no start node produces zero steps, so the later heartbeat that masked it
+  never runs, and the assertion becomes a plain null check. When a mutant looks unkillable, look for an
+  input that stops the masking path from running at all, rather than reaching for timing.
 - **A rare flake is invisible to single-run verification.** A test asserting that a 1 ms timer had
   ticked failed about one run in fifteen and survived five reviews. When a test asserts a timing side
   effect, assert *order* instead.
