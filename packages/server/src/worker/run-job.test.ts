@@ -52,6 +52,28 @@ const makeSample = (path: string, videoCodec: string) =>
     path,
   ]);
 
+/** Same shape as `makeSample`, but a visually different pattern — distinct bytes, same duration. */
+const makeAltSample = (path: string, videoCodec: string) =>
+  execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc2=duration=2:size=320x240:rate=10',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=880:duration=2',
+    '-c:v',
+    videoCodec,
+    '-preset',
+    'ultrafast',
+    '-c:a',
+    'aac',
+    path,
+  ]);
+
 const videoCodecOf = async (path: string): Promise<string> => {
   const { stdout } = await execFileAsync('ffprobe', [
     '-v',
@@ -102,40 +124,6 @@ const TRANSCODE_FLOW: FlowDefinition = {
     { fromNodeId: 'check', outputNumber: 2, toNodeId: 'begin' },
     { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'encoder' },
     { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'execute' },
-    { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
-    { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
-  ],
-};
-
-/**
- * No codec check, no encoder — Execute always finds nothing to do
- * (`deriveShouldProcess` false), Verify trivially passes an unchanged file
- * against itself, and Replace's "already the file this flow produced"
- * branch fires. Every one of these nodes still reports success (output 1),
- * so the flow CLAIMS to have modified the file while nothing on disk moved
- * — the scenario `applyRunOutcome`'s one-strike rule exists to catch.
- */
-const NOOP_FLOW: FlowDefinition = {
-  nodes: [
-    { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
-    { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
-    { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
-    {
-      id: 'verify',
-      pluginId: 'trawlarr:verifyOutput',
-      pluginVersion: '1.0.0',
-      inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
-    },
-    {
-      id: 'replace',
-      pluginId: 'trawlarr:replaceOriginal',
-      pluginVersion: '1.0.0',
-      inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
-    },
-  ],
-  edges: [
-    { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
-    { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'execute' },
     { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
     { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
   ],
@@ -308,41 +296,65 @@ describe.runIf(available)('runJob', () => {
     expect(jobRows[0]?.state).toBe('failed');
   }, 60_000);
 
-  it('marks the ledger not_converging (the one-strike rule) when the flow claims a change but nothing moved', async () => {
-    const { claimed } = await setupClaimedFile({ definition: NOOP_FLOW, videoCodec: 'libx264' });
-    const beforeSize = statSync(claimed.path).size;
-    const beforeCodec = await videoCodecOf(claimed.path);
+  it(
+    'marks the ledger not_converging (the one-strike rule) when Replace swaps in a new ' +
+      'inode holding byte-identical content',
+    async () => {
+      // NOTE: under the output-number-based `claimedModified` this test used
+      // before I-4, a flow whose Replace step took the "nothing to replace,
+      // already the file this flow produced" branch (no swap, no identity
+      // change at all) was — incorrectly — read as a modification claim.
+      // Judged by identity (see `runJob`'s `claimedModified`), that branch
+      // correctly reports NO change, so it can no longer stand in for the
+      // one-strike scenario. The one real-component way left to make
+      // identity change while facts stay byte-for-byte identical is to
+      // swap in a file that is a genuine copy, not the same file — see
+      // `copyVerbatimFlow`.
+      const { claimed } = await setupClaimedFile({
+        definition: copyVerbatimFlow(),
+        videoCodec: 'libx264',
+      });
+      const beforeSize = statSync(claimed.path).size;
+      const beforeCodec = await videoCodecOf(claimed.path);
+      const beforeRow = createMediaFileRepo(db).getById(claimed.fileId);
 
-    const result = await runJob({
-      db,
-      claimed,
-      ffmpegPath: 'ffmpeg',
-      ffprobePath: 'ffprobe',
-      nowMs: now,
-    });
+      const result = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
 
-    expect(result.state).toBe('not_converging');
+      expect(result.state).toBe('not_converging');
 
-    const steps = createJobRepo(db).getSteps(result.jobId);
-    expect(steps.map((s) => s.pluginId)).toEqual([
-      'trawlarr:start',
-      'trawlarr:beginCommand',
-      'trawlarr:execute',
-      'trawlarr:verifyOutput',
-      'trawlarr:replaceOriginal',
-    ]);
-    // Replace reported success (its "nothing to replace" branch), which is
-    // exactly the claim the file was modified.
-    expect(steps.at(-1)?.outputNumber).toBe(1);
+      const steps = createJobRepo(db).getSteps(result.jobId);
+      expect(steps.map((s) => s.pluginId)).toEqual([
+        'trawlarr:start',
+        expect.any(String), // the copy-verbatim plugin's absolute path
+        'trawlarr:verifyOutput',
+        'trawlarr:replaceOriginal',
+      ]);
+      expect(steps.at(-1)?.outputNumber).toBe(1);
 
-    // Nothing actually moved.
-    expect(statSync(claimed.path).size).toBe(beforeSize);
-    expect(await videoCodecOf(claimed.path)).toBe(beforeCodec);
+      // Content is byte-for-byte the same the whole way through...
+      expect(statSync(claimed.path).size).toBe(beforeSize);
+      expect(await videoCodecOf(claimed.path)).toBe(beforeCodec);
 
-    const ledger = createMediaFileRepo(db).getLedger(claimed.fileId);
-    expect(ledger?.state).toBe('not_converging');
-    expect(ledger?.consecutiveNoopCount).toBeGreaterThanOrEqual(1);
-  }, 60_000);
+      // ...but identity genuinely changed: a new inode, holding the SAME
+      // content, replaced the old one. This is what makes it a real
+      // "claimed modified" case rather than an early refusal (which would
+      // leave the row's identity untouched).
+      const afterRow = createMediaFileRepo(db).getById(claimed.fileId);
+      expect(afterRow?.inode_key).not.toBe(beforeRow?.inode_key);
+      expect(afterRow?.content_key).toBe(beforeRow?.content_key);
+
+      const ledger = createMediaFileRepo(db).getLedger(claimed.fileId);
+      expect(ledger?.state).toBe('not_converging');
+      expect(ledger?.consecutiveNoopCount).toBeGreaterThanOrEqual(1);
+    },
+    60_000,
+  );
 });
 
 /**
@@ -563,6 +575,192 @@ const writeDiagPlugin = (): string => {
   return abs;
 };
 
+/**
+ * A CommonJS plugin standing in for Execute: copies the input file
+ * byte-for-byte into `workDir` rather than transcoding it, so Replace swaps
+ * in a file with a genuinely NEW inode but IDENTICAL content — the only
+ * real-component way to construct "the flow claims a change and identity
+ * really did change, but the facts are byte-for-byte the same", which is
+ * what the one-strike rule exists to catch once `claimedModified` is judged
+ * by identity rather than by output number.
+ */
+const copyVerbatimPluginCode = (): string => `
+const fs = require('node:fs');
+const path = require('node:path');
+
+const details = () => ({
+  name: 'Copy Verbatim',
+  description: 'copies the input file byte-for-byte, standing in for a no-op transcode',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => {
+  const src = args.inputFileObj._id;
+  const dest = path.join(args.workDir, 'copy' + path.extname(src));
+  fs.copyFileSync(src, dest);
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: dest },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`;
+
+const writeCopyVerbatimPlugin = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'trawlarr-copy-plugin-'));
+  const abs = join(dir, 'index.js');
+  writeFileSync(abs, copyVerbatimPluginCode(), 'utf8');
+  return abs;
+};
+
+/**
+ * A CommonJS plugin that ignores its own input entirely and copies a FIXED
+ * source path (baked in at generation time) into `workDir` instead — used
+ * to make one file's "transcode" deterministically produce bytes identical
+ * to a DIFFERENT, already-tracked file, for the I-1 content-key-collision
+ * test. Real `fs.copyFileSync`, no mocking of the engine or its runners.
+ */
+const copyFromPluginCode = (sourcePath: string): string => `
+const fs = require('node:fs');
+const path = require('node:path');
+
+const details = () => ({
+  name: 'Copy From Fixed Source',
+  description: 'copies a fixed source path byte-for-byte, ignoring its own input',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => {
+  const dest = path.join(args.workDir, 'copy-from-source.mkv');
+  fs.copyFileSync(${JSON.stringify(sourcePath)}, dest);
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: dest },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`;
+
+const writeCopyFromPlugin = (sourcePath: string): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'trawlarr-copy-from-plugin-'));
+  const abs = join(dir, 'index.js');
+  writeFileSync(abs, copyFromPluginCode(sourcePath), 'utf8');
+  return abs;
+};
+
+/** start -> (byte-for-byte copy of `sourcePath`) -> verify -> replace. */
+const copyFromFlow = (sourcePath: string): FlowDefinition => {
+  const copyPath = writeCopyFromPlugin(sourcePath);
+  return {
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'copy', pluginId: copyPath, pluginVersion: '1.0.0', inputs: {} },
+      {
+        id: 'verify',
+        pluginId: 'trawlarr:verifyOutput',
+        pluginVersion: '1.0.0',
+        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+      },
+      {
+        id: 'replace',
+        pluginId: 'trawlarr:replaceOriginal',
+        pluginVersion: '1.0.0',
+        inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+      },
+    ],
+    edges: [
+      { fromNodeId: 'start', outputNumber: 1, toNodeId: 'copy' },
+      { fromNodeId: 'copy', outputNumber: 1, toNodeId: 'verify' },
+      { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+    ],
+  };
+};
+
+/** start -> (byte-for-byte copy) -> verify -> replace, using the plugin above. */
+const copyVerbatimFlow = (): FlowDefinition => {
+  const copyPath = writeCopyVerbatimPlugin();
+  return {
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'copy', pluginId: copyPath, pluginVersion: '1.0.0', inputs: {} },
+      {
+        id: 'verify',
+        pluginId: 'trawlarr:verifyOutput',
+        pluginVersion: '1.0.0',
+        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+      },
+      {
+        id: 'replace',
+        pluginId: 'trawlarr:replaceOriginal',
+        pluginVersion: '1.0.0',
+        inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+      },
+    ],
+    edges: [
+      { fromNodeId: 'start', outputNumber: 1, toNodeId: 'copy' },
+      { fromNodeId: 'copy', outputNumber: 1, toNodeId: 'verify' },
+      { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+    ],
+  };
+};
+
+/**
+ * A CommonJS plugin that feeds a nonexistent path downstream — used to make
+ * a SECOND `trawlarr:replaceOriginal` node refuse (its `statFile(newPath)`
+ * fails), so its own reported path is the true library path rather than a
+ * trivial "already there" no-op. See the I-4 test below for why.
+ */
+const sabotagePluginCode = (): string => `
+const details = () => ({
+  name: 'Sabotage',
+  description: 'feeds a nonexistent path downstream, for testing a Replace refusal',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: '/nonexistent/trawlarr-test-path/should-not-exist.mkv' },
+  variables: args.variables,
+});
+
+module.exports = { details, plugin };
+`;
+
+const writeSabotagePlugin = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'trawlarr-sabotage-plugin-'));
+  const abs = join(dir, 'index.js');
+  writeFileSync(abs, sabotagePluginCode(), 'utf8');
+  return abs;
+};
+
 describe.runIf(available)('runJob: rejection, persistence and stall regressions', () => {
   it('Critical 1: a Verify Output rejection with no remediation route does not converge to good', async () => {
     const { claimed } = await setupClaimedFile({
@@ -645,6 +843,96 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
         'trawlarr:checkVideoCodec',
       ]);
       expect(await videoCodecOf(claimed.path)).toBe('hevc');
+    },
+    120_000,
+  );
+
+  it(
+    'I-4: a Replace step that reports failure AFTER an earlier Replace in the same run ' +
+      'already swapped the file in is still recognised as a real change',
+    async () => {
+      // `replaceOriginal` itself can swap the library file in and STILL
+      // report output 2 (see `replace-original.ts`'s `leftLinked` check
+      // around line 895, and the companion-split branch around line 929).
+      // Both require either a genuine mid-operation race or filesystem
+      // privileges this sandbox does not grant — confirmed empirically:
+      // `chattr +i` here returns "Operation not permitted"; `chmod 000` on
+      // a file does not block `rename()` on Linux (only directory
+      // permissions matter for that); and the companion/media-file rename
+      // targets always share a device with their source (companions never
+      // leave the media file's own directory), so EXDEV cannot be forced
+      // either. Neither branch is constructible as a deterministic
+      // real-component test here.
+      //
+      // This test instead pins the same underlying invariant — a Replace
+      // step's OWN reported output number must not gate whether the change
+      // it made is recorded — via a real, deterministic two-Replace-node
+      // flow: the FIRST Replace genuinely swaps the file in (new inode), a
+      // sabotage node then feeds a nonexistent path into a SECOND Replace,
+      // which refuses (output 2) and reports the TRUE library path in its
+      // own `outputFileObj` — a path that, on disk, already carries the
+      // FIRST Replace's swap. This does NOT discriminate against the
+      // original `.some(step => output === 1)` check (verified: reverting
+      // ONLY the `claimedModified` derivation to that shape still passes
+      // this test, since replace1's own output 1 already satisfies it) —
+      // but it DOES discriminate against the more direct "gate on the LAST
+      // Replace step's own output number" shape (verified failing:
+      // `expected 'h264' to be 'hevc'`, i.e. nothing was persisted), which
+      // is the same class of bug 895/929 are real instances of: something
+      // about "this replace step" being read as "the" decision instead of
+      // the identity actually on disk.
+      const sabotagePath = writeSabotagePlugin();
+      const definition: FlowDefinition = {
+        nodes: [
+          ...TRANSCODE_FLOW.nodes.filter((n) => n.id !== 'replace'),
+          {
+            id: 'replace1',
+            pluginId: 'trawlarr:replaceOriginal',
+            pluginVersion: '1.0.0',
+            inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+          },
+          { id: 'sabotage', pluginId: sabotagePath, pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'replace2',
+            pluginId: 'trawlarr:replaceOriginal',
+            pluginVersion: '1.0.0',
+            inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+          },
+        ],
+        edges: [
+          ...TRANSCODE_FLOW.edges.filter((e) => e.toNodeId !== 'replace'),
+          { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace1' },
+          { fromNodeId: 'replace1', outputNumber: 1, toNodeId: 'sabotage' },
+          { fromNodeId: 'sabotage', outputNumber: 1, toNodeId: 'replace2' },
+        ],
+      };
+
+      const { claimed } = await setupClaimedFile({ definition, videoCodec: 'libx264' });
+      const beforeRow = createMediaFileRepo(db).getById(claimed.fileId);
+
+      const result = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
+
+      // The job overall failed — replace2 (the LAST step) reported output 2
+      // with nowhere to route from there.
+      expect(result.state).not.toBe('good');
+      const steps = createJobRepo(db).getSteps(result.jobId);
+      expect(steps.at(-1)).toMatchObject({ nodeId: 'replace2', outputNumber: 2 });
+
+      // The library file WAS genuinely replaced by replace1, on disk...
+      expect(await videoCodecOf(claimed.path)).toBe('hevc');
+
+      // ...and — the point of I-4 — that change was RECORDED even though
+      // the run, and the last Replace step specifically, ended in failure.
+      const afterRow = createMediaFileRepo(db).getById(claimed.fileId);
+      expect(afterRow?.video_codec).toBe('hevc');
+      expect(afterRow?.inode_key).not.toBe(beforeRow?.inode_key);
+      expect(afterRow?.content_key).not.toBe(beforeRow?.content_key);
     },
     120_000,
   );
@@ -831,9 +1119,130 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
       .prepare(`SELECT started_at, heartbeat_at FROM job WHERE id = ?`)
       .get(result.jobId) as { started_at: number; heartbeat_at: number | null };
     expect(jobRow.heartbeat_at).not.toBeNull();
-    // Started at the FIRST advancing() call; by the time a 7-step flow
-    // finishes, several more calls have happened, so a heartbeat recorded
-    // per step must read later than job start.
-    expect(jobRow.heartbeat_at!).toBeGreaterThan(jobRow.started_at);
+    // A bound of `> started_at` alone is satisfied by the start-of-job
+    // heartbeat ALONE (it is one `advancing()` tick after `started_at` by
+    // construction), so it cannot tell "only the start heartbeat ran" apart
+    // from "the per-step heartbeat also ran" — exactly the mutation that
+    // needs killing. `>= started_at + stepCount` requires at least one
+    // MORE tick per step beyond the start heartbeat, which only holds if
+    // the per-step heartbeat call is still there.
+    expect(jobRow.heartbeat_at!).toBeGreaterThanOrEqual(jobRow.started_at + result.stepCount);
   }, 60_000);
+});
+
+/**
+ * I-1: a realistic content-key collision — restoring a previous original
+ * beside its own already-transcoded copy, where a deterministic re-encode
+ * reproduces the copy byte-for-byte — must be handled explicitly (a clear,
+ * actionable outcome) and atomically (no split state: `setProbe` must not
+ * survive on its own when `updateAfterRun` throws for the same run).
+ *
+ * Built without depending on ffmpeg's own determinism across two encodes
+ * (verified separately, empirically, NOT to hold for this fixture — two
+ * encodes of identical input differed at byte 221, almost certainly a
+ * muxer timestamp): file B starts as a DISTINCT sample (so its initial scan
+ * gets its own row and content_key, not an immediate collision), and B's
+ * OWN flow then copies file A's CURRENT library content — byte-for-byte —
+ * into B's slot, so B's post-run content_key is guaranteed to equal A's by
+ * construction, not by chance.
+ */
+describe.runIf(available)('runJob: I-1 identity conflict handling', () => {
+  it('handles a content-key collision explicitly and atomically, with no split state', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-conflict-'));
+    await makeSample(join(root, 'a.mkv'), 'libx264');
+    await makeAltSample(join(root, 'b.mkv'), 'libx264');
+
+    const flowA = createFlowRepo(db).create({
+      name: 'copy-flow-a',
+      definition: copyVerbatimFlow(),
+      nowMs: NOW,
+    });
+    const library = createLibraryRepo(db).create({
+      name: 'conflict-lib',
+      roots: [root],
+      extensions: ['mkv'],
+      flowId: flowA.id,
+      nowMs: NOW,
+    });
+    const libraryRepo = createLibraryRepo(db);
+    const mediaFileRepo = createMediaFileRepo(db);
+
+    // Both files are discovered up front, each with its own distinct
+    // content_key (different samples) — no collision yet. Both are
+    // claimed immediately (order between them is not guaranteed, so both
+    // are drained and identified by path) — B being `running` a little
+    // early does not matter, since `runJob` never reads a row's `state`.
+    await scanLibrary({ db, libraryId: library.id, ffprobePath: 'ffprobe', nowMs: now });
+    expect(db.prepare(`SELECT id FROM media_file`).all()).toHaveLength(2);
+
+    const claims = [
+      mediaFileRepo.claimNext({ workerClass: 'transcode', nowMs: NOW }),
+      mediaFileRepo.claimNext({ workerClass: 'transcode', nowMs: NOW }),
+    ];
+    const claimedA = claims.find((c) => c?.path === join(root, 'a.mkv')) ?? null;
+    const claimedB0 = claims.find((c) => c?.path === join(root, 'b.mkv')) ?? null;
+    if (claimedA === null || claimedB0 === null) {
+      throw new Error('setup failed to queue both files');
+    }
+
+    // File A: run for real (copies its own bytes back in, unchanged), so
+    // it owns a stable, real content_key in this library.
+    await runJob({
+      db,
+      claimed: claimedA,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    const rowA = mediaFileRepo.getById(claimedA.fileId);
+    expect(rowA?.content_key).toBeTruthy();
+
+    // Point the library at a flow for B that copies A's CURRENT content
+    // byte-for-byte into B's own slot. `runJob` reads `library.flowId`
+    // fresh at run time (not at claim time), so switching it now applies
+    // to B's run below without needing to re-claim B.
+    const flowB = createFlowRepo(db).create({
+      name: 'copy-flow-b',
+      definition: copyFromFlow(claimedA.path),
+      nowMs: NOW,
+    });
+    libraryRepo.setFlow(library.id, flowB.id);
+    const claimedB = claimedB0;
+
+    const beforeRowB = mediaFileRepo.getById(claimedB.fileId);
+
+    const resultB = await runJob({
+      db,
+      claimed: claimedB,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+
+    // Explicit: the outcome names the real cause, not a bare generic
+    // message a human would have to go spelunking for.
+    expect(resultB.outcome).toContain('already matches another tracked file');
+    expect(resultB.state).not.toBe('good');
+
+    // M-1 / atomicity: row B's probe/codec/container/size/identity are
+    // COMPLETELY UNCHANGED from before this run. Without the transaction,
+    // `setProbe` would have already committed (new probe_json, new
+    // video_codec) by the time `updateAfterRun` threw on the UNIQUE
+    // violation, leaving exactly the split state this mechanism exists to
+    // prevent: new codec columns, old identity/size/path.
+    const afterRowB = mediaFileRepo.getById(claimedB.fileId);
+    expect(afterRowB?.video_codec).toBe(beforeRowB?.video_codec);
+    expect(afterRowB?.container).toBe(beforeRowB?.container);
+    expect(afterRowB?.size_bytes).toBe(beforeRowB?.size_bytes);
+    expect(afterRowB?.probe_json).toBe(beforeRowB?.probe_json);
+    expect(afterRowB?.inode_key).toBe(beforeRowB?.inode_key);
+    expect(afterRowB?.content_key).toBe(beforeRowB?.content_key);
+
+    // Row A is completely undisturbed by B's failed attempt.
+    const rowAAfter = mediaFileRepo.getById(claimedA.fileId);
+    expect(rowAAfter?.content_key).toBe(rowA?.content_key);
+
+    // Exactly two rows exist — B's failure did not fork a third.
+    expect(db.prepare(`SELECT id FROM media_file`).all()).toHaveLength(2);
+  }, 120_000);
 });

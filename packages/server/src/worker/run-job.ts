@@ -29,7 +29,11 @@ import {
   type NodeInvocation,
 } from '@trawlarr/engine';
 import type { Db } from '../db/connection.js';
-import { createMediaFileRepo, type ClaimedFile } from '../db/media-file-repo.js';
+import {
+  createMediaFileRepo,
+  IdentityConflictError,
+  type ClaimedFile,
+} from '../db/media-file-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createPluginDocumentRepo } from '../db/plugin-document-repo.js';
@@ -252,6 +256,28 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
       }),
     ];
 
+    // The `outputFileObj` Replace Original File itself RETURNED on its most
+    // recent invocation — captured by wrapping its substituted `plugin()`
+    // function, not by reading what was fed IN to the node. This is the
+    // fix for I-4: the node's own return value is authoritative for "what
+    // path now holds the library file", on EVERY output number, because
+    // `replaceOriginal` sets `outputFileObj._id` to the real swapped-in
+    // path on the two branches where a swap lands but the node still
+    // reports failure (left hardlinked; a companion move that split) —
+    // reading the INPUT object instead would miss those, and reading only
+    // `outputNumber === 1` (the earlier version of this fix) missed them
+    // too. `runFlow` itself updates its OWN `currentPath` from this same
+    // value after every step regardless of output number, so this mirrors
+    // exactly what the engine already treats as authoritative — captured
+    // here only because `result.currentPath` alone conflates every node,
+    // not just Replace (see the loop-back comment below).
+    //
+    // Held in an object property, not a bare `let`, so the assignment made
+    // inside the wrapped `plugin()` below is visible without TypeScript
+    // narrowing the outer binding back to its initial `null` at the point
+    // it is read, long after `runFlow` has actually invoked that closure.
+    const replaceOutput: { fileObject: { _id: string } | null } = { fileObject: null };
+
     const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
       const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
       if (firstParty !== undefined) {
@@ -266,7 +292,19 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
           (found, runner) => found ?? runner(base),
           null,
         );
-        return substitute === null ? base : { ...base, module: substitute };
+        if (substitute === null) return base;
+        if (node.pluginId !== REPLACE_ORIGINAL_PLUGIN_ID) return { ...base, module: substitute };
+        return {
+          ...base,
+          module: {
+            details: substitute.details,
+            plugin: async (args) => {
+              const output = await substitute.plugin(args);
+              replaceOutput.fileObject = output.outputFileObj;
+              return output;
+            },
+          },
+        };
       }
       return loader.load(node.pluginId);
     };
@@ -280,21 +318,6 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
     // but one the server is the first place to actually run flows where it
     // would silently feed a downstream codec/size check stale data.
     let lastFileObject: PluginFileObject = originalFileObject;
-    // The file object actually passed to the LAST node invocation whose
-    // pluginId was Replace Original File, captured so the post-run re-probe
-    // targets exactly what THAT node produced — never `result.currentPath`,
-    // which is whatever the flow's FINAL node happened to leave behind. A
-    // flow that loops back to Execute after replacing (another transcode,
-    // a health check, anything) ends with `currentPath` pointing at a
-    // scratch file inside `workDir`, which the `finally` below deletes
-    // seconds later; re-probing THAT and storing its facts as the file's
-    // signature would describe a file that no longer exists.
-    //
-    // Held in an object property (not a bare `let`) so the assignment inside
-    // the `buildArgs` closure below is visible without TypeScript narrowing
-    // the outer binding back to its initial `null` at the point it is read,
-    // long after `runFlow` has actually invoked that closure.
-    const replaceInvocation: { fileObject: PluginFileObject | null } = { fileObject: null };
 
     const buildArgs = (invocation: NodeInvocation) => {
       const args = buildPluginInputArgs({
@@ -322,9 +345,6 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
         log: () => {},
       });
       lastFileObject = args.inputFileObj;
-      if (invocation.node.pluginId === REPLACE_ORIGINAL_PLUGIN_ID) {
-        replaceInvocation.fileObject = args.inputFileObj;
-      }
       return args;
     };
 
@@ -376,69 +396,124 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
 
     const success = !result.failed && !rejectedWithNoRemediation;
 
-    // The flow's own claim of having modified the library file: it reached
-    // the Replace Original File node and that node routed to its success
-    // output. Tied to Replace rather than Execute, because Execute only
-    // ever writes into workDir — Replace is the one node that touches the
-    // library, so it is the only place a claim about the LIBRARY FILE can
-    // legitimately come from. Computed over EVERY step, not just the last,
-    // and deliberately independent of `success`: a node placed after a
-    // successful Replace can still fail the overall run, but the
-    // replacement itself already happened and must not be forgotten.
-    const claimedModified = result.steps.some(
-      (step) => step.pluginId === REPLACE_ORIGINAL_PLUGIN_ID && step.outputNumber === 1,
-    );
-
+    // Whether the LIBRARY FILE actually changed — decided from identity
+    // (inode, content hash), never from the replace step's output number.
+    // The output number says whether the JOB considers itself successful; it
+    // does not say whether the FILESYSTEM changed, and those are different
+    // questions. `replaceOriginal` can swap the file in and still route to
+    // its failure output — landed-but-left-hardlinked
+    // (`packages/engine/src/executor/replace-original.ts` around the
+    // `leftLinked` check) and landed-but-companions-split are both real,
+    // reachable branches where `describeReplacement` already ran (setting
+    // `outputFileObj._id` to the new path) before the node returned output
+    // 2. Requiring output 1 missed exactly those two branches: the row's
+    // probe/identity were never updated even though the file on disk
+    // already had a new inode and new content — the same orphaned-row bug
+    // this whole mechanism exists to eliminate, still live in the branches
+    // the earlier, output-number-based check did not reach.
+    const replacedPath = replaceOutput.fileObject?._id ?? null;
     let postFacts: FactSet | null = null;
-    if (claimedModified) {
-      // The path Replace Original File itself produced — see
-      // `replaceInvocation`'s doc comment above for why this is not
-      // `result.currentPath`.
-      const replacedPath = replaceInvocation.fileObject?._id ?? result.currentPath;
-
-      const newProbe = await probeFile({ ffprobePath: input.ffprobePath, path: replacedPath });
+    let claimedModified = false;
+    if (replacedPath !== null) {
       const newStats = await fsStat(replacedPath);
-      // Extracted from the probe and stat this run just took, alongside the
-      // container/size it actually means — never from `getProbe`, whose
-      // "facts as of now" recompute against the row's container/size_bytes
-      // columns, which `setProbe` below does NOT update.
-      postFacts = extractFacts({
-        probe: newProbe,
-        container: containerOf(replacedPath),
-        sizeBytes: newStats.size,
-      });
-      mediaFileRepo.setProbe({ fileId: row.id, probe: newProbe, facts: postFacts });
-
-      // Replace Original File just swapped in a file with a NEW inode and
-      // NEW content — both identity signals `upsertScanned` matches on move
-      // together, at once, on every replacement. Left unrecorded, the next
-      // scan computes an identity that matches neither this row's old
-      // inode_key nor its old content_key, so it opens a SECOND row for the
-      // same path instead of recognising this one: the file (and its
-      // now-orphaned first row) never reaches `alreadyGood`, and every scan
-      // re-queues and re-transcodes it. Recording the row's row-of-record
-      // identity, path, and stat here — by this known fileId, not by a
-      // fresh identity search — is what lets the next scan match this exact
-      // row again.
-      //
-      // Done unconditionally on `claimedModified`, NOT gated on `success`:
-      // the replacement already happened regardless of what a later node in
-      // this same flow goes on to do, and forgetting it here is what made a
-      // retry re-discover an already-hevc file as h264 (from the row's stale
-      // probe) and burn a second, unnecessary transcode on it.
       const newHash = await partialHashFile(replacedPath);
-      const identity = identityFromStat({ stat: newStats, hash: newHash });
-      mediaFileRepo.updateAfterRun({
-        fileId: row.id,
-        identity,
-        path: replacedPath,
-        nlink: newStats.nlink,
-        sizeBytes: newStats.size,
-        mtimeMs: newStats.mtimeMs,
-        ctimeMs: newStats.ctimeMs,
-        container: containerOf(replacedPath),
-        nowMs: input.nowMs(),
-      });
+      const newIdentity = identityFromStat({ stat: newStats, hash: newHash });
+      // Unchanged identity means Replace never actually swapped anything in
+      // for THIS invocation — an early refusal (hardlink guard, symlink
+      // guard, occupied destination, ...) or the legitimate "already the
+      // file this flow produced" no-op, none of which mutate the file
+      // object at all, so `replacedPath` still names the untouched original
+      // and its identity still matches the row's own pre-run identity.
+      claimedModified =
+        newIdentity.contentKey !== row.content_key || newIdentity.inodeKey !== row.inode_key;
+
+      if (claimedModified) {
+        const newProbe = await probeFile({ ffprobePath: input.ffprobePath, path: replacedPath });
+        // Extracted from the probe and stat this run just took, alongside
+        // the container/size it actually means — never from `getProbe`,
+        // whose "facts as of now" recompute against the row's
+        // container/size_bytes columns, which `setProbe` below does NOT
+        // update.
+        postFacts = extractFacts({
+          probe: newProbe,
+          container: containerOf(replacedPath),
+          sizeBytes: newStats.size,
+        });
+
+        // Replace Original File just swapped in a file with a NEW inode and
+        // NEW content — both identity signals `upsertScanned` matches on
+        // move together, at once, on every replacement. Left unrecorded,
+        // the next scan computes an identity that matches neither this
+        // row's old inode_key nor its old content_key, so it opens a SECOND
+        // row for the same path instead of recognising this one: the file
+        // (and its now-orphaned first row) never reaches `alreadyGood`, and
+        // every scan re-queues and re-transcodes it. Recording the row's
+        // row-of-record identity, path, and stat here — by this known
+        // fileId, not by a fresh identity search — is what lets the next
+        // scan match this exact row again.
+        //
+        // Done unconditionally on `claimedModified` (identity changed), NOT
+        // gated on `success` or on the step's output number: the
+        // replacement already happened regardless of what a later node in
+        // this same flow goes on to do or how this node itself routed, and
+        // forgetting it here is what made a retry re-discover an
+        // already-hevc file as h264 (from the row's stale probe) and burn a
+        // second, unnecessary transcode on it.
+        //
+        // `setProbe` and `updateAfterRun` run inside ONE transaction: a
+        // content-key collision in `updateAfterRun` (a restored original
+        // that re-encodes byte-identical to a copy already tracked under
+        // another row — realistic, not exotic) throws AFTER `setProbe`
+        // would otherwise already have committed, which would leave this
+        // row with new probe/codec columns but OLD identity/path/size — the
+        // exact split state this mechanism exists to prevent, just moved
+        // one level down. The transaction makes that impossible: either
+        // both writes land, or neither does.
+        // A plain const, not the outer `let postFacts`: read inside the
+        // `db.transaction` closure below, where TypeScript would otherwise
+        // narrow the outer binding back to its declared union type instead
+        // of the value just assigned (the same reasoning as
+        // `replaceOutput` above, for the same closure-narrowing reason).
+        const factsForThisReplacement = postFacts;
+        try {
+          db.transaction(() => {
+            mediaFileRepo.setProbe({
+              fileId: row.id,
+              probe: newProbe,
+              facts: factsForThisReplacement,
+            });
+            mediaFileRepo.updateAfterRun({
+              fileId: row.id,
+              identity: newIdentity,
+              path: replacedPath,
+              nlink: newStats.nlink,
+              sizeBytes: newStats.size,
+              mtimeMs: newStats.mtimeMs,
+              ctimeMs: newStats.ctimeMs,
+              container: containerOf(replacedPath),
+              nowMs: input.nowMs(),
+            });
+          })();
+        } catch (error) {
+          if (error instanceof IdentityConflictError) {
+            // Explicit, actionable outcome instead of falling into the
+            // generic "Unhandled error" stall message below: a human needs
+            // to resolve the duplicate (delete or requeue one of the two
+            // rows) before this file can converge, and retrying on its own
+            // will not fix that.
+            throw new Error(
+              `The replacement for "${row.path}" produced content that already matches ` +
+                `another tracked file in this library (${error.message}). This can happen ` +
+                `when a previous original is restored from ".trawlarr/trash" beside its own ` +
+                `already-transcoded copy and a deterministic re-encode reproduces it ` +
+                `byte-for-byte. Resolve the duplicate manually (delete or requeue one of the ` +
+                `two rows) before this file can converge.`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
     }
 
     const currentFacts = postFacts ?? preFacts;
@@ -496,19 +571,41 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
     const message = messageOf(error);
     const ledger = mediaFileRepo.getLedger(row.id) ?? newLedgerRecord();
     const stalled = applyStall({ record: ledger, nowMs: input.nowMs() });
-    mediaFileRepo.setLedger({ fileId: row.id, record: stalled, lastRunId: jobId });
-    if (jobId !== null) {
-      jobRepo.finish({
-        jobId,
-        state: 'failed',
-        outcome: `Unhandled error: ${message}`,
+
+    // A failure can happen before `jobRepo.start` ever ran (an unknown
+    // library, a library with no flow attached, an unknown flow, a file
+    // that was never probed) — record a SYNTHETIC job row for the attempt
+    // even then, with sentinel flow columns (job.flow_id/flow_hash carry no
+    // foreign key, so this is safe). Without this, an attempt that failed
+    // this early left NO job row at all: an operator saw a `held` file with
+    // `attempt_count: 1` and nothing anywhere explaining why, and
+    // `RunJobResult.jobId` was the empty string.
+    const finalJobId =
+      jobId ??
+      jobRepo.start({
+        fileId: row.id,
+        flowId: 'unknown',
+        flowHash: 'unknown',
         nowMs: input.nowMs(),
       });
-    }
+
+    // `setLedger` treats `undefined` as "leave `last_run_id` unchanged" and
+    // an explicit `null` as "overwrite it with NULL" (see its doc comment)
+    // — passing the bare `jobId` local here, before it could be `null`, is
+    // exactly what erased the pointer to the file's last REAL job. Passing
+    // `finalJobId` (guaranteed a real string by the synthetic-job fallback
+    // above) makes that impossible now.
+    mediaFileRepo.setLedger({ fileId: row.id, record: stalled, lastRunId: finalJobId });
+    jobRepo.finish({
+      jobId: finalJobId,
+      state: 'failed',
+      outcome: `Unhandled error: ${message}`,
+      nowMs: input.nowMs(),
+    });
     return {
-      jobId: jobId ?? '',
+      jobId: finalJobId,
       state: stalled.state,
-      stepCount: jobId === null ? 0 : jobRepo.getSteps(jobId).length,
+      stepCount: jobRepo.getSteps(finalJobId).length,
       outcome: `Unhandled error: ${message}`,
     };
   } finally {

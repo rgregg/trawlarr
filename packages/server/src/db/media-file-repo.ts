@@ -418,26 +418,56 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       const current = selectById.get(input.fileId) as MediaFileRow | undefined;
       if (current === undefined) throw new Error(`Unknown media file: ${input.fileId}`);
 
-      // Same column set and shape as the identity-matched branch of
-      // `upsertScanned` — this is the same "what does this row's file look
-      // like now" update, just addressed by the id the caller already knows
-      // rather than by searching for it.
-      try {
-        updateScanned.run(
-          input.identity.inodeKey,
-          input.identity.contentKey,
-          input.path,
-          input.nlink,
-          input.sizeBytes,
-          input.mtimeMs,
-          input.ctimeMs,
-          input.container,
-          input.nowMs,
-          input.fileId,
-        );
-      } catch (err) {
-        throw toIdentityConflictError(err, current.library_id, input.identity.contentKey);
-      }
+      // Run as one transaction: a caller that also calls `setProbe` for the
+      // same run (as `runJob` does) wraps that call together with this one
+      // in its own outer transaction, and better-sqlite3 nests transactions
+      // as savepoints — so a conflict below rolls back BOTH writes, not just
+      // this one. Without that, a thrown IdentityConflictError here would
+      // leave `setProbe`'s write already committed: the row would carry the
+      // NEW probe/codec columns but the OLD inode_key/content_key/path/
+      // size_bytes — exactly the split state this whole mechanism exists to
+      // prevent, just moved one level down.
+      db.transaction(() => {
+        // A freshly-replaced file's inode is a NEW one from the kernel's
+        // perspective, and inode numbers are recycled after deletion — so it
+        // can coincide with the inode_key some OTHER row in this library
+        // recorded for a file that has since been deleted or replaced.
+        // `inode_key` carries no UNIQUE constraint at the schema level (only
+        // `content_key` does), so writing it here without checking would
+        // silently leave two rows claiming the same inode_key, and a future
+        // scan's `byInodeKey` lookup would be ambiguous between them —
+        // matching a rename to the wrong file's row. Mirrors the same
+        // defensive clear `upsertScanned` already does for exactly this
+        // reason.
+        if (input.identity.inodeKey !== null) {
+          const colliding = byInode.get(current.library_id, input.identity.inodeKey) as
+            { id: string } | undefined;
+          if (colliding !== undefined && colliding.id !== input.fileId) {
+            clearInodeKey.run(input.nowMs, colliding.id);
+          }
+        }
+
+        // Same column set and shape as the identity-matched branch of
+        // `upsertScanned` — this is the same "what does this row's file
+        // look like now" update, just addressed by the id the caller
+        // already knows rather than by searching for it.
+        try {
+          updateScanned.run(
+            input.identity.inodeKey,
+            input.identity.contentKey,
+            input.path,
+            input.nlink,
+            input.sizeBytes,
+            input.mtimeMs,
+            input.ctimeMs,
+            input.container,
+            input.nowMs,
+            input.fileId,
+          );
+        } catch (err) {
+          throw toIdentityConflictError(err, current.library_id, input.identity.contentKey);
+        }
+      })();
     },
 
     setLedger(input) {
