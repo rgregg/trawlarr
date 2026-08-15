@@ -29,6 +29,37 @@ fixed:
 Derive "the library file changed" from the replace step's own output path and identity differing from
 the original — never from an output number, and never from whether the job as a whole succeeded.
 
+## An allow-list is not a rule
+
+"A terminal output the flow author did not route is not success" was implemented as a hard-coded list of
+two plugin ids — `verifyOutput` and `replaceOriginal`. `trawlarr:execute` also routes failure to output 2
+and was not on the list, so **an ffmpeg that exits non-zero was recorded as convergence**: the file was
+written `good` with its pre-transcode signature, matched by `isKnownGood` on every later scan, and never
+retried. Reproduced with `hevc_nvenc` on a CPU-only host — the commonest first-run misconfiguration for
+this class of tool — where the CLI reported three files converged, "100% converged", zero errors, and
+three untouched h264 files on disk.
+
+Whenever a rule is expressed by enumerating the things it applies to, every future addition silently
+opts out. The flow definition already knows which outputs have no outgoing edge and `details()` already
+declares what each output means; derive the rule from those.
+
+## A file mid-replacement belongs to no row
+
+Replace renames the new file into place, then the runner probes it, and only afterwards records the new
+identity. In that window the file on disk has an identity no database row claims. A scanner walking the
+path there matches nothing and inserts a *second* row, after which the runner's identity update hits the
+unique constraint and unwinds into a stall. The scanner's `running`-state guard cannot help, because the
+file it walked is not associated with the running row.
+
+The ghost row keeps the pre-transcode probe, so after its backoff it is claimed again, the codec check
+reads stale facts, and an already-transcoded file is transcoded a second time — generational loss — with
+the good result pushed into trash. End state: two `good` rows for one file, "100% converged", one of
+them a phantom whose content exists only in trash.
+
+`trawlarr scan` and `trawlarr run` are separate processes against the same WAL database, so this is
+ordinary use, not an exotic race. Any window where an on-disk file is claimed by no row is a window a
+concurrent scan will find.
+
 ## The loop itself must be tested, not only its parts
 
 Tasks 1-9 each shipped with a green suite, a passing review, and empirical verification of their own
