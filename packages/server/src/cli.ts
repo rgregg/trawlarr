@@ -7,7 +7,12 @@ import { pathToFileURL } from 'node:url';
 import type { FileState, FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
-import { createLibraryRepo, DEFAULT_EXTENSIONS } from './db/library-repo.js';
+import { createLibraryRepo, DEFAULT_EXTENSIONS, type LibraryRecord } from './db/library-repo.js';
+import {
+  DEFAULT_TRASH_RETENTION_DAYS,
+  purgeTrash,
+  trashRetentionDaysForFlow,
+} from './library/trash.js';
 import { createFlowRepo } from './db/flow-repo.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
@@ -337,6 +342,119 @@ const cmdRun = async (args: string[]): Promise<number> => {
       `  ${summary.pausedSkipped} file(s) left untouched in paused libraries this drain.`,
     );
   }
+
+  // The drain is the thing that FILLS the trash, so it is also what empties
+  // it: without this, `trashRetentionDays` would only take effect for
+  // someone who knew to run `trawlarr trash purge` by hand, and a library
+  // being transcoded wholesale accumulates a full copy of every original.
+  // Run AFTER the drain, never during it: an in-flight replacement's
+  // recovery path is the trash.
+  //
+  // Quiet unless it actually removed something — a `run` that transcoded
+  // nothing should not print a paragraph about a trash that was already
+  // empty. A sweep failure must not fail the drain that already succeeded.
+  const sweepTargets =
+    values.library !== undefined
+      ? [requireLibrary(db, values.library)]
+      : createLibraryRepo(db).list();
+  for (const library of sweepTargets) {
+    try {
+      await sweepLibraryTrash(db, library, { quiet: true });
+    } catch (err) {
+      console.log(`  Trash sweep for "${library.name}" did not run: ${messageOf(err)}`);
+    }
+  }
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
+// trash purge
+// ---------------------------------------------------------------------------
+
+/**
+ * Sweep one library's trash, reporting what went.
+ *
+ * The retention comes from the library's own flow — the `trashRetentionDays`
+ * input on its Replace Original File node(s) — so the setting a user typed
+ * into the flow is the setting that takes effect, which is exactly what was
+ * missing while nothing read it. `--days` overrides it for one invocation.
+ */
+const sweepLibraryTrash = async (
+  db: Db,
+  library: LibraryRecord,
+  options: { days?: number; dryRun?: boolean; quiet?: boolean },
+): Promise<void> => {
+  const flow = library.flowId === null ? null : createFlowRepo(db).getById(library.flowId);
+  const retentionDays =
+    options.days ??
+    (flow === null ? DEFAULT_TRASH_RETENTION_DAYS : trashRetentionDaysForFlow(flow.definition));
+
+  const summary = await purgeTrash({
+    library,
+    retentionDays,
+    nowMs: Date.now(),
+    dryRun: options.dryRun,
+  });
+
+  if (options.quiet === true && summary.removed === 0 && summary.failed === 0) return;
+
+  const verb = options.dryRun === true ? 'would remove' : 'removed';
+  console.log(
+    `Trash for "${library.name}" (retention ${retentionDays} day(s)): ${verb} ` +
+      `${summary.removed} file(s), ${formatBytes(summary.bytesFreed)}; ${summary.retained} still ` +
+      `within retention, ${summary.skipped} left alone (not trawlarr trash entries).`,
+  );
+  if (summary.failed > 0) {
+    console.log(`  ${summary.failed} entr(ies) could not be removed; check permissions.`);
+  }
+  if (summary.dirsRefused > 0) {
+    console.log(
+      `  ${summary.dirsRefused} configured trash director(ies) contain a library root and were ` +
+        `refused: sweeping one would delete library files. Point trashDir somewhere that does ` +
+        `not contain a root.`,
+    );
+  }
+};
+
+const formatBytes = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]!}`;
+};
+
+const cmdTrashPurge = async (args: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'data-dir': { type: 'string', default: './trawlarr-data' },
+      library: { type: 'string' },
+      days: { type: 'string' },
+      'dry-run': { type: 'boolean', default: false },
+    },
+  });
+
+  const db = await openDb(values['data-dir']!);
+  const days =
+    values.days === undefined ? undefined : parseNonNegativeInt(values.days, 'trash purge: --days');
+
+  const libraries =
+    values.library !== undefined
+      ? [requireLibrary(db, values.library)]
+      : createLibraryRepo(db).list();
+  if (libraries.length === 0) {
+    console.log('No libraries configured.');
+    return 0;
+  }
+
+  for (const library of libraries) {
+    await sweepLibraryTrash(db, library, { days, dryRun: values['dry-run'] });
+  }
   return 0;
 };
 
@@ -567,6 +685,7 @@ const USAGE = `Usage:
   trawlarr status [--library <name>] [--files] [--state <state>] [--missing]
   trawlarr requeue --file <id> [--file <id>...]
   trawlarr requeue --library <name> --state <state>
+  trawlarr trash purge [--library <name>] [--days <n>] [--dry-run]
 
 All commands accept --data-dir <path> (default ./trawlarr-data).`;
 
@@ -583,6 +702,11 @@ const dispatch = async (argv: string[]): Promise<number> => {
     const [sub, ...subRest] = rest;
     if (sub === 'add') return cmdFlowAdd(subRest);
     throw new CliError(`Unknown command: "flow ${sub ?? ''}".\n\n${USAGE}`);
+  }
+  if (cmd === 'trash') {
+    const [sub, ...subRest] = rest;
+    if (sub === 'purge') return cmdTrashPurge(subRest);
+    throw new CliError(`Unknown command: "trash ${sub ?? ''}".\n\n${USAGE}`);
   }
   if (cmd === 'scan') return cmdScan(rest);
   if (cmd === 'run') return cmdRun(rest);

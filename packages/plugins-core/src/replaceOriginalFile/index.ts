@@ -20,9 +20,15 @@ export const details = (): PluginDetails => ({
       type: 'string',
       defaultValue: '14',
       tooltip:
-        'How many days the replaced original should be retained in the library trash. ' +
-        'Automatic purging is not implemented yet, so the trash accumulates until it is ' +
-        'cleared manually — this value records intent, it does not yet trigger cleanup.',
+        'How many days the replaced original is kept in the library trash before it is ' +
+        'purged. The sweep runs at the end of every "trawlarr run", and on demand with ' +
+        '"trawlarr trash purge"; it only ever removes entries inside a resolved trash ' +
+        'directory, and ages them by when trawlarr trashed them rather than by their ' +
+        'file timestamps (a move preserves mtime, so an old film trashed today is not an ' +
+        'old trash entry). An entry exactly at the boundary is kept. Where a flow has ' +
+        'several of these nodes, the longest retention declared by any of them wins. ' +
+        'Everything the destructive layer can recover from depends on this trash, so ' +
+        'shorten it deliberately.',
       inputUI: { type: 'text' },
     },
     {

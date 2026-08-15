@@ -794,7 +794,10 @@ export const createReplaceOriginalRunner =
             originalPath,
           );
         }
-        say(`Original moved to trash: "${trashPath}" (nothing purges it automatically).`);
+        say(
+          `Original moved to trash: "${trashPath}" (kept until the retention sweep purges ` +
+            `it; the timestamp in that name is what the sweep ages it by).`,
+        );
 
         const restoreOriginal = async (): Promise<void> => {
           try {

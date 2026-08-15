@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -252,6 +252,100 @@ describe('cli: run', () => {
   it('claims nothing against an empty database and still exits 0', async () => {
     expect(await main(['run', '--data-dir', newDataDir()])).toBe(0);
     expect(stdout()).toContain('Claimed 0 file(s)');
+  });
+
+  it('sweeps expired trash at the end of a drain, using the retention the flow declares', async () => {
+    const dataDir = newDataDir();
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-root-'));
+    await main(['library', 'add', '--name', 'Movies', '--root', root, '--data-dir', dataDir]);
+
+    // A flow that declares a 3-day retention on its Replace node.
+    const flowFile = join(mkdtempSync(join(tmpdir(), 'trawlarr-cli-flow-')), 'flow.json');
+    writeFileSync(
+      flowFile,
+      JSON.stringify({
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'replace',
+            pluginId: 'trawlarr:replaceOriginal',
+            pluginVersion: '1.0.0',
+            inputs: { trashRetentionDays: '3' },
+          },
+        ],
+        edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'replace' }],
+      }),
+      'utf8',
+    );
+    await main(['flow', 'add', '--name', 'F', '--file', flowFile, '--data-dir', dataDir]);
+    await main([
+      'library',
+      'set-flow',
+      '--library',
+      'Movies',
+      '--flow',
+      'F',
+      '--data-dir',
+      dataDir,
+    ]);
+
+    const trashDir = join(root, '.trawlarr', 'trash');
+    mkdirSync(trashDir, { recursive: true });
+    const expired = join(trashDir, `old.${Date.now() - 10 * 24 * 60 * 60 * 1000}.mkv`);
+    const keep = join(trashDir, `new.${Date.now() - 24 * 60 * 60 * 1000}.mkv`);
+    writeFileSync(expired, 'x'.repeat(2048));
+    writeFileSync(keep, 'y');
+
+    expect(await main(['run', '--library', 'Movies', '--data-dir', dataDir])).toBe(0);
+
+    // Files on disk, not log text: the 3-day retention the flow declared is
+    // the one that was applied.
+    expect(existsSync(expired)).toBe(false);
+    expect(existsSync(keep)).toBe(true);
+  });
+});
+
+describe('cli: trash purge', () => {
+  it('names the unknown subcommand', async () => {
+    expect(await main(['trash', 'empty', '--data-dir', newDataDir()])).not.toBe(0);
+    expect(stderr()).toContain('Unknown command: "trash empty"');
+  });
+
+  it('removes nothing under --dry-run, and removes it for real without', async () => {
+    const dataDir = newDataDir();
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-root-'));
+    await main(['library', 'add', '--name', 'Movies', '--root', root, '--data-dir', dataDir]);
+
+    const trashDir = join(root, '.trawlarr', 'trash');
+    mkdirSync(trashDir, { recursive: true });
+    const expired = join(trashDir, `old.${Date.now() - 40 * 24 * 60 * 60 * 1000}.mkv`);
+    writeFileSync(expired, 'x'.repeat(4096));
+
+    expect(
+      await main(['trash', 'purge', '--library', 'Movies', '--dry-run', '--data-dir', dataDir]),
+    ).toBe(0);
+    expect(existsSync(expired)).toBe(true);
+
+    expect(await main(['trash', 'purge', '--library', 'Movies', '--data-dir', dataDir])).toBe(0);
+    expect(existsSync(expired)).toBe(false);
+  });
+
+  it('rejects a non-numeric --days rather than sweeping on a NaN window', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    expect(
+      await main([
+        'trash',
+        'purge',
+        '--library',
+        'Movies',
+        '--days',
+        'soon',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('--days must be a non-negative integer');
   });
 });
 
