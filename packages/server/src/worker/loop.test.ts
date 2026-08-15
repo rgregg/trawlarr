@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -11,7 +11,8 @@ import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { scanLibrary } from '../scanner/scan-library.js';
-import { runQueue } from './loop.js';
+import { runJob } from './run-job.js';
+import { runQueue, type LoopSummary } from './loop.js';
 
 const execFileAsync = promisify(execFile);
 const NOW = 1_700_000_000_000;
@@ -62,11 +63,178 @@ const BROKEN_FLOW: FlowDefinition = {
   edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'bad' }],
 };
 
+/**
+ * A CommonJS plugin that copies the input file byte-for-byte into `workDir`
+ * — a new inode holding identical content — standing in for a no-op
+ * transcode. Same technique run-job.test.ts uses for its `not_converging`
+ * (one-strike) coverage: Replace swaps in a genuinely new inode, but the
+ * facts before and after are byte-for-byte identical, so `applyRunOutcome`
+ * flags it in one strike rather than converging.
+ */
+const copyVerbatimPluginCode = (): string => `
+const fs = require('node:fs');
+const path = require('node:path');
+
+const details = () => ({
+  name: 'Copy Verbatim',
+  description: 'copies the input file byte-for-byte, standing in for a no-op transcode',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => {
+  const src = args.inputFileObj._id;
+  const dest = path.join(args.workDir, 'copy' + path.extname(src));
+  fs.copyFileSync(src, dest);
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: dest },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`;
+
+const writeCopyVerbatimPlugin = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'trawlarr-loop-copy-plugin-'));
+  const abs = join(dir, 'index.js');
+  writeFileSync(abs, copyVerbatimPluginCode(), 'utf8');
+  return abs;
+};
+
+/** start -> (byte-for-byte copy) -> verify -> replace. */
+const copyVerbatimFlow = (): FlowDefinition => {
+  const copyPath = writeCopyVerbatimPlugin();
+  return {
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'copy', pluginId: copyPath, pluginVersion: '1.0.0', inputs: {} },
+      {
+        id: 'verify',
+        pluginId: 'trawlarr:verifyOutput',
+        pluginVersion: '1.0.0',
+        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+      },
+      {
+        id: 'replace',
+        pluginId: 'trawlarr:replaceOriginal',
+        pluginVersion: '1.0.0',
+        inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+      },
+    ],
+    edges: [
+      { fromNodeId: 'start', outputNumber: 1, toNodeId: 'copy' },
+      { fromNodeId: 'copy', outputNumber: 1, toNodeId: 'verify' },
+      { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+    ],
+  };
+};
+
+/**
+ * A CommonJS plugin that remuxes the input into an mp4 container via a real
+ * `ffmpeg -c copy` call — genuinely changing the library file's extension
+ * (and therefore its path) without re-encoding anything, so this stays
+ * fast. Used to pin that `onFile`/the row's path reflect what Replace
+ * actually produced, not the path the file was claimed under.
+ */
+const remuxToMp4PluginCode = (ffmpegPath: string): string => `
+const { execFileSync } = require('node:child_process');
+const path = require('node:path');
+
+const details = () => ({
+  name: 'Remux To MP4',
+  description: 'remuxes the input into an mp4 container, changing its extension',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => {
+  const dest = path.join(args.workDir, 'remuxed.mp4');
+  execFileSync(
+    ${JSON.stringify(ffmpegPath)},
+    ['-y', '-i', args.inputFileObj._id, '-c', 'copy', dest],
+    { stdio: 'ignore' },
+  );
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: dest },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`;
+
+const writeRemuxToMp4Plugin = (ffmpegPath: string): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'trawlarr-loop-remux-plugin-'));
+  const abs = join(dir, 'index.js');
+  writeFileSync(abs, remuxToMp4PluginCode(ffmpegPath), 'utf8');
+  return abs;
+};
+
+/** start -> (real ffmpeg remux to mp4) -> verify -> replace. */
+const remuxToMp4Flow = (ffmpegPath: string): FlowDefinition => {
+  const remuxPath = writeRemuxToMp4Plugin(ffmpegPath);
+  return {
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'remux', pluginId: remuxPath, pluginVersion: '1.0.0', inputs: {} },
+      {
+        id: 'verify',
+        pluginId: 'trawlarr:verifyOutput',
+        pluginVersion: '1.0.0',
+        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+      },
+      {
+        id: 'replace',
+        pluginId: 'trawlarr:replaceOriginal',
+        pluginVersion: '1.0.0',
+        inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+      },
+    ],
+    edges: [
+      { fromNodeId: 'start', outputNumber: 1, toNodeId: 'remux' },
+      { fromNodeId: 'remux', outputNumber: 1, toNodeId: 'verify' },
+      { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+    ],
+  };
+};
+
 let db: Db;
 
 beforeEach(() => {
   db = openDatabase({ file: ':memory:' });
   migrate(db);
+});
+
+/** The all-zeros shape, so each test only spells out the fields it expects nonzero. */
+const ZERO_SUMMARY: LoopSummary = {
+  claimed: 0,
+  succeeded: 0,
+  failed: 0,
+  skipped: 0,
+  heldForRetry: 0,
+  notConverging: 0,
+  pausedSkipped: 0,
+};
+const summaryOf = (overrides: Partial<LoopSummary>): LoopSummary => ({
+  ...ZERO_SUMMARY,
+  ...overrides,
 });
 
 /** Builds a library with `fileCount` real media files, wires `definition`, and scans them into `queued`. */
@@ -103,7 +271,7 @@ describe('runQueue', () => {
       ffprobePath: 'ffprobe',
       nowMs: now,
     });
-    expect(summary).toEqual({ claimed: 0, succeeded: 0, failed: 0, skipped: 0 });
+    expect(summary).toEqual(ZERO_SUMMARY);
   });
 
   it('processes three queued files and the summary counts match', async () => {
@@ -116,7 +284,7 @@ describe('runQueue', () => {
       nowMs: now,
     });
 
-    expect(summary).toEqual({ claimed: 3, succeeded: 3, failed: 0, skipped: 0 });
+    expect(summary).toEqual(summaryOf({ claimed: 3, succeeded: 3 }));
     const counts = createMediaFileRepo(db).countsByState(library.id);
     expect(counts.good).toBe(3);
     expect(counts.queued).toBe(0);
@@ -134,7 +302,7 @@ describe('runQueue', () => {
       maxFiles: 1,
     });
 
-    expect(summary).toEqual({ claimed: 1, succeeded: 1, failed: 0, skipped: 0 });
+    expect(summary).toEqual(summaryOf({ claimed: 1, succeeded: 1 }));
     const counts = createMediaFileRepo(db).countsByState(library.id);
     expect(counts.good).toBe(1);
     expect(counts.queued).toBe(2);
@@ -169,7 +337,7 @@ describe('runQueue', () => {
     });
 
     expect(seen).toHaveLength(1);
-    expect(summary).toEqual({ claimed: 1, succeeded: 1, failed: 0, skipped: 0 });
+    expect(summary).toEqual(summaryOf({ claimed: 1, succeeded: 1 }));
 
     const counts = createMediaFileRepo(db).countsByState(library.id);
     expect(counts.good).toBe(1);
@@ -188,17 +356,14 @@ describe('runQueue', () => {
       nowMs: now,
     });
 
-    expect(summary.claimed).toBe(2);
-    expect(summary.succeeded).toBe(1);
-    expect(summary.failed + summary.skipped).toBe(1);
+    // First bad-plugin attempt backs off (`held`), it does not go straight
+    // to terminal `failed` — see recordFailedAttempt/MAX_ATTEMPTS in
+    // @trawlarr/core.
+    expect(summary).toEqual(summaryOf({ claimed: 2, succeeded: 1, heldForRetry: 1, skipped: 1 }));
 
     const mediaFileRepo = createMediaFileRepo(db);
     expect(mediaFileRepo.countsByState(good.library.id).good).toBe(1);
     const brokenCounts = mediaFileRepo.countsByState(broken.library.id);
-    // First bad-plugin attempt backs off (`held`), it does not go straight
-    // to terminal `failed` — see recordFailedAttempt/MAX_ATTEMPTS in
-    // @trawlarr/core. Either way, it is not `queued`/`running` and it did
-    // not stop the loop from reaching the other library's file.
     expect(brokenCounts.held).toBe(1);
     expect(brokenCounts.queued).toBe(0);
     expect(brokenCounts.running).toBe(0);
@@ -216,7 +381,7 @@ describe('runQueue', () => {
       nowMs: now,
     });
 
-    expect(summary).toEqual({ claimed: 1, succeeded: 1, failed: 0, skipped: 0 });
+    expect(summary).toEqual(summaryOf({ claimed: 1, succeeded: 1, pausedSkipped: 1 }));
 
     const mediaFileRepo = createMediaFileRepo(db);
     expect(mediaFileRepo.countsByState(active.library.id).good).toBe(1);
@@ -246,5 +411,169 @@ describe('runQueue', () => {
     }
     // Distinct files, not the same one reported twice.
     expect(new Set(events.map((e) => e.fileId)).size).toBe(2);
+  }, 60_000);
+
+  // --- Fix round 1 ---------------------------------------------------
+
+  it('does not abort the drain when runJob itself throws: the file counts as failed and the loop continues', async () => {
+    const { library } = await buildLibrary({ fileCount: 3, definition: GOOD_FLOW });
+    let calls = 0;
+
+    // Throws on the SECOND claim, whichever file that happens to be —
+    // deterministic without depending on tie-break ordering among rows
+    // scanned in the same instant. Delegates to the real runJob for every
+    // other claim, so the other two files genuinely converge.
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      runJobFn: (jobInput) => {
+        calls += 1;
+        if (calls === 2) throw new Error('boom: simulated SQLITE_BUSY or similar');
+        return runJob(jobInput);
+      },
+    });
+
+    expect(calls).toBe(3);
+    expect(summary).toEqual(summaryOf({ claimed: 3, succeeded: 2, failed: 1 }));
+
+    const counts = createMediaFileRepo(db).countsByState(library.id);
+    expect(counts.good).toBe(2);
+    // The thrown claim is genuinely stranded `running` — recorded, not
+    // silently repaired; there is no stall reaper anywhere in the server
+    // yet (see loop.ts's doc comment). What matters here is that the OTHER
+    // two files still converged and the drain returned instead of
+    // rejecting.
+    expect(counts.running).toBe(1);
+    expect(counts.queued).toBe(0);
+  }, 60_000);
+
+  it('does not abort the drain when onFile throws: the remaining files are still processed', async () => {
+    const { library } = await buildLibrary({ fileCount: 3, definition: GOOD_FLOW });
+    let calls = 0;
+
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      onFile: () => {
+        calls += 1;
+        if (calls === 1) throw new Error('a CLI formatting bug, or closed stdout');
+      },
+    });
+
+    expect(calls).toBe(3);
+    expect(summary).toEqual(summaryOf({ claimed: 3, succeeded: 3 }));
+    expect(createMediaFileRepo(db).countsByState(library.id).good).toBe(3);
+  }, 60_000);
+
+  it('pins every counter distinctly: swapping any two would fail this test', async () => {
+    // Every bucket gets a DIFFERENT file count on purpose: two counters
+    // that both happened to land on 1 would make a mutant that swaps their
+    // labels (e.g. reports every `held` as `notConverging` and vice versa)
+    // produce the exact same summary object — invisible to `toEqual`. With
+    // distinct counts (2, 3, 4, 1, 5) below, any such swap changes the
+    // resulting object and the test fails. This is the earlier version's
+    // real gap: it used 1 file per bucket and did NOT catch a
+    // heldForRetry/notConverging swap (verified while writing this test —
+    // see the task report).
+    const succeeding = await buildLibrary({ fileCount: 2, definition: GOOD_FLOW, name: 'good' });
+    const terminal = await buildLibrary({
+      fileCount: 3,
+      definition: BROKEN_FLOW,
+      name: 'terminal',
+    });
+    const retrying = await buildLibrary({
+      fileCount: 4,
+      definition: BROKEN_FLOW,
+      name: 'retrying',
+    });
+    const notConverging = await buildLibrary({
+      fileCount: 1,
+      definition: copyVerbatimFlow(),
+      name: 'not-converging',
+    });
+    const paused = await buildLibrary({ fileCount: 6, definition: GOOD_FLOW, name: 'paused' });
+
+    // Pre-seed every one of `terminal`'s files at attemptCount 2, so THIS
+    // run's failure (attemptCount 3 >= MAX_ATTEMPTS) lands directly on the
+    // terminal `failed` state instead of another `held` — real ledger
+    // backoff mechanics (recordFailedAttempt in @trawlarr/core), not a
+    // shortcut.
+    const mediaFileRepo = createMediaFileRepo(db);
+    for (const row of mediaFileRepo.listByLibrary({ libraryId: terminal.library.id })) {
+      mediaFileRepo.setState({ fileId: row.id, state: 'queued', attemptCount: 2 });
+    }
+
+    createLibraryRepo(db).pause(paused.library.id, 'maintenance');
+
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+
+    expect(summary).toEqual({
+      claimed: 10,
+      succeeded: 2,
+      failed: 3,
+      heldForRetry: 4,
+      notConverging: 1,
+      skipped: 5,
+      pausedSkipped: 6,
+    });
+
+    expect(mediaFileRepo.countsByState(succeeding.library.id).good).toBe(2);
+    expect(mediaFileRepo.countsByState(terminal.library.id).failed).toBe(3);
+    expect(mediaFileRepo.countsByState(retrying.library.id).held).toBe(4);
+    expect(mediaFileRepo.countsByState(notConverging.library.id).not_converging).toBe(1);
+    expect(mediaFileRepo.countsByState(paused.library.id).queued).toBe(6);
+  }, 60_000);
+
+  it('libraryIds restricts the drain to the named library only', async () => {
+    const restricted = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW, name: 'a' });
+    const other = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW, name: 'b' });
+
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      libraryIds: [restricted.library.id],
+    });
+
+    expect(summary).toEqual(summaryOf({ claimed: 1, succeeded: 1 }));
+
+    const mediaFileRepo = createMediaFileRepo(db);
+    expect(mediaFileRepo.countsByState(restricted.library.id).good).toBe(1);
+    // Untouched: the other library was never in the restricted set, even
+    // though it is enabled and would otherwise have been drained.
+    const otherCounts = mediaFileRepo.countsByState(other.library.id);
+    expect(otherCounts.queued).toBe(1);
+    expect(otherCounts.good).toBe(0);
+  }, 60_000);
+
+  it('onFile reports the resulting (post-run) path, not the path the file was claimed under', async () => {
+    const { root } = await buildLibrary({ fileCount: 1, definition: remuxToMp4Flow('ffmpeg') });
+    const events: { fileId: string; path: string; state: FileState }[] = [];
+
+    await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      onFile: (event) => events.push(event),
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.state).toBe('good');
+    expect(events[0]!.path).toBe(join(root, 'f0.mp4'));
+    expect(events[0]!.path).not.toBe(join(root, 'f0.mkv'));
+
+    const row = createMediaFileRepo(db).getById(events[0]!.fileId);
+    expect(row?.path).toBe(events[0]!.path);
   }, 60_000);
 });
