@@ -416,6 +416,47 @@ describe('probe, facts and ledger persistence', () => {
     expect(row.last_run_id).toBe('job-1');
   });
 
+  it(
+    'updateAfterRun overwrites identity/path/stat on the SAME row, so the next scan matches ' +
+      'it again instead of opening a second row for what looks like a new file',
+    () => {
+      const id = scan();
+      const replaced = buildIdentityCandidate({ deviceId: 2049, inode: 999, hash });
+
+      repo.updateAfterRun({
+        fileId: id,
+        identity: replaced,
+        path: '/media/movies/Arrival.mkv',
+        nlink: 1,
+        sizeBytes: 12_345,
+        mtimeMs: NOW + 10,
+        ctimeMs: NOW + 10,
+        container: 'mp4',
+        nowMs: NOW + 10,
+      });
+
+      // Same row, id unchanged — this is an update in place, not an insert.
+      expect(db.prepare(`SELECT COUNT(*) AS c FROM media_file`).get()).toEqual({ c: 1 });
+      const row = repo.getById(id);
+      expect(row).toMatchObject({
+        inode_key: replaced.inodeKey,
+        content_key: replaced.contentKey,
+        size_bytes: 12_345,
+        container: 'mp4',
+      });
+
+      // The whole point: a lookup keyed on the NEW identity — the shape a
+      // subsequent scan of the replaced file would perform — now finds this
+      // row, not nothing (which is what forced the scanner to insert a
+      // second, orphaned row before this method existed).
+      const lookup = repo.identityLookup(LIB);
+      expect(lookup.byInodeKey(replaced.inodeKey!)).toBe(id);
+      expect(lookup.byContentKey(replaced.contentKey)).toBe(id);
+      // And the OLD identity no longer resolves to anything.
+      expect(lookup.byInodeKey('2049:42')).toBeNull();
+    },
+  );
+
   it('lists a library, optionally filtered by state', () => {
     const a = scan();
     repo.setState({ fileId: a, state: 'good' });

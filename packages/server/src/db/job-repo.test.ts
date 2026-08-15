@@ -4,7 +4,7 @@ import { migrate } from './migrate.js';
 import { createFlowRepo } from './flow-repo.js';
 import { createLibraryRepo } from './library-repo.js';
 import { createMediaFileRepo } from './media-file-repo.js';
-import { createJobRepo, type JobRepo } from './job-repo.js';
+import { createJobRepo, MAX_LOG_EXCERPT_CHARS, type JobRepo } from './job-repo.js';
 
 const NOW = 1_700_000_000_000;
 
@@ -83,6 +83,26 @@ describe('createJobRepo', () => {
       durationMs: 12,
       logExcerpt: 'ran fine',
     });
+  });
+
+  it('bounds an unbounded log excerpt rather than storing it in full', () => {
+    const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW });
+    repo.recordStep({
+      jobId,
+      step: {
+        seq: 1,
+        nodeId: 'start',
+        pluginId: 'trawlarr:start',
+        outputNumber: 1,
+        durationMs: 1,
+        logExcerpt: 'x'.repeat(MAX_LOG_EXCERPT_CHARS * 3),
+      },
+    });
+    const stored = repo.getSteps(jobId)[0]?.logExcerpt ?? '';
+    expect(stored.length).toBeLessThan(MAX_LOG_EXCERPT_CHARS * 3);
+    expect(stored.length).toBeGreaterThan(MAX_LOG_EXCERPT_CHARS);
+    expect(stored.startsWith('x'.repeat(100))).toBe(true);
+    expect(stored).toContain('truncated');
   });
 
   it('folds a step error into its log excerpt, since job_step has no error column', () => {

@@ -81,6 +81,18 @@ export interface ClaimedFile {
   path: string;
 }
 
+export interface UpdateAfterRunInput {
+  fileId: string;
+  identity: IdentityCandidate;
+  path: string;
+  nlink: number;
+  sizeBytes: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  container: string;
+  nowMs: number;
+}
+
 export interface MediaFileRepo {
   identityLookup(libraryId: string): IdentityLookup;
   upsertScanned(input: UpsertScannedInput): string;
@@ -128,6 +140,28 @@ export interface MediaFileRepo {
    * it already has in hand rather than trusting this method.
    */
   getProbe(fileId: string): { probe: ProbeData; facts: FactSet } | null;
+  /**
+   * Overwrite a KNOWN row's identity and stat columns (`inode_key`,
+   * `content_key`, `path`, `nlink`, `size_bytes`, `mtime_ms`, `ctime_ms`,
+   * `container`) after a run has changed what is actually on disk at this
+   * file's path — most notably, after Replace Original File swaps in a new
+   * inode with different content.
+   *
+   * This is deliberately NOT `upsertScanned`: that method's whole job is to
+   * MATCH a freshly-walked file against an existing row by identity, and a
+   * replaced file's new identity (new inode, new content hash) cannot match
+   * its own row's now-stale one — that mismatch is exactly what made every
+   * scan after a run treat the file as brand new and open a second row,
+   * forever, rather than recognising the row a job already owns. Called by
+   * `fileId`, which the caller already knows, this updates that exact row in
+   * place instead of searching for one.
+   *
+   * Skipping this call (or calling it with anything other than what the
+   * replaced file's own stat and content hash report) reopens the same bug:
+   * the next scan's identity lookup misses this row, inserts a new one, and
+   * the file never reaches `alreadyGood`.
+   */
+  updateAfterRun(input: UpdateAfterRunInput): void;
   listByLibrary(input: { libraryId: string; state?: FileState }): MediaFileRow[];
   requeue(fileId: string): void;
   countsByState(libraryId: string): Record<FileState, number>;
@@ -378,6 +412,32 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         sizeBytes: current.size_bytes,
       });
       return { probe, facts };
+    },
+
+    updateAfterRun(input) {
+      const current = selectById.get(input.fileId) as MediaFileRow | undefined;
+      if (current === undefined) throw new Error(`Unknown media file: ${input.fileId}`);
+
+      // Same column set and shape as the identity-matched branch of
+      // `upsertScanned` — this is the same "what does this row's file look
+      // like now" update, just addressed by the id the caller already knows
+      // rather than by searching for it.
+      try {
+        updateScanned.run(
+          input.identity.inodeKey,
+          input.identity.contentKey,
+          input.path,
+          input.nlink,
+          input.sizeBytes,
+          input.mtimeMs,
+          input.ctimeMs,
+          input.container,
+          input.nowMs,
+          input.fileId,
+        );
+      } catch (err) {
+        throw toIdentityConflictError(err, current.library_id, input.identity.contentKey);
+      }
     },
 
     setLedger(input) {
