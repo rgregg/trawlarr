@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   renameSync,
   symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -256,6 +257,37 @@ describe('scanLibrary', () => {
       expect(summary.probed).toBe(3);
     } finally {
       execFileAsync('rm', ['-f', join(root, 'broken.mkv')]);
+    }
+  });
+
+  it('re-probes a file whose probe has never succeeded, instead of leaving it unknown forever', async () => {
+    // A first probe that fails leaves no probe_json, so the file can never
+    // compute a signature and never leaves `unknown` — permanently capping
+    // the library's convergence percentage. Nothing about the FILE changes
+    // when the failure was transient (a busy ffprobe, a mount that blinked,
+    // a truncated download later replaced at the same size), so a
+    // size/mtime-only probe rule never looks at it again.
+    const brokenPath = join(root, 'never-probed.mkv');
+    writeFileSync(brokenPath, 'this is not media');
+    try {
+      const first = await scan();
+      expect(first.probed).toBe(3);
+      expect(first.unreadable).toBe(1);
+
+      const repo = createMediaFileRepo(db);
+      const brokenRow = repo.listByLibrary({ libraryId }).find((r) => r.path === brokenPath);
+      expect(brokenRow?.probe_json).toBeNull();
+      expect(brokenRow?.state).toBe('unknown');
+
+      // Untouched on disk — same size, same mtime — and still re-probed.
+      const second = await scan();
+      expect(second.probed).toBe(1);
+      expect(second.unreadable).toBe(1);
+      // The two healthy files are still skipped: this is a targeted retry,
+      // not a reversion to probing everything on every scan.
+      expect(second.seen).toBe(3);
+    } finally {
+      unlinkSync(brokenPath);
     }
   });
 });

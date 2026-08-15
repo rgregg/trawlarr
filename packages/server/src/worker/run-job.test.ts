@@ -1498,3 +1498,103 @@ describe.runIf(available)('runJob: I-1 identity conflict handling', () => {
     expect(db.prepare(`SELECT id FROM media_file`).all()).toHaveLength(2);
   }, 120_000);
 });
+
+/**
+ * Critical C2: `Replace Original File` renames the new file into place, and
+ * only AFTER `runJob` has probed it does `updateAfterRun` record the new
+ * identity. Between those two points the on-disk file has an identity no row
+ * claims — and `trawlarr scan` and `trawlarr run` are separate processes
+ * against the same WAL database, which is the normal deployment, so a scan
+ * really can walk that path inside the window.
+ *
+ * The scan matched nothing, inserted a SECOND row, and `updateAfterRun` then
+ * hit `UNIQUE (library_id, content_key)` and unwound the run into a stall:
+ * a ghost row keeping the PRE-transcode probe (claimed again after its
+ * backoff, re-transcoding the already-hevc file with generational loss and
+ * pushing the good result into trash) beside a second row for the same file,
+ * both eventually `good` — "100% converged", one of them a permanent
+ * phantom whose content exists only in trash. `NEVER_REQUEUE_STATES` could
+ * not help: the file the scanner walked was associated with no row at all,
+ * let alone the `running` one.
+ *
+ * The window is FORCED here, not raced: the scan is injected at the
+ * `moveCompanions` seam, which `replaceOriginal` reaches after the media
+ * swap has already landed and long before `updateAfterRun` runs. A test that
+ * merely started a scan concurrently and hoped for the interleaving passes
+ * against the broken code most of the time (see the P2 prerequisites note on
+ * concurrency tests).
+ */
+describe.runIf(available)('runJob: C2 — a scan inside the replacement window', () => {
+  it('does not open a second row for the file a running job is replacing', async () => {
+    const { claimed } = await setupClaimedFile({
+      definition: TRANSCODE_FLOW,
+      videoCodec: 'libx264',
+    });
+    const mediaFileRepo = createMediaFileRepo(db);
+    const beforeRow = mediaFileRepo.getById(claimed.fileId);
+    const injected: ScanSummary[] = [];
+
+    const result = await runJob({
+      db,
+      claimed,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      // The real companion move still happens; the scan is what this seam
+      // is standing in for — any scanner walking this root at this instant.
+      moveCompanions: async (moveInput) => {
+        await moveCompanionsReal(moveInput);
+        injected.push(
+          await scanLibrary({
+            db,
+            libraryId: claimed.libraryId,
+            ffprobePath: 'ffprobe',
+            nowMs: now,
+          }),
+        );
+      },
+    });
+
+    // The scan saw the swapped-in file and left it alone: it belongs to a
+    // run in flight, not to a new library file.
+    expect(injected).toHaveLength(1);
+    expect(injected[0]?.added).toBe(0);
+    expect(injected[0]?.queued).toBe(0);
+
+    // Exactly ONE row describes this file, and it is the row the job owns.
+    const rows = db.prepare('SELECT id, state, path, video_codec FROM media_file').all() as {
+      id: string;
+      state: string;
+      path: string;
+      video_codec: string | null;
+    }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(claimed.fileId);
+
+    // The run converged rather than unwinding into a stall...
+    expect(result.state).toBe('good');
+    expect(rows[0]?.state).toBe('good');
+
+    // ...on the POST-transcode facts: no stale probe left to make a later
+    // claim re-transcode an already-hevc file.
+    expect(await videoCodecOf(claimed.path)).toBe('hevc');
+    expect(rows[0]?.video_codec).toBe('hevc');
+    const afterRow = mediaFileRepo.getById(claimed.fileId);
+    expect(afterRow?.content_key).not.toBe(beforeRow?.content_key);
+
+    // Nothing is claimable: no ghost waiting out a backoff.
+    expect(mediaFileRepo.claimNext({ workerClass: 'transcode', nowMs: NOW })).toBeNull();
+
+    // And a normal scan AFTER the run recognises that same row as converged.
+    const after = await scanLibrary({
+      db,
+      libraryId: claimed.libraryId,
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    expect(after.alreadyGood).toBe(1);
+    expect(after.added).toBe(0);
+    expect(after.queued).toBe(0);
+    expect(db.prepare('SELECT id FROM media_file').all()).toHaveLength(1);
+  }, 180_000);
+});

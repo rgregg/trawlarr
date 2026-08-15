@@ -83,6 +83,20 @@ number the whole project exists to report. State (including which files are
 queued, held, or done) lives in `<data-dir>/trawlarr.db`, an ordinary sqlite
 file (`--data-dir` defaults to `./trawlarr-data`).
 
+Two states are terminal by design: `failed` (the retry budget is spent) and
+`not_converging` (the flow keeps changing the file without settling). Neither
+the scanner nor the queue will touch them again, so they need a human:
+
+```bash
+trawlarr status --library Movies --files --state failed   # ids and paths
+trawlarr requeue --file <id>                              # one file
+trawlarr requeue --library Movies --state failed          # all of them
+```
+
+`requeue` clears the file's attempt count and backoff and puts it back in
+`queued`, so the next `run` claims it. It is also the recovery path for a row
+left `running` by a worker that died mid-job.
+
 **Trash is never pruned.** A flow node like Replace Original File moves the
 original into a per-library `.trawlarr/trash` directory rather than deleting
 it, and nothing currently sweeps that directory. It grows without limit until

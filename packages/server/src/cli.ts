@@ -4,12 +4,12 @@ import { realpathSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { FlowDefinition } from '@trawlarr/core';
+import type { FileState, FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo, DEFAULT_EXTENSIONS } from './db/library-repo.js';
 import { createFlowRepo } from './db/flow-repo.js';
-import { createMediaFileRepo } from './db/media-file-repo.js';
+import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
 import { runQueue } from './worker/loop.js';
 
@@ -76,6 +76,20 @@ const parseExtensions = (raw: string): string[] => {
     );
   }
   return extensions;
+};
+
+/**
+ * A `--state` value the user typed, checked against the real state vocabulary
+ * rather than passed through to a query that would silently match nothing.
+ */
+const parseState = (raw: string, label: string): FileState => {
+  const match = ALL_STATES.find((state) => state === raw);
+  if (match === undefined) {
+    throw new CliError(
+      `${label}: "${raw}" is not a file state. Valid states: ${ALL_STATES.join(', ')}.`,
+    );
+  }
+  return match;
 };
 
 /** A whole non-negative integer, rejecting "3abc"-style inputs `parseInt` would silently accept. */
@@ -233,6 +247,12 @@ const cmdScan = async (args: string[]): Promise<number> => {
       `probed ${summary.probed}, queued ${summary.queued}, ${summary.alreadyGood} already good, ` +
       `${summary.skippedHardlinked} skipped (hardlinked), ${summary.unreadable} unreadable/conflicted.`,
   );
+  if (summary.inFlight > 0) {
+    console.log(
+      `  ${summary.inFlight} file(s) left to a run currently in flight; they are recorded by ` +
+        `that run and picked up by the next scan.`,
+    );
+  }
   return 0;
 };
 
@@ -287,7 +307,8 @@ const cmdRun = async (args: string[]): Promise<number> => {
     console.log(
       `  Note: a "failed" count here can include a file whose attempt threw before any ` +
         `outcome was recorded; such a row may be left "running" with no automatic retry — ` +
-        `check "status" and consider a manual requeue.`,
+        `find it with "trawlarr status --files" and recover it with ` +
+        `"trawlarr requeue --file <id>".`,
     );
   }
   if (summary.pausedSkipped > 0) {
@@ -308,12 +329,20 @@ const cmdStatus = async (args: string[]): Promise<number> => {
     options: {
       'data-dir': { type: 'string', default: './trawlarr-data' },
       library: { type: 'string' },
+      files: { type: 'boolean', default: false },
+      state: { type: 'string' },
     },
   });
 
   const db = await openDb(values['data-dir']!);
   const libraryRepo = createLibraryRepo(db);
   const mediaFileRepo = createMediaFileRepo(db);
+
+  const stateFilter =
+    values.state === undefined ? undefined : parseState(values.state, 'status: --state');
+  // `--state` on its own is only meaningful as a filter on the file list, so
+  // it implies `--files` rather than silently printing the same summary.
+  const showFiles = values.files || stateFilter !== undefined;
 
   const libraries =
     values.library !== undefined ? [requireLibrary(db, values.library)] : libraryRepo.list();
@@ -326,6 +355,22 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   for (const library of libraries) {
     const counts = mediaFileRepo.countsByState(library.id);
     const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+
+    // A library that has never been scanned — or whose roots point
+    // somewhere with no matching media — has no percentage to report, and
+    // printing "0 file(s) ... (0% converged)" reads as a failure for what
+    // is very often the first command a new user runs. Say what actually
+    // happened, and what to do next, instead.
+    if (total === 0) {
+      console.log(
+        `${library.name}: no files tracked yet. Roots: ${library.roots.join(', ')}. ` +
+          `Run "trawlarr scan --library ${library.name}" — if that still finds nothing, ` +
+          `check the roots above and --extensions (currently ` +
+          `${library.extensions.join(', ')}).`,
+      );
+      continue;
+    }
+
     // Floored, not rounded: rounding up would let a library with files
     // still queued read "100% converged", the one number this project's
     // counter-honesty rule cannot let overstate. 100% is reserved for
@@ -337,7 +382,110 @@ const cmdStatus = async (args: string[]): Promise<number> => {
         `not_converging ${counts.not_converging}, unknown ${counts.unknown} ` +
         `(${pct}% converged)`,
     );
+
+    const stuck = counts.failed + counts.not_converging;
+    if (stuck > 0 && !showFiles) {
+      console.log(
+        `  ${stuck} file(s) are in a terminal state and will not be retried on their own. ` +
+          `List them with "trawlarr status --library ${library.name} --files --state failed" ` +
+          `(or --state not_converging), then "trawlarr requeue --file <id>".`,
+      );
+    }
+
+    // File ids are what `requeue` takes, and nothing else printed them:
+    // the documented recovery path named a row the user had no way to
+    // name back.
+    if (showFiles) {
+      const rows = mediaFileRepo
+        .listByLibrary({ libraryId: library.id, state: stateFilter })
+        .sort((a, b) => a.path.localeCompare(b.path));
+      if (rows.length === 0) {
+        console.log(
+          stateFilter === undefined ? '  (no files)' : `  (no files in state "${stateFilter}")`,
+        );
+      }
+      for (const row of rows) {
+        console.log(
+          `  ${row.id}  ${row.state.padEnd(15)} attempts ${row.attempt_count}  ${row.path}`,
+        );
+      }
+    }
   }
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
+// requeue
+// ---------------------------------------------------------------------------
+
+/**
+ * The documented recovery path for `failed`, `not_converging`, a row left
+ * `running` by a worker that died, and a duplicate-identity stall — all of
+ * which are terminal (or invisible) to the scanner and the queue by design.
+ * `mediaFileRepo.requeue` has always implemented it; until now nothing
+ * outside the tests could call it, so every one of those messages pointed at
+ * a command that did not exist.
+ */
+const cmdRequeue = async (args: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'data-dir': { type: 'string', default: './trawlarr-data' },
+      file: { type: 'string', multiple: true },
+      library: { type: 'string' },
+      state: { type: 'string' },
+    },
+  });
+
+  const byFile = values.file !== undefined && values.file.length > 0;
+  const byState = values.state !== undefined;
+
+  if (!byFile && !byState) {
+    throw new CliError(
+      'requeue: name what to requeue — either "--file <id>" (repeatable, ids come from ' +
+        '"trawlarr status --files") or "--library <name> --state <state>".',
+    );
+  }
+  if (byFile && byState) {
+    throw new CliError('requeue: use either --file or --state, not both.');
+  }
+  if (byState && values.library === undefined) {
+    throw new CliError(
+      'requeue: --state also needs --library, to say which library to scope it to.',
+    );
+  }
+
+  const db = await openDb(values['data-dir']!);
+  const mediaFileRepo = createMediaFileRepo(db);
+
+  const targets = byFile
+    ? values.file!.map((id) => {
+        const row = mediaFileRepo.getById(id);
+        if (row === null) {
+          throw new CliError(
+            `requeue: no file with id "${id}". Ids come from "trawlarr status --files".`,
+          );
+        }
+        return row;
+      })
+    : mediaFileRepo.listByLibrary({
+        libraryId: requireLibrary(db, values.library!).id,
+        state: parseState(values.state!, 'requeue: --state'),
+      });
+
+  if (targets.length === 0) {
+    console.log(`No files in state "${values.state!}" in library "${values.library!}".`);
+    return 0;
+  }
+
+  for (const row of targets) {
+    mediaFileRepo.requeue(row.id);
+    console.log(`  ${row.path}: ${row.state} -> queued`);
+  }
+  console.log(
+    `Requeued ${targets.length} file(s). Run "trawlarr run" to work through them ` +
+      `(a requeued file is claimed immediately: its attempt count and backoff are cleared).`,
+  );
   return 0;
 };
 
@@ -351,7 +499,9 @@ const USAGE = `Usage:
   trawlarr library set-flow --library <name> --flow <name>
   trawlarr scan --library <name>
   trawlarr run [--library <name>] [--max <n>]
-  trawlarr status [--library <name>]
+  trawlarr status [--library <name>] [--files] [--state <state>]
+  trawlarr requeue --file <id> [--file <id>...]
+  trawlarr requeue --library <name> --state <state>
 
 All commands accept --data-dir <path> (default ./trawlarr-data).`;
 
@@ -372,6 +522,7 @@ const dispatch = async (argv: string[]): Promise<number> => {
   if (cmd === 'scan') return cmdScan(rest);
   if (cmd === 'run') return cmdRun(rest);
   if (cmd === 'status') return cmdStatus(rest);
+  if (cmd === 'requeue') return cmdRequeue(rest);
 
   if (cmd === undefined) throw new CliError(`No command given.\n\n${USAGE}`);
   if (cmd.startsWith('-')) {

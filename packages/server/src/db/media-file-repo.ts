@@ -163,6 +163,18 @@ export interface MediaFileRepo {
    */
   updateAfterRun(input: UpdateAfterRunInput): void;
   listByLibrary(input: { libraryId: string; state?: FileState }): MediaFileRow[];
+  /**
+   * The library paths of rows that are `running` RIGHT NOW — the files some
+   * worker has claimed and may be part-way through replacing.
+   *
+   * Read fresh per walked file by the scanner (never cached for the length
+   * of a scan): a run claims its row — committing `running` — strictly
+   * before it can put a replacement on disk, so a file the scanner can
+   * already see is guaranteed to be covered by a `running` row that was
+   * committed before it existed. Caching this set at scan start would break
+   * exactly that guarantee for a job that started mid-scan.
+   */
+  listRunningPaths(libraryId: string): string[];
   requeue(fileId: string): void;
   countsByState(libraryId: string): Record<FileState, number>;
 }
@@ -209,7 +221,8 @@ const ALL_STATES_MAP = {
   held: true,
 } satisfies Record<FileState, true>;
 
-const ALL_STATES: readonly FileState[] = Object.keys(ALL_STATES_MAP) as FileState[];
+/** Every `FileState`, in a stable order — exported for the CLI's own validation. */
+export const ALL_STATES: readonly FileState[] = Object.keys(ALL_STATES_MAP) as FileState[];
 
 const isUniqueConstraintError = (err: unknown): boolean =>
   err instanceof Error &&
@@ -232,6 +245,9 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     `SELECT id FROM media_file WHERE library_id = ? AND content_key = ?`,
   );
   const selectById = db.prepare(`SELECT * FROM media_file WHERE id = ?`);
+  const runningPaths = db.prepare(
+    `SELECT path FROM media_file WHERE library_id = ? AND state = 'running'`,
+  );
 
   const insertFile = db.prepare(
     `INSERT INTO media_file (
@@ -530,6 +546,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       return db
         .prepare(`SELECT * FROM media_file WHERE library_id = ? AND state = ?`)
         .all(input.libraryId, input.state) as MediaFileRow[];
+    },
+
+    listRunningPaths(libraryId) {
+      return (runningPaths.all(libraryId) as { path: string }[]).map((row) => row.path);
     },
 
     requeue(fileId) {

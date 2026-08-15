@@ -297,6 +297,161 @@ describe('cli: status', () => {
   });
 });
 
+/**
+ * Seeds a library with rows in given states, returning their ids in order.
+ * Written directly rather than through a scan so a state like
+ * `not_converging` (which only a real run can produce) can be set up
+ * cheaply, and so these tests need no ffmpeg.
+ */
+const seedFiles = (dataDir: string, libraryName: string, states: string[]): string[] => {
+  const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+  migrate(db);
+  const library = createLibraryRepo(db).getByName(libraryName)!;
+  const insert = db.prepare(
+    `INSERT INTO media_file (
+       id, library_id, content_key, path, size_bytes, mtime_ms, ctime_ms,
+       container, state, attempt_count, hold_until_ms, discovered_at, updated_at
+     ) VALUES (?, ?, ?, ?, 0, 0, 0, 'mkv', ?, 3, 999, 0, 0)`,
+  );
+  const ids = states.map((state, i) => {
+    const id = `seeded-${String(i)}`;
+    insert.run(id, library.id, `content-${String(i)}`, `/movies/${String(i)}.mkv`, state);
+    return id;
+  });
+  db.close();
+  return ids;
+};
+
+const stateOfFile = (dataDir: string, fileId: string) => {
+  const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+  migrate(db);
+  const row = db
+    .prepare('SELECT state, attempt_count, hold_until_ms FROM media_file WHERE id = ?')
+    .get(fileId) as
+    { state: string; attempt_count: number; hold_until_ms: number | null } | undefined;
+  db.close();
+  return row;
+};
+
+const addLibrary = async (dataDir: string, name: string): Promise<void> => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-root-'));
+  await main(['library', 'add', '--name', name, '--root', root, '--data-dir', dataDir]);
+};
+
+describe('cli: status --files', () => {
+  it('says what an empty library means instead of reporting it as 0% converged', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Empty');
+
+    expect(await main(['status', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('no files tracked yet');
+    expect(stdout()).toContain('trawlarr scan --library Empty');
+    // The number a new user reads as failure on their very first command.
+    expect(stdout()).not.toContain('(0% converged)');
+  });
+
+  it('prints the file ids requeue takes, filtered by state', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const ids = seedFiles(dataDir, 'Movies', ['good', 'failed', 'not_converging']);
+
+    expect(
+      await main([
+        'status',
+        '--library',
+        'Movies',
+        '--files',
+        '--state',
+        'failed',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+    expect(stdout()).toContain(ids[1]!);
+    expect(stdout()).not.toContain(ids[0]!);
+    expect(stdout()).not.toContain(ids[2]!);
+  });
+
+  it('rejects a mistyped --state rather than silently listing nothing', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    expect(await main(['status', '--state', 'faild', '--data-dir', dataDir])).not.toBe(0);
+    expect(stderr()).toContain('is not a file state');
+  });
+
+  it('points at requeue when a library holds terminal files', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    seedFiles(dataDir, 'Movies', ['failed', 'not_converging']);
+    expect(await main(['status', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('trawlarr requeue --file <id>');
+  });
+});
+
+describe('cli: requeue', () => {
+  it('requires something to requeue', async () => {
+    expect(await main(['requeue', '--data-dir', newDataDir()])).not.toBe(0);
+    expect(stderr()).toContain('name what to requeue');
+  });
+
+  it('rejects an unknown file id by name', async () => {
+    expect(await main(['requeue', '--file', 'nope', '--data-dir', newDataDir()])).not.toBe(0);
+    expect(stderr()).toContain('no file with id "nope"');
+  });
+
+  it('rejects --state without --library', async () => {
+    expect(await main(['requeue', '--state', 'failed', '--data-dir', newDataDir()])).not.toBe(0);
+    expect(stderr()).toContain('--state also needs --library');
+  });
+
+  it('moves a terminal file back to queued and clears its backoff', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const ids = seedFiles(dataDir, 'Movies', ['not_converging', 'good']);
+
+    expect(await main(['requeue', '--file', ids[0]!, '--data-dir', dataDir])).toBe(0);
+
+    expect(stateOfFile(dataDir, ids[0]!)).toMatchObject({
+      state: 'queued',
+      attempt_count: 0,
+      hold_until_ms: null,
+    });
+    // Nothing else moved.
+    expect(stateOfFile(dataDir, ids[1]!)?.state).toBe('good');
+  });
+
+  it('requeues every file in one state within a library', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const ids = seedFiles(dataDir, 'Movies', ['failed', 'failed', 'good']);
+
+    expect(
+      await main(['requeue', '--library', 'Movies', '--state', 'failed', '--data-dir', dataDir]),
+    ).toBe(0);
+
+    expect(stateOfFile(dataDir, ids[0]!)?.state).toBe('queued');
+    expect(stateOfFile(dataDir, ids[1]!)?.state).toBe('queued');
+    expect(stateOfFile(dataDir, ids[2]!)?.state).toBe('good');
+  });
+
+  it('requeued files become claimable again: "run" picks them up', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const ids = seedFiles(dataDir, 'Movies', ['failed']);
+
+    // Before: a terminal row is invisible to the queue.
+    expect(await main(['run', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('Claimed 0 file(s)');
+    expect(stateOfFile(dataDir, ids[0]!)?.state).toBe('failed');
+
+    expect(await main(['requeue', '--file', ids[0]!, '--data-dir', dataDir])).toBe(0);
+    // After: it is claimed (and stalls at once — the seeded row has no
+    // probe — which is exactly the observable proof the queue reached it).
+    expect(await main(['run', '--data-dir', dataDir])).toBe(0);
+    expect(stateOfFile(dataDir, ids[0]!)?.state).not.toBe('queued');
+  });
+});
+
 describe.runIf(ffmpegAvailable)('cli: run --library restricts the drain', () => {
   const makeSample = async (path: string): Promise<void> => {
     const { execFile } = await import('node:child_process');

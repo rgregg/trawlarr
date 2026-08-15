@@ -603,11 +603,12 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
             // will not fix that.
             throw new Error(
               `The replacement for "${row.path}" produced content that already matches ` +
-                `another tracked file in this library (${error.message}). This can happen ` +
-                `when a previous original is restored from ".trawlarr/trash" beside its own ` +
-                `already-transcoded copy and a deterministic re-encode reproduces it ` +
-                `byte-for-byte. Resolve the duplicate manually (delete or requeue one of the ` +
-                `two rows) before this file can converge.`,
+                `another tracked file in this library (${error.message}). Two files in the ` +
+                `library now hold byte-identical content — most often a genuine duplicate ` +
+                `(the same title present twice) that a deterministic re-encode has made ` +
+                `identical, or a second row opened for this same file. Inspect them with ` +
+                `"trawlarr status --library <name> --files", then remove whichever copy is ` +
+                `redundant and "trawlarr requeue --file <id>" the row you keep.`,
               { cause: error },
             );
           }

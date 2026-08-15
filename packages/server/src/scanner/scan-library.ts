@@ -1,4 +1,4 @@
-import { extname } from 'node:path';
+import { basename, dirname, extname } from 'node:path';
 import {
   computeSignature,
   extractFacts,
@@ -35,6 +35,13 @@ export interface ScanSummary {
    * rather than merely producing the same downstream numbers by chance.
    */
   probed: number;
+  /**
+   * Files left entirely alone because they are the in-flight output of a
+   * run that has not finished recording itself yet (see `isInFlightOutput`).
+   * Not an error and not a skip the user needs to act on: the run that owns
+   * the file records it moments later, and the next scan sees it normally.
+   */
+  inFlight: number;
 }
 
 export interface ScanLibraryInput {
@@ -47,6 +54,53 @@ export interface ScanLibraryInput {
 
 /** States a scan must never touch: terminal or already mid-flight. */
 const NEVER_REQUEUE_STATES = new Set(['failed', 'not_converging', 'running']);
+
+const stemOf = (path: string): string => basename(path).replace(/\.[^.]*$/, '');
+
+/**
+ * Is `candidate` a file some in-flight run is entitled to be producing right
+ * now, for the library file `runningPath` names?
+ *
+ * `Replace Original File` takes the ORIGINAL's stem and only ever changes
+ * the container (that rule is load-bearing elsewhere: the filename belongs
+ * to the user, so a replacement can never adopt the staged file's name), so
+ * a running row's file can legally appear at exactly one other path — same
+ * directory, same stem, different extension — and nowhere else.
+ *
+ * This closes the window between the swap landing on disk and `runJob`
+ * recording the new identity (`updateAfterRun`). Inside it the file's
+ * identity matches NO row, so a scan walking the path would insert a second
+ * row for a file that is already tracked; `updateAfterRun` then collides on
+ * `UNIQUE (library_id, content_key)` and unwinds the run, leaving a ghost
+ * row holding the pre-transcode probe that gets claimed and transcoded a
+ * second time. `NEVER_REQUEUE_STATES` cannot help, because the walked file
+ * is associated with no row at all.
+ *
+ * Chosen over the alternatives deliberately:
+ *
+ *  - "Make the identity update part of the same transaction as the swap"
+ *    does not close anything: the scan's insert happens between the swap and
+ *    ANY later observation, whatever transaction that observation sits in,
+ *    because the swap itself is a filesystem operation no sqlite transaction
+ *    contains.
+ *  - "Reserve the identity before the swap" means writing a row's
+ *    content_key from the staged file before it is in place, which is a
+ *    guess: a cross-device replacement copies (new inode), a companion or
+ *    hardlink guard can refuse after staging, and a run that dies mid-swap
+ *    would leave the ledger describing a file that never landed — the
+ *    ledger would stop being a record of what is on disk.
+ *  - Skipping only paths EQUAL to a running row's path fails the moment the
+ *    flow changes container (`movie.mkv` -> `movie.mp4`), which is the most
+ *    common replacement of all.
+ *
+ * The ordering that makes this airtight: a run's row is `running`
+ * (committed by `claimNext`) strictly before that run can put anything on
+ * disk, so any file a scanner can SEE inside the window is covered by a
+ * `running` row the scanner can already read — in this process or another
+ * one against the same WAL database.
+ */
+const isInFlightOutput = (runningPath: string, candidate: string): boolean =>
+  dirname(runningPath) === dirname(candidate) && stemOf(runningPath) === stemOf(candidate);
 
 /**
  * Walk a library's roots, bring the database's view of each file up to date,
@@ -82,6 +136,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     unreadable: 0,
     alreadyGood: 0,
     probed: 0,
+    inFlight: 0,
   };
 
   interface Decision {
@@ -123,6 +178,21 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     const lookup = mediaFileRepo.identityLookup(libraryId);
     const match = matchIdentity(identity, lookup);
     const isNew = match.fileId === null;
+
+    // A file no row claims, at a path an in-flight run is entitled to be
+    // producing, is not a new file — it is that run's replacement, caught
+    // between landing on disk and being recorded. Leave it entirely alone
+    // (no insert, no probe, no queue) and let the run that owns it record
+    // it; the next scan sees it as the row it belongs to. Queried fresh
+    // here rather than once per scan, so a job that started after this scan
+    // began is still covered — see `listRunningPaths`.
+    if (isNew) {
+      const running = mediaFileRepo.listRunningPaths(libraryId);
+      if (running.some((runningPath) => isInFlightOutput(runningPath, entry.path))) {
+        summary.inFlight += 1;
+        continue;
+      }
+    }
 
     // Read the PRE-scan row now, before upsertScanned overwrites
     // size_bytes/mtime_ms with this scan's stat: comparing against the row
@@ -170,6 +240,14 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     const doProbe =
       isNew ||
       existingBeforeUpsert === null ||
+      // A file whose probe has NEVER succeeded must be retried on every
+      // scan: size/mtime alone would never re-probe it (nothing about a
+      // file changes when ffprobe was merely busy, or the mount was
+      // briefly unavailable, or the user has since replaced a truncated
+      // download in place at the same size), so it sat in `unknown`
+      // forever — permanently capping the library's convergence
+      // percentage, with its only diagnostic long scrolled past.
+      existingBeforeUpsert.probe_json === null ||
       existingBeforeUpsert.size_bytes !== entry.stat.size ||
       existingBeforeUpsert.mtime_ms !== entry.stat.mtimeMs;
 
