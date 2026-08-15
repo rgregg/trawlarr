@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -247,8 +248,11 @@ const buildLibrary = async (input: {
   for (let i = 0; i < input.fileCount; i += 1) {
     await makeSample(join(root, `f${i}.mkv`));
   }
+  // `flow.name` is unique at the schema level (see migration
+  // 002_flow_name_unique.sql) — a fixed literal here collides the instant a
+  // test builds more than one library, so every call gets its own name.
   const flow = createFlowRepo(db).create({
-    name: 'flow',
+    name: `flow-${randomUUID()}`,
     definition: input.definition,
     nowMs: NOW,
   });
@@ -575,5 +579,112 @@ describe('runQueue', () => {
 
     const row = createMediaFileRepo(db).getById(events[0]!.fileId);
     expect(row?.path).toBe(events[0]!.path);
+  }, 60_000);
+
+  // --- Fix round 2 ---------------------------------------------------
+
+  it('stops the drain and still returns the summary so far when the claim step itself throws', async () => {
+    const { library } = await buildLibrary({ fileCount: 3, definition: GOOD_FLOW });
+    const mediaFileRepo = createMediaFileRepo(db);
+    const realClaimNext = mediaFileRepo.claimNext;
+    let calls = 0;
+
+    // Throws on the 3rd claim attempt (a stand-in for SQLITE_BUSY on the
+    // claimNext UPDATE, e.g. a concurrent scanner or API write against the
+    // same WAL database), after two files have already genuinely
+    // succeeded. `runQueue` must resolve with what it already has, not
+    // reject and discard those two real successes.
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      claimNextFn: (claimInput) => {
+        calls += 1;
+        if (calls === 3) throw new Error('SQLITE_BUSY: simulated claim failure');
+        return realClaimNext(claimInput);
+      },
+    });
+
+    expect(calls).toBe(3);
+    expect(summary).toEqual(summaryOf({ claimed: 2, succeeded: 2 }));
+
+    const counts = mediaFileRepo.countsByState(library.id);
+    expect(counts.good).toBe(2);
+    // The third claim never actually reached the database (the seam threw
+    // instead of calling the real claimNext), so this row is untouched —
+    // still `queued`, not stranded `running`, and the drain stopped
+    // cleanly rather than spinning on the failing claim.
+    expect(counts.queued).toBe(1);
+    expect(counts.running).toBe(0);
+  }, 60_000);
+
+  it('keeps whatever pausedSkipped total it already reached when that tally itself fails partway', async () => {
+    const active = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW, name: 'active' });
+    const pausedA = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW, name: 'paused-a' });
+    const pausedB = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW, name: 'paused-b' });
+    const libraryRepo = createLibraryRepo(db);
+    libraryRepo.pause(pausedA.library.id, 'maintenance');
+    libraryRepo.pause(pausedB.library.id, 'maintenance');
+
+    const mediaFileRepo = createMediaFileRepo(db);
+    const realListByLibrary = mediaFileRepo.listByLibrary;
+
+    // `library.list()` orders by name (paused-a before paused-b), so
+    // paused-a's contribution is tallied before paused-b's read throws.
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      listByLibraryFn: (listInput) => {
+        if (listInput.libraryId === pausedB.library.id) {
+          throw new Error('simulated read failure for the second paused library');
+        }
+        return realListByLibrary(listInput);
+      },
+    });
+
+    // The real work (the active library's file) is intact regardless.
+    expect(summary.claimed).toBe(1);
+    expect(summary.succeeded).toBe(1);
+    // Only paused-a's queued file is counted: paused-b's read failed, and
+    // the partial total already accumulated from paused-a survives rather
+    // than being reset to 0 or the whole summary being discarded.
+    expect(summary.pausedSkipped).toBe(1);
+
+    expect(mediaFileRepo.countsByState(active.library.id).good).toBe(1);
+  }, 60_000);
+
+  it('does not double-count a file this drain already claimed and worked on when its library is paused mid-drain', async () => {
+    const { library } = await buildLibrary({ fileCount: 2, definition: BROKEN_FLOW });
+    const libraryRepo = createLibraryRepo(db);
+
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      // Pauses the library right after the FIRST file's outcome (`held`,
+      // via heldForRetry) is recorded, before the loop claims again — the
+      // exact "paused mid-drain, after already claiming one of its files"
+      // scenario the pausedSkipped doc comment calls out.
+      onFile: () => {
+        libraryRepo.pause(library.id, 'paused mid-drain');
+      },
+    });
+
+    expect(summary.claimed).toBe(1);
+    expect(summary.heldForRetry).toBe(1);
+    // The second file was never claimed this drain (the library was
+    // already paused by the time the loop reached it) — it is the only
+    // one pausedSkipped should count. A double-count bug would report 2
+    // here (the first file's `held` row counted again, on top of the
+    // second file's untouched `queued` row).
+    expect(summary.pausedSkipped).toBe(1);
+
+    const counts = createMediaFileRepo(db).countsByState(library.id);
+    expect(counts.held).toBe(1);
+    expect(counts.queued).toBe(1);
   }, 60_000);
 });
