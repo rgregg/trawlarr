@@ -379,6 +379,42 @@ describe('cli: status --files', () => {
     expect(stderr()).toContain('is not a file state');
   });
 
+  it('leaves a missing file out of the convergence percentage and lists it under --missing', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const ids = seedFiles(dataDir, 'Movies', ['good', 'queued']);
+    // The second file was deleted from disk while still queued — the shape
+    // that used to cap this library below 100% for ever.
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    db.prepare('UPDATE media_file SET missing_since_ms = ? WHERE id = ?').run(
+      1_700_000_000_000,
+      ids[1]!,
+    );
+    db.close();
+
+    expect(await main(['status', '--library', 'Movies', '--data-dir', dataDir])).toBe(0);
+    // Parsed, not substring-matched: '100% converged'.includes('0% converged').
+    expect(/\((\d+)% converged\)/.exec(stdout())?.[1]).toBe('100');
+    expect(stdout()).toContain('1 file(s) are gone from disk');
+
+    logSpy.mockClear();
+    expect(await main(['status', '--library', 'Movies', '--missing', '--data-dir', dataDir])).toBe(
+      0,
+    );
+    expect(stdout()).toContain(ids[1]!);
+    expect(stdout()).not.toContain(ids[0]!);
+    expect(stdout()).toContain('MISSING since');
+  });
+
+  it('rejects --missing together with --state rather than silently ignoring one', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    expect(
+      await main(['status', '--missing', '--state', 'queued', '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('use either --missing or --state');
+  });
+
   it('points at requeue when a library holds terminal files', async () => {
     const dataDir = newDataDir();
     await addLibrary(dataDir, 'Movies');

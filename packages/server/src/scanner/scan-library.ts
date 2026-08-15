@@ -8,6 +8,7 @@ import {
   type LedgerRecord,
 } from '@trawlarr/core';
 import { walkFiles } from '../fs/walk.js';
+import { reconcileMissing } from './reconcile.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
 import { partialHashFile, identityFromStat } from '../fs/partial-hash.js';
 import { probeFile, ProbeError } from '../probe/ffprobe.js';
@@ -42,6 +43,20 @@ export interface ScanSummary {
    * the file records it moments later, and the next scan sees it normally.
    */
   inFlight: number;
+  /**
+   * Rows this scan newly marked missing: their file is gone from disk. The
+   * row itself is kept (see `reconcileMissing`), but it stops counting
+   * towards the library's convergence and can no longer be claimed.
+   */
+  missing: number;
+  /** Rows whose file came back, so their missing mark was cleared. */
+  restored: number;
+  /**
+   * Library roots that could NOT be shown to be present, so nothing under
+   * them was reconciled this scan. Non-zero is the signal that a mount is
+   * down: the scan's other counters describe only the roots that were up.
+   */
+  rootsUnavailable: number;
 }
 
 export interface ScanLibraryInput {
@@ -50,6 +65,12 @@ export interface ScanLibraryInput {
   ffprobePath: string;
   nowMs: () => number;
   onProgress?: (seen: number) => void;
+  /**
+   * Reconcile under a root that exists but is completely empty. Off by
+   * default: an empty directory is what an unmounted share looks like. See
+   * `ReconcileInput.allowEmptyRoots`.
+   */
+  allowEmptyRoots?: boolean;
 }
 
 /** States a scan must never touch: terminal or already mid-flight. */
@@ -137,7 +158,17 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     alreadyGood: 0,
     probed: 0,
     inFlight: 0,
+    missing: 0,
+    restored: 0,
+    rootsUnavailable: 0,
   };
+
+  /**
+   * Every row this scan actually walked a file for. Reconciliation (phase 4)
+   * only considers rows NOT in here — a file the walk yielded is present by
+   * definition, whatever its path column happens to say afterwards.
+   */
+  const seenFileIds = new Set<string>();
 
   interface Decision {
     fileId: string;
@@ -226,8 +257,20 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       throw err;
     }
 
+    seenFileIds.add(fileId);
+
     if (isNew) summary.added += 1;
     else summary.updated += 1;
+
+    // The file is back (restored from a backup, remounted, moved back).
+    // Cleared here rather than inside `upsertScanned` so the scan can report
+    // it: a row silently un-marking itself is indistinguishable from one
+    // that was never marked, and "3 files came back" is the counterpart of
+    // "3 files went missing" an operator needs to see.
+    if (existingBeforeUpsert?.missing_since_ms != null) {
+      mediaFileRepo.clearMissing(fileId);
+      summary.restored += 1;
+    }
 
     if (nlink > 1 && !library.allowHardlinked) {
       // Leave the file alone beyond tracking its identity: replacing a
@@ -372,6 +415,20 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       summary.queued += 1;
     },
   });
+
+  // Phase 4: reconcile the rows the walk did NOT account for. Deliberately
+  // last: it compares against `seenFileIds`, which is only complete once the
+  // whole walk has finished, and it must never run against a partial walk —
+  // that is the shape that would purge a library whose scan was interrupted.
+  const reconciled = await reconcileMissing({
+    library,
+    mediaFileRepo,
+    seenFileIds,
+    nowMs: nowMs(),
+    allowEmptyRoots: input.allowEmptyRoots,
+  });
+  summary.missing = reconciled.missing;
+  summary.rootsUnavailable = reconciled.rootsUnavailable;
 
   return summary;
 };

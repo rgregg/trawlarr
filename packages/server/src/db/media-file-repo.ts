@@ -61,6 +61,14 @@ export interface MediaFileRow {
   priority: number;
   discovered_at: number;
   updated_at: number;
+  /**
+   * When a scan first confirmed this row's file was gone from disk, or NULL
+   * while the file is present. See `003_media_file_missing.sql`: a missing
+   * row keeps all of its history but is excluded from `countsByState` (the
+   * convergence percentage describes files that exist) and from `claimNext`
+   * (a file that vanished while queued is never handed to a worker).
+   */
+  missing_since_ms: number | null;
 }
 
 export interface UpsertScannedInput {
@@ -176,7 +184,33 @@ export interface MediaFileRepo {
    */
   listRunningPaths(libraryId: string): string[];
   requeue(fileId: string): void;
+  /**
+   * Files in this library, by ledger state, EXCLUDING rows whose file is
+   * missing from disk. The convergence percentage the CLI reports is
+   * `good / total` over this map, and a row for a file that no longer
+   * exists can never reach `good` — counting it would cap a library's
+   * convergence below 100% permanently for a file the user deliberately
+   * deleted. `missingCount` reports those separately.
+   */
   countsByState(libraryId: string): Record<FileState, number>;
+  /** How many of this library's rows are currently marked missing on disk. */
+  missingCount(libraryId: string): number;
+  listMissing(libraryId: string): MediaFileRow[];
+  /**
+   * Record that this row's file is gone, if the row still looks exactly the
+   * way the caller found it.
+   *
+   * The re-checks are the point, and they run inside the write transaction:
+   * a scan takes minutes, and between deciding a path was absent and writing
+   * that decision, a worker can claim the row (`claimNext` commits `running`
+   * before it touches the filesystem) or a replacement can move it. Both
+   * shapes legitimately leave the OLD path empty, and marking either of them
+   * missing would take a live file out of the convergence count. Returns
+   * whether the mark was actually applied.
+   */
+  markMissing(input: { fileId: string; expectPath: string; nowMs: number }): boolean;
+  /** The file is back: clear the mark. A no-op when it was never set. */
+  clearMissing(fileId: string): void;
 }
 
 const RESOLUTION_LABELS: ReadonlyArray<{ minWidth: number; label: string }> = [
@@ -268,6 +302,14 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     `UPDATE media_file SET inode_key = NULL, updated_at = ? WHERE id = ?`,
   );
 
+  const markMissingStatement = db.prepare(
+    `UPDATE media_file SET missing_since_ms = ? WHERE id = ?`,
+  );
+
+  const clearMissingStatement = db.prepare(
+    `UPDATE media_file SET missing_since_ms = NULL WHERE id = ?`,
+  );
+
   /**
    * Claim in one statement. A read-then-write queue lets two workers select
    * the same row and transcode it twice into each other's output, so the
@@ -279,6 +321,12 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       WHERE id = (
         SELECT id FROM media_file
          WHERE state IN ('queued', 'held')
+           -- A file the scanner has confirmed gone is not work: claiming it
+           -- would spend an attempt (and a backoff, and eventually a
+           -- terminal failure) on a file nothing can process. The mark is
+           -- cleared the moment the file comes back, and the row's ledger
+           -- state is untouched meanwhile, so it resumes exactly here.
+           AND missing_since_ms IS NULL
            AND (hold_until_ms IS NULL OR hold_until_ms < :nowMs)
            AND (:filterLibraries = 0 OR library_id IN (SELECT value FROM json_each(:libraryIds)))
          ORDER BY priority DESC, discovered_at ASC
@@ -579,10 +627,56 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     countsByState(libraryId) {
       const counts = Object.fromEntries(ALL_STATES.map((s) => [s, 0])) as Record<FileState, number>;
       const rows = db
-        .prepare(`SELECT state, COUNT(*) AS c FROM media_file WHERE library_id = ? GROUP BY state`)
+        .prepare(
+          `SELECT state, COUNT(*) AS c FROM media_file
+            WHERE library_id = ? AND missing_since_ms IS NULL
+            GROUP BY state`,
+        )
         .all(libraryId) as Array<{ state: FileState; c: number }>;
       for (const row of rows) counts[row.state] = row.c;
       return counts;
+    },
+
+    missingCount(libraryId) {
+      return (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM media_file
+              WHERE library_id = ? AND missing_since_ms IS NOT NULL`,
+          )
+          .get(libraryId) as { c: number }
+      ).c;
+    },
+
+    listMissing(libraryId) {
+      return db
+        .prepare(`SELECT * FROM media_file WHERE library_id = ? AND missing_since_ms IS NOT NULL`)
+        .all(libraryId) as MediaFileRow[];
+    },
+
+    markMissing(input) {
+      return db.transaction((): boolean => {
+        const current = selectById.get(input.fileId) as MediaFileRow | undefined;
+        if (current === undefined) return false;
+        // Already marked: keep the ORIGINAL discovery time rather than
+        // sliding it forward on every scan, so "missing since" means what
+        // it says.
+        if (current.missing_since_ms !== null) return false;
+        // A worker claimed it after the check: `Replace Original File`
+        // legitimately empties the old path mid-run, and the run records the
+        // new one moments later.
+        if (current.state === 'running') return false;
+        // The row moved to a different path after the check (a rename picked
+        // up by a concurrent scan, or a run's `updateAfterRun`): the absence
+        // that was observed is no longer this row's absence.
+        if (current.path !== input.expectPath) return false;
+        markMissingStatement.run(input.nowMs, input.fileId);
+        return true;
+      })();
+    },
+
+    clearMissing(fileId) {
+      clearMissingStatement.run(fileId);
     },
   };
 };

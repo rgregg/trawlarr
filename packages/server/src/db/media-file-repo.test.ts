@@ -574,3 +574,44 @@ describe('probe, facts and ledger persistence', () => {
     });
   });
 });
+
+describe('missing-file marking', () => {
+  it('refuses to mark a row whose path moved after the check, and one already claimed', () => {
+    const id = scan();
+
+    // The row was renamed (a concurrent scan, or a run recording its
+    // replacement) between the absent-path observation and this write: the
+    // absence that was seen is no longer this row's absence.
+    expect(repo.markMissing({ fileId: id, expectPath: '/media/movies/Gone.mkv', nowMs: NOW })).toBe(
+      false,
+    );
+    expect(repo.getById(id)?.missing_since_ms).toBeNull();
+
+    // Claimed after the check: `Replace Original File` legitimately empties
+    // the original's path mid-run and records the new one moments later.
+    repo.setState({ fileId: id, state: 'running' });
+    expect(
+      repo.markMissing({ fileId: id, expectPath: '/media/movies/Arrival.mkv', nowMs: NOW }),
+    ).toBe(false);
+    expect(repo.getById(id)?.missing_since_ms).toBeNull();
+  });
+
+  it('keeps the first "missing since" time, and excludes missing rows from the counts', () => {
+    const id = scan();
+    expect(
+      repo.markMissing({ fileId: id, expectPath: '/media/movies/Arrival.mkv', nowMs: NOW }),
+    ).toBe(true);
+    expect(
+      repo.markMissing({ fileId: id, expectPath: '/media/movies/Arrival.mkv', nowMs: NOW + 5_000 }),
+    ).toBe(false);
+    expect(repo.getById(id)?.missing_since_ms).toBe(NOW);
+
+    expect(repo.countsByState(LIB).unknown).toBe(0);
+    expect(repo.missingCount(LIB)).toBe(1);
+    expect(repo.listMissing(LIB).map((row) => row.id)).toEqual([id]);
+
+    repo.clearMissing(id);
+    expect(repo.countsByState(LIB).unknown).toBe(1);
+    expect(repo.missingCount(LIB)).toBe(0);
+  });
+});

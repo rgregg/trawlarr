@@ -218,6 +218,7 @@ const cmdScan = async (args: string[]): Promise<number> => {
       'data-dir': { type: 'string', default: './trawlarr-data' },
       library: { type: 'string' },
       ffprobe: { type: 'string', default: 'ffprobe' },
+      'allow-empty-roots': { type: 'boolean', default: false },
     },
   });
 
@@ -237,6 +238,7 @@ const cmdScan = async (args: string[]): Promise<number> => {
     libraryId: library.id,
     ffprobePath: values.ffprobe!,
     nowMs: Date.now,
+    allowEmptyRoots: values['allow-empty-roots'],
   });
 
   // `updated` counts rows the upsert TOUCHED, not rows that changed — a
@@ -251,6 +253,25 @@ const cmdScan = async (args: string[]): Promise<number> => {
     console.log(
       `  ${summary.inFlight} file(s) left to a run currently in flight; they are recorded by ` +
         `that run and picked up by the next scan.`,
+    );
+  }
+  if (summary.missing > 0 || summary.restored > 0) {
+    console.log(
+      `  ${summary.missing} file(s) gone from disk (their rows are kept, with their history, ` +
+        `but no longer count towards convergence and are never claimed), ` +
+        `${summary.restored} came back.`,
+    );
+  }
+  // The loudest line the scan can print, because it is the one that explains
+  // why the numbers above are smaller than the library really is — and the
+  // reason nothing was marked missing under that root.
+  if (summary.rootsUnavailable > 0) {
+    console.log(
+      `  WARNING: ${summary.rootsUnavailable} of this library's ${library.roots.length} root(s) ` +
+        `could not be shown to be present (missing, unreadable, or empty — which is what an ` +
+        `unmounted network share looks like). Nothing under them was reconciled, so no file ` +
+        `was marked gone on the strength of a mount that may simply be offline. If a root ` +
+        `really is empty now, re-run with --allow-empty-roots.`,
     );
   }
   return 0;
@@ -331,6 +352,7 @@ const cmdStatus = async (args: string[]): Promise<number> => {
       library: { type: 'string' },
       files: { type: 'boolean', default: false },
       state: { type: 'string' },
+      missing: { type: 'boolean', default: false },
     },
   });
 
@@ -338,11 +360,19 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   const libraryRepo = createLibraryRepo(db);
   const mediaFileRepo = createMediaFileRepo(db);
 
+  if (values.missing && values.state !== undefined) {
+    throw new CliError(
+      'status: use either --missing or --state, not both. --missing lists the files that are ' +
+        'gone from disk, whatever ledger state each row was left in.',
+    );
+  }
+
   const stateFilter =
     values.state === undefined ? undefined : parseState(values.state, 'status: --state');
-  // `--state` on its own is only meaningful as a filter on the file list, so
-  // it implies `--files` rather than silently printing the same summary.
-  const showFiles = values.files || stateFilter !== undefined;
+  // `--state`/`--missing` on their own are only meaningful as filters on the
+  // file list, so each implies `--files` rather than silently printing the
+  // same summary.
+  const showFiles = values.files || stateFilter !== undefined || values.missing;
 
   const libraries =
     values.library !== undefined ? [requireLibrary(db, values.library)] : libraryRepo.list();
@@ -355,13 +385,18 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   for (const library of libraries) {
     const counts = mediaFileRepo.countsByState(library.id);
     const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    // Deliberately outside `total`: `countsByState` already excludes these,
+    // and a file that no longer exists can never reach `good`, so counting
+    // it would cap the percentage below 100% forever for a file the user
+    // deleted on purpose. Reported on its own line instead of hidden.
+    const missing = mediaFileRepo.missingCount(library.id);
 
     // A library that has never been scanned — or whose roots point
     // somewhere with no matching media — has no percentage to report, and
     // printing "0 file(s) ... (0% converged)" reads as a failure for what
     // is very often the first command a new user runs. Say what actually
     // happened, and what to do next, instead.
-    if (total === 0) {
+    if (total === 0 && missing === 0) {
       console.log(
         `${library.name}: no files tracked yet. Roots: ${library.roots.join(', ')}. ` +
           `Run "trawlarr scan --library ${library.name}" — if that still finds nothing, ` +
@@ -383,6 +418,15 @@ const cmdStatus = async (args: string[]): Promise<number> => {
         `(${pct}% converged)`,
     );
 
+    if (missing > 0) {
+      console.log(
+        `  ${missing} file(s) are gone from disk. Their rows (and job history) are kept and ` +
+          `excluded from the count above; putting a file back makes the next scan pick it up ` +
+          `exactly where it left off. List them with "trawlarr status --library ` +
+          `${library.name} --missing".`,
+      );
+    }
+
     const stuck = counts.failed + counts.not_converging;
     if (stuck > 0 && !showFiles) {
       console.log(
@@ -396,17 +440,30 @@ const cmdStatus = async (args: string[]): Promise<number> => {
     // the documented recovery path named a row the user had no way to
     // name back.
     if (showFiles) {
-      const rows = mediaFileRepo
-        .listByLibrary({ libraryId: library.id, state: stateFilter })
-        .sort((a, b) => a.path.localeCompare(b.path));
+      const rows = (
+        values.missing
+          ? mediaFileRepo.listMissing(library.id)
+          : mediaFileRepo.listByLibrary({ libraryId: library.id, state: stateFilter })
+      ).sort((a, b) => a.path.localeCompare(b.path));
       if (rows.length === 0) {
         console.log(
-          stateFilter === undefined ? '  (no files)' : `  (no files in state "${stateFilter}")`,
+          values.missing
+            ? '  (no files missing from disk)'
+            : stateFilter === undefined
+              ? '  (no files)'
+              : `  (no files in state "${stateFilter}")`,
         );
       }
       for (const row of rows) {
+        // The marker matters on the unfiltered listing too: a `queued` row
+        // whose file is gone is never going to be claimed, and nothing else
+        // in this line says so.
+        const gone =
+          row.missing_since_ms === null
+            ? ''
+            : `  MISSING since ${new Date(row.missing_since_ms).toISOString()}`;
         console.log(
-          `  ${row.id}  ${row.state.padEnd(15)} attempts ${row.attempt_count}  ${row.path}`,
+          `  ${row.id}  ${row.state.padEnd(15)} attempts ${row.attempt_count}  ${row.path}${gone}`,
         );
       }
     }
@@ -480,7 +537,15 @@ const cmdRequeue = async (args: string[]): Promise<number> => {
 
   for (const row of targets) {
     mediaFileRepo.requeue(row.id);
-    console.log(`  ${row.path}: ${row.state} -> queued`);
+    // Requeueing a row whose file is gone is legal (the ledger state really
+    // does go back to `queued`) but does nothing until the file returns,
+    // since `claimNext` skips missing rows. Saying so beats a user watching
+    // "trawlarr run" claim nothing and finding no explanation anywhere.
+    const gone =
+      row.missing_since_ms === null
+        ? ''
+        : '  (file is gone from disk; it will not be claimed until it comes back)';
+    console.log(`  ${row.path}: ${row.state} -> queued${gone}`);
   }
   console.log(
     `Requeued ${targets.length} file(s). Run "trawlarr run" to work through them ` +
@@ -497,9 +562,9 @@ const USAGE = `Usage:
   trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked]
   trawlarr flow add --name <name> --file <flow.json>
   trawlarr library set-flow --library <name> --flow <name>
-  trawlarr scan --library <name>
+  trawlarr scan --library <name> [--allow-empty-roots]
   trawlarr run [--library <name>] [--max <n>]
-  trawlarr status [--library <name>] [--files] [--state <state>]
+  trawlarr status [--library <name>] [--files] [--state <state>] [--missing]
   trawlarr requeue --file <id> [--file <id>...]
   trawlarr requeue --library <name> --state <state>
 
