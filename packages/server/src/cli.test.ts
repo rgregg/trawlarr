@@ -518,6 +518,74 @@ describe('cli: status --files', () => {
   });
 });
 
+describe('cli: reap', () => {
+  /** A row left `running`, claimed `agoMs` ago, with no job row at all. */
+  const seedRunning = (dataDir: string, libraryName: string, agoMs: number): string => {
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    const library = createLibraryRepo(db).getByName(libraryName)!;
+    const id = `stranded-${String(agoMs)}`;
+    db.prepare(
+      `INSERT INTO media_file (
+         id, library_id, content_key, path, size_bytes, mtime_ms, ctime_ms,
+         container, state, discovered_at, updated_at
+       ) VALUES (?, ?, ?, ?, 0, 0, 0, 'mkv', 'running', 0, ?)`,
+    ).run(
+      id,
+      library.id,
+      `content-${String(agoMs)}`,
+      `/movies/${String(agoMs)}.mkv`,
+      Date.now() - agoMs,
+    );
+    db.close();
+    return id;
+  };
+
+  const stateOf = (dataDir: string, fileId: string): string => {
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    const row = db.prepare('SELECT state FROM media_file WHERE id = ?').get(fileId) as {
+      state: string;
+    };
+    db.close();
+    return row.state;
+  };
+
+  it('says so plainly when nothing is running', async () => {
+    expect(await main(['reap', '--data-dir', newDataDir()])).toBe(0);
+    expect(stdout()).toContain('nothing to reclaim');
+  });
+
+  it('reclaims a long-abandoned row and leaves a recently claimed one running', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const stranded = seedRunning(dataDir, 'Movies', 40 * 60 * 60 * 1000);
+    const fresh = seedRunning(dataDir, 'Movies', 30 * 60 * 1000);
+
+    expect(await main(['reap', '--data-dir', dataDir])).toBe(0);
+    expect(stateOf(dataDir, stranded)).toBe('held');
+    expect(stateOf(dataDir, fresh)).toBe('running');
+  });
+
+  it('changes nothing under --dry-run', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const stranded = seedRunning(dataDir, 'Movies', 40 * 60 * 60 * 1000);
+
+    expect(await main(['reap', '--dry-run', '--data-dir', dataDir])).toBe(0);
+    expect(stateOf(dataDir, stranded)).toBe('running');
+  });
+
+  it('refuses a threshold short enough to reclaim a running transcode', async () => {
+    const dataDir = newDataDir();
+    await addLibrary(dataDir, 'Movies');
+    const stranded = seedRunning(dataDir, 'Movies', 2 * 60 * 60 * 1000);
+
+    expect(await main(['reap', '--stale-after-hours', '0', '--data-dir', dataDir])).not.toBe(0);
+    expect(stderr()).toContain('too short');
+    expect(stateOf(dataDir, stranded)).toBe('running');
+  });
+});
+
 describe('cli: requeue', () => {
   it('requires something to requeue', async () => {
     expect(await main(['requeue', '--data-dir', newDataDir()])).not.toBe(0);

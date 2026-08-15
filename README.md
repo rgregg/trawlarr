@@ -94,14 +94,46 @@ trawlarr requeue --library Movies --state failed          # all of them
 ```
 
 `requeue` clears the file's attempt count and backoff and puts it back in
-`queued`, so the next `run` claims it. It is also the recovery path for a row
-left `running` by a worker that died mid-job.
+`queued`, so the next `run` claims it.
 
-**Trash is never pruned.** A flow node like Replace Original File moves the
-original into a per-library `.trawlarr/trash` directory rather than deleting
-it, and nothing currently sweeps that directory. It grows without limit until
-a retention sweep exists (planned for a later phase) — plan disk space
-accordingly, and clean it out by hand in the meantime.
+A row left `running` by a worker that was killed mid-job is reclaimed by the
+reaper instead:
+
+```bash
+trawlarr reap                            # every row silent for 24h
+trawlarr reap --stale-after-hours 48 --dry-run
+```
+
+A job's heartbeat only advances between flow steps, and one step can be a
+multi-hour transcode, so the threshold is a day and cannot be set below an
+hour — reclaiming a file that is still being encoded would put two workers
+on it. A reclaimed row counts as a failed attempt (it backs off, and becomes
+`failed` once its attempts are spent), never as a free requeue.
+
+**Files that disappear.** `scan` finishes by reconciling rows against the
+filesystem: a row whose file is gone is marked missing, which keeps its
+history but drops it out of the convergence count and out of the queue.
+Putting the file back un-marks it on the next scan. Nothing is marked under
+a root that cannot be shown to be present — missing, unreadable, or empty,
+which is what an unmounted network share looks like — so a NAS that is
+briefly offline never causes a library-wide purge. `scan
+--allow-empty-roots` is the explicit override for a root that really is
+empty now; `trawlarr status --library Movies --missing` lists what is gone.
+
+**Trash retention.** Replace Original File moves the original into a
+per-library `.trawlarr/trash` directory rather than deleting it, and its
+`trashRetentionDays` input (default 14) says how long it is kept. The sweep
+runs automatically at the end of every `trawlarr run`, and on demand:
+
+```bash
+trawlarr trash purge --library Movies --dry-run
+trawlarr trash purge --library Movies --days 30
+```
+
+It only ever removes entries inside a resolved trash directory, and only
+ones trawlarr itself named — a file you put there by hand is left alone.
+Entries are aged by when trawlarr trashed them, not by their file
+timestamps.
 
 ### The development CLI
 

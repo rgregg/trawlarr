@@ -17,6 +17,7 @@ import { createFlowRepo } from './db/flow-repo.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
 import { runQueue } from './worker/loop.js';
+import { DEFAULT_STALE_AFTER_MS, reapStalled } from './worker/reap-stalled.js';
 
 /** Raised by a command handler to report a clean, diagnosable failure — never a raw stack trace. */
 class CliError extends Error {}
@@ -333,8 +334,9 @@ const cmdRun = async (args: string[]): Promise<number> => {
     console.log(
       `  Note: a "failed" count here can include a file whose attempt threw before any ` +
         `outcome was recorded; such a row may be left "running" with no automatic retry — ` +
-        `find it with "trawlarr status --files" and recover it with ` +
-        `"trawlarr requeue --file <id>".`,
+        `find it with "trawlarr status --files", recover a specific one with ` +
+        `"trawlarr requeue --file <id>", or let "trawlarr reap" reclaim every row whose ` +
+        `worker has gone silent for a day.`,
     );
   }
   if (summary.pausedSkipped > 0) {
@@ -673,6 +675,67 @@ const cmdRequeue = async (args: string[]): Promise<number> => {
 };
 
 // ---------------------------------------------------------------------------
+// reap
+// ---------------------------------------------------------------------------
+
+/**
+ * The recovery for a row stranded in `running` by a worker that was killed
+ * mid-transcode. Nothing else reaches one: `claimNext` takes only
+ * `queued`/`held`, the scanner refuses to touch `running`, and `runJob`'s
+ * own stall handler cannot run in a process that no longer exists.
+ */
+const cmdReap = async (args: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'data-dir': { type: 'string', default: './trawlarr-data' },
+      library: { type: 'string' },
+      'stale-after-hours': { type: 'string' },
+      'dry-run': { type: 'boolean', default: false },
+    },
+  });
+
+  const db = await openDb(values['data-dir']!);
+
+  const hours =
+    values['stale-after-hours'] === undefined
+      ? undefined
+      : parseNonNegativeInt(values['stale-after-hours'], 'reap: --stale-after-hours');
+
+  const libraryIds =
+    values.library === undefined ? undefined : [requireLibrary(db, values.library).id];
+
+  const summary = reapStalled({
+    db,
+    nowMs: Date.now(),
+    staleAfterMs: hours === undefined ? undefined : hours * 60 * 60 * 1000,
+    libraryIds,
+    dryRun: values['dry-run'],
+  });
+
+  const staleAfterHours = hours ?? DEFAULT_STALE_AFTER_MS / (60 * 60 * 1000);
+  if (summary.running === 0) {
+    console.log('No files are running, so there is nothing to reclaim.');
+    return 0;
+  }
+
+  for (const file of summary.files) {
+    console.log(
+      `  ${file.fileId}  running -> ${file.state}  ${file.path} ` +
+        `(last sign of life ${new Date(file.lastActivityMs).toISOString()})`,
+    );
+  }
+  console.log(
+    `${summary.running} file(s) running: ${summary.reclaimed} ` +
+      `${values['dry-run'] ? 'would be reclaimed' : 'reclaimed'} after ${staleAfterHours} ` +
+      `hour(s) without a heartbeat, ${summary.live} still alive and left running. ` +
+      `A reclaimed file counts as a failed attempt, so it backs off and becomes "failed" ` +
+      `once its attempts are exhausted — it is not silently retried for ever.`,
+  );
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -686,6 +749,7 @@ const USAGE = `Usage:
   trawlarr requeue --file <id> [--file <id>...]
   trawlarr requeue --library <name> --state <state>
   trawlarr trash purge [--library <name>] [--days <n>] [--dry-run]
+  trawlarr reap [--library <name>] [--stale-after-hours <n>] [--dry-run]
 
 All commands accept --data-dir <path> (default ./trawlarr-data).`;
 
@@ -712,6 +776,7 @@ const dispatch = async (argv: string[]): Promise<number> => {
   if (cmd === 'run') return cmdRun(rest);
   if (cmd === 'status') return cmdStatus(rest);
   if (cmd === 'requeue') return cmdRequeue(rest);
+  if (cmd === 'reap') return cmdReap(rest);
 
   if (cmd === undefined) throw new CliError(`No command given.\n\n${USAGE}`);
   if (cmd.startsWith('-')) {
