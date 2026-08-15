@@ -439,11 +439,19 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         // matching a rename to the wrong file's row. Mirrors the same
         // defensive clear `upsertScanned` already does for exactly this
         // reason.
+        //
+        // `.all()`, not `.get()`: there is only an index on
+        // (library_id, inode_key), not a UNIQUE constraint, so more than one
+        // row can already share the incoming inode_key (possible
+        // historically, before this clearing existed). Clearing only the
+        // first one `.get()` happened to return would leave the lookup
+        // still ambiguous between whichever row was missed and this one.
         if (input.identity.inodeKey !== null) {
-          const colliding = byInode.get(current.library_id, input.identity.inodeKey) as
-            { id: string } | undefined;
-          if (colliding !== undefined && colliding.id !== input.fileId) {
-            clearInodeKey.run(input.nowMs, colliding.id);
+          const colliding = byInode.all(current.library_id, input.identity.inodeKey) as {
+            id: string;
+          }[];
+          for (const row of colliding) {
+            if (row.id !== input.fileId) clearInodeKey.run(input.nowMs, row.id);
           }
         }
 

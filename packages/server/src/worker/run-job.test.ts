@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -14,6 +14,7 @@ import { createJobRepo } from '../db/job-repo.js';
 import { createPluginDocumentRepo } from '../db/plugin-document-repo.js';
 import { scanLibrary } from '../scanner/scan-library.js';
 import { probeFile } from '../probe/ffprobe.js';
+import { moveCompanions as moveCompanionsReal } from '../fs/companions.js';
 import { runJob } from './run-job.js';
 
 const execFileAsync = promisify(execFile);
@@ -696,39 +697,11 @@ const copyFromFlow = (sourcePath: string): FlowDefinition => {
   };
 };
 
-/** start -> (byte-for-byte copy) -> verify -> replace, using the plugin above. */
-const copyVerbatimFlow = (): FlowDefinition => {
-  const copyPath = writeCopyVerbatimPlugin();
-  return {
-    nodes: [
-      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
-      { id: 'copy', pluginId: copyPath, pluginVersion: '1.0.0', inputs: {} },
-      {
-        id: 'verify',
-        pluginId: 'trawlarr:verifyOutput',
-        pluginVersion: '1.0.0',
-        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
-      },
-      {
-        id: 'replace',
-        pluginId: 'trawlarr:replaceOriginal',
-        pluginVersion: '1.0.0',
-        inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
-      },
-    ],
-    edges: [
-      { fromNodeId: 'start', outputNumber: 1, toNodeId: 'copy' },
-      { fromNodeId: 'copy', outputNumber: 1, toNodeId: 'verify' },
-      { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
-    ],
-  };
-};
-
 /**
  * A CommonJS plugin that feeds a nonexistent path downstream — used to make
  * a SECOND `trawlarr:replaceOriginal` node refuse (its `statFile(newPath)`
- * fails), so its own reported path is the true library path rather than a
- * trivial "already there" no-op. See the I-4 test below for why.
+ * fails), so its own reported path is the true `originalLibraryFile._id`
+ * rather than a trivial "already there" no-op. See the I-5 test for why.
  */
 const sabotagePluginCode = (): string => `
 const details = () => ({
@@ -759,6 +732,74 @@ const writeSabotagePlugin = (): string => {
   const abs = join(dir, 'index.js');
   writeFileSync(abs, sabotagePluginCode(), 'utf8');
   return abs;
+};
+
+/**
+ * A CommonJS plugin that forces the in-flight ffmpeg command's container,
+ * so a Replace node downstream genuinely changes the library file's
+ * extension (and therefore its path) rather than replacing in place. Placed
+ * after Set Video Encoder and before Execute in the I-5 test.
+ */
+const setContainerPluginCode = (container: string): string => `
+const details = () => ({
+  name: 'Set Container',
+  description: 'forces the in-flight ffmpeg command container',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => {
+  args.variables.ffmpegCommand.container = ${JSON.stringify(container)};
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: args.inputFileObj._id },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`;
+
+const writeSetContainerPlugin = (container: string): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'trawlarr-set-container-plugin-'));
+  const abs = join(dir, 'index.js');
+  writeFileSync(abs, setContainerPluginCode(container), 'utf8');
+  return abs;
+};
+
+/** start -> (byte-for-byte copy) -> verify -> replace, using the plugin above. */
+const copyVerbatimFlow = (): FlowDefinition => {
+  const copyPath = writeCopyVerbatimPlugin();
+  return {
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'copy', pluginId: copyPath, pluginVersion: '1.0.0', inputs: {} },
+      {
+        id: 'verify',
+        pluginId: 'trawlarr:verifyOutput',
+        pluginVersion: '1.0.0',
+        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+      },
+      {
+        id: 'replace',
+        pluginId: 'trawlarr:replaceOriginal',
+        pluginVersion: '1.0.0',
+        inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+      },
+    ],
+    edges: [
+      { fromNodeId: 'start', outputNumber: 1, toNodeId: 'copy' },
+      { fromNodeId: 'copy', outputNumber: 1, toNodeId: 'verify' },
+      { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+    ],
+  };
 };
 
 describe.runIf(available)('runJob: rejection, persistence and stall regressions', () => {
@@ -848,43 +889,88 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
   );
 
   it(
-    'I-4: a Replace step that reports failure AFTER an earlier Replace in the same run ' +
-      'already swapped the file in is still recognised as a real change',
+    'I-4: a SINGLE Replace step that swaps the file in for real and STILL reports ' +
+      'output 2 (a companion move that splits) still gets the change recorded',
     async () => {
-      // `replaceOriginal` itself can swap the library file in and STILL
-      // report output 2 (see `replace-original.ts`'s `leftLinked` check
-      // around line 895, and the companion-split branch around line 929).
-      // Both require either a genuine mid-operation race or filesystem
-      // privileges this sandbox does not grant — confirmed empirically:
-      // `chattr +i` here returns "Operation not permitted"; `chmod 000` on
-      // a file does not block `rename()` on Linux (only directory
-      // permissions matter for that); and the companion/media-file rename
-      // targets always share a device with their source (companions never
-      // leave the media file's own directory), so EXDEV cannot be forced
-      // either. Neither branch is constructible as a deterministic
-      // real-component test here.
-      //
-      // This test instead pins the same underlying invariant — a Replace
-      // step's OWN reported output number must not gate whether the change
-      // it made is recorded — via a real, deterministic two-Replace-node
-      // flow: the FIRST Replace genuinely swaps the file in (new inode), a
-      // sabotage node then feeds a nonexistent path into a SECOND Replace,
-      // which refuses (output 2) and reports the TRUE library path in its
-      // own `outputFileObj` — a path that, on disk, already carries the
-      // FIRST Replace's swap. This does NOT discriminate against the
-      // original `.some(step => output === 1)` check (verified: reverting
-      // ONLY the `claimedModified` derivation to that shape still passes
-      // this test, since replace1's own output 1 already satisfies it) —
-      // but it DOES discriminate against the more direct "gate on the LAST
-      // Replace step's own output number" shape (verified failing:
-      // `expected 'h264' to be 'hevc'`, i.e. nothing was persisted), which
-      // is the same class of bug 895/929 are real instances of: something
-      // about "this replace step" being read as "the" decision instead of
-      // the identity actually on disk.
+      // The exact branch named in review: `replace-original.ts`'s
+      // companion-split failure (around line 929) — `describeReplacement`
+      // already ran (the media swap landed for real) before `moveCompanions`
+      // throws and the node returns output 2. Round 1 could not reach this
+      // black-box (no privilege to force a real EACCES/EXDEV on a
+      // same-directory rename in this sandbox — verified empirically:
+      // `chattr +i` denied, `chmod 000` does not block `rename()` on Linux).
+      // The fix for THAT gap is `RunJobInput.moveCompanions`: an injectable
+      // seam at the composition root, defaulting to the real implementation
+      // in production, that lets a test force the exact failure without
+      // touching engine internals or mocking anything else. The companion
+      // move below is REAL (a real file really moves) up until the
+      // synthetic throw that stands in for the permission/device failure
+      // itself.
+      const { root, claimed } = await setupClaimedFile({
+        definition: TRANSCODE_FLOW,
+        videoCodec: 'libx264',
+      });
+      writeFileSync(join(root, 'sample.srt'), 'subtitles', 'utf8');
+      const beforeRow = createMediaFileRepo(db).getById(claimed.fileId);
+
+      const result = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+        moveCompanions: async (moveInput) => {
+          await moveCompanionsReal(moveInput);
+          throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        },
+      });
+
+      // The job failed — exactly ONE Replace step ran, and it reported
+      // output 2.
+      expect(result.state).not.toBe('good');
+      const steps = createJobRepo(db).getSteps(result.jobId);
+      const replaceSteps = steps.filter((s) => s.pluginId === 'trawlarr:replaceOriginal');
+      expect(replaceSteps).toHaveLength(1);
+      expect(replaceSteps[0]?.outputNumber).toBe(2);
+
+      // The library file WAS genuinely replaced, on disk...
+      expect(await videoCodecOf(claimed.path)).toBe('hevc');
+
+      // ...and — the point of I-4 — that change was RECORDED even though
+      // this SAME, SOLE Replace step ended in failure. Round 1's
+      // `steps.some(replace && output === 1)` shape is definitionally
+      // false here (there is exactly one Replace step and its output is
+      // 2), so this is the one test in the suite where reverting to that
+      // shape provably fails (see the task report for the pasted output).
+      const afterRow = createMediaFileRepo(db).getById(claimed.fileId);
+      expect(afterRow?.video_codec).toBe('hevc');
+      expect(afterRow?.inode_key).not.toBe(beforeRow?.inode_key);
+      expect(afterRow?.content_key).not.toBe(beforeRow?.content_key);
+    },
+    120_000,
+  );
+
+  it(
+    'I-5: a later Replace refusing with a now-stale pre-run path does not stall a run ' +
+      "whose earlier Replace's real, container-changing swap already landed",
+    async () => {
+      // Two Replace nodes, with a real container change (mkv -> mp4) forced
+      // by a small custom node before Execute: the first Replace really
+      // swaps `sample.mkv` for `sample.mp4` — `sample.mkv` genuinely no
+      // longer exists afterward, moved to trash. A sabotage node then feeds
+      // a nonexistent path into a SECOND Replace, which refuses and reports
+      // ITS OWN `originalLibraryFile._id` — the PRE-RUN path, `sample.mkv`
+      // — correctly, by that node's own contract, but that path is now
+      // gone. Before this fix, stat-ing it for identity comparison threw
+      // ENOENT and the whole run stalled, discarding the first Replace's
+      // real swap: `OUTCOME: Unhandled error: ENOENT ... stat '.../
+      // sample.mkv' | STATE: held`, exactly as reproduced in review.
+      const containerPath = writeSetContainerPlugin('mp4');
       const sabotagePath = writeSabotagePlugin();
-      const definition: FlowDefinition = {
+      const changeContainerFlow: FlowDefinition = {
         nodes: [
           ...TRANSCODE_FLOW.nodes.filter((n) => n.id !== 'replace'),
+          { id: 'setContainer', pluginId: containerPath, pluginVersion: '1.0.0', inputs: {} },
           {
             id: 'replace1',
             pluginId: 'trawlarr:replaceOriginal',
@@ -900,15 +986,23 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
           },
         ],
         edges: [
-          ...TRANSCODE_FLOW.edges.filter((e) => e.toNodeId !== 'replace'),
+          ...TRANSCODE_FLOW.edges.filter(
+            (e) => e.toNodeId !== 'replace' && e.toNodeId !== 'execute',
+          ),
+          { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'setContainer' },
+          { fromNodeId: 'setContainer', outputNumber: 1, toNodeId: 'execute' },
           { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace1' },
           { fromNodeId: 'replace1', outputNumber: 1, toNodeId: 'sabotage' },
           { fromNodeId: 'sabotage', outputNumber: 1, toNodeId: 'replace2' },
         ],
       };
 
-      const { claimed } = await setupClaimedFile({ definition, videoCodec: 'libx264' });
+      const { root, claimed } = await setupClaimedFile({
+        definition: changeContainerFlow,
+        videoCodec: 'libx264',
+      });
       const beforeRow = createMediaFileRepo(db).getById(claimed.fileId);
+      const mp4Path = join(root, 'sample.mp4');
 
       const result = await runJob({
         db,
@@ -918,18 +1012,23 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
         nowMs: now,
       });
 
-      // The job overall failed — replace2 (the LAST step) reported output 2
-      // with nowhere to route from there.
-      expect(result.state).not.toBe('good');
-      const steps = createJobRepo(db).getSteps(result.jobId);
-      expect(steps.at(-1)).toMatchObject({ nodeId: 'replace2', outputNumber: 2 });
+      // Confirm the premise: the container really changed and the old path
+      // is really gone — otherwise this would not be testing I-5 at all.
+      expect(existsSync(claimed.path)).toBe(false);
+      expect(existsSync(mp4Path)).toBe(true);
 
-      // The library file WAS genuinely replaced by replace1, on disk...
-      expect(await videoCodecOf(claimed.path)).toBe('hevc');
+      // Did NOT stall: no unhandled ENOENT, a real job outcome instead.
+      expect(result.outcome).not.toContain('ENOENT');
+      expect(result.outcome).not.toContain('Unhandled error');
 
-      // ...and — the point of I-4 — that change was RECORDED even though
-      // the run, and the last Replace step specifically, ended in failure.
+      // replace1's real swap is still on disk...
+      expect(await videoCodecOf(mp4Path)).toBe('hevc');
+
+      // ...and was NOT discarded: the row now points at the real, current
+      // path and identity, not the stale pre-run ones.
       const afterRow = createMediaFileRepo(db).getById(claimed.fileId);
+      expect(afterRow?.path).toBe(mp4Path);
+      expect(afterRow?.container).toBe('mp4');
       expect(afterRow?.video_codec).toBe('hevc');
       expect(afterRow?.inode_key).not.toBe(beforeRow?.inode_key);
       expect(afterRow?.content_key).not.toBe(beforeRow?.content_key);
@@ -938,18 +1037,39 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
   );
 
   it(
-    'Critical 3: an unexpected error (library reconfigured mid-flight) stalls the file ' +
-      'instead of stranding it in running forever',
+    'Critical 3 / I-7: an unexpected error (library reconfigured mid-flight) stalls the ' +
+      'file instead of stranding it in running forever, and still records a real job ' +
+      'row and a correct last_run_id pointer',
     async () => {
       const { claimed } = await setupClaimedFile({
         definition: TRANSCODE_FLOW,
         videoCodec: 'libx264',
       });
-
+      const mediaFileRepo = createMediaFileRepo(db);
+      const jobRepo = createJobRepo(db);
       const libraryRepo = createLibraryRepo(db);
-      // Simulate the library's flow being cleared between claim and run —
-      // the row is already `running` (claimNext set that), and nothing but
-      // `runJob` itself can ever move it out of that state.
+
+      // A first, REAL successful run — so there is a genuine prior job row
+      // and a genuine prior `last_run_id` this test can prove the failed
+      // attempt below does not silently reuse or erase.
+      const first = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
+      expect(first.state).toBe('good');
+      const rowAfterFirst = mediaFileRepo.getById(claimed.fileId);
+      expect(rowAfterFirst?.last_run_id).toBe(first.jobId);
+      const jobCountAfterFirst = jobRepo.listForFile(claimed.fileId).length;
+      expect(jobCountAfterFirst).toBe(1);
+
+      // Simulate the library's flow being cleared between claim and a
+      // SECOND run — the row is claimed again by re-using the same
+      // `claimed` reference directly (this test is about `runJob`'s own
+      // failure handling, not the queue), and nothing but `runJob` itself
+      // can ever move a `running` row out of that state.
       libraryRepo.setFlow(claimed.libraryId, null);
 
       const result = await runJob({
@@ -964,13 +1084,27 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
       expect(result.state).not.toBe('running');
       expect(result.state).toBe('held');
 
-      const row = createMediaFileRepo(db).getById(claimed.fileId);
+      const row = mediaFileRepo.getById(claimed.fileId);
       expect(row?.state).not.toBe('running');
       expect(row?.state).toBe('held');
       expect(row?.attempt_count).toBe(1);
       expect(row?.hold_until_ms).not.toBeNull();
+
+      // I-7: this failure — which happens BEFORE `jobRepo.start` would
+      // normally run, since the library/flow lookup is what fails — still
+      // produces a REAL, distinct job row (not zero, not a reuse of the
+      // first run's), and the row's `last_run_id` POINTER moves on to it
+      // rather than being erased (a stray `null`) or left pointing at the
+      // now-stale first run.
+      expect(result.jobId).not.toBe('');
+      expect(result.jobId).not.toBe(first.jobId);
+      expect(row?.last_run_id).not.toBeNull();
+      expect(row?.last_run_id).toBe(result.jobId);
+      const jobsAfterSecond = jobRepo.listForFile(claimed.fileId);
+      expect(jobsAfterSecond).toHaveLength(jobCountAfterFirst + 1);
+      expect(jobsAfterSecond.some((j) => j.id === result.jobId)).toBe(true);
     },
-    60_000,
+    120_000,
   );
 
   it('Critical 4: the stored signature is derived from the ACTUAL post-run facts, not the pre-run ones', async () => {
@@ -1128,6 +1262,52 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
     // the per-step heartbeat call is still there.
     expect(jobRow.heartbeat_at!).toBeGreaterThanOrEqual(jobRow.started_at + result.stepCount);
   }, 60_000);
+
+  it(
+    'Minor 5: a flow with no start node still records the start-of-job heartbeat, ' +
+      'with zero steps to mask its absence',
+    async () => {
+      // No node here has `isStartPlugin: true`, and `runJob` passes no
+      // explicit `startNodeId`, so `runFlow` cannot find a start node: it
+      // returns `stopReason: 'no-start-node'` with `steps: []` — no
+      // `onStep` ever fires, so the per-step heartbeat literally cannot
+      // run. This isolates the start-of-job heartbeat completely: unlike
+      // Important 7's real multi-step flow, there is no "many other
+      // `nowMs()` calls dwarf the difference" escape hatch here, no tick
+      // coupling, and no timing/polling involved — a `heartbeat_at` read
+      // after the run is either null (start heartbeat missing) or not
+      // (present), full stop.
+      const definition: FlowDefinition = {
+        nodes: [
+          {
+            id: 'x',
+            pluginId: 'trawlarr:checkVideoCodec',
+            pluginVersion: '1.0.0',
+            inputs: { codec: 'hevc' },
+          },
+        ],
+        edges: [],
+      };
+      const { claimed } = await setupClaimedFile({ definition, videoCodec: 'libx264' });
+
+      const result = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
+
+      expect(result.stepCount).toBe(0);
+      expect(result.outcome).toContain('no start node');
+
+      const jobRow = db.prepare(`SELECT heartbeat_at FROM job WHERE id = ?`).get(result.jobId) as {
+        heartbeat_at: number | null;
+      };
+      expect(jobRow.heartbeat_at).not.toBeNull();
+    },
+    30_000,
+  );
 });
 
 /**

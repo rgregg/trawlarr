@@ -26,7 +26,9 @@ import {
   runFlow,
   toPluginFileObject,
   type LoadedPlugin,
+  type MoveCompanionsFn,
   type NodeInvocation,
+  type StatFileFn,
 } from '@trawlarr/engine';
 import type { Db } from '../db/connection.js';
 import {
@@ -54,6 +56,20 @@ export interface RunJobInput {
   ffmpegPath: string;
   ffprobePath: string;
   nowMs: () => number;
+  /**
+   * Seams for tests: substitute Replace Original File's companion mover and
+   * stat function. Default to the real implementations
+   * (`moveCompanionsSeam`/`statFileSeam`) — production code never sets
+   * these. They exist because two of `replaceOriginal`'s real branches (a
+   * swap that lands but leaves the file hardlinked; a swap that lands but
+   * whose companion move fails partway) are reachable only by injecting a
+   * failure here: real-filesystem privilege that would force them
+   * (`chattr +i`, a genuine EACCES/EXDEV on a same-directory rename) is not
+   * available in an unprivileged single-process test, and both branches
+   * still need to be provably exercised — see `run-job.test.ts`'s I-4 test.
+   */
+  moveCompanions?: MoveCompanionsFn;
+  statFile?: StatFileFn;
 }
 
 export interface RunJobResult {
@@ -248,35 +264,44 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
         trashDirFor: (originalPath) => resolveTrashDir({ library, filePath: originalPath }),
         companionExtensions: library.companionExtensions,
         findCompanions: findCompanionsSeam,
-        moveCompanions: moveCompanionsSeam,
+        moveCompanions: input.moveCompanions ?? moveCompanionsSeam,
         allowHardlinked: library.allowHardlinked,
-        statFile: statFileSeam,
+        statFile: input.statFile ?? statFileSeam,
         crossDeviceError: crossDeviceErrorSeam,
         nowMs: input.nowMs,
       }),
     ];
 
-    // The `outputFileObj` Replace Original File itself RETURNED on its most
-    // recent invocation — captured by wrapping its substituted `plugin()`
-    // function, not by reading what was fed IN to the node. This is the
-    // fix for I-4: the node's own return value is authoritative for "what
-    // path now holds the library file", on EVERY output number, because
-    // `replaceOriginal` sets `outputFileObj._id` to the real swapped-in
-    // path on the two branches where a swap lands but the node still
-    // reports failure (left hardlinked; a companion move that split) —
-    // reading the INPUT object instead would miss those, and reading only
-    // `outputNumber === 1` (the earlier version of this fix) missed them
-    // too. `runFlow` itself updates its OWN `currentPath` from this same
-    // value after every step regardless of output number, so this mirrors
-    // exactly what the engine already treats as authoritative — captured
-    // here only because `result.currentPath` alone conflates every node,
-    // not just Replace (see the loop-back comment below).
+    // The `outputFileObj` Replace Original File itself RETURNED, from EVERY
+    // invocation in this run, oldest first — captured by wrapping its
+    // substituted `plugin()` function, not by reading what was fed IN to
+    // the node. This is the fix for I-4: the node's own return value is
+    // authoritative for "what path now holds the library file", on EVERY
+    // output number, because `replaceOriginal` sets `outputFileObj._id` to
+    // the real swapped-in path on the two branches where a swap lands but
+    // the node still reports failure (left hardlinked; a companion move
+    // that split) — reading the INPUT object instead would miss those, and
+    // reading only `outputNumber === 1` (an earlier version of this fix)
+    // missed them too. `runFlow` itself updates its OWN `currentPath` from
+    // this same value after every step regardless of output number, so
+    // this mirrors exactly what the engine already treats as authoritative
+    // — captured here only because `result.currentPath` alone conflates
+    // every node, not just Replace (see the loop-back comment below).
     //
-    // Held in an object property, not a bare `let`, so the assignment made
-    // inside the wrapped `plugin()` below is visible without TypeScript
-    // narrowing the outer binding back to its initial `null` at the point
-    // it is read, long after `runFlow` has actually invoked that closure.
-    const replaceOutput: { fileObject: { _id: string } | null } = { fileObject: null };
+    // Recording EVERY invocation, not just the last, is the fix for I-5: a
+    // flow with two Replace nodes where the first changes the container
+    // (`sample.mkv` -> `sample.mp4`) and a LATER one refuses reports the
+    // pre-run `originalPath` (`sample.mkv`) in ITS OWN `outputFileObj` —
+    // correctly, as far as that node's own contract goes, but that path no
+    // longer exists on disk. Below, the most RECENT invocation whose
+    // reported path can still be stat'd wins, so a stale later report can
+    // never erase the record of an earlier, real swap. The guard on
+    // `outputFileObj?._id` being a string is defensive: only the
+    // substituted first-party runner is ever wrapped below, so it always
+    // returns a well-formed `outputFileObj`, but nothing should silently
+    // misread a malformed one as "no replacement happened" without at
+    // least being written to make that reasoning explicit.
+    const replaceOutputs: { _id: string }[] = [];
 
     const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
       const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
@@ -300,7 +325,9 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
             details: substitute.details,
             plugin: async (args) => {
               const output = await substitute.plugin(args);
-              replaceOutput.fileObject = output.outputFileObj;
+              if (typeof output.outputFileObj?._id === 'string') {
+                replaceOutputs.push(output.outputFileObj);
+              }
               return output;
             },
           },
@@ -411,13 +438,45 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
     // already had a new inode and new content — the same orphaned-row bug
     // this whole mechanism exists to eliminate, still live in the branches
     // the earlier, output-number-based check did not reach.
-    const replacedPath = replaceOutput.fileObject?._id ?? null;
+    //
+    // Tried most-recent-invocation first, falling back to earlier ones: a
+    // container-changing Replace followed by a LATER Replace that refuses
+    // reports that later node's own `originalPath` — correct for that
+    // node's own contract, but a path an earlier, successful swap in THIS
+    // SAME run may have already renamed away, so `fsStat`/hashing it
+    // throws ENOENT. That must never propagate into the stall path below:
+    // the read that DETECTS a change must never be able to DESTROY the
+    // record of a change that already happened. Falling back to the
+    // invocation before it is what lets a real, still-on-disk swap still
+    // be found and recorded even when the LAST report about it is stale.
+    let replacedPath: string | null = null;
+    let newStats: Awaited<ReturnType<typeof fsStat>> | null = null;
+    let newIdentity: ReturnType<typeof identityFromStat> | null = null;
+    for (let i = replaceOutputs.length - 1; i >= 0; i -= 1) {
+      const candidate = replaceOutputs[i]!._id;
+      try {
+        const stats = await fsStat(candidate);
+        const hash = await partialHashFile(candidate);
+        replacedPath = candidate;
+        newStats = stats;
+        newIdentity = identityFromStat({ stat: stats, hash });
+        break;
+      } catch {
+        // This invocation's reported path is gone — try the one before it.
+      }
+    }
+
     let postFacts: FactSet | null = null;
     let claimedModified = false;
-    if (replacedPath !== null) {
-      const newStats = await fsStat(replacedPath);
-      const newHash = await partialHashFile(replacedPath);
-      const newIdentity = identityFromStat({ stat: newStats, hash: newHash });
+    if (replacedPath !== null && newStats !== null && newIdentity !== null) {
+      // Bind to plain consts: read inside the `db.transaction` closure
+      // below, where TypeScript would otherwise narrow these outer `let`
+      // bindings back to their declared (possibly-null) type instead of
+      // the values just assigned (the same reasoning applies as it did for
+      // `replaceOutputs` above).
+      const path = replacedPath;
+      const stats = newStats;
+      const identity = newIdentity;
       // Unchanged identity means Replace never actually swapped anything in
       // for THIS invocation — an early refusal (hardlink guard, symlink
       // guard, occupied destination, ...) or the legitimate "already the
@@ -425,10 +484,10 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
       // object at all, so `replacedPath` still names the untouched original
       // and its identity still matches the row's own pre-run identity.
       claimedModified =
-        newIdentity.contentKey !== row.content_key || newIdentity.inodeKey !== row.inode_key;
+        identity.contentKey !== row.content_key || identity.inodeKey !== row.inode_key;
 
       if (claimedModified) {
-        const newProbe = await probeFile({ ffprobePath: input.ffprobePath, path: replacedPath });
+        const newProbe = await probeFile({ ffprobePath: input.ffprobePath, path });
         // Extracted from the probe and stat this run just took, alongside
         // the container/size it actually means — never from `getProbe`,
         // whose "facts as of now" recompute against the row's
@@ -436,8 +495,8 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
         // update.
         postFacts = extractFacts({
           probe: newProbe,
-          container: containerOf(replacedPath),
-          sizeBytes: newStats.size,
+          container: containerOf(path),
+          sizeBytes: stats.size,
         });
 
         // Replace Original File just swapped in a file with a NEW inode and
@@ -472,8 +531,8 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
         // A plain const, not the outer `let postFacts`: read inside the
         // `db.transaction` closure below, where TypeScript would otherwise
         // narrow the outer binding back to its declared union type instead
-        // of the value just assigned (the same reasoning as
-        // `replaceOutput` above, for the same closure-narrowing reason).
+        // of the value just assigned (the same reasoning as `path`/`stats`/
+        // `identity` above, for the same closure-narrowing reason).
         const factsForThisReplacement = postFacts;
         try {
           db.transaction(() => {
@@ -484,13 +543,13 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
             });
             mediaFileRepo.updateAfterRun({
               fileId: row.id,
-              identity: newIdentity,
-              path: replacedPath,
-              nlink: newStats.nlink,
-              sizeBytes: newStats.size,
-              mtimeMs: newStats.mtimeMs,
-              ctimeMs: newStats.ctimeMs,
-              container: containerOf(replacedPath),
+              identity,
+              path,
+              nlink: stats.nlink,
+              sizeBytes: stats.size,
+              mtimeMs: stats.mtimeMs,
+              ctimeMs: stats.ctimeMs,
+              container: containerOf(path),
               nowMs: input.nowMs(),
             });
           })();

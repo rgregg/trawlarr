@@ -457,6 +457,76 @@ describe('probe, facts and ledger persistence', () => {
     },
   );
 
+  it('updateAfterRun clears a colliding inode_key from EVERY row that holds it, not just one', () => {
+    // `inode_key` carries only an index, not a UNIQUE constraint (unlike
+    // `content_key`), so two rows sharing one is possible historically —
+    // simulated here with a direct insert bypassing `upsertScanned`'s own
+    // (newer) defensive clearing.
+    const sharedInodeKey = '2049:555';
+    const rowA = scan({
+      identity: buildIdentityCandidate({
+        deviceId: 2049,
+        inode: 555,
+        hash: { sizeBytes: 1, headHex: 'row-a-head', tailHex: 'row-a-tail' },
+      }),
+    });
+    db.prepare(
+      `INSERT INTO media_file (
+           id, library_id, inode_key, content_key, path, nlink,
+           size_bytes, mtime_ms, ctime_ms, container, state, discovered_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 'mkv', 'unknown', ?, ?)`,
+    ).run(
+      'row-b',
+      LIB,
+      sharedInodeKey,
+      'content-key-b-distinct',
+      '/media/movies/Other.mkv',
+      hash.sizeBytes,
+      NOW,
+      NOW,
+      NOW,
+      NOW,
+    );
+    expect(repo.getById('row-b')?.inode_key).toBe(sharedInodeKey);
+
+    // A third, unrelated row is the one a run now claims the SAME inode
+    // for (a fresh replacement whose new inode happens to be a reused
+    // number).
+    const rowC = scan({
+      identity: buildIdentityCandidate({
+        deviceId: 9000,
+        inode: 1,
+        hash: { sizeBytes: 1, headHex: 'row-c-head', tailHex: 'row-c-tail' },
+      }),
+      path: '/media/movies/Third.mkv',
+    });
+    const claimedIdentity = buildIdentityCandidate({
+      deviceId: 2049,
+      inode: 555,
+      hash: { sizeBytes: 1, headHex: 'cc', tailHex: 'dd' },
+    });
+
+    repo.updateAfterRun({
+      fileId: rowC,
+      identity: claimedIdentity,
+      path: '/media/movies/Third.mkv',
+      nlink: 1,
+      sizeBytes: 1,
+      mtimeMs: NOW + 1,
+      ctimeMs: NOW + 1,
+      container: 'mkv',
+      nowMs: NOW + 1,
+    });
+
+    // Both A and B — every row that held the colliding inode_key — are
+    // cleared, not just whichever one a `.get()` happened to return.
+    expect(repo.getById(rowA)?.inode_key).toBeNull();
+    expect(repo.getById('row-b')?.inode_key).toBeNull();
+    // C now holds it, unambiguously.
+    expect(repo.getById(rowC)?.inode_key).toBe(sharedInodeKey);
+    expect(repo.identityLookup(LIB).byInodeKey(sharedInodeKey)).toBe(rowC);
+  });
+
   it('lists a library, optionally filtered by state', () => {
     const a = scan();
     repo.setState({ fileId: a, state: 'good' });
