@@ -15,3 +15,4 @@ export * from './library/replace-seams.js';
 export * from './probe/ffprobe.js';
 export * from './scanner/scan-library.js';
 export * from './worker/run-job.js';
+export * from './worker/loop.js';
