@@ -329,6 +329,22 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
   it. It could not — a flow with no start node produces zero steps, so the later heartbeat that masked it
   never runs, and the assertion becomes a plain null check. When a mutant looks unkillable, look for an
   input that stops the masking path from running at all, rather than reaching for timing.
+- **`toContain` on a formatted number is a substring trap.** `expect(stdout).toContain('0% converged')`
+  passes against the string `100% converged`, because `'100% converged'.includes('0% converged')` is
+  true. The convergence percentage is the number this product exists to report, it had exactly one
+  assertion, and that assertion stayed green when every library was forced to report 100%. Assert with
+  the delimiters included (`'(0% converged)'`) or parse the number and compare it numerically.
+- **A test that invokes a built artifact silently validates a stale one.** The end-to-end test drives
+  `dist/cli.js`, so `pnpm test` alone proves nothing about `src/` unless `pnpm build` ran first. This
+  surfaced the hard way: an agent deleted `dist/cli.js` to check the test failed for the right reason,
+  and `tsc --build` — being incremental — would not regenerate it, because its build info said the
+  output was current. `tsc --build --force` was needed. Any test driving a build output should fail
+  loudly when that output is older than its sources.
+- **A guard that only runs in production is a guard no test covers.** An `isMain()` check comparing
+  `import.meta.url` against a raw `process.argv[1]` path made the installed `bin` a silent no-op —
+  package managers install bins as symlinks, which Node resolves in `import.meta.url` but not in the raw
+  path, so the two never matched. The end-to-end test could not see it because it invoked the script by
+  its real path. When a code path only differs under installation, test it under installation.
 - **A rare flake is invisible to single-run verification.** A test asserting that a 1 ms timer had
   ticked failed about one run in fifteen and survived five reviews. When a test asserts a timing side
   effect, assert *order* instead.
