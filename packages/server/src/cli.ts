@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
@@ -38,6 +40,52 @@ const requireFlow = (db: Db, name: string) => {
   return flow;
 };
 
+/**
+ * `library`/`flow` names are UNIQUE at the schema level, so a duplicate
+ * `add` would otherwise surface as a raw `UNIQUE constraint failed:
+ * flow.name` SqliteError — technically diagnosable, but not in the terms a
+ * user typed. Checked up front so the CLI's own error, not sqlite's, is
+ * what a duplicate name gets.
+ */
+const requireNameAvailable = (input: {
+  kind: 'library' | 'flow';
+  existing: { id: string } | null;
+  name: string;
+}): void => {
+  if (input.existing !== null) {
+    throw new CliError(`${input.kind} add: a ${input.kind} named "${input.name}" already exists.`);
+  }
+};
+
+/**
+ * Extensions the way a user is most likely to type them wrong: a leading
+ * dot (`.mkv` instead of `mkv`) is normalised away rather than producing a
+ * library that can never match a real file's extname; an empty/blank list
+ * (`--extensions ""`, or `--extensions " , "`) is rejected outright, for
+ * the same reason.
+ */
+const parseExtensions = (raw: string): string[] => {
+  const extensions = raw
+    .split(',')
+    .map((ext) => ext.trim().replace(/^\.+/, '').toLowerCase())
+    .filter((ext) => ext.length > 0);
+  if (extensions.length === 0) {
+    throw new CliError(
+      `library add: --extensions "${raw}" contained no usable extension. Write them without a ` +
+        `leading dot, comma-separated (e.g. "mkv,mp4"), or omit --extensions to use the default set.`,
+    );
+  }
+  return extensions;
+};
+
+/** A whole non-negative integer, rejecting "3abc"-style inputs `parseInt` would silently accept. */
+const parseNonNegativeInt = (raw: string, label: string): number => {
+  if (!/^\d+$/.test(raw)) {
+    throw new CliError(`${label} must be a non-negative integer, got "${raw}".`);
+  }
+  return Number.parseInt(raw, 10);
+};
+
 // ---------------------------------------------------------------------------
 // library add
 // ---------------------------------------------------------------------------
@@ -60,13 +108,13 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
   }
 
   const db = await openDb(values['data-dir']!);
+  requireNameAvailable({
+    kind: 'library',
+    existing: createLibraryRepo(db).getByName(values.name),
+    name: values.name,
+  });
   const extensions =
-    values.extensions !== undefined
-      ? values.extensions
-          .split(',')
-          .map((ext) => ext.trim())
-          .filter((ext) => ext.length > 0)
-      : [...DEFAULT_EXTENSIONS];
+    values.extensions !== undefined ? parseExtensions(values.extensions) : [...DEFAULT_EXTENSIONS];
 
   const library = createLibraryRepo(db).create({
     name: values.name,
@@ -109,6 +157,11 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
   }
 
   const db = await openDb(values['data-dir']!);
+  requireNameAvailable({
+    kind: 'flow',
+    existing: createFlowRepo(db).getByName(values.name),
+    name: values.name,
+  });
   const flow = createFlowRepo(db).create({ name: values.name, definition, nowMs: Date.now() });
   console.log(`Added flow "${flow.name}" (${flow.id}), ${flow.definition.nodes.length} node(s).`);
   return 0;
@@ -158,6 +211,12 @@ const cmdScan = async (args: string[]): Promise<number> => {
 
   const db = await openDb(values['data-dir']!);
   const library = requireLibrary(db, values.library);
+  if (library.flowId === null) {
+    throw new CliError(
+      `Library "${library.name}" has no flow attached, so a scan cannot queue anything for it. ` +
+        `Run "library set-flow --library ${library.name} --flow <name>" first.`,
+    );
+  }
 
   const summary = await scanLibrary({
     db,
@@ -203,13 +262,8 @@ const cmdRun = async (args: string[]): Promise<number> => {
     libraryIds = [library.id];
   }
 
-  let maxFiles: number | undefined;
-  if (values.max !== undefined) {
-    maxFiles = Number.parseInt(values.max, 10);
-    if (!Number.isFinite(maxFiles) || maxFiles < 0) {
-      throw new CliError(`run: --max must be a non-negative integer, got "${values.max}".`);
-    }
-  }
+  const maxFiles =
+    values.max !== undefined ? parseNonNegativeInt(values.max, 'run: --max') : undefined;
 
   const summary = await runQueue({
     db,
@@ -272,7 +326,11 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   for (const library of libraries) {
     const counts = mediaFileRepo.countsByState(library.id);
     const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
-    const pct = total === 0 ? 0 : Math.round((counts.good / total) * 100);
+    // Floored, not rounded: rounding up would let a library with files
+    // still queued read "100% converged", the one number this project's
+    // counter-honesty rule cannot let overstate. 100% is reserved for
+    // `good === total` exactly.
+    const pct = total === 0 ? 0 : Math.floor((counts.good / total) * 100);
     console.log(
       `${library.name}: ${total} file(s) — good ${counts.good}, queued ${counts.queued}, ` +
         `held ${counts.held}, running ${counts.running}, failed ${counts.failed}, ` +
@@ -315,8 +373,19 @@ const dispatch = async (argv: string[]): Promise<number> => {
   if (cmd === 'run') return cmdRun(rest);
   if (cmd === 'status') return cmdStatus(rest);
 
-  console.error(USAGE);
-  return cmd === undefined ? 2 : 2;
+  if (cmd === undefined) throw new CliError(`No command given.\n\n${USAGE}`);
+  if (cmd.startsWith('-')) {
+    // Every option (`--data-dir` included) belongs to a SUBCOMMAND's own
+    // parseArgs call, never to a global pass before it — `trawlarr
+    // --data-dir X library add ...` would otherwise fall through to the
+    // generic "unknown command" message below without saying why.
+    throw new CliError(
+      `Unrecognized option "${cmd}" where a command was expected. Options — including ` +
+        `--data-dir — must come AFTER the command, e.g. "trawlarr scan --library Movies ` +
+        `--data-dir ./trawlarr-data".\n\n${USAGE}`,
+    );
+  }
+  throw new CliError(`Unknown command: "${cmd}".\n\n${USAGE}`);
 };
 
 export const main = async (argv: string[]): Promise<number> => {
@@ -333,9 +402,31 @@ export const main = async (argv: string[]): Promise<number> => {
   }
 };
 
+/**
+ * True only when THIS module is the process's actual entry point — as
+ * opposed to being `import`ed by a test that wants `main` without the
+ * side effect of it also running.
+ *
+ * A raw `file://${resolve(entry)}` comparison (the first version of this
+ * check) breaks the moment the process was launched through a symlink: a
+ * normal global install (`pnpm add -g`) makes the `trawlarr` bin a
+ * SYMLINK into `node_modules/.bin`, so `process.argv[1]` is the symlink's
+ * path while Node resolves `import.meta.url` through it to the real file
+ * — the two strings never match, this returns false, and the installed
+ * command prints nothing and exits 0. `realpathSync` resolves the symlink
+ * on the `argv[1]` side before comparing, and `pathToFileURL` (rather than
+ * a hand-built `file://` template) applies the same percent-encoding
+ * `import.meta.url` already carries, so a path containing a space or `#`
+ * compares correctly too.
+ */
 const isMain = (): boolean => {
   const entry = process.argv[1];
-  return entry !== undefined && import.meta.url === `file://${resolve(entry)}`;
+  if (entry === undefined) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false; // argv[1] does not exist on disk: cannot be this file.
+  }
 };
 
 if (isMain()) {

@@ -1,9 +1,17 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from '../src/db/connection.js';
 import { migrate } from '../src/db/migrate.js';
@@ -38,6 +46,57 @@ const CLI_PATH = join(process.cwd(), 'packages/server/dist/cli.js');
 
 const runCli = (args: string[]) =>
   execFileAsync('node', [CLI_PATH, ...args], { maxBuffer: 10 * 1024 * 1024 });
+
+/** Newest mtime of any file under `dir`, recursively. */
+const newestMtimeMs = (dir: string): number => {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    newest = Math.max(newest, entry.isDirectory() ? newestMtimeMs(full) : statSync(full).mtimeMs);
+  }
+  return newest;
+};
+
+/**
+ * This suite drives `dist/cli.js`, a BUILT artifact, not the TypeScript
+ * source vitest otherwise runs directly — so a server-side regression is
+ * invisible here unless `pnpm build` ran first. That gap is exactly how a
+ * deleted `dist/cli.js` once slipped through: `pnpm test` alone still
+ * "passed" against whatever `dist` happened to already contain. Failing
+ * loudly here, before a single command runs, turns a silent false-negative
+ * into an actionable message instead.
+ */
+const assertBuiltCliIsFresh = (): void => {
+  const srcDir = join(process.cwd(), 'packages/server/src');
+  if (!existsSync(CLI_PATH)) {
+    throw new Error(`${CLI_PATH} does not exist. Run "pnpm build" before this suite.`);
+  }
+  const builtAt = statSync(CLI_PATH).mtimeMs;
+  const newestSource = newestMtimeMs(srcDir);
+  if (builtAt < newestSource) {
+    throw new Error(
+      `${CLI_PATH} (built ${new Date(builtAt).toISOString()}) is older than the newest file ` +
+        `under packages/server/src (${new Date(newestSource).toISOString()}) — this suite would ` +
+        `be exercising STALE compiled output. Run "pnpm build" first.`,
+    );
+  }
+};
+
+/**
+ * Pulls the number out of `status`'s own `(NN% converged)` line. Deliberately
+ * NOT a `toContain('0% converged')`-style substring check: `'100% converged'`
+ * itself contains the substring `'0% converged'`, so that assertion is
+ * satisfied by a library reporting full convergence when zero was expected —
+ * it cannot fail no matter what the real percentage is. Requiring the
+ * surrounding parens and parsing a number is what makes this falsifiable.
+ */
+const convergencePercentOf = (stdout: string): number => {
+  const match = /\((\d+)% converged\)/.exec(stdout);
+  if (match?.[1] === undefined) {
+    throw new Error(`Could not find a "(NN% converged)" line in status output:\n${stdout}`);
+  }
+  return Number.parseInt(match[1], 10);
+};
 
 const makeSample = (path: string) =>
   execFileAsync('ffmpeg', [
@@ -124,6 +183,10 @@ const openStateDb = (dataDir: string): Db => {
 };
 
 describe.runIf(available)('CLI end-to-end: a library actually converges', () => {
+  beforeAll(() => {
+    assertBuiltCliIsFresh();
+  });
+
   it(
     'scans, queues, drains, transcodes, converges, stays quiet on a second pass, ' +
       'and re-queues when the flow changes',
@@ -188,7 +251,7 @@ describe.runIf(available)('CLI end-to-end: a library actually converges', () => 
 
       // 6. status: nothing has converged yet.
       const zeroPctStatus = await runCli(['status', '--data-dir', dataDir]);
-      expect(zeroPctStatus.stdout).toContain('0% converged');
+      expect(convergencePercentOf(zeroPctStatus.stdout)).toBe(0);
 
       // 7. Run: drains the queue, actually transcoding all three files.
       await runCli(['run', '--data-dir', dataDir]);
@@ -221,11 +284,19 @@ describe.runIf(available)('CLI end-to-end: a library actually converges', () => 
         expect(await videoCodecOf(path)).toBe('hevc');
       }
 
-      // 9. The three originals are recoverable in the library's trash, still h264.
+      // 9. The three originals are recoverable in the library's trash, still
+      // h264, under names that still identify which file they were — not
+      // merely "3 files that happen to be h264" (a regression that renamed
+      // every trashed original to a bare UUID would still pass a check that
+      // stopped at count and codec).
       const trashDir = join(libraryRoot, '.trawlarr', 'trash');
       const trashed = readdirSync(trashDir);
       expect(trashed).toHaveLength(3);
+      const expectedStems = moviePaths.map((path) => basename(path, '.mkv')).sort();
+      const trashedStems = trashed.map((name) => name.split('.')[0]!).sort();
+      expect(trashedStems).toEqual(expectedStems);
       for (const name of trashed) {
+        expect(name.endsWith('.mkv')).toBe(true);
         expect(await videoCodecOf(join(trashDir, name))).toBe('h264');
       }
 
@@ -235,7 +306,7 @@ describe.runIf(available)('CLI end-to-end: a library actually converges', () => 
 
       // 11. status: fully converged.
       const fullPctStatus = await runCli(['status', '--data-dir', dataDir]);
-      expect(fullPctStatus.stdout).toContain('100% converged');
+      expect(convergencePercentOf(fullPctStatus.stdout)).toBe(100);
 
       // 12. Scan again: nothing new to queue, all three already good — the
       // proof that convergence is real, not "reprocess everything forever".
@@ -300,4 +371,28 @@ describe.runIf(available)('CLI end-to-end: a library actually converges', () => 
     },
     600_000,
   );
+
+  /**
+   * A real global install (`pnpm add -g` / `npm i -g`) makes the `trawlarr`
+   * bin a SYMLINK into `node_modules/.bin`, pointing at `dist/cli.js`. The
+   * test above invokes `dist/cli.js` by its real path, so it cannot catch a
+   * regression in `isMain`'s symlink handling — the exact shape that once
+   * made the installed command print nothing and exit 0 silently, because
+   * `import.meta.url` (resolved through the symlink) never matched a raw
+   * `file://${resolve(argv[1])}` built from the symlink's own un-resolved
+   * path. Only invoking through an actual symlink reproduces that.
+   */
+  it('runs correctly when invoked through a symlink, like a real global install', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-symlink-'));
+    const dataDir = join(workDir, 'data');
+    const binDir = join(workDir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const symlinkPath = join(binDir, 'trawlarr');
+    symlinkSync(CLI_PATH, symlinkPath);
+
+    const { stdout } = await execFileAsync('node', [symlinkPath, 'status', '--data-dir', dataDir]);
+    // Proof this actually ran the command instead of silently doing nothing:
+    // a no-op exit would produce empty stdout, not this specific message.
+    expect(stdout).toContain('No libraries configured.');
+  }, 30_000);
 });

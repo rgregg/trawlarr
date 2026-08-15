@@ -40,9 +40,10 @@ plugin.
 
 ## Status
 
-Early. There is no server process, no HTTP API, no UI, and no scheduler yet —
-the pieces below are libraries plus a development CLI that runs one file
-through one flow.
+Early. There is no HTTP API, no UI, no filesystem watcher, and no scheduler
+yet. What exists is a `trawlarr` command-line tool that can point at a real
+folder of media, scan it, and drain the queue against real `ffmpeg`/`ffprobe`
+— see "Try it" below — plus the libraries behind it.
 
 The pnpm workspace holds five packages:
 
@@ -52,7 +53,41 @@ The pnpm workspace holds five packages:
 | `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                          |
 | `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute.                                                                                                                                                                     |
 | `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run. |
-| `@trawlarr/server`       | SQLite persistence: connection setup, forward-only migrations, the media-file repository (identity-preserving upsert, atomic claim) and the plugin document store.                                                                                                                    |
+| `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the unattended worker loop that drains the queue, and the `trawlarr` CLI itself.                                                                       |
+
+### Try it
+
+`@trawlarr/server` builds the `trawlarr` CLI: point it at a real folder of
+media, give it a flow, and it will scan, queue, and drive every file toward
+that flow's known-good state.
+
+```bash
+pnpm build
+
+trawlarr() { node packages/server/dist/cli.js "$@"; }
+
+trawlarr library add --name Movies --root /path/to/media
+trawlarr flow add --name HEVC --file flow.json
+trawlarr library set-flow --library Movies --flow HEVC
+trawlarr scan --library Movies
+trawlarr run
+trawlarr status
+```
+
+`scan` walks the library's roots, probes whatever changed, and queues
+anything that doesn't match the flow's current signature — including
+nothing, on a library that's already converged. `run` drains the queue one
+file at a time, printing each file's path and resulting state. `status`
+reports, per library, a count by state and a convergence percentage — the
+number the whole project exists to report. State (including which files are
+queued, held, or done) lives in `<data-dir>/trawlarr.db`, an ordinary sqlite
+file (`--data-dir` defaults to `./trawlarr-data`).
+
+**Trash is never pruned.** A flow node like Replace Original File moves the
+original into a per-library `.trawlarr/trash` directory rather than deleting
+it, and nothing currently sweeps that directory. It grows without limit until
+a retention sweep exists (planned for a later phase) — plan disk space
+accordingly, and clean it out by hand in the meantime.
 
 ### The development CLI
 
