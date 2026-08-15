@@ -13,7 +13,7 @@ export const details = (): PluginDetails => ({
   inputs: [],
   outputs: [
     { number: 1, tooltip: 'Command succeeded' },
-    { number: 2, tooltip: 'Command failed' },
+    { number: 2, tooltip: 'Command failed', outcome: 'failure' },
   ],
   requiresVersion: '1.0.0',
 });

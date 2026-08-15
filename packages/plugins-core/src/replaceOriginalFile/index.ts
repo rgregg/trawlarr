@@ -42,7 +42,7 @@ export const details = (): PluginDetails => ({
   ],
   outputs: [
     { number: 1, tooltip: 'Original replaced successfully' },
-    { number: 2, tooltip: 'Replacement failed' },
+    { number: 2, tooltip: 'Replacement failed', outcome: 'failure' },
   ],
   requiresVersion: '1.0.0',
 });

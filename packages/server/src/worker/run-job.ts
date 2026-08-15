@@ -12,7 +12,12 @@ import {
   type LedgerRecord,
   type RunOutcome,
 } from '@trawlarr/core';
-import type { ConfigVars, PluginFileObject, ProbeData } from '@trawlarr/plugin-api';
+import type {
+  ConfigVars,
+  PluginFileObject,
+  PluginInputArgs,
+  ProbeData,
+} from '@trawlarr/plugin-api';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 import {
   buildPluginDeps,
@@ -81,10 +86,6 @@ export interface RunJobResult {
 
 /** The engine's own substitute for the Replace Original File node's plugin id. */
 const REPLACE_ORIGINAL_PLUGIN_ID = 'trawlarr:replaceOriginal';
-/** The engine's own substitute for the Verify Output node's plugin id. */
-const VERIFY_OUTPUT_PLUGIN_ID = 'trawlarr:verifyOutput';
-/** Output number both safety nodes use for "this did not pass". */
-const REJECTION_OUTPUT = 2;
 
 const containerOf = (path: string): string => extname(path).replace('.', '').toLowerCase();
 
@@ -254,8 +255,26 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
 
     const loader = createPluginLoader();
 
+    // The args object `buildArgs` most recently produced — i.e. the one
+    // belonging to the step currently executing. `runFlow` REASSIGNS
+    // `args.jobLog` on that same object after `buildArgs` returns, wrapping
+    // it so everything written lands in that step's `logExcerpt`; going
+    // through this reference (rather than capturing the function) is what
+    // makes a runner's own log output reach the wrapper, and therefore the
+    // `job_step.log_excerpt` column.
+    let currentArgs: PluginInputArgs | null = null;
+
     const runners = [
-      createExecuteRunner({ ffmpegPath: input.ffmpegPath, outputPathFor }),
+      createExecuteRunner({
+        ffmpegPath: input.ffmpegPath,
+        outputPathFor,
+        // Without this, `execute-node.ts`'s `ffmpeg failed (code N):
+        // <stderrTail>` — the ONLY record of why an encode failed — went
+        // nowhere, and the Execute step's log excerpt was empty: an
+        // operator saw a held file with no reason attached anywhere in the
+        // database.
+        log: (text) => currentArgs?.jobLog(text),
+      }),
       createVerifyOutputRunner({
         probeFile: (path) => probeFile({ ffprobePath: input.ffprobePath, path }),
         statFile: statFileSeam,
@@ -372,6 +391,7 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
         log: () => {},
       });
       lastFileObject = args.inputFileObj;
+      currentArgs = args;
       return args;
     };
 
@@ -404,24 +424,45 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
       },
     });
 
-    // `runFlow` reports `end-of-flow` whenever the current node's output has
-    // no outgoing edge — which is exactly what happens when Verify Output
-    // rejects (output 2) or Replace Original File refuses (output 2) and the
-    // flow's author never wired a remediation path from there. That is not
-    // success: it is the safety net catching a bad encode or a refused
-    // replacement, and a flow that ends there converged on nothing. Only the
-    // LAST step matters — `end-of-flow` fires for whichever node's output
-    // had no edge, which is always the final entry in `result.steps` — so a
-    // flow that DOES route rejection somewhere (quarantine, alert, retry) and
-    // finishes on its own terms downstream is unaffected.
+    // THE RULE: a terminal output the flow author did not route, on a node
+    // that is reporting failure, is not success.
+    //
+    // Both halves are read from things that already exist and generalise:
+    //
+    //  - "terminal and unrouted" is `stopReason === 'end-of-flow'`, which
+    //    `runFlow` returns from exactly one place — the branch where no edge
+    //    leaves the output the node just took. The flow definition knows
+    //    which outputs have no outgoing edge; this is that fact, already
+    //    computed. Only the LAST step can be the unrouted one, so that is
+    //    the step judged. A flow that DOES route its failure output
+    //    somewhere (quarantine, alert, retry with different settings) and
+    //    finishes on its own terms downstream is unaffected.
+    //
+    //  - "reporting failure" is the node's OWN `details()` declaration for
+    //    the output it took (`PluginOutputDescriptor.outcome`), captured on
+    //    the step by `runFlow`. Not a plugin-id allow-list: that shape
+    //    listed Verify Output and Replace Original File and silently
+    //    omitted Execute, so ffmpeg exiting non-zero — a missing hardware
+    //    encoder, a corrupt source, ENOSPC in staging — ended the flow with
+    //    `success = true` and stored the PRE-transcode signature as `good`,
+    //    which `isKnownGood` then matched forever: a whole library
+    //    reporting "100% converged" with nothing transcoded and no error
+    //    anywhere. An id list has to be extended for every future
+    //    first-party node and can never cover a community plugin at all;
+    //    a declaration travels with the node that owns the meaning.
+    //
+    // A node that declares nothing (the Tdarr-compatible shape) is neutral,
+    // which is deliberate and conservative in the safe direction: guessing
+    // "failure" from an undeclared output — say, by pattern-matching the
+    // tooltip — would misread a filter node's "no, this file is not hevc"
+    // as a failure and hold files that had genuinely converged.
     const lastStep = result.steps.at(-1);
-    const rejectedWithNoRemediation =
+    const endedOnUnroutedFailure =
+      result.stopReason === 'end-of-flow' &&
       lastStep !== undefined &&
-      (lastStep.pluginId === VERIFY_OUTPUT_PLUGIN_ID ||
-        lastStep.pluginId === REPLACE_ORIGINAL_PLUGIN_ID) &&
-      lastStep.outputNumber === REJECTION_OUTPUT;
+      lastStep.outputOutcome === 'failure';
 
-    const success = !result.failed && !rejectedWithNoRemediation;
+    const success = !result.failed && !endedOnUnroutedFailure;
 
     // Whether the LIBRARY FILE actually changed — decided from identity
     // (inode, content hash), never from the replace step's output number.
@@ -600,9 +641,9 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
 
     const outcomeText = success
       ? `Flow finished: ${result.stopReason}.`
-      : rejectedWithNoRemediation
-        ? `Flow finished, but "${lastStep?.pluginName ?? lastStep?.pluginId}" rejected on output ` +
-          `${REJECTION_OUTPUT} with no route from there.`
+      : endedOnUnroutedFailure
+        ? `Flow finished, but "${lastStep?.pluginName ?? lastStep?.pluginId}" reported failure ` +
+          `on output ${String(lastStep?.outputNumber)}, which this flow routes nowhere.`
         : `Flow failed: ${result.error ?? result.stopReason}`;
 
     jobRepo.finish({

@@ -8,6 +8,18 @@ export interface StepRecord {
   pluginId: string;
   pluginName: string;
   outputNumber: number | null;
+  /**
+   * What the node's own `details()` declares the output it took to MEAN —
+   * `'failure'`, `'success'`, or `null` when the plugin declares nothing
+   * (the Tdarr-compatible shape) or the step produced no output at all.
+   *
+   * Carried on the step so a caller can judge a run without knowing which
+   * plugin ids exist: paired with `stopReason === 'end-of-flow'` (which
+   * fires exactly when the output the node took has NO outgoing edge in the
+   * flow), `'failure'` here is the general form of "the flow stopped on a
+   * failure its author routed nowhere". See `runJob`'s success rule.
+   */
+  outputOutcome: 'success' | 'failure' | null;
   durationMs: number;
   logExcerpt: string;
   error: string | null;
@@ -175,6 +187,7 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
         pluginId: node.pluginId,
         pluginName: node.pluginId,
         outputNumber: null,
+        outputOutcome: null,
         durationMs: nowMs() - startedAt,
         logExcerpt: '',
         error: messageOf(error),
@@ -220,6 +233,15 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
       pluginId: node.pluginId,
       pluginName: plugin.details.name,
       outputNumber,
+      // The node's own declaration for the output it actually took. Read
+      // from `details()` per step rather than looked up later by the
+      // caller, because only here is the loaded plugin (and therefore its
+      // declaration) in scope alongside the output it chose.
+      outputOutcome:
+        outputNumber === null
+          ? null
+          : (plugin.details.outputs.find((output) => output.number === outputNumber)?.outcome ??
+            null),
       durationMs: nowMs() - startedAt,
       logExcerpt: logLines.join('\n'),
       error: stepError,

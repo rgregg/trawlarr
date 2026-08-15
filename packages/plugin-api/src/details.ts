@@ -34,6 +34,25 @@ export interface PluginInput {
 export interface PluginOutputDescriptor {
   number: number;
   tooltip: string;
+  /**
+   * What this output MEANS, as the node's own author declares it —
+   * machine-readable, unlike `tooltip`.
+   *
+   * `'failure'` says "reaching this output means this node did not do what
+   * it was asked to do" (ffmpeg exited non-zero, verification rejected the
+   * output, a replacement was refused). It is NOT "the other branch of a
+   * question": a filter node answering "this file is not hevc" is reporting
+   * a fact, not a failure, and must leave this undefined.
+   *
+   * The host reads it to answer a question no plugin id list can answer
+   * generally: a flow that ENDS on a `'failure'` output the flow author
+   * routed nowhere has not converged on anything, and must never be
+   * recorded as a success (see `runJob`). Absent (the Tdarr-compatible
+   * shape every community plugin already ships) means "unspecified", which
+   * is treated as neutral — a plugin that wants its failure branch to
+   * participate declares it.
+   */
+  outcome?: 'success' | 'failure';
 }
 
 export interface PluginDetails {

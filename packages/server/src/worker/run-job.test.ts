@@ -12,7 +12,7 @@ import { createLibraryRepo } from '../db/library-repo.js';
 import { createMediaFileRepo, type ClaimedFile } from '../db/media-file-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { createPluginDocumentRepo } from '../db/plugin-document-repo.js';
-import { scanLibrary } from '../scanner/scan-library.js';
+import { scanLibrary, type ScanSummary } from '../scanner/scan-library.js';
 import { probeFile } from '../probe/ffprobe.js';
 import { moveCompanions as moveCompanionsReal } from '../fs/companions.js';
 import { runJob } from './run-job.js';
@@ -802,7 +802,79 @@ const copyVerbatimFlow = (): FlowDefinition => {
   };
 };
 
+/**
+ * TRANSCODE_FLOW with an encoder no ffmpeg build has, so Execute's ffmpeg
+ * child really exits non-zero and the node really routes to its own failure
+ * output (2), which the canonical flow — like this one — wires nowhere.
+ *
+ * Deliberately a nonsense encoder name rather than `hevc_nvenc` (the
+ * real-world trigger: the most common first-run misconfiguration is a
+ * hardware encoder on a host without that hardware). A host WITH an NVIDIA
+ * card would transcode successfully and this test would silently prove
+ * nothing there; an encoder no build has fails identically everywhere.
+ */
+const FAILING_ENCODE_FLOW: FlowDefinition = {
+  ...TRANSCODE_FLOW,
+  nodes: TRANSCODE_FLOW.nodes.map((node) =>
+    node.id === 'encoder'
+      ? { ...node, inputs: { encoder: 'no_such_encoder_exists', quality: '30' } }
+      : node,
+  ),
+};
+
 describe.runIf(available)('runJob: rejection, persistence and stall regressions', () => {
+  it(
+    'Critical C1: ffmpeg exiting non-zero, on a node whose failure output the flow routes ' +
+      'nowhere, is not convergence',
+    async () => {
+      const { claimed } = await setupClaimedFile({
+        definition: FAILING_ENCODE_FLOW,
+        videoCodec: 'libx264',
+      });
+      const beforeRow = createMediaFileRepo(db).getById(claimed.fileId);
+      const beforeSize = statSync(claimed.path).size;
+
+      const result = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
+
+      // Nothing was transcoded, so nothing converged. `good` here is the
+      // whole defect: it stores the PRE-transcode signature, which
+      // `isKnownGood` then matches on every future scan — a library that
+      // reports "100% converged" with every file still h264.
+      expect(result.state).not.toBe('good');
+      expect(result.state).toBe('held');
+
+      const row = createMediaFileRepo(db).getById(claimed.fileId);
+      expect(row?.state).toBe('held');
+      expect(row?.signature).toBeNull();
+      expect(row?.attempt_count).toBe(1);
+      expect(row?.hold_until_ms).not.toBeNull();
+
+      // The file on disk is untouched: same codec, same bytes, same identity.
+      expect(await videoCodecOf(claimed.path)).toBe('h264');
+      expect(statSync(claimed.path).size).toBe(beforeSize);
+      expect(row?.content_key).toBe(beforeRow?.content_key);
+
+      // Execute really ran and really reported its own failure output.
+      const steps = createJobRepo(db).getSteps(result.jobId);
+      expect(steps.at(-1)).toMatchObject({ pluginId: 'trawlarr:execute', outputNumber: 2 });
+
+      // And the reason is recorded, in the database, on that step: without
+      // the runner's `log` wired through, the excerpt is empty and there is
+      // no record anywhere of WHY the encode failed.
+      expect(steps.at(-1)?.logExcerpt).toMatch(/ffmpeg failed \(code \d+\)/);
+
+      const jobRows = createJobRepo(db).listForFile(claimed.fileId);
+      expect(jobRows[0]?.state).toBe('failed');
+    },
+    120_000,
+  );
+
   it('Critical 1: a Verify Output rejection with no remediation route does not converge to good', async () => {
     const { claimed } = await setupClaimedFile({
       definition: REJECTING_VERIFY_FLOW,

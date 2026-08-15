@@ -36,7 +36,11 @@ export const details = (): PluginDetails => ({
   ],
   outputs: [
     { number: 1, tooltip: 'Output verified: probes cleanly and matches expectations' },
-    { number: 2, tooltip: 'Verification failed: output did not meet the checks above' },
+    {
+      number: 2,
+      tooltip: 'Verification failed: output did not meet the checks above',
+      outcome: 'failure',
+    },
   ],
   requiresVersion: '1.0.0',
 });
