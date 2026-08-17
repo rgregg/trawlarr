@@ -206,6 +206,84 @@ describe('cli: flow add', () => {
     expect(stderr()).toContain('a flow named "F" already exists');
     expect(stderr()).not.toContain('UNIQUE constraint failed');
   });
+
+  /**
+   * `flow add` is where a user meets flow validation, so the message has to
+   * name the offending node, say what to fix, and say what running the flow
+   * unvalidated would have cost — and nothing may be stored.
+   */
+  it('refuses a flow with a duplicate node id, naming the node and the consequence', async () => {
+    const dataDir = newDataDir();
+    const flowFile = join(mkdtempSync(join(tmpdir(), 'trawlarr-cli-flow-')), 'dup.json');
+    writeFileSync(
+      flowFile,
+      JSON.stringify({
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'enc', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'enc', pluginId: 'trawlarr:verifyOutput', pluginVersion: '1.0.0', inputs: {} },
+        ],
+        edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'enc' }],
+      }),
+      'utf8',
+    );
+
+    expect(
+      await main(['flow', 'add', '--name', 'Dup', '--file', flowFile, '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('"enc"');
+    expect(stderr()).toContain('flow add');
+
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    expect(createFlowRepo(db).list()).toHaveLength(0);
+    db.close();
+  });
+
+  it('refuses a flow with a dangling edge and one with no start node', async () => {
+    const dataDir = newDataDir();
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-cli-flow-'));
+
+    const danglingFile = join(dir, 'dangling.json');
+    writeFileSync(
+      danglingFile,
+      JSON.stringify({
+        nodes: [{ id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} }],
+        edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'encode' }],
+      }),
+      'utf8',
+    );
+    expect(
+      await main(['flow', 'add', '--name', 'D', '--file', danglingFile, '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('"encode"');
+
+    const noStartFile = join(dir, 'no-start.json');
+    writeFileSync(
+      noStartFile,
+      JSON.stringify({
+        nodes: [
+          {
+            id: 'check',
+            pluginId: 'trawlarr:checkVideoCodec',
+            pluginVersion: '1.0.0',
+            inputs: { codec: 'h264' },
+          },
+        ],
+        edges: [],
+      }),
+      'utf8',
+    );
+    expect(
+      await main(['flow', 'add', '--name', 'N', '--file', noStartFile, '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('start');
+
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    expect(createFlowRepo(db).list()).toHaveLength(0);
+    db.close();
+  });
 });
 
 describe('cli: library set-flow', () => {

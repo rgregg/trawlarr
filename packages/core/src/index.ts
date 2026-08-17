@@ -2,6 +2,7 @@ export * from './canonical-json.js';
 export * from './identity.js';
 export * from './facts.js';
 export * from './flow.js';
+export * from './flow-validate.js';
 export * from './signature.js';
 export * from './ledger.js';
 export * from './ffmpeg-command.js';

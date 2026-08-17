@@ -141,16 +141,6 @@ a flow, rescan, assert the affected files leave `good`.
 
 This is also what limits the damage from recycled inodes (see *Accepted risks* below).
 
-### Flow validation must reject duplicate node ids
-
-Nothing validates node-id uniqueness anywhere. The executor builds a `Map` keyed on node id, so a
-duplicate silently drops a node. Separately, `flowDefinitionHash` sorts with a comparator that never
-returns 0, so two flows differing only in the array order of duplicate-id nodes can hash
-differently.
-
-Spec §6.5 defers flow validation to P2. It must include this check, which also retires the
-comparator issue.
-
 ### `Replace Original File` must re-stat the file
 
 Nothing in P1 re-stats after a transcode, so `file_size`, `oldSize` and `newSize` all report the
@@ -446,6 +436,35 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
 
 ## Retired
 
+- **Flow validation (spec §6.5).** `validateFlowDefinition` in core now gates `flowRepo.create` and
+  `flowRepo.update` — the only two doors a definition enters by — and rejects rather than repairs:
+  duplicate node ids, an edge naming a node that does not exist, an output number the node's own
+  `details()` does not declare, a flow with no start node (or no nodes at all), MORE THAN ONE start
+  node, more than one edge leaving a single output, and a malformed document. The last two were added
+  on the same reasoning as the first: `runFlow` picks the first match in ARRAY order while
+  `flowDefinitionHash` sorts, so both let the route taken — and therefore every convergence decision
+  — depend on the order of a JSON array while the flow's version does not move.
+
+  Deliberately allowed: **cycles** (a remediation branch rejoining the main path is one, and
+  `DEFAULT_MAX_STEPS` already bounds every flow) and **unreachable nodes** (an `onFlowError` handler
+  is reached by no edge at all, and a parked branch is an author's choice; the hash deliberately
+  covers unreachable branches, so the cost is a re-evaluation, never a wrong answer). A node whose
+  plugin this host cannot resolve is treated as unknown, not wrong — a flow is routinely authored on
+  a machine where a community plugin is not installed — and one unresolvable node suppresses the
+  no-start-node verdict entirely, because it may be the start.
+
+  This retires the `flowDefinitionHash` comparator concern with no change to `flowDefinitionHash`:
+  the comparator does now return 0 for equal keys (fixed earlier, with the reasoning recorded at
+  `byKey`), and the residual hazard — two definitions with an identical id set hashing differently
+  because two nodes share an id — is unreachable once such a definition cannot be stored.
+  `packages/core/src/flow-validate.test.ts` pins both halves.
+
+  Rows written before the check are **not migrated and not revalidated on read**: the executor is
+  unchanged, so a live database keeps working exactly as it did, and repairing a stored definition
+  would silently change the graph a library is converging against — which IS the flow's identity.
+  Such a flow is rejected the next time anyone tries to store it. Note a stored flow can also become
+  invalid without anyone editing it, by a plugin update changing what `details()` declares; that is
+  why `runFlow` keeps its own `no-start-node` / `missing-node` handling.
 - **Plugin version and loader cache key from `requiresVersion`/mtime.** Both now derive from a
   SHA-256 of the plugin file's contents, so a plugin code change invalidates affected files and a
   same-mtime rewrite cannot serve stale code. Spec §5.3's promise that updating a plugin invalidates

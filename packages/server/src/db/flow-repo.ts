@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { flowDefinitionHash, type FlowDefinition } from '@trawlarr/core';
+import {
+  assertFlowDefinitionValid,
+  flowDefinitionHash,
+  type FlowDefinition,
+  type FlowNodeCapabilityResolver,
+} from '@trawlarr/core';
+import { createNodeCapabilityResolver } from '../flow/node-capabilities.js';
 import type { Db } from './connection.js';
 
 export interface FlowRecord {
@@ -49,7 +55,25 @@ const toRecord = (row: FlowRow): FlowRecord => ({
   updatedAt: row.updated_at,
 });
 
-export const createFlowRepo = (db: Db): FlowRepo => {
+/**
+ * Create and update are the only two doors a definition enters through, so
+ * they are where validation lives: anything in the `flow` table is a flow the
+ * executor has agreed to run. Validation REJECTS, never repairs — a repaired
+ * flow is a flow its author did not write, running unattended over a library.
+ *
+ * Rows written before this check existed are deliberately left alone: nothing
+ * revalidates on read, so a live database keeps working exactly as it did
+ * (the executor is unchanged), and such a flow is rejected the next time
+ * someone tries to store it. Repairing them on read is the one thing that
+ * would be worse than leaving them: it would silently change the graph a
+ * library is converging against, which is the flow's identity.
+ */
+export const createFlowRepo = (
+  db: Db,
+  options?: { resolveNodeCapabilities?: FlowNodeCapabilityResolver },
+): FlowRepo => {
+  const resolveNodeCapabilities =
+    options?.resolveNodeCapabilities ?? createNodeCapabilityResolver();
   const selectById = db.prepare(`SELECT * FROM flow WHERE id = ?`);
   const selectByName = db.prepare(`SELECT * FROM flow WHERE name = ?`);
   const selectAll = db.prepare(`SELECT * FROM flow ORDER BY name`);
@@ -61,6 +85,7 @@ export const createFlowRepo = (db: Db): FlowRepo => {
 
   return {
     create(input) {
+      assertFlowDefinitionValid(input.definition, resolveNodeCapabilities);
       const id = randomUUID();
       db.prepare(
         `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
@@ -82,6 +107,7 @@ export const createFlowRepo = (db: Db): FlowRepo => {
     },
 
     update(input) {
+      assertFlowDefinitionValid(input.definition, resolveNodeCapabilities);
       // The hash is recomputed here rather than read back, because it IS the
       // flow's version: every file whose ledger recorded the old hash becomes
       // stale the moment this returns.

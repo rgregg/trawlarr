@@ -4,7 +4,7 @@ import { realpathSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { FileState, FlowDefinition } from '@trawlarr/core';
+import { FlowValidationError, type FileState, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo, DEFAULT_EXTENSIONS, type LibraryRecord } from './db/library-repo.js';
@@ -183,7 +183,24 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
     existing: createFlowRepo(db).getByName(values.name),
     name: values.name,
   });
-  const flow = createFlowRepo(db).create({ name: values.name, definition, nowMs: Date.now() });
+
+  // Validation lives in the repo (so nothing can write round it), but the
+  // message a user sees belongs here: a FlowValidationError carries one
+  // sentence per problem, and a flow file usually has more than one thing
+  // wrong with it, so they are listed rather than joined into a paragraph.
+  let flow;
+  try {
+    flow = createFlowRepo(db).create({ name: values.name, definition, nowMs: Date.now() });
+  } catch (err) {
+    if (err instanceof FlowValidationError) {
+      throw new CliError(
+        `flow add: "${values.file}" is not a flow trawlarr will run, so nothing was stored ` +
+          `(${err.problems.length} problem(s)):\n` +
+          err.problems.map((problem) => `  - ${problem.message}`).join('\n'),
+      );
+    }
+    throw err;
+  }
   console.log(`Added flow "${flow.name}" (${flow.id}), ${flow.definition.nodes.length} node(s).`);
   return 0;
 };

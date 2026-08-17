@@ -144,11 +144,24 @@ beforeEach(() => {
 const setupClaimedFile = async (input: {
   definition: FlowDefinition;
   videoCodec: string;
+  /**
+   * Store the definition with every node's plugin treated as unresolvable, so
+   * the checks that need a `details()` declaration are skipped — the same
+   * position the repo is in for a flow written on a host where a plugin was
+   * not installed, and for a flow stored before a plugin update changed what
+   * it declares. Needed by the no-start-node case: `flow add` refuses such a
+   * flow now, but `runFlow` must still handle one that reached the table
+   * anyway, which is exactly what that test pins.
+   */
+  unvalidatedPlugins?: boolean;
 }): Promise<{ root: string; claimed: ClaimedFile; flowId: string }> => {
   const root = mkdtempSync(join(tmpdir(), 'trawlarr-runjob-'));
   await makeSample(join(root, 'sample.mkv'), input.videoCodec);
 
-  const flow = createFlowRepo(db).create({
+  const flow = createFlowRepo(
+    db,
+    input.unvalidatedPlugins === true ? { resolveNodeCapabilities: () => null } : undefined,
+  ).create({
     name: 'flow',
     definition: input.definition,
     nowMs: NOW,
@@ -1354,7 +1367,11 @@ describe.runIf(available)('runJob: rejection, persistence and stall regressions'
         ],
         edges: [],
       };
-      const { claimed } = await setupClaimedFile({ definition, videoCodec: 'libx264' });
+      const { claimed } = await setupClaimedFile({
+        definition,
+        videoCodec: 'libx264',
+        unvalidatedPlugins: true,
+      });
 
       const result = await runJob({
         db,

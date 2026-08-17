@@ -68,3 +68,78 @@ describe('createFlowRepo', () => {
     expect(() => repo.update({ id: 'nope', definition: definition(), nowMs: NOW })).toThrow(/nope/);
   });
 });
+
+/**
+ * Creation and update are the only two ways a definition enters the database,
+ * so they are where validation belongs: a stored flow is a flow the executor
+ * has agreed to run. Rejected, never repaired — a repaired flow is a flow the
+ * author did not write, running unattended over their library.
+ */
+describe('createFlowRepo: validation', () => {
+  const broken = (): FlowDefinition => ({
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'dup', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+      { id: 'dup', pluginId: 'trawlarr:verifyOutput', pluginVersion: '1.0.0', inputs: {} },
+    ],
+    edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'dup' }],
+  });
+
+  it('refuses to create a flow with a duplicate node id, and stores nothing', () => {
+    expect(() => repo.create({ name: 'Broken', definition: broken(), nowMs: NOW })).toThrow(/dup/);
+    expect(repo.getByName('Broken')).toBeNull();
+    expect(repo.list()).toHaveLength(0);
+  });
+
+  it('refuses to update a valid flow into an invalid one, leaving the stored definition intact', () => {
+    const created = repo.create({ name: 'HEVC', definition: definition(), nowMs: NOW });
+    expect(() => repo.update({ id: created.id, definition: broken(), nowMs: NOW + 1 })).toThrow(
+      /dup/,
+    );
+    const reread = repo.getById(created.id)!;
+    expect(reread.definition).toEqual(definition());
+    expect(reread.definitionHash).toBe(created.definitionHash);
+    expect(reread.updatedAt).toBe(NOW);
+  });
+
+  it('refuses an edge naming an output the node does not declare', () => {
+    const definitionWithBadOutput: FlowDefinition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        { id: 'enc', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+      ],
+      edges: [{ fromNodeId: 'start', outputNumber: 2, toNodeId: 'enc' }],
+    };
+    expect(() =>
+      repo.create({ name: 'BadOutput', definition: definitionWithBadOutput, nowMs: NOW }),
+    ).toThrow(/output 2/);
+  });
+
+  it('accepts a flow whose plugin ids this host cannot resolve, checking only its structure', () => {
+    const community: FlowDefinition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        { id: 'x', pluginId: '/plugins/not-installed-here.js', pluginVersion: '1.0.0', inputs: {} },
+      ],
+      edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'x' }],
+    };
+    expect(() =>
+      repo.create({ name: 'Community', definition: community, nowMs: NOW }),
+    ).not.toThrow();
+  });
+
+  it('leaves an already-stored invalid flow readable, so a live database keeps working', () => {
+    // Written the way a pre-validation release wrote it: straight into the
+    // table. Nothing revalidates on read, so the flow keeps running exactly
+    // as it did before this check existed.
+    db.prepare(
+      `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
+                         created_at, updated_at)
+       VALUES ('legacy', 'Legacy', '', '', ?, 'hash', ?, ?)`,
+    ).run(JSON.stringify(broken()), NOW, NOW);
+
+    const legacy = repo.getByName('Legacy');
+    expect(legacy?.definition.nodes).toHaveLength(3);
+    expect(repo.list()).toHaveLength(1);
+  });
+});
