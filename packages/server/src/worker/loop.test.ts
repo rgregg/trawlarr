@@ -13,7 +13,7 @@ import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { scanLibrary } from '../scanner/scan-library.js';
 import { runJob } from './run-job.js';
-import { runQueue, type LoopSummary } from './loop.js';
+import { DEFAULT_MAX_CLAIMS_PER_FILE, runQueue, type LoopSummary } from './loop.js';
 
 const execFileAsync = promisify(execFile);
 const NOW = 1_700_000_000_000;
@@ -686,5 +686,139 @@ describe('runQueue', () => {
     const counts = createMediaFileRepo(db).countsByState(library.id);
     expect(counts.held).toBe(1);
     expect(counts.queued).toBe(1);
+  }, 60_000);
+});
+
+/**
+ * `run` without `--max` drains until `claimNext` returns null, which is the
+ * right loop — but it made a regression that let converged files be claimed
+ * again indistinguishable from work: nine minutes re-transcoding the same
+ * three files, surfacing in CI as a timeout rather than a failure. The defence
+ * is not a smaller loop; it is a bound that makes that shape DIAGNOSABLE.
+ *
+ * The distinction it draws: ending a file `held` records a real backoff and
+ * legitimately authorises one later claim in the same drain, so each `held`
+ * outcome buys one more claim. A file that comes back claimable without one —
+ * `good`, or a row left `queued` — has made no progress, and the drain stops
+ * and says which file did it.
+ */
+describe('runQueue: the repeat-claim bound', () => {
+  it('stops and names the file when the same file is claimed again with no backoff recorded', async () => {
+    const { library } = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW });
+    const mediaFileRepo = createMediaFileRepo(db);
+    const [row] = mediaFileRepo.listByLibrary({ libraryId: library.id });
+    const realClaimNext = mediaFileRepo.claimNext;
+
+    // Exactly the regression: the file converges, and is then claimable
+    // again. Reproduced through the REAL claimNext against the real ledger,
+    // by having the run put the row back to `queued` — so nothing here
+    // simulates the claim itself.
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      claimNextFn: realClaimNext,
+      runJobFn: async (jobInput) => {
+        const result = await runJob(jobInput);
+        mediaFileRepo.requeue(jobInput.claimed.fileId);
+        return result;
+      },
+    });
+
+    expect(summary.claimed).toBe(1);
+    expect(summary.repeatClaimStop).toEqual({
+      fileId: row!.id,
+      path: row!.path,
+      claims: 1,
+      backoffs: 0,
+      limit: DEFAULT_MAX_CLAIMS_PER_FILE,
+    });
+
+    // The claim the guard refused is not left stranded `running`: the guard
+    // fires AFTER claimNext has already committed that state, so it has to
+    // put the row back itself.
+    const counts = mediaFileRepo.countsByState(library.id);
+    expect(counts.running).toBe(0);
+    expect(counts.queued).toBe(1);
+  }, 60_000);
+
+  it('still allows the re-claim a real backoff authorises, and does not report a stop', async () => {
+    const { library } = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW });
+    const mediaFileRepo = createMediaFileRepo(db);
+    const [row] = mediaFileRepo.listByLibrary({ libraryId: library.id });
+
+    // Held once (a real backoff, recorded in the ledger), then claimed again
+    // and converged — the ordinary "its hold expired mid-drain" path, which
+    // must keep working.
+    let claims = 0;
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      claimNextFn: () => {
+        claims += 1;
+        if (claims > 2) return null;
+        return {
+          fileId: row!.id,
+          libraryId: row!.library_id,
+          path: row!.path,
+          state: 'queued' as FileState,
+        } as never;
+      },
+      runJobFn: async () => ({
+        jobId: `job-${claims}`,
+        state: (claims === 1 ? 'held' : 'good') as FileState,
+        stepCount: 1,
+        outcome: 'test',
+      }),
+    });
+
+    expect(summary.claimed).toBe(2);
+    expect(summary.heldForRetry).toBe(1);
+    expect(summary.succeeded).toBe(1);
+    expect(summary.repeatClaimStop).toBeUndefined();
+    expect(library.id).toBe(row!.library_id);
+  }, 60_000);
+
+  it('bounds a file that is held over and over, however many backoffs it records', async () => {
+    const { library } = await buildLibrary({ fileCount: 1, definition: GOOD_FLOW });
+    const mediaFileRepo = createMediaFileRepo(db);
+    const [row] = mediaFileRepo.listByLibrary({ libraryId: library.id });
+
+    // A ledger whose backoff never exhausts (the shape a broken MAX_ATTEMPTS
+    // would take) would otherwise buy itself one more claim for ever, so the
+    // allowance is capped outright as well.
+    const summary = await runQueue({
+      db,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+      maxClaimsPerFile: 3,
+      claimNextFn: () =>
+        ({
+          fileId: row!.id,
+          libraryId: row!.library_id,
+          path: row!.path,
+          state: 'held' as FileState,
+        }) as never,
+      runJobFn: async () => ({
+        jobId: 'job',
+        state: 'held' as FileState,
+        stepCount: 1,
+        outcome: 'held again',
+      }),
+    });
+
+    expect(summary.claimed).toBe(3);
+    expect(summary.heldForRetry).toBe(3);
+    expect(summary.repeatClaimStop).toMatchObject({
+      fileId: row!.id,
+      claims: 3,
+      backoffs: 3,
+      limit: 3,
+    });
+    expect(mediaFileRepo.countsByState(library.id)).toBeDefined();
   }, 60_000);
 });

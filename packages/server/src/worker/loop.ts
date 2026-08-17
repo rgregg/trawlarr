@@ -50,6 +50,28 @@ export interface LoopSummary {
    * than reset to 0.
    */
   pausedSkipped: number;
+  /**
+   * Present only when the drain stopped because one file was being claimed
+   * repeatedly with no progress — see `runQueue`'s doc comment and
+   * `DEFAULT_MAX_CLAIMS_PER_FILE`. Absent on every normal drain, including one
+   * where a `held` file was legitimately re-claimed after its backoff expired.
+   *
+   * Its whole purpose is to turn "the run never came back" into a named file:
+   * the counters above describe a drain that ended, and a drain that cannot
+   * end has no counters at all.
+   */
+  repeatClaimStop?: RepeatClaimStop;
+}
+
+export interface RepeatClaimStop {
+  fileId: string;
+  path: string;
+  /** Claims of this file id that this drain actually ran, before refusing another. */
+  claims: number;
+  /** How many of those ended `held`, i.e. recorded a real backoff. */
+  backoffs: number;
+  /** The absolute per-file ceiling in force for this drain. */
+  limit: number;
 }
 
 export interface RunQueueInput {
@@ -66,6 +88,12 @@ export interface RunQueueInput {
    */
   libraryIds?: string[];
   maxFiles?: number;
+  /**
+   * Absolute ceiling on how many times ONE file id may be claimed within this
+   * single drain. Defaults to `DEFAULT_MAX_CLAIMS_PER_FILE`. Lower it in a test
+   * that wants to reach the ceiling; production has no reason to set it.
+   */
+  maxClaimsPerFile?: number;
   signal?: AbortSignal;
   onFile?: (event: { fileId: string; path: string; state: FileState }) => void;
   /**
@@ -100,6 +128,20 @@ export interface RunQueueInput {
 
 /** Matches the value `runJob`'s own `buildArgs` call already hard-codes (see run-job.ts). */
 const WORKER_CLASS = 'transcode';
+
+/**
+ * Absolute ceiling on claims of one file id within a single drain.
+ *
+ * The per-file allowance is normally derived from outcomes rather than from a
+ * number — one claim, plus one more for each time the file ended `held`, since
+ * ending `held` records a real backoff and is the only thing that legitimately
+ * makes a file claimable again inside the same drain. This constant is the
+ * backstop for the case where that derivation cannot help: a ledger whose
+ * backoff never exhausts would buy itself one more claim for ever. Set above
+ * the ledger's own `MAX_ATTEMPTS` so a healthy file can use every attempt it is
+ * entitled to and still never reach it.
+ */
+export const DEFAULT_MAX_CLAIMS_PER_FILE = 8;
 
 /**
  * Exhaustive on `FileState`: every member the type currently has gets an
@@ -197,6 +239,28 @@ const assertNever = (value: never): never => {
  * bounded by `MAX_ATTEMPTS` (3) at the ledger level, so not a liveness
  * bug, but `maxFiles: 10` does not always mean ten distinct files touched.
  *
+ * WITHOUT `maxFiles` the drain is bounded only by `claimNext` running dry,
+ * which is the correct loop and was also, once, a nine-minute spin: a
+ * regression made converged files claimable again, and the same three files
+ * were re-transcoded until the test suite gave up. That surfaced as a TIMEOUT
+ * rather than a failure — the worst possible shape, since a drain that cannot
+ * end produces no summary and names no file.
+ *
+ * So one file id may only be claimed as many times as its own outcomes justify:
+ * once, plus once more for each time it ended `held`. Ending `held` is what
+ * records a backoff, and a backoff is the only thing that legitimately makes a
+ * file claimable again inside one drain — so "claimed again after a real
+ * backoff" is normal and keeps working, while "claimed again having converged
+ * (or been left `queued`) last time" means the drain is making no progress.
+ * `DEFAULT_MAX_CLAIMS_PER_FILE` caps the allowance outright as a backstop for a
+ * backoff that never exhausts. Reaching either stops the drain and reports
+ * `LoopSummary.repeatClaimStop`, naming the file.
+ *
+ * The refused claim has already been committed as `running` by `claimNext`
+ * before this loop can see it, so it is requeued rather than left stranded:
+ * this loop refusing to run a file is not the file's fault, and `requeue` is
+ * exactly the documented recovery for a row nothing is going to finish.
+ *
  * NOTE: `WORKER_CLASS` is currently decorative. `claimNext`'s SQL filters
  * only on `state`/`hold_until_ms`/`library_id` — it never references
  * `worker_class` — so passing it here reserves the field for when worker
@@ -223,6 +287,11 @@ export const runQueue = async (input: RunQueueInput): Promise<LoopSummary> => {
   // only to keep the post-loop `pausedSkipped` tally from double-counting
   // a file that was claimed and worked on before its library was paused.
   const claimedThisDrain = new Set<string>();
+
+  // Per file id: how many times this drain has claimed and run it, and how
+  // many of those ended `held` (each of which authorises one further claim).
+  const claimsPerFile = new Map<string, { claims: number; backoffs: number }>();
+  const maxClaimsPerFile = input.maxClaimsPerFile ?? DEFAULT_MAX_CLAIMS_PER_FILE;
 
   for (;;) {
     if (input.signal?.aborted === true) break;
@@ -254,6 +323,32 @@ export const runQueue = async (input: RunQueueInput): Promise<LoopSummary> => {
     }
     if (claimed === null) break;
 
+    // See the doc comment above. `1 + backoffs` is what this file's own
+    // outcomes have earned; `maxClaimsPerFile` is the backstop for a backoff
+    // that never exhausts.
+    const history = claimsPerFile.get(claimed.fileId) ?? { claims: 0, backoffs: 0 };
+    const allowance = Math.min(1 + history.backoffs, maxClaimsPerFile);
+    if (history.claims >= allowance) {
+      summary.repeatClaimStop = {
+        fileId: claimed.fileId,
+        path: claimed.path,
+        claims: history.claims,
+        backoffs: history.backoffs,
+        limit: maxClaimsPerFile,
+      };
+      try {
+        // `claimNext` committed `running` before returning it, and this loop is
+        // not going to run it — so put it back rather than leave a row nothing
+        // will finish.
+        mediaFileRepo.requeue(claimed.fileId);
+      } catch {
+        // A failed requeue leaves the row `running` for `trawlarr reap`, which
+        // is strictly better than losing the summary that explains the stop.
+      }
+      break;
+    }
+    claimsPerFile.set(claimed.fileId, { ...history, claims: history.claims + 1 });
+
     summary.claimed += 1;
     claimedThisDrain.add(claimed.fileId);
 
@@ -284,10 +379,15 @@ export const runQueue = async (input: RunQueueInput): Promise<LoopSummary> => {
       case 'failed':
         summary.failed += 1;
         break;
-      case 'held':
+      case 'held': {
         summary.heldForRetry += 1;
         summary.skipped += 1;
+        // A recorded backoff: this file may legitimately come back round once
+        // its hold expires, even within this same drain.
+        const held = claimsPerFile.get(claimed.fileId);
+        if (held !== undefined) held.backoffs += 1;
         break;
+      }
       case 'not_converging':
         summary.notConverging += 1;
         summary.skipped += 1;

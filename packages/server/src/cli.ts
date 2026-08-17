@@ -363,6 +363,22 @@ const cmdRun = async (args: string[]): Promise<number> => {
     );
   }
 
+  // The loudest thing `run` can say, because it means the drain stopped for a
+  // reason that is not "there was nothing left to do" — and the alternative to
+  // saying it is a command that never returns.
+  if (summary.repeatClaimStop !== undefined) {
+    const stop = summary.repeatClaimStop;
+    console.log(
+      `  STOPPED EARLY: "${stop.path}" was claimable again after ${stop.claims} run(s) in this ` +
+        `drain that recorded no backoff (${stop.backoffs} of them held), so this drain would ` +
+        `have kept re-running the same file indefinitely. Nothing else was claimed after it. ` +
+        `That is a bug in trawlarr, not in your library — a file is only meant to become ` +
+        `claimable again after a hold expires or after "trawlarr requeue". Look at that file ` +
+        `with "trawlarr status --library <name> --files" and at its job history; the file id is ` +
+        `${stop.fileId}. Run again to continue with the rest of the queue.`,
+    );
+  }
+
   // The drain is the thing that FILLS the trash, so it is also what empties
   // it: without this, `trashRetentionDays` would only take effect for
   // someone who knew to run `trawlarr trash purge` by hand, and a library

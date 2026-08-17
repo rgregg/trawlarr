@@ -363,6 +363,29 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
 
 ---
 
+## An unbounded loop fails as a timeout, which is not a failure
+
+`trawlarr run` without `--max` drains until `claimNext` returns null. That is the correct loop, and it
+was also once a nine-minute spin: a regression made converged files claimable again, and the same
+three files were re-transcoded until the suite gave up. It surfaced as a **timeout, not a failure** —
+the worst shape available, because a drain that cannot end produces no summary, names no file, and
+reports no error, while on a real library it is an unattended worker re-encoding the same files with
+generational loss.
+
+`runQueue` now bounds claims **per file id per drain**, derived from outcomes rather than from a
+number: one claim, plus one more for each time that file ended `held`. Ending `held` is what records a
+backoff, and a backoff is the only thing that legitimately makes a file claimable again inside one
+drain — so "re-claimed after a real backoff expired mid-drain" keeps working exactly as before, while
+"claimable again having converged last time" stops the drain and reports
+`LoopSummary.repeatClaimStop`, naming the file, its id, and how many times it ran.
+`DEFAULT_MAX_CLAIMS_PER_FILE` (8, above the ledger's `MAX_ATTEMPTS` of 3) caps the allowance outright,
+because a backoff that never exhausts would otherwise buy itself one more claim for ever.
+
+Two details worth keeping: the refused claim has already been committed `running` by `claimNext`
+before the loop can see it, so it is **requeued** rather than stranded — the loop refusing to run a
+file is not the file's fault. And the guard is deliberately a diagnostic, not a repair: it says the
+drain was making no progress and stops, leaving the rest of the queue for the next `run`.
+
 ## Testing lessons that cost real time
 
 - **A concurrency test that lets the scheduler interleave usually passes against broken code**, because
