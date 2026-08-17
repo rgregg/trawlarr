@@ -7,6 +7,7 @@ export * from './host/crud-trans-dbn.js';
 export * from './host/axios-middleware.js';
 export * from './ffmpeg/progress.js';
 export * from './ffmpeg/run.js';
+export * from './ffmpeg/process-group.js';
 export * from './executor/run-flow.js';
 export * from './executor/encode-target.js';
 export * from './executor/execute-node.js';

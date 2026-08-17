@@ -147,12 +147,13 @@ const assertNever = (value: never): never => {
  * Stopping faster than "let the current file finish" means killing the
  * worker at the OS process level, which is a concern for whoever launches
  * the worker process, not this loop: nothing here spawns a child process
- * directly, so nothing here needs to manage a process group either. (A real
- * gap remains one layer down — `packages/engine/src/ffmpeg/run.ts` kills
- * only ffmpeg's direct pid, not its process group, so a plugin-spawned
- * descendant of ffmpeg would survive even a future mid-file cancellation —
- * but this loop's own abort semantics never reach that code path, so fixing
- * it belongs to whichever task actually wires mid-file cancellation.)
+ * directly, so nothing here needs to manage a process group either. One layer
+ * down, `packages/engine/src/ffmpeg/run.ts` now spawns ffmpeg detached and
+ * cancels by killing its whole process GROUP, so a plugin-spawned descendant
+ * of ffmpeg dies with it — and the host's own SIGINT/SIGTERM/exit take those
+ * groups down too, which is what a detached child costs. Whichever task wires
+ * mid-file cancellation therefore only has to reach that abort signal; the
+ * kill it triggers already covers the tree.
  *
  * THE FULL CONTRACT, made true by construction rather than by convention:
  * `runQueue` ALWAYS resolves with the summary so far; it never rejects.

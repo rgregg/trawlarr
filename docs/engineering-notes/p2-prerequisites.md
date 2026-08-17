@@ -160,13 +160,6 @@ them when P2 wires writeback.
 When persisting, round `newSizeBytes` to an integer first: the megabyte round-trip is floating point,
 so an awkward byte count can come back as `999.0000000000001`.
 
-### Worker cancellation needs a process group
-
-`child.kill('SIGKILL')` signals only the direct child. In P1 that child *is* ffmpeg, so cancellation
-works. Once workers are their own child processes and third-party plugins can spawn ffmpeg outside
-our runner, cancellation will not reach those descendants. Spec §4.6 promises the process tree — give
-the worker its own process group and kill the group.
-
 ---
 
 ### The filename belongs to the user; only the container is ours
@@ -436,6 +429,24 @@ invoked, so "found 2000, probed 3" is the honest summary line for a rescan.
 
 ## Retired
 
+- **Worker cancellation now kills the process tree (spec §4.6).** `runFfmpeg` spawns with
+  `detached: true`, which makes the child a process-group LEADER, and cancellation sends SIGKILL to
+  `-pid` — the group — with the old direct `child.kill` kept as the fallback for a child that never
+  got a pid or a group that returns EPERM. A plugin that spawns ffmpeg itself is therefore reached.
+
+  **`detached` has a cost that had to be paid in the same change**, and it is the reason this is more
+  than a one-line fix: a detached child is no longer in the terminal's foreground process group, so
+  Ctrl-C on `trawlarr run` stops reaching ffmpeg. Every live leader is tracked in
+  `packages/engine/src/ffmpeg/process-group.ts`, and the host's `SIGINT`/`SIGTERM`/`SIGHUP`
+  (re-raised after our handler runs, so the host still dies of the signal it was sent) and its
+  `exit` sweep those groups. Handlers are installed on the first live child and removed with the
+  last, so a host that never transcodes has its signal handling untouched.
+
+  Two guards are load-bearing in `killProcessGroup`: pgid `0` means "my own group" and would kill the
+  host and every sibling worker, and pgid `1` means "everything I may signal". Neither can be a child
+  we spawned, so both are refused rather than translated. And `killFn` is injectable purely so a test
+  driving a FAKE child cannot signal a real group — the fake child's pid is `undefined` by default
+  for the same reason. A fake pid plus a real `process.kill(-pid)` is a live grenade in a test suite.
 - **Flow validation (spec §6.5).** `validateFlowDefinition` in core now gates `flowRepo.create` and
   `flowRepo.update` — the only two doors a definition enters by — and rejects rather than repairs:
   duplicate node ids, an edge naming a node that does not exist, an output number the node's own

@@ -12,7 +12,14 @@ class FakeStream extends EventEmitter {
 class FakeChild extends EventEmitter {
   stdout = new FakeStream();
   stderr = new FakeStream();
-  pid = 4242;
+  /**
+   * Deliberately absent by default. A fake child's pid is either nothing or
+   * some unrelated REAL process on this machine, and `runFfmpeg` now signals
+   * the process GROUP of the pid it spawned — so a fake pid with the real kill
+   * behind it would send SIGKILL to a process group the test never created.
+   * The one test that needs a pid supplies it together with a `killFn` spy.
+   */
+  pid: number | undefined = undefined;
   killed = false;
   killSignals: string[] = [];
 
@@ -126,6 +133,44 @@ describe('runFfmpeg', () => {
     const result = await run;
     expect(child.killed).toBe(true);
     expect(result.cancelled).toBe(true);
+  });
+
+  it('spawns detached, so the child leads a process group of its own', async () => {
+    const { child, spawnFn } = harness();
+    const run = runFfmpeg({ ffmpegPath: 'ffmpeg', args: [], spawnFn });
+    setImmediate(() => child.emit('close', 0, null));
+    await run;
+
+    const [, , options] = (spawnFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(options).toMatchObject({ detached: true });
+  });
+
+  /**
+   * The pid-versus-group distinction, at the unit level: a negative pid is a
+   * process GROUP, and `-pid` of the child we spawned is exactly the tree it
+   * leads. The direct `child.kill` still happens as the fallback for a child
+   * with no pid, or a group that cannot be signalled.
+   */
+  it('signals the child process GROUP on abort, not only the child pid', async () => {
+    const { child, spawnFn } = harness();
+    child.pid = 987_654;
+    const killFn = vi.fn();
+    const controller = new AbortController();
+    const run = runFfmpeg({
+      ffmpegPath: 'ffmpeg',
+      args: [],
+      signal: controller.signal,
+      spawnFn,
+      killFn,
+    });
+    setImmediate(() => {
+      controller.abort();
+      child.emit('close', null, 'SIGKILL');
+    });
+    await run;
+
+    expect(killFn).toHaveBeenCalledWith(-987_654, 'SIGKILL');
+    expect(child.killed).toBe(true);
   });
 
   it('rejects when the binary cannot be spawned at all', async () => {
