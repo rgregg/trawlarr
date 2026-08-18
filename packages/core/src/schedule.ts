@@ -3,9 +3,8 @@ import type { WorkerClass } from './worker-class.js';
 /**
  * A weekly period during which the given per-class worker counts are in
  * force. A class this window doesn't name keeps its `ScheduleConfig.baseCounts`
- * value — see `evaluateSchedule` (Task 2 of the P2b daemon phase), which is
- * intentionally left for that task; this file only carries the shapes and
- * the write-time validation the settings repository needs today.
+ * value — see `evaluateSchedule`, which applies windows in array order so a
+ * later window wins over an earlier one for the same class.
  */
 export interface ScheduleWindow {
   id: string;
@@ -26,6 +25,108 @@ export interface ScheduleConfig {
   windows: ScheduleWindow[];
 }
 
+/** Weekday and minute-of-day derived from an instant in a given IANA zone. */
+export interface ZonedInstant {
+  /** 0 = Sunday … 6 = Saturday. */
+  weekday: number;
+  /** Minutes past local midnight, 0..1439. */
+  minuteOfDay: number;
+}
+
+const WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+
+/**
+ * Projects an instant onto weekday and minute-of-day in `timezone`, using
+ * `Intl.DateTimeFormat` (Node 22 ships full ICU, so no dependency is
+ * required). This is the only place a UTC instant is turned into local wall
+ * clock in this module — `evaluateSchedule` never does the reverse
+ * (local wall clock -> instant), which is what keeps DST unambiguous. See
+ * `evaluateSchedule` for why that direction matters.
+ */
+export const zonedInstant = (input: { nowMs: number; timezone: string }): ZonedInstant => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: input.timezone,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(input.nowMs));
+  const find = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  return {
+    weekday: WEEKDAY_INDEX[find('weekday')] ?? 0,
+    minuteOfDay: Number(find('hour')) * 60 + Number(find('minute')),
+  };
+};
+
+/**
+ * Whether `at` falls inside `window`. The start minute is included and the
+ * end minute is excluded; `endMinute <= startMinute` means the window wraps
+ * past midnight (e.g. 23:00-06:00). A wrapping window is attributed to the
+ * day it STARTED on, not the day(s) it spills into: at Sunday 02:00 inside a
+ * Saturday-23:00-to-06:00 window, `days: [6]` must match and `days: [0]`
+ * must not.
+ */
+export const windowContains = (window: ScheduleWindow, at: ZonedInstant): boolean => {
+  const wraps = window.endMinute <= window.startMinute;
+  const inSpan = wraps
+    ? at.minuteOfDay >= window.startMinute || at.minuteOfDay < window.endMinute
+    : at.minuteOfDay >= window.startMinute && at.minuteOfDay < window.endMinute;
+  if (!inSpan) return false;
+  if (window.days.length === 0) return true;
+  // A wrapping window that we are in BEFORE its end minute began yesterday.
+  const startedOn = wraps && at.minuteOfDay < window.endMinute ? (at.weekday + 6) % 7 : at.weekday;
+  return window.days.includes(startedOn);
+};
+
+/**
+ * Computes the target worker count per class for `nowMs`. Starts from
+ * `schedule.baseCounts` and applies every active window in array order,
+ * each window overwriting only the classes it names — so later windows win
+ * over earlier ones for the same class, and a class no active window names
+ * keeps its base count (or the count set by an earlier active window, if a
+ * later active window doesn't mention it). When no window is active, the
+ * result is exactly `baseCounts`.
+ *
+ * On DST: this function never converts a local wall-clock boundary into an
+ * instant. It converts the *current instant* `nowMs` into local wall clock
+ * via `zonedInstant` and asks whether that falls inside each window, which
+ * is always well-defined in that direction — "which instant does local
+ * 01:30 mean" only becomes a question when going the other way, and this
+ * code never goes the other way. Because the supervisor (Task 7) re-evaluates
+ * on every tick rather than firing at boundaries, the practical result is:
+ * on a spring-forward day, a window whose span falls entirely in the
+ * skipped local hour (e.g. 02:00-02:30 when clocks jump from 02:00 to
+ * 03:00) simply never becomes active for any instant, because no instant
+ * ever projects to a minute-of-day in that range. On a fall-back day, a
+ * window covering the repeated local hour is active across both real-world
+ * passes through it, because two different instants both project to the
+ * same minute-of-day.
+ */
+export const evaluateSchedule = (input: {
+  schedule: ScheduleConfig;
+  nowMs: number;
+}): Record<WorkerClass, number> => {
+  const at = zonedInstant({ nowMs: input.nowMs, timezone: input.schedule.timezone });
+  const counts: Record<WorkerClass, number> = { ...input.schedule.baseCounts };
+  for (const window of input.schedule.windows) {
+    if (!windowContains(window, at)) continue;
+    for (const [workerClass, count] of Object.entries(window.counts) as Array<
+      [WorkerClass, number]
+    >) {
+      counts[workerClass] = count;
+    }
+  }
+  return counts;
+};
+
 export const DEFAULT_SCHEDULE: ScheduleConfig = {
   timezone: 'UTC',
   baseCounts: { transcode: 1, health: 0 },
@@ -44,11 +145,7 @@ const isWholeNumberInRange = (value: unknown, min: number, max: number): value i
 
 /**
  * Validates a schedule so a bad value can never be stored, and so a
- * hand-edited row is a named error rather than a downstream mystery. Reused
- * unchanged from the shape specified for Task 2 of
- * docs/superpowers/plans/2026-08-18-p2b-daemon.md; `evaluateSchedule`,
- * `zonedInstant` and `windowContains` are left for that task since nothing
- * in this phase's Task 1 needs them.
+ * hand-edited row is a named error rather than a downstream mystery.
  */
 export const validateSchedule = (schedule: ScheduleConfig): void => {
   try {
