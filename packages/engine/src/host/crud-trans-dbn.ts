@@ -1,10 +1,34 @@
 import type { CrudMode, PluginDeps } from '@trawlarr/plugin-api';
 
+/**
+ * Every method may answer asynchronously.
+ *
+ * The synchronous, sqlite-backed implementation satisfies this unchanged (a
+ * `void` return is assignable to `void | Promise<void>`), and the widening
+ * is what lets a job run in a process that holds no database at all: its
+ * document store is the daemon's, reached over IPC, and an IPC round trip
+ * cannot be synchronous. `createCrudTransDbn` awaits every call, so a
+ * plugin's `await deps.crudTransDBN(...)` sees the same value — and the same
+ * FAILURE — either way.
+ */
 export interface DocumentPort {
-  get(collection: string, docId: string): Record<string, unknown> | undefined;
-  insert(collection: string, docId: string, data: Record<string, unknown>, nowMs: number): void;
-  update(collection: string, docId: string, patch: Record<string, unknown>, nowMs: number): void;
-  removeOne(collection: string, docId: string): void;
+  get(
+    collection: string,
+    docId: string,
+  ): Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>;
+  insert(
+    collection: string,
+    docId: string,
+    data: Record<string, unknown>,
+    nowMs: number,
+  ): void | Promise<void>;
+  update(
+    collection: string,
+    docId: string,
+    patch: Record<string, unknown>,
+    nowMs: number,
+  ): void | Promise<void>;
+  removeOne(collection: string, docId: string): void | Promise<void>;
 }
 
 export interface HostSettingsPort {
@@ -68,15 +92,15 @@ export const createCrudTransDbn = (input: {
 
     switch (mode) {
       case 'getById':
-        return input.documents.get(collection, docID);
+        return await input.documents.get(collection, docID);
       case 'insert':
-        input.documents.insert(collection, docID, obj, input.nowMs());
+        await input.documents.insert(collection, docID, obj, input.nowMs());
         return undefined;
       case 'update':
-        input.documents.update(collection, docID, obj, input.nowMs());
+        await input.documents.update(collection, docID, obj, input.nowMs());
         return undefined;
       case 'removeOne':
-        input.documents.removeOne(collection, docID);
+        await input.documents.removeOne(collection, docID);
         return undefined;
       default:
         throw new Error(

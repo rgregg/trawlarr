@@ -15,5 +15,8 @@ export * from './library/paths.js';
 export * from './library/replace-seams.js';
 export * from './probe/ffprobe.js';
 export * from './scanner/scan-library.js';
+export * from './worker/job-payload.js';
+export * from './worker/run-payload.js';
+export * from './worker/apply-report.js';
 export * from './worker/run-job.js';
 export * from './worker/loop.js';

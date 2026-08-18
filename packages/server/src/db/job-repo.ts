@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { WorkerClass } from '@trawlarr/core';
 import type { Db } from './connection.js';
 
 export interface JobRow {
@@ -32,6 +33,16 @@ export interface StartJobInput {
   flowId: string;
   flowHash: string;
   nowMs: number;
+  /**
+   * Defaults to 'transcode' when omitted, matching the column default.
+   *
+   * A job's own row is the only place the class it ran under is recorded:
+   * the file it ran on says nothing about it, and the worker that ran it is
+   * gone by the time anyone asks.
+   */
+  workerClass?: WorkerClass;
+  /** The node this job ran on. NULL until the local node registers itself. */
+  nodeId?: string | null;
 }
 
 export interface RecordStepInput {
@@ -157,8 +168,8 @@ const truncateLogExcerpt = (text: string): string => {
  */
 export const createJobRepo = (db: Db): JobRepo => {
   const insertJob = db.prepare(
-    `INSERT INTO job (id, file_id, flow_id, flow_hash, worker_class, state, started_at)
-     VALUES (?, ?, ?, ?, 'transcode', 'running', ?)`,
+    `INSERT INTO job (id, file_id, flow_id, flow_hash, worker_class, node_id, state, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'running', ?)`,
   );
 
   const insertStep = db.prepare(
@@ -177,7 +188,15 @@ export const createJobRepo = (db: Db): JobRepo => {
   return {
     start(input) {
       const id = randomUUID();
-      insertJob.run(id, input.fileId, input.flowId, input.flowHash, input.nowMs);
+      insertJob.run(
+        id,
+        input.fileId,
+        input.flowId,
+        input.flowHash,
+        input.workerClass ?? 'transcode',
+        input.nodeId ?? null,
+        input.nowMs,
+      );
       return id;
     },
 
