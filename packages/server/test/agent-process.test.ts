@@ -1,8 +1,16 @@
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
 import type { DocumentPort } from '@trawlarr/engine';
 import type { ProbeData } from '@trawlarr/plugin-api';
@@ -14,6 +22,9 @@ import {
   createAgentHandle,
   forkAgent,
 } from '../src/worker/agent-handle.js';
+import { fakeTimers } from './fake-child.js';
+import { probeFile } from '../src/probe/ffprobe.js';
+import { ffmpegAvailableSync } from '../../../test-support/tool-availability.js';
 
 /**
  * The one test that forks a REAL agent process.
@@ -368,3 +379,416 @@ describe('the forked worker agent', () => {
     expect(isAlive(handle.pid ?? 0)).toBe(false);
   }, 30_000);
 });
+
+/**
+ * CANCELLING a real forked worker.
+ *
+ * Everything above proves the boundary exists. This proves the one thing a
+ * shape assertion cannot: that cancelling reaches processes we did not
+ * spawn. `detached: true` with a bare-pid kill and `detached: true` with a
+ * group kill are indistinguishable to any assertion about spawn options —
+ * only liveness separates them, and the previous phase measured the
+ * difference:
+ *
+ *   kill(-pid)  (the group) -> worker dead, grandchild dead   <- the fix
+ *   kill(pid)   (bare pid)  -> worker dead, grandchild ALIVE  <- the bug
+ *
+ * So every assertion here is `process.kill(pid, 0)` (which throws ESRCH once
+ * a pid is gone), the kernel's own view of a process group read from
+ * `/proc`, or a directory listing. Nothing reads log text, and nothing
+ * measures elapsed time: the grace period is an INJECTED timer, advanced by
+ * hand, because a test that really waits 30 seconds is a test nobody runs.
+ *
+ * Skipped on exactly ONE condition — a platform with no POSIX process
+ * groups, where `kill(-pgid)`, `detached` and signal 0 have no meaning at
+ * all — computed synchronously at module scope, because `skipIf` is
+ * evaluated at collection time and a check behind an async `beforeAll` reads
+ * as "skip" every run. Everything else is ASSERTED rather than detected: a
+ * missing `/bin/sh` or `/proc` on a POSIX host is a broken environment, and
+ * quietly removing this coverage is worse than failing.
+ */
+const posixProcessGroups = process.platform !== 'win32';
+
+if (posixProcessGroups && !(existsSync('/bin/sh') && existsSync('/proc/self/stat'))) {
+  throw new Error(
+    'A POSIX host without /bin/sh or /proc cannot observe process groups: refusing to ' +
+      'skip the worker cancellation suite silently.',
+  );
+}
+
+const DEADLINE_MS = 15_000;
+
+/** Polls until `predicate` holds, or fails with `what` — never a bare sleep. */
+const until = async (what: string, predicate: () => boolean): Promise<void> => {
+  const deadline = Date.now() + DEADLINE_MS;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}.`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+
+/** The process group a pid belongs to, as the kernel reports it. */
+const pgidOfPid = (pid: number): number | null => {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]);
+  } catch {
+    return null;
+  }
+};
+
+/** Every live process descended from `pid`, however deep. */
+const descendantsOf = (pid: number): number[] => {
+  const parentOf = new Map<number, number>();
+  for (const entry of readdirSync('/proc')) {
+    const candidate = Number(entry);
+    if (!Number.isInteger(candidate)) continue;
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+      parentOf.set(candidate, Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]));
+    } catch {
+      // The process exited between readdir and read: not a descendant now.
+    }
+  }
+  const found: number[] = [];
+  let frontier = [pid];
+  while (frontier.length > 0) {
+    const next: number[] = [];
+    for (const [child, parent] of parentOf) {
+      if (!frontier.includes(parent) || found.includes(child)) continue;
+      found.push(child);
+      next.push(child);
+    }
+    frontier = next;
+  }
+  return found;
+};
+
+/** The command name of a pid, for picking the real ffmpeg out of a tree. */
+const commOf = (pid: number): string => {
+  try {
+    return readFileSync(`/proc/${String(pid)}/comm`, 'utf8').trim();
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * A plugin that spawns a REAL descendant of its own, outside the runner, and
+ * then never returns.
+ *
+ * This is the whole scenario in one file: a third-party plugin free to shell
+ * out to ffmpeg itself. The descendant is NOT detached, so it inherits the
+ * worker's process group — which is what a group kill reaches and a bare-pid
+ * kill does not. It `trap`s SIGTERM (as ffmpeg legitimately does while
+ * finalising a container) so only SIGKILL ends it, and the plugin awaits a
+ * promise that never settles, so the agent's abort has nothing to unblock.
+ */
+const grandchildPluginPath = (pidFile: string): string =>
+  writePlugin(`
+${detailsSource('Spawns Its Own ffmpeg', "[{ number: 1, tooltip: 'never taken' }]")}
+
+const { spawn } = require('node:child_process');
+
+const plugin = async (args) => {
+  spawn(
+    '/bin/sh',
+    [
+      '-c',
+      "trap '' TERM; echo $$ > ${pidFile}.tmp; mv ${pidFile}.tmp ${pidFile}; " +
+        'while : ; do sleep 0.2; done',
+    ],
+    { stdio: 'ignore' },
+  );
+  await new Promise(() => {});
+  return { outputNumber: 1, outputFileObj: { _id: args.inputFileObj._id }, variables: args.variables };
+};
+
+module.exports = { details, plugin };
+`);
+
+/** Pids this suite caused to exist, swept regardless of whether the code worked. */
+const causedPids: number[] = [];
+
+/** A real pid, killed for real — recorded so the test can assert on it. */
+const recordingKill = (kills: { pid: number; signal: NodeJS.Signals }[]) => {
+  return (pid: number, signal: NodeJS.Signals): void => {
+    kills.push({ pid, signal });
+    process.kill(pid, signal);
+  };
+};
+
+const readGrandchildPid = (pidFile: string): number => {
+  const text = readFileSync(pidFile, 'utf8').trim();
+  const pid = Number.parseInt(text, 10);
+  if (!Number.isInteger(pid) || pid <= 1) throw new Error(`Unusable grandchild pid: "${text}"`);
+  return pid;
+};
+
+describe.skipIf(!posixProcessGroups)('cancelling a real forked worker', () => {
+  beforeAll(() => {
+    assertBuiltAgentIsFresh();
+  });
+
+  afterEach(() => {
+    // Cleanup must not depend on the code under test having worked: on a
+    // FAILING run, the tree the kill failed to take down is exactly what is
+    // still running here.
+    for (const pid of causedPids.splice(0)) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        // Already gone, or never a group leader.
+      }
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  it('kills a grandchild the PLUGIN spawned, not just the worker process', async () => {
+    const pidFile = join(mkdtempSync(join(tmpdir(), 'trawlarr-cancel-')), 'grandchild.pid');
+    const { port } = recordingDocuments();
+    const timers = fakeTimers();
+    const kills: { pid: number; signal: NodeJS.Signals }[] = [];
+    const handle = createAgentHandle({
+      id: 'w1',
+      documents: port,
+      onStep: () => {},
+      onHeartbeat: () => {},
+      onProgress: () => {},
+      onLog: () => {},
+      nowMs: () => Date.now(),
+      forkFn: () => forkAgent(AGENT_DIST),
+      killFn: recordingKill(kills),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+
+    const running = handle.run(payloadFor(flowThrough([grandchildPluginPath(pidFile)])));
+    // Nothing may reject unobserved while the assertions below run.
+    const outcome = running.then(
+      () => null,
+      (error: unknown) => error as AgentFailure,
+    );
+
+    const worker = handle.pid;
+    if (worker === undefined) throw new Error('The forked worker never got a pid.');
+    causedPids.push(worker);
+
+    let grandchild = 0;
+    await until('the plugin to report the pid of the process it spawned', () => {
+      try {
+        grandchild = readGrandchildPid(pidFile);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    causedPids.push(grandchild);
+
+    expect(isAlive(worker)).toBe(true);
+    expect(isAlive(grandchild)).toBe(true);
+    expect(grandchild).not.toBe(worker);
+    // The property that makes ONE signal sufficient: the process the plugin
+    // spawned is in the worker's group, and the worker leads that group.
+    expect(pgidOfPid(worker)).toBe(worker);
+    expect(pgidOfPid(grandchild)).toBe(worker);
+
+    handle.cancel();
+    // Rung one: asked politely, signalled not at all.
+    expect(kills).toEqual([]);
+
+    timers.advance(30_000);
+    // Rung two, NEGATED: the group, not the pid. This is the assertion that
+    // reverts to red if `killProcessGroup` is replaced by a bare-pid kill —
+    // and so does the grandchild's death below.
+    expect(kills).toEqual([{ pid: -worker, signal: 'SIGTERM' }]);
+
+    // Liveness FIRST, before awaiting the run: under a bare-pid kill the
+    // surviving grandchild is a specific, named failure here, rather than an
+    // unexplained suite timeout somewhere later.
+    await until('the worker process to be gone', () => !isAlive(worker));
+    await until('the process the plugin spawned to be gone', () => !isAlive(grandchild));
+    expect(isAlive(grandchild)).toBe(false);
+    expect(isAlive(worker)).toBe(false);
+    // Nothing of the worker's tree survives it.
+    expect(descendantsOf(process.pid)).not.toContain(grandchild);
+
+    const failure = await outcome;
+    expect(failure).toBeInstanceOf(AgentFailure);
+    expect(failure?.cancelled).toBe(true);
+  }, 60_000);
+});
+
+/**
+ * The same cancellation against REAL ffmpeg, on the rung that should
+ * normally be enough: the worker is asked to stop, its own runner takes the
+ * transcode down, and the daemon never has to escalate.
+ *
+ * Gated on ffmpeg being installed — checked SYNCHRONOUSLY at module scope,
+ * because `skipIf` is evaluated at collection time and a check behind an
+ * async `beforeAll` reads as "skip" on every run, which is exactly how this
+ * repo's end-to-end suite silently skipped for several commits. Only ENOENT
+ * counts as "not installed"; a check that could not be trusted throws (see
+ * `toolAvailableSync`).
+ */
+const ffmpegPresent = ffmpegAvailableSync();
+
+const makeLongSample = (path: string): void => {
+  execFileSync(
+    'ffmpeg',
+    [
+      '-hide_banner',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc=duration=60:size=640x480:rate=24',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      path,
+    ],
+    { stdio: 'ignore' },
+  );
+};
+
+const TRANSCODE_FLOW: FlowDefinition = {
+  nodes: [
+    { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+    { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'encoder',
+      pluginId: 'trawlarr:setVideoEncoder',
+      pluginVersion: '1.0.0',
+      inputs: { encoder: 'libx265', quality: '30' },
+    },
+    { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+  ],
+  edges: [
+    { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
+    { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'encoder' },
+    { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'execute' },
+  ],
+};
+
+describe.skipIf(!posixProcessGroups || !ffmpegPresent)(
+  'cancelling a real transcode in a real worker',
+  () => {
+    beforeAll(() => {
+      assertBuiltAgentIsFresh();
+    });
+
+    afterEach(() => {
+      for (const pid of causedPids.splice(0)) {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // Already gone, or never a group leader.
+        }
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }
+    });
+
+    it('stops ffmpeg and cleans up its staged output without the daemon signalling anything', async () => {
+      const libDir = mkdtempSync(join(tmpdir(), 'trawlarr-cancel-lib-'));
+      const filePath = join(libDir, 'movie.mkv');
+      makeLongSample(filePath);
+      const probe = await probeFile({ ffprobePath: 'ffprobe', path: filePath });
+
+      // The worker builds its scratch directory under its OWN tmpdir, so
+      // giving it a private one makes "did the staged output get cleaned up"
+      // an assertion about this worker rather than about a shared /tmp that
+      // every other suite is also writing to. `forkAgent` copies
+      // `process.env` at fork time, and the fork happens synchronously
+      // inside `createAgentHandle`, so this is set only across that call.
+      const workRoot = mkdtempSync(join(tmpdir(), 'trawlarr-cancel-tmp-'));
+      const previousTmp = process.env['TMPDIR'];
+      process.env['TMPDIR'] = workRoot;
+
+      const { port } = recordingDocuments();
+      const timers = fakeTimers();
+      const kills: { pid: number; signal: NodeJS.Signals }[] = [];
+      const handle = createAgentHandle({
+        id: 'w1',
+        documents: port,
+        onStep: () => {},
+        onHeartbeat: () => {},
+        onProgress: () => {},
+        onLog: () => {},
+        nowMs: () => Date.now(),
+        forkFn: () => forkAgent(AGENT_DIST),
+        killFn: recordingKill(kills),
+        setTimer: timers.setTimer,
+        clearTimer: timers.clearTimer,
+      });
+
+      if (previousTmp === undefined) delete process.env['TMPDIR'];
+      else process.env['TMPDIR'] = previousTmp;
+
+      const base = payloadFor(TRANSCODE_FLOW);
+      const running = handle.run({
+        ...base,
+        path: filePath,
+        sizeBytes: statSync(filePath).size,
+        originalSizeBytes: statSync(filePath).size,
+        probe,
+        library: { ...base.library, roots: [libDir] },
+      });
+      const outcome = running.then(
+        (report) => ({ report, failure: null }),
+        (error: unknown) => ({ report: null, failure: error as AgentFailure }),
+      );
+
+      const worker = handle.pid;
+      if (worker === undefined) throw new Error('The forked worker never got a pid.');
+      causedPids.push(worker);
+
+      // A real ffmpeg, spawned by the worker's own runner, encoding right now.
+      let ffmpeg = 0;
+      await until('ffmpeg to be running under the worker', () => {
+        ffmpeg = descendantsOf(worker).find((pid) => commOf(pid).includes('ffmpeg')) ?? 0;
+        return ffmpeg !== 0;
+      });
+      causedPids.push(ffmpeg);
+      expect(isAlive(ffmpeg)).toBe(true);
+      // The cleanup assertion at the end is only meaningful if there is
+      // something to clean up: the worker's scratch directory, holding the
+      // half-written encode, really is here while ffmpeg runs.
+      expect(
+        readdirSync(workRoot).filter((entry) => entry.startsWith('trawlarr-job-')),
+      ).toHaveLength(1);
+
+      handle.cancel();
+
+      // Liveness first, as ever: ffmpeg and the worker are both gone, and
+      // the timers were never advanced, so NOTHING here depends on a clock.
+      await until('the ffmpeg process to be gone', () => !isAlive(ffmpeg));
+      await until('the worker process to be gone', () => !isAlive(worker));
+      expect(isAlive(ffmpeg)).toBe(false);
+
+      // The escalation was never needed: no SIGTERM was sent, because the
+      // worker stopped when it was asked to. (The one signal that does go
+      // out is the post-exit group sweep — see `agent-handle.ts`.)
+      expect(kills.filter((kill) => kill.signal === 'SIGTERM')).toEqual([]);
+
+      const { report, failure } = await outcome;
+      expect(failure).toBeNull();
+      expect(report?.cancelled).toBe(true);
+
+      // Cleanup: no staged output and no work directory left behind, and the
+      // library file itself untouched — a cancelled job leaves nothing for
+      // the next run to trip over.
+      expect(readdirSync(workRoot)).toEqual([]);
+      expect(readdirSync(libDir)).toEqual(['movie.mkv']);
+    }, 120_000);
+  },
+);

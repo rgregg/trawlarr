@@ -5,13 +5,13 @@ import { describe, expect, it } from 'vitest';
 import type { DocumentPort, StepRecord } from '@trawlarr/engine';
 import type { JobPayload } from './job-payload.js';
 import type { JobReport } from './run-payload.js';
-import type { DaemonToAgent } from './protocol.js';
 import {
   AGENT_MODULE_URL,
   AgentFailure,
   createAgentHandle,
   type AgentHandleDeps,
 } from './agent-handle.js';
+import { fakeChild, fakeTimers, type FakeChild, type FakeTimers } from '../../test/fake-child.js';
 
 const FIXED = 1_700_000_000_000;
 
@@ -55,33 +55,6 @@ const step = (seq: number): StepRecord => ({
   error: null,
 });
 
-/**
- * A fake child process: every message the daemon sends is recorded, and
- * every message the agent would send is delivered by `emit`.
- *
- * There is no real process and therefore no timing anywhere in this file —
- * a lifecycle test that waits for a race to happen passes against broken
- * code most of the time, so every interleaving below is forced by hand.
- */
-const fakeChild = () => {
-  const toAgent: DaemonToAgent[] = [];
-  const listeners: Record<string, ((...args: unknown[]) => void)[]> = {};
-  return {
-    pid: 4242,
-    connected: true,
-    send: (message: DaemonToAgent) => {
-      toAgent.push(message);
-      return true;
-    },
-    on: (event: string, fn: (...args: unknown[]) => void) => {
-      (listeners[event] ??= []).push(fn);
-    },
-    kill: () => true,
-    emit: (event: string, ...args: unknown[]) => listeners[event]?.forEach((fn) => fn(...args)),
-    sent: toAgent,
-  };
-};
-
 const nullDocuments = (): DocumentPort => ({
   get: () => undefined,
   insert: () => {},
@@ -89,35 +62,10 @@ const nullDocuments = (): DocumentPort => ({
   removeOne: () => {},
 });
 
-const fakeTimers = () => {
-  const pending = new Map<number, { fn: () => void; ms: number }>();
-  let next = 0;
-  return {
-    setTimer: (fn: () => void, ms: number): unknown => {
-      next += 1;
-      pending.set(next, { fn, ms });
-      return next;
-    },
-    clearTimer: (handle: unknown): void => {
-      pending.delete(handle as number);
-    },
-    pending,
-    /** Fire every armed timer, exactly once each. */
-    fire: (): void => {
-      for (const [id, timer] of [...pending]) {
-        pending.delete(id);
-        timer.fn();
-      }
-    },
-  };
-};
-
-type Timers = ReturnType<typeof fakeTimers>;
-
 const depsFor = (
-  child: ReturnType<typeof fakeChild>,
+  child: FakeChild,
   over: Partial<AgentHandleDeps> = {},
-  timers: Timers = fakeTimers(),
+  timers: FakeTimers = fakeTimers(),
 ): AgentHandleDeps & { id: string } => ({
   id: 'w1',
   documents: nullDocuments(),
@@ -158,7 +106,7 @@ const settled = async (promise: Promise<unknown>): Promise<boolean> => {
 
 describe('createAgentHandle', () => {
   it('forks the agent module and exposes the child pid', () => {
-    const child = fakeChild();
+    const child = fakeChild(4242);
     const forked: string[] = [];
     const handle = createAgentHandle(
       depsFor(child, {
@@ -580,11 +528,16 @@ describe('createAgentHandle', () => {
     const running = handle.run(payload);
     child.emit('message', { type: 'ready', pid: 4242 });
     handle.cancel();
-    timers.fire();
+    timers.advance(30_000);
+    timers.advance(5_000);
 
     // Negative pid: the whole group led by the detached child, ffmpeg
-    // included — not just the node process we forked.
-    expect(signalled).toEqual([[-4242, 'SIGKILL']]);
+    // included — not just the node process we forked. The ladder itself is
+    // pinned in `cancel.test.ts`.
+    expect(signalled).toEqual([
+      [-4242, 'SIGTERM'],
+      [-4242, 'SIGKILL'],
+    ]);
 
     child.emit('exit', null, 'SIGKILL');
     const failure = await failureOf(running);
@@ -592,7 +545,7 @@ describe('createAgentHandle', () => {
     expect(failure.reported).toBe(false);
   });
 
-  it('disarms the grace timer when the cancelled agent exits on its own', () => {
+  it('disarms the grace timer when the cancelled agent exits on its own, sweeping the group once', () => {
     const child = fakeChild();
     const timers = fakeTimers();
     const signalled: [number, NodeJS.Signals][] = [];
@@ -604,10 +557,14 @@ describe('createAgentHandle', () => {
     child.emit('message', { type: 'ready', pid: 4242 });
     handle.cancel();
     child.emit('exit', 0, null);
-    timers.fire();
+    timers.advance(600_000);
 
+    // No TIMER survives the exit — nothing is signalled minutes later, at a
+    // pid the kernel may have handed to someone else. The one SIGKILL that
+    // does go out is synchronous with the exit, and it is there because a
+    // process group outlives its leader: see `cancel.test.ts`.
     expect(timers.pending.size).toBe(0);
-    expect(signalled).toEqual([]);
+    expect(signalled).toEqual([[-4242, 'SIGKILL']]);
   });
 
   it('never sends a job to an agent cancelled before it became ready', async () => {

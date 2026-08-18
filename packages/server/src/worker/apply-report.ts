@@ -301,3 +301,57 @@ export const applyThrownFailure = (input: {
 
   return { jobId, state, stepCount: jobRepo.getSteps(jobId).length, outcome };
 };
+
+/**
+ * Fold a job a HUMAN stopped into a requeue rather than a failed attempt.
+ *
+ * This is the one ending that is not evidence about the file. Every other
+ * way a run can end without a report — a plugin that threw, a child that
+ * vanished, ffmpeg exiting non-zero — says something about whether this
+ * file can converge, so it goes through `applyStall`, which increments
+ * `attemptCount` and backs the file off. Cancellation says something about
+ * the OPERATOR: they wanted the machine quiet, or the wrong flow was
+ * attached, or the box was needed for something else.
+ *
+ * Counting it as an attempt would be actively harmful, because `applyStall`
+ * is not merely cosmetic bookkeeping: attempts accumulate toward the
+ * `failed` terminal state, and nothing but a manual `requeue` leaves
+ * `failed`. Three interrupted evenings would therefore push a perfectly
+ * healthy file into a state a human has to dig it out of. So this uses
+ * `mediaFileRepo.requeue` — `applyRequeue`, the same fold a manual requeue
+ * performs — which returns the row to `queued` with `attemptCount` and
+ * `holdUntilMs` cleared: the file is eligible again the moment a worker is
+ * free, exactly as if it had never been claimed.
+ *
+ * The `job` row still closes, as `cancelled` rather than `failed`. A
+ * cancelled attempt DID happen and its steps are worth keeping, but calling
+ * it a failure in the one place an operator reads job history would blame
+ * the file for something they did.
+ *
+ * Note what this does NOT need to clean up: the staged output. It lives in
+ * the WORKER's temporary work directory, which `runPayload` removes in its
+ * own `finally` as the cancelled run unwinds, and the destination
+ * reservation is released by the same unwind — neither is reachable from
+ * this process, and neither is recorded in the database, so a requeued file
+ * has nothing left behind pointing at a half-written encode.
+ */
+export const applyJobCancelled = (input: {
+  db: Db;
+  payload: JobPayload;
+  nowMs: () => number;
+}): AppliedOutcome => {
+  const mediaFileRepo = createMediaFileRepo(input.db);
+  // Throws for a file that no longer exists, exactly as `requireRow` would:
+  // a cancel for a row that has been deleted is a bug worth surfacing, not
+  // something to swallow.
+  mediaFileRepo.requeue(input.payload.fileId);
+
+  createJobRepo(input.db).finish({
+    jobId: input.payload.jobId,
+    state: 'cancelled',
+    outcome: 'Cancelled: the job was stopped by an operator, so the file was requeued unpenalised.',
+    nowMs: input.nowMs(),
+  });
+
+  return { state: requireRow(input.db, input.payload.fileId).state };
+};

@@ -1,6 +1,10 @@
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { killProcessGroup } from '@trawlarr/engine';
+import {
+  killProcessGroup,
+  trackProcessGroupLeader,
+  untrackProcessGroupLeader,
+} from '@trawlarr/engine';
 import type { ChildProcess } from 'node:child_process';
 import type { DocumentPort, KillFn, StepRecord } from '@trawlarr/engine';
 import type { JobPayload } from './job-payload.js';
@@ -11,8 +15,17 @@ import { PROTOCOL_VERSION, PROTOCOL_VERSION_ENV, parseAgentMessage } from './pro
 /** Where the built agent entry point lives, relative to this module. */
 export const AGENT_MODULE_URL: URL = new URL('./agent.js', import.meta.url);
 
-/** How long a cancelled worker gets to exit cleanly before its group is killed. */
+/** How long a cancelled worker gets to exit cleanly before its group is signalled. */
 const DEFAULT_CANCEL_GRACE_MS = 30_000;
+
+/**
+ * How long the worker's group gets to die of SIGTERM before SIGKILL.
+ *
+ * Short on purpose: by the time this timer is armed the worker has already
+ * had the full cancel grace period AND a polite signal, so the only thing
+ * still running is something that is not going to stop on request.
+ */
+const DEFAULT_KILL_GRACE_MS = 5_000;
 
 /**
  * Why a run did not produce a report.
@@ -83,8 +96,10 @@ export interface AgentHandleDeps {
   forkFn?: (modulePath: string) => ChildProcess;
   /** Seam for tests: substitute the kill used on this worker's group. */
   killFn?: KillFn;
-  /** How long a cancelled worker gets to exit cleanly before its group is killed. */
+  /** How long a cancelled worker gets to exit cleanly before its group is signalled. */
   cancelGraceMs?: number;
+  /** How long the worker's group gets to die of SIGTERM before SIGKILL. */
+  killGraceMs?: number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -128,6 +143,7 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
   const setTimer = input.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearTimer = input.clearTimer ?? ((handle: unknown) => clearTimeout(handle as never));
   const cancelGraceMs = input.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
+  const killGraceMs = input.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   const child = (input.forkFn ?? forkAgent)(fileURLToPath(AGENT_MODULE_URL));
 
   let ready = false;
@@ -139,6 +155,8 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     | null = null;
   let started = false;
   let graceTimer: unknown = null;
+  /** The pid the agent reported for itself, used when the fork's own is unknown. */
+  let reportedPid: number | undefined;
 
   let resolveExited: (code: number | null) => void = () => {};
   const exited = new Promise<number | null>((resolve) => {
@@ -170,8 +188,34 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     graceTimer = null;
   };
 
-  const killGroup = (): void => {
-    killProcessGroup(child.pid, 'SIGKILL', input.killFn);
+  /**
+   * The pid whose GROUP is signalled.
+   *
+   * The fork's own pid is preferred: it is the daemon's own knowledge of
+   * what it created, whereas `ready.pid` arrives on a channel a plugin can
+   * write to. The reported pid is the fallback for the case where the fork
+   * never surfaced one locally.
+   */
+  const groupPid = (): number | undefined => child.pid ?? reportedPid;
+
+  /**
+   * Signal the worker's whole process GROUP, never the bare pid.
+   *
+   * `detached: true` made the child a group leader, so its descendants —
+   * including an ffmpeg a plugin spawned ITSELF, outside our runner —
+   * inherit that group. `kill(pid)` reaps the node process and leaves that
+   * transcode running with nothing tracking it; `kill(-pid)` takes the
+   * whole tree. `killProcessGroup` owns the negation AND the two guards
+   * (pgid 0 is our own group, pgid 1 is everything we may signal), which is
+   * why this never writes `process.kill(-pid)` for itself.
+   */
+  const killGroup = (signal: NodeJS.Signals): void => {
+    killProcessGroup(groupPid(), signal, input.killFn);
+  };
+
+  /** Give up tracking this worker's group; its processes are gone. */
+  const forgetGroup = (): void => {
+    untrackProcessGroupLeader(groupPid());
   };
 
   const answerDocRequest = (request: Extract<AgentToDaemon, { type: 'doc-request' }>): void => {
@@ -233,6 +277,13 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     switch (message.type) {
       case 'ready':
         ready = true;
+        reportedPid = message.pid;
+        // From here the daemon's own fatal signals (and its exit) take this
+        // worker's group down with them: a detached child no longer dies of
+        // the SIGINT a terminal delivers to the foreground group, so Ctrl-C
+        // would otherwise leave a transcode running with nothing left to
+        // record it.
+        trackProcessGroupLeader(groupPid(), input.killFn);
         if (cancelled) {
           post({ type: 'cancel' });
           return;
@@ -298,6 +349,16 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
   child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
     gone = true;
     disarmGrace();
+    // A CANCELLED worker's descendants can outlive it: a plugin that spawned
+    // ffmpeg itself, outside our runner, left a process in this group that no
+    // longer has a parent watching it, and the group survives its leader. So
+    // the last rung of the ladder is delivered here, synchronously with the
+    // exit, rather than being dropped along with the grace timer — otherwise
+    // "the worker died of our SIGTERM" silently becomes "the transcode is
+    // still running and nothing is tracking it". `killProcessGroup` swallows
+    // the ESRCH of an already-empty group, which is the common case.
+    if (cancelled) killGroup('SIGKILL');
+    forgetGroup();
     resolveExited(code ?? null);
     finish({ ok: false, error: vanished(code, signal) });
   });
@@ -305,6 +366,7 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
   child.on('error', (error: Error) => {
     gone = true;
     disarmGrace();
+    forgetGroup();
     finish({
       ok: false,
       error: new AgentFailure(`Worker ${input.id} could not be run: ${error.message}`, {
@@ -360,18 +422,29 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
       // the cancel itself.
       if (ready) post({ type: 'cancel' });
       // A plugin can ignore an abort, block the event loop, or hold an
-      // ffmpeg child that will not die. The grace timer is what guarantees
-      // the worker slot comes back regardless. Task 6 owns the policy
-      // around this; the mechanism is here so it cannot be forgotten.
+      // ffmpeg child that will not die — and ffmpeg itself legitimately
+      // ignores a stop request while it finalises a container. So the
+      // escalation is a LADDER, with nothing skipped: ask, then SIGTERM the
+      // group after the cancel grace period, then SIGKILL the group after a
+      // second, shorter one. Both rungs are timers rather than awaits,
+      // because the whole point is that the process being waited on may
+      // never do anything again.
       graceTimer = setTimer(() => {
-        graceTimer = null;
-        killGroup();
+        killGroup('SIGTERM');
+        graceTimer = setTimer(() => {
+          graceTimer = null;
+          killGroup('SIGKILL');
+        }, killGraceMs);
       }, cancelGraceMs);
     },
 
     kill: (): void => {
+      // The operator-level hard stop, and the daemon's own last resort: no
+      // ladder, no grace, because every caller of this has already decided
+      // that waiting is not on the table.
       disarmGrace();
-      killGroup();
+      killGroup('SIGKILL');
+      forgetGroup();
     },
   };
 };
