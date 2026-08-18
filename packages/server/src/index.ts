@@ -19,4 +19,9 @@ export * from './worker/job-payload.js';
 export * from './worker/run-payload.js';
 export * from './worker/apply-report.js';
 export * from './worker/run-job.js';
+// The agent ENTRY POINT (`worker/agent.js`) is deliberately absent: importing
+// it starts a message pump. Only its protocol and the daemon's handle for it
+// belong in the barrel.
+export * from './worker/protocol.js';
+export * from './worker/agent-handle.js';
 export * from './worker/loop.js';
