@@ -6,6 +6,7 @@ export * from './db/library-repo.js';
 export * from './db/plugin-document-repo.js';
 export * from './db/flow-repo.js';
 export * from './db/job-repo.js';
+export * from './db/settings-repo.js';
 export * from './fs/partial-hash.js';
 export * from './fs/path-contains.js';
 export * from './fs/walk.js';
