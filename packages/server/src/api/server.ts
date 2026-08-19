@@ -282,6 +282,10 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
  * (default `127.0.0.1`) and `port`. The default matters: binding `0.0.0.0`
  * would expose an API whose only authentication is a shared key to the whole
  * local network on first run, before the operator has done anything at all.
+ *
+ * The live event stream shares this server rather than getting one of its
+ * own: `attachWebSocket` (`api/ws.ts`) mounts `/api/v1/events` on the same
+ * port, so there is one thing to expose and one thing to reverse-proxy.
  */
 export const createApiServer = (ctx: ApiContext, options?: CreateApiHandlerOptions): Server =>
   createServer(createApiHandler(ctx, options));

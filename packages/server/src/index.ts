@@ -36,4 +36,5 @@ export * from './flow/dry-run.js';
 export * from './api/router.js';
 export * from './api/auth.js';
 export * from './api/server.js';
+export * from './api/ws.js';
 export * from './api/routes/nodes.js';
