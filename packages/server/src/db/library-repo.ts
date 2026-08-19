@@ -31,8 +31,38 @@ export interface CreateLibraryInput {
   nowMs: number;
 }
 
+/**
+ * The fields an existing library can be edited through. Every one is
+ * OPTIONAL and absence means "leave it alone", so a client that knows about
+ * three fields cannot blank the two it has never heard of — the failure mode
+ * of a whole-record PUT against a schema that keeps growing.
+ */
+export interface UpdateLibraryInput {
+  id: string;
+  name?: string;
+  roots?: string[];
+  extensions?: string[];
+  companionExtensions?: string[];
+  stagingDir?: string | null;
+  trashDir?: string | null;
+  flowId?: string | null;
+  allowHardlinked?: boolean;
+  userVariables?: Record<string, string>;
+}
+
 export interface LibraryRepo {
   create(input: CreateLibraryInput): LibraryRecord;
+  /**
+   * Edit an existing library, re-running EVERY check `create` runs on the
+   * fields being changed — root overlap against the other libraries (spec
+   * 4.1 requires the re-check "when a root is edited"), and the
+   * staging/trash absolute-path and root-containment rules. An edit path
+   * that skipped them would be a second, unchecked door into exactly the
+   * states creation refuses.
+   */
+  update(input: UpdateLibraryInput): LibraryRecord;
+  /** Returns false when no such library existed. Cascades its files and their jobs. */
+  remove(id: string): boolean;
   getById(id: string): LibraryRecord | null;
   getByName(name: string): LibraryRecord | null;
   list(): LibraryRecord[];
@@ -157,6 +187,60 @@ const toRecord = (row: LibraryRow): LibraryRecord => ({
   createdAt: row.created_at,
 });
 
+/**
+ * Every root/reserved-directory rule `create` enforces, in one place so
+ * `update` cannot enforce a subset of them. `excludeLibraryId` is what lets
+ * an edit compare against the OTHER libraries without a library's own roots
+ * overlapping themselves.
+ */
+const validateRootsAndDirs = (input: {
+  roots: string[];
+  stagingDir: string | null;
+  trashDir: string | null;
+  existing: LibraryRecord[];
+  excludeLibraryId: string | null;
+}): { roots: string[]; stagingDir: string | null; trashDir: string | null } => {
+  const roots = input.roots.map((root) => resolve(root));
+
+  for (let i = 0; i < roots.length; i += 1) {
+    for (let j = i + 1; j < roots.length; j += 1) {
+      if (overlaps(roots[i]!, roots[j]!)) throw new OverlappingRootsError(roots[i]!, roots[j]!);
+    }
+  }
+  for (const existing of input.existing) {
+    if (existing.id === input.excludeLibraryId) continue;
+    for (const existingRoot of existing.roots) {
+      for (const root of roots) {
+        if (overlaps(existingRoot, root)) throw new OverlappingRootsError(existingRoot, root);
+      }
+    }
+  }
+
+  // Validated (and normalised) before the overlap check below, so a
+  // relative path reports "must be absolute" rather than a confusing
+  // containment result derived from a cwd the user never chose.
+  const stagingDir =
+    input.stagingDir != null ? requireAbsolute('stagingDir', input.stagingDir) : null;
+  const trashDir = input.trashDir != null ? requireAbsolute('trashDir', input.trashDir) : null;
+
+  // Staging/trash *inside* a root is the default shape and must stay
+  // allowed; it's a staging/trash dir that equals or CONTAINS a root
+  // that silently prunes the root itself out of every scan.
+  for (const [kind, dir] of [
+    ['stagingDir', stagingDir],
+    ['trashDir', trashDir],
+  ] as const) {
+    if (dir === null) continue;
+    for (const root of roots) {
+      if (pathContains(dir, root)) {
+        throw new ReservedDirectoryOverlapsRootError({ kind, dir, root });
+      }
+    }
+  }
+
+  return { roots, stagingDir, trashDir };
+};
+
 export const createLibraryRepo = (db: Db): LibraryRepo => {
   const selectById = db.prepare(`SELECT * FROM library WHERE id = ?`);
   const selectByName = db.prepare(`SELECT * FROM library WHERE name = ?`);
@@ -174,42 +258,14 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
       if (input.roots.length === 0) {
         throw new Error(`Library "${input.name}" needs at least one root directory.`);
       }
-      const roots = input.roots.map((root) => resolve(root));
 
-      for (let i = 0; i < roots.length; i += 1) {
-        for (let j = i + 1; j < roots.length; j += 1) {
-          if (overlaps(roots[i]!, roots[j]!)) throw new OverlappingRootsError(roots[i]!, roots[j]!);
-        }
-      }
-      for (const existing of list()) {
-        for (const existingRoot of existing.roots) {
-          for (const root of roots) {
-            if (overlaps(existingRoot, root)) throw new OverlappingRootsError(existingRoot, root);
-          }
-        }
-      }
-
-      // Validated (and normalised) before the overlap check below, so a
-      // relative path reports "must be absolute" rather than a confusing
-      // containment result derived from a cwd the user never chose.
-      const stagingDir =
-        input.stagingDir != null ? requireAbsolute('stagingDir', input.stagingDir) : null;
-      const trashDir = input.trashDir != null ? requireAbsolute('trashDir', input.trashDir) : null;
-
-      // Staging/trash *inside* a root is the default shape and must stay
-      // allowed; it's a staging/trash dir that equals or CONTAINS a root
-      // that silently prunes the root itself out of every scan.
-      for (const [kind, dir] of [
-        ['stagingDir', stagingDir],
-        ['trashDir', trashDir],
-      ] as const) {
-        if (dir === null) continue;
-        for (const root of roots) {
-          if (pathContains(dir, root)) {
-            throw new ReservedDirectoryOverlapsRootError({ kind, dir, root });
-          }
-        }
-      }
+      const { roots, stagingDir, trashDir } = validateRootsAndDirs({
+        roots: input.roots,
+        stagingDir: input.stagingDir ?? null,
+        trashDir: input.trashDir ?? null,
+        existing: list(),
+        excludeLibraryId: null,
+      });
 
       const id = randomUUID();
       db.prepare(
@@ -232,6 +288,53 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
       const created = get(id);
       if (created === null) throw new Error(`Library ${id} vanished immediately after insert.`);
       return created;
+    },
+
+    update(input) {
+      const current = get(input.id);
+      if (current === null) throw new Error(`Unknown library: ${input.id}`);
+
+      const nextRoots = input.roots ?? current.roots;
+      if (nextRoots.length === 0) {
+        throw new Error(
+          `Library "${input.name ?? current.name}" needs at least one root directory.`,
+        );
+      }
+
+      const { roots, stagingDir, trashDir } = validateRootsAndDirs({
+        roots: nextRoots,
+        stagingDir: input.stagingDir === undefined ? current.stagingDir : input.stagingDir,
+        trashDir: input.trashDir === undefined ? current.trashDir : input.trashDir,
+        existing: list(),
+        excludeLibraryId: current.id,
+      });
+
+      db.prepare(
+        `UPDATE library
+            SET name = ?, roots_json = ?, extensions_json = ?, companion_extensions_json = ?,
+                staging_dir = ?, trash_dir = ?, flow_id = ?, allow_hardlinked = ?,
+                user_variables_json = ?
+          WHERE id = ?`,
+      ).run(
+        input.name ?? current.name,
+        JSON.stringify(roots),
+        JSON.stringify(input.extensions ?? current.extensions),
+        JSON.stringify(input.companionExtensions ?? current.companionExtensions),
+        stagingDir,
+        trashDir,
+        input.flowId === undefined ? current.flowId : input.flowId,
+        (input.allowHardlinked ?? current.allowHardlinked) ? 1 : 0,
+        JSON.stringify(input.userVariables ?? current.userVariables),
+        current.id,
+      );
+
+      const updated = get(current.id);
+      if (updated === null) throw new Error(`Library ${current.id} vanished during update.`);
+      return updated;
+    },
+
+    remove(id) {
+      return db.prepare(`DELETE FROM library WHERE id = ?`).run(id).changes > 0;
     },
 
     getById: get,

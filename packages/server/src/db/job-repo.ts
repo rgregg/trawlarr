@@ -76,12 +76,34 @@ export interface HeartbeatInput {
   nowMs: number;
 }
 
+/**
+ * A page of job rows plus the TOTAL the filter matched.
+ *
+ * The total is what makes a page navigable: a client that only gets the rows
+ * cannot tell "this is the last page" from "the page size happened to match",
+ * and a real library's job history is tens of thousands of rows.
+ */
+export interface JobPage {
+  total: number;
+  items: JobRow[];
+}
+
+export interface QueryJobsInput {
+  fileId?: string;
+  state?: string;
+  limit: number;
+  offset: number;
+}
+
 export interface JobRepo {
   start(input: StartJobInput): string;
   recordStep(input: RecordStepInput): void;
   finish(input: FinishJobInput): void;
   heartbeat(input: HeartbeatInput): void;
   listForFile(fileId: string): JobRow[];
+  getById(jobId: string): JobRow | null;
+  /** Filtered, paginated job history, newest first. */
+  query(input: QueryJobsInput): JobPage;
   getSteps(jobId: string): JobStepRow[];
 }
 
@@ -223,6 +245,34 @@ export const createJobRepo = (db: Db): JobRepo => {
 
     listForFile(fileId) {
       return (selectForFile.all(fileId) as JobRowRaw[]).map(toJobRow);
+    },
+
+    getById(jobId) {
+      const row = db.prepare(`SELECT * FROM job WHERE id = ?`).get(jobId) as JobRowRaw | undefined;
+      return row === undefined ? null : toJobRow(row);
+    },
+
+    query(input) {
+      // Both statements are built from the SAME where clause, so the total
+      // can never describe a different filter than the rows do.
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (input.fileId !== undefined) {
+        where.push(`file_id = ?`);
+        params.push(input.fileId);
+      }
+      if (input.state !== undefined) {
+        where.push(`state = ?`);
+        params.push(input.state);
+      }
+      const clause = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`;
+      const total = (
+        db.prepare(`SELECT COUNT(*) AS c FROM job ${clause}`).get(...params) as { c: number }
+      ).c;
+      const items = db
+        .prepare(`SELECT * FROM job ${clause} ORDER BY started_at DESC, id ASC LIMIT ? OFFSET ?`)
+        .all(...params, input.limit, input.offset) as JobRowRaw[];
+      return { total, items: items.map(toJobRow) };
     },
 
     getSteps(jobId) {

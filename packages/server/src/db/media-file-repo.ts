@@ -89,6 +89,22 @@ export interface ClaimedFile {
   path: string;
 }
 
+export interface QueryFilesInput {
+  libraryId?: string;
+  state?: FileState;
+  /** true: only rows whose file is confirmed gone. false: only rows whose file is present. */
+  missing?: boolean;
+  /** Substring match on the row's path, matched literally (LIKE wildcards are escaped). */
+  q?: string;
+  limit: number;
+  offset: number;
+}
+
+export interface MediaFilePage {
+  total: number;
+  items: MediaFileRow[];
+}
+
 export interface UpdateAfterRunInput {
   fileId: string;
   identity: IdentityCandidate;
@@ -171,6 +187,16 @@ export interface MediaFileRepo {
    */
   updateAfterRun(input: UpdateAfterRunInput): void;
   listByLibrary(input: { libraryId: string; state?: FileState }): MediaFileRow[];
+  /**
+   * Filtered, paginated rows plus the TOTAL the filter matched.
+   *
+   * The only listing an API should ever expose: a real library is 100,000
+   * rows, and `listByLibrary` (which returns all of them) is a query for
+   * batch code that is about to iterate, not for a request/response boundary.
+   * `total` is separate from the page so a client can tell "last page" from
+   * "the page size happened to match".
+   */
+  query(input: QueryFilesInput): MediaFilePage;
   /**
    * The library paths of rows that are `running` RIGHT NOW — the files some
    * worker has claimed and may be part-way through replacing.
@@ -594,6 +620,38 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       return db
         .prepare(`SELECT * FROM media_file WHERE library_id = ? AND state = ?`)
         .all(input.libraryId, input.state) as MediaFileRow[];
+    },
+
+    query(input) {
+      // One where clause, used by both statements: a total describing a
+      // different filter than the rows is worse than no total at all.
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (input.libraryId !== undefined) {
+        where.push(`library_id = ?`);
+        params.push(input.libraryId);
+      }
+      if (input.state !== undefined) {
+        where.push(`state = ?`);
+        params.push(input.state);
+      }
+      if (input.missing !== undefined) {
+        where.push(input.missing ? `missing_since_ms IS NOT NULL` : `missing_since_ms IS NULL`);
+      }
+      if (input.q !== undefined && input.q !== '') {
+        // A user searching for a literal '%' or '_' in a path (both legal in
+        // a filename) must not silently get a wildcard match.
+        where.push(`path LIKE ? ESCAPE '\\'`);
+        params.push(`%${input.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      }
+      const clause = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`;
+      const total = (
+        db.prepare(`SELECT COUNT(*) AS c FROM media_file ${clause}`).get(...params) as { c: number }
+      ).c;
+      const items = db
+        .prepare(`SELECT * FROM media_file ${clause} ORDER BY path ASC, id ASC LIMIT ? OFFSET ?`)
+        .all(...params, input.limit, input.offset) as MediaFileRow[];
+      return { total, items };
     },
 
     listRunningPaths(libraryId) {

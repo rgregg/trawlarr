@@ -56,6 +56,18 @@ export interface BuildJobPayloadInput {
   db: Db;
   claimed: ClaimedFile;
   jobId: string;
+  /**
+   * Run THIS flow instead of the one the library is attached to.
+   *
+   * The only caller is the dry-run endpoint, which is asked to walk a
+   * specific flow against a specific file — including a flow the library is
+   * not (yet) using, and including a library with no flow attached at all,
+   * which is exactly the case someone reaches for a dry run to get out of.
+   * A real job never sets this: the flow a library converges against is the
+   * library's own, and letting a caller substitute one would make the
+   * `flow_hash` recorded on the job row a fiction.
+   */
+  flow?: { id: string; definition: FlowDefinition; definitionHash: string };
   workerClass: WorkerClass;
   hardwareType: HardwareType;
   ffmpegPath: string;
@@ -79,14 +91,18 @@ export const buildJobPayload = (input: BuildJobPayloadInput): JobPayload => {
   if (library === null) {
     throw new Error(`Claimed file's library ${input.claimed.libraryId} does not exist.`);
   }
-  if (library.flowId === null) {
-    throw new Error(`Library "${library.name}" has no flow attached; nothing to run.`);
-  }
 
-  const flow = createFlowRepo(input.db).getById(library.flowId);
-  if (flow === null) {
-    throw new Error(`Library "${library.name}" references unknown flow ${library.flowId}.`);
-  }
+  const flow = ((): { id: string; definition: FlowDefinition; definitionHash: string } => {
+    if (input.flow !== undefined) return input.flow;
+    if (library.flowId === null) {
+      throw new Error(`Library "${library.name}" has no flow attached; nothing to run.`);
+    }
+    const attached = createFlowRepo(input.db).getById(library.flowId);
+    if (attached === null) {
+      throw new Error(`Library "${library.name}" references unknown flow ${library.flowId}.`);
+    }
+    return attached;
+  })();
 
   const probe = row.probe_json === null ? null : (JSON.parse(row.probe_json) as ProbeData);
   if (probe === null) {

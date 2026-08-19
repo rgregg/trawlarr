@@ -8,11 +8,7 @@ import { FlowValidationError, type FileState, type FlowDefinition } from '@trawl
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo, DEFAULT_EXTENSIONS, type LibraryRecord } from './db/library-repo.js';
-import {
-  DEFAULT_TRASH_RETENTION_DAYS,
-  purgeTrash,
-  trashRetentionDaysForFlow,
-} from './library/trash.js';
+import { sweepLibraryTrash as sweepTrashForLibrary } from './library/trash-sweep.js';
 import { createFlowRepo } from './db/flow-repo.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
@@ -420,14 +416,16 @@ const sweepLibraryTrash = async (
   library: LibraryRecord,
   options: { days?: number; dryRun?: boolean; quiet?: boolean },
 ): Promise<void> => {
-  const flow = library.flowId === null ? null : createFlowRepo(db).getById(library.flowId);
-  const retentionDays =
-    options.days ??
-    (flow === null ? DEFAULT_TRASH_RETENTION_DAYS : trashRetentionDaysForFlow(flow.definition));
-
-  const summary = await purgeTrash({
+  // The sweep itself — including how the retention is resolved from the
+  // library's own flow — lives in `library/trash-sweep.ts`, shared verbatim
+  // with `POST /system/maintenance/trash-purge`. This function is only the
+  // CLI's presentation of what that returned; a second copy of the retention
+  // rule here is how the two would eventually disagree about when a user's
+  // only remaining copy of a file may be deleted.
+  const { retentionDays, summary } = await sweepTrashForLibrary({
+    db,
     library,
-    retentionDays,
+    days: options.days,
     nowMs: Date.now(),
     dryRun: options.dryRun,
   });

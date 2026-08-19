@@ -28,6 +28,17 @@ export interface FlowRepo {
     nowMs: number;
   }): FlowRecord;
   update(input: { id: string; definition: FlowDefinition; nowMs: number }): FlowRecord;
+  /**
+   * Returns false when no such flow existed.
+   *
+   * `library.flow_id` is `ON DELETE SET NULL`, so a library pointed at a
+   * deleted flow is DETACHED rather than left pointing at nothing — which is
+   * exactly the state `checkLibraryHealth` pauses with a stated reason.
+   * Callers that delete a flow are expected to re-check library health
+   * immediately, so an operator learns their library stopped converging from
+   * the library's own `pausedReason` rather than from a silent backlog.
+   */
+  remove(id: string): boolean;
   getById(id: string): FlowRecord | null;
   getByName(name: string): FlowRecord | null;
   list(): FlowRecord[];
@@ -125,6 +136,10 @@ export const createFlowRepo = (
       const updated = get(input.id);
       if (updated === null) throw new Error(`Flow ${input.id} vanished immediately after update.`);
       return updated;
+    },
+
+    remove(id) {
+      return db.prepare(`DELETE FROM flow WHERE id = ?`).run(id).changes > 0;
     },
 
     getById: get,

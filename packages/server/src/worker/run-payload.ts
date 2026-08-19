@@ -130,7 +130,15 @@ const containerOf = (path: string): string => extname(path).replace('.', '').toL
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-const staticConfigVars = (input: { ffmpegPath: string }): ConfigVars => ({
+/**
+ * The `configVars` block every plugin invocation sees, static apart from the
+ * ffmpeg path.
+ *
+ * Exported because the dry-run harness builds the same plugin arguments this
+ * one does — a dry run whose plugins saw a DIFFERENT config block than a real
+ * run would be answering a question nobody asked.
+ */
+export const pluginConfigVars = (input: { ffmpegPath: string }): ConfigVars => ({
   config: {
     nodeID: 'server',
     nodeName: 'server',
@@ -215,7 +223,7 @@ export const runPayload = async (input: {
       discoveredAtMs: payload.discoveredAtMs,
     });
 
-    const configVars = staticConfigVars({ ffmpegPath: payload.ffmpegPath });
+    const configVars = pluginConfigVars({ ffmpegPath: payload.ffmpegPath });
     // The document store is a PORT, not a repository: in the daemon it is
     // the same sqlite-backed store every invocation of this job (and every
     // future job for this file) shares, so a plugin's skip-list survives
