@@ -512,3 +512,132 @@ drain was making no progress and stops, leaving the rest of the queue for the ne
   unreachable and a tolerant comparison false-flagged metadata-only flows.
 - **§2.10** describes contract-level reporting and a warning when a plugin's `requiresVersion`
   exceeds ours. Not implemented.
+
+---
+
+## P2b — the daemon phase, and what its end-to-end test found
+
+Written at the end of P2b (`trawlarr daemon`: settings, schedule windows, forked worker agents,
+supervisor, watcher, scan coordinator, library health, HTTP API, WebSocket, lock file, daemon-aware
+CLI). This section is the record the next phase should read before relitigating anything here.
+
+### Constraints this phase DISCHARGED
+
+- **"Nothing purges the trash"** (recorded above) is discharged for a running daemon.
+  `sweepLibraryTrash` is called on a `TRASH_PURGE_INTERVAL_MS` (24h) re-armed timer in `daemon.ts`,
+  per library, sequentially, against each library's own flow-declared `trashRetentionDays` — the same
+  sweep `trawlarr run` performs, so the retention rule has one definition and not two. One library
+  whose trash directory is unreachable is reported and skipped; it never costs the others their
+  sweep. Note what is NOT discharged: a deployment that never runs the daemon and only ever invokes
+  `trawlarr run` still sweeps only when `run` is invoked.
+- **"Stall detection has no watcher."** `reapStalled` now runs on a `REAP_INTERVAL_MS` (1h) re-armed
+  timer, so a row left `running` by a worker that vanished (OOM killer, `process.exit()` in a plugin,
+  a host reboot) returns to the queue without a human noticing it. Both timers are re-armed in a
+  `finally`, deliberately: one failed pass costs one interval, whereas a timer that died costs
+  everything for ever and looks exactly like a healthy idle system.
+- **"Worker cancellation needs a process group once workers become child processes."** Discharged in
+  Task 6. Workers are forked `detached: true`, so a worker's pgid is its own pid and a plugin's own
+  ffmpeg grandchildren inherit it; cancellation asks the worker to stop, then signals the whole GROUP
+  (SIGTERM, then SIGKILL after a short grace). The daemon's `stop()` drains with a deadline
+  (`DEFAULT_DRAIN_DEADLINE_MS`, 5 min) and cancels through that same path past it — an unbounded wait
+  would make `systemctl stop` hang for hours, and no wait at all would leave an ffmpeg writing into a
+  library with no daemon left to record what it did.
+
+### Constraints that REMAIN OPEN after P2b
+
+- **Absorbed plugin changes still do not round-trip `container` or `lastPluginDetails`** (see the
+  section above). Untouched by this phase.
+- **`job.log_path` is still NULL.** There are no per-job log files on disk; what exists is each
+  step's `logExcerpt` in `job_step` and the live `job.log` frames on the WebSocket.
+  `GET /jobs/:id/log` therefore returns a NAMED 501 rather than a 404, so a client author does not go
+  hunting for a path they already got right.
+- **Contract-level reporting (spec §2.10) is still unimplemented.** `GET /system/version` reports
+  `contractLevel: null` with a note saying why: a client that read a level trawlarr does not honour
+  would silently enable plugins this build cannot run correctly.
+- **Hardware is declared, never detected** (`settings.hardware.available`). Declaring `nvenc` on a
+  machine without one produces failing jobs.
+
+### The four design decisions of this phase, and why
+
+**1. Worker concurrency is process concurrency, and the claim happens in the daemon.** A worker is a
+forked child process that never opens the database: the daemon claims the file (committing `running`),
+builds a self-contained payload, forks, and folds the returned report back in. The reason is not
+isolation for its own sake — it is that the scanner's in-flight-output guard depends on `running`
+being committed strictly BEFORE any replacement byte can land on disk, and on `listRunningPaths` being
+queried fresh per walked file. Both survive N workers by construction under this arrangement, and the
+same payload/report split becomes the remote-node transport in v1.2 with no second code path. The
+corollary is that every ending of a run must arrive at the daemon as a value: a child that vanished
+authored nothing, so only the daemon can write that outcome, and a row left `running` by a dead worker
+is a file nothing will ever claim again.
+
+**2. One writer, advertised in a lock file; the CLI becomes a client.** A daemon that owns a data
+directory writes `<data-dir>/daemon.json` with `open(path, 'wx')` and removes it on exit. Every CLI
+invocation resolves that file first: no file (or a file whose pid is dead — a SIGKILLed daemon leaves
+one behind) means open the database directly, exactly as before; a live pid means route every command
+through the API with that file's key and never open the database at all. `run` is the one command that
+cannot be delegated — it IS a drain, and the daemon is already draining — so it is refused with a
+message naming the daemon's pid and its API. The lock is released after the HTTP server is closed and
+before the database is, so a CLI that read it a moment ago finds either a daemon that still answers or
+no lock at all, never a lock pointing at a port that has stopped listening.
+
+**3. A schedule window sets the target pool size; it never interrupts work in progress.** When the
+target falls the supervisor stops starting work and lets running workers retire on completion. The
+asymmetry decides it: finishing costs at most one job's remaining runtime past the boundary, once,
+while cancelling costs the whole elapsed runtime and pays it again later — in exactly the hours the
+window was configured to protect. A user who wants a hard stop has `POST /jobs/:id/cancel`, which is
+explicit, per-job, requeues the file unpenalised, and leaves an audit trail. This is asserted directly
+by the daemon end-to-end suite: the window is closed to zero workers while a transcode is running, and
+that job is required to finish `succeeded`.
+
+**4. Every scan trigger goes through one code path, and the periodic rescan is not optional.** A full
+walk, a watch event and the interval all end in `ScanCoordinator.request()`, which calls `scanLibrary`
+and nothing else — deliberately with no "just this one file" fast path, however much cheaper it looks,
+because identity resolution, the in-flight-output guard, signature recomputation and reconciliation are
+one algorithm and a second copy of it on the newest, least-tested path is the copy that will be wrong.
+A watch event is a HINT that something moved; the walk decides what it means. Watch events settle per
+LIBRARY (not per file) for `scan.settleMs`, so a scan happens once the tree has been quiet rather than
+in the middle of a download; and the interval rescan exists because chokidar over NFS/SMB drops events
+— the mounts this product runs on are exactly the ones where it does — which makes the interval the
+correctness backstop rather than redundancy.
+
+### What the end-to-end test found
+
+`packages/server/test/daemon-end-to-end.test.ts` drives a real `node dist/cli.js daemon` process,
+configured only through its own HTTP API, and never issues `scan` or `run` after it starts. It found
+one real defect and two latency gaps of the same shape; all three are fixed.
+
+- **A library created through the API was never WATCHED.** Filesystem watchers were derived once, in
+  `ScanCoordinator.start()`, over the libraries that existed at that instant — and since the API is
+  the only way a UI creates a library, every library created through it had no watch until the daemon
+  was restarted. A file dropped into such a library was found only by the periodic rescan, up to an
+  hour later, with nothing anywhere saying why; and because the rescan does eventually find it, the
+  symptom is a mysterious delay rather than an error. Fixed with
+  `ScanCoordinator.syncWatchers()`, which makes the live watches EQUAL the set of libraries: a library
+  with unchanged roots keeps the watch it already has (re-creating it would drop inotify
+  registrations and lose events in the gap), one whose roots moved is re-watched, and one that has
+  been deleted has its watch closed — a watch outliving its row keeps requesting scans of a library id
+  `scanLibrary` refuses by name, for ever. `POST`, `PATCH` and `DELETE /libraries` all call it.
+- **A newly created library was not walked until the next interval**, so "I added my library and
+  nothing happened" was indistinguishable from broken for up to an hour. `POST /libraries` now
+  requests a scan, on exactly the reasoning the daemon's own startup already used.
+- **Editing a flow, or attaching a different flow to a library, left the library reporting "100%
+  converged" under a flow none of its files had ever been run through** until the next interval —
+  because `scanLibrary` is the only thing that re-derives a signature and moves a file out of `good`.
+  `PUT /flows/:id` now requests a scan for each library attached to that flow, and `PATCH
+  /libraries/:id` does so when the flow or the roots changed (and NOT when something cosmetic like the
+  name changed: a walk of a 100,000-file library is not the right cost for a rename).
+
+Two properties worth keeping in mind when reading that suite:
+
+- **A pid is not on the event stream.** `job.started` carries `jobId`, `fileId`, `libraryId`, `path`
+  and `workerId` — no pid — so "no worker process survived the shutdown" is checked against pids
+  sampled from `GET /workers` while jobs were in flight. That is a real API surface, not a peek behind
+  the daemon's back, but it does mean a worker that started and finished entirely between two samples
+  contributes no pid. Adding a pid to `job.started` would make the check exhaustive.
+- **The suite must never be allowed to skip.** Its ffmpeg condition is computed synchronously at
+  module scope (`describe.runIf` reads it at collection time, before any async `beforeAll`), and
+  `toolAvailableSync` answers `false` only for a genuine `ENOENT` while THROWING for every other
+  failure — a spawn that failed under load reporting "ffmpeg is missing" would silently skip the one
+  suite that proves the product works, and report green. It also refuses to run against a stale
+  `dist/`: editing anything under `packages/server/src`, INCLUDING a test file there, means
+  `tsc --build --force` before this suite will run.

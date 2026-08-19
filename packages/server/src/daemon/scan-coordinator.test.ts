@@ -422,6 +422,75 @@ describe('scan coordinator: watchers', () => {
     expect(watched).toHaveLength(0);
   });
 
+  /**
+   * The defect the daemon end-to-end suite found: watchers were started ONCE,
+   * from `start()`, over the libraries that existed at that instant. Since
+   * the API is the only way a UI creates a library, every library created
+   * through it was unwatched until the daemon was restarted — a file dropped
+   * into it sat there until the periodic rescan, up to an hour later.
+   */
+  it('watches a library created after start, once the API syncs it', () => {
+    const { coordinator, watched, db } = harness();
+    coordinator.start();
+    expect(watched).toHaveLength(1);
+
+    const added = createLibraryRepo(db).create({
+      name: 'added-later',
+      roots: [mkdtempSync(join(tmpdir(), 'trawlarr-coord-added-'))],
+      nowMs: 0,
+    });
+    coordinator.syncWatchers();
+
+    expect(watched.map((entry) => entry.libraryId)).toContain(added.id);
+    expect(watched.filter((entry) => entry.libraryId === added.id)).toHaveLength(1);
+  });
+
+  it('keeps the existing watch for an unchanged library, however often it is synced', () => {
+    const { coordinator, watched, closedWatchers } = harness();
+    coordinator.start();
+    coordinator.syncWatchers();
+    coordinator.syncWatchers();
+    // Re-watching an unchanged library would drop its inotify registrations
+    // and lose every event in the gap, for no gain at all.
+    expect(watched).toHaveLength(1);
+    expect(closedWatchers()).toBe(0);
+  });
+
+  it('re-watches a library whose roots moved, and closes the watch on the old ones', () => {
+    const { coordinator, watched, closedWatchers, libraryIds, db } = harness();
+    coordinator.start();
+    const movedRoot = mkdtempSync(join(tmpdir(), 'trawlarr-coord-moved-'));
+    createLibraryRepo(db).update({ id: libraryIds[0]!, roots: [movedRoot] });
+
+    coordinator.syncWatchers();
+
+    expect(closedWatchers()).toBe(1);
+    expect(watched).toHaveLength(2);
+    expect(watched.at(-1)!.roots).toEqual([movedRoot]);
+  });
+
+  it('closes the watch of a library that has been deleted', () => {
+    const { coordinator, closedWatchers, libraryIds, db } = harness();
+    coordinator.start();
+    createLibraryRepo(db).remove(libraryIds[0]!);
+
+    coordinator.syncWatchers();
+
+    // Otherwise its events keep asking for scans of a library id
+    // `scanLibrary` refuses by name, for ever.
+    expect(closedWatchers()).toBe(1);
+  });
+
+  it('starts nothing on a sync before start, or after stop', async () => {
+    const { coordinator, watched } = harness();
+    coordinator.syncWatchers();
+    expect(watched).toHaveLength(0);
+    coordinator.start();
+    await coordinator.stop();
+    coordinator.syncWatchers();
+    expect(watched).toHaveLength(1); // the one from start(), and no more
+  });
+
   it('closes its watchers and disarms its timers on stop', async () => {
     const { coordinator, timers, scans, closedWatchers, libraryIds } = harness();
     coordinator.start();

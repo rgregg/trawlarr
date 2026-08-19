@@ -1,5 +1,5 @@
 import type { Db } from '../db/connection.js';
-import { createLibraryRepo } from '../db/library-repo.js';
+import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
 import { scanLibrary, type ScanLibraryInput, type ScanSummary } from '../scanner/scan-library.js';
@@ -32,6 +32,15 @@ export interface ScanCoordinator {
   request(libraryId: string, reason: ScanReason): void;
   /** Resolves when no scan is running and no library is dirty. Tests only. */
   idle(): Promise<void>;
+  /**
+   * Make the live filesystem watches equal the set of libraries.
+   *
+   * Called by `start()`, and by every API mutation that adds, edits or
+   * removes a library — a library created after the daemon started is
+   * otherwise never watched at all. Idempotent: an unchanged library keeps
+   * the watch it already has.
+   */
+  syncWatchers(): void;
   start(): void;
   stop(): Promise<void>;
   scanning(): string[];
@@ -66,6 +75,12 @@ export interface CreateScanCoordinatorInput {
  * the rate exactly rather than hoping about wall time.
  */
 const PROGRESS_INTERVAL_MS = 250;
+
+/** A live watch, and the `watchKeyOf` value it was built from. */
+interface WatchEntry {
+  key: string;
+  handle: WatchHandle;
+}
 
 interface LibraryScanState {
   /** A scan (and its at-most-one catch-up) is in flight for this library. */
@@ -143,7 +158,8 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
   const libraryRepo = createLibraryRepo(db);
   const states = new Map<string, LibraryScanState>();
   const inFlight = new Map<string, Promise<void>>();
-  const watchHandles: WatchHandle[] = [];
+  /** One live watch per library, keyed by what it was built from. */
+  const watchHandles = new Map<string, WatchEntry>();
   let idleWaiters: (() => void)[] = [];
   let rescanHandle: unknown = null;
   let started = false;
@@ -346,11 +362,63 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
     }, intervalMs);
   };
 
-  const startWatchers = (): void => {
-    for (const library of libraryRepo.list()) {
+  /**
+   * What this library's watch is FOR — its roots and the directories the
+   * walk prunes. A watch built from a different one of these is the wrong
+   * watch, so it is compared rather than assumed unchanged.
+   */
+  const watchKeyOf = (library: LibraryRecord): string =>
+    JSON.stringify([library.roots, reservedDirsForLibrary(library)]);
+
+  const closeWatch = (libraryId: string, entry: WatchEntry): void => {
+    watchHandles.delete(libraryId);
+    void entry.handle.close().catch((error: unknown) => {
+      onError(error, { libraryId, phase: 'watch' });
+    });
+  };
+
+  /**
+   * Make the set of live watches equal the set of libraries — the property
+   * this used to get wrong.
+   *
+   * Watchers were started ONCE, from `start()`, over the libraries that
+   * existed at that instant. A library created afterwards — and the API is
+   * the only way a UI creates one — therefore had no watch at all until the
+   * daemon was restarted, so a file dropped into a brand-new library was
+   * found only by the periodic rescan, up to an hour later, with nothing
+   * anywhere saying why. The end-to-end daemon suite proved exactly that: a
+   * file dropped into an API-created library was still undiscovered five
+   * minutes later with the rescan pushed out of reach.
+   *
+   * It is idempotent and re-entrant-safe by construction: a library whose
+   * roots and reserved directories are unchanged keeps the watch it already
+   * has (re-creating it would drop inotify registrations and lose events
+   * during the gap), one whose roots CHANGED is re-watched, and one that no
+   * longer exists has its watch closed — a watch on a deleted library would
+   * keep requesting scans of a library id `scanLibrary` refuses by name.
+   */
+  const syncWatchers = (): void => {
+    if (!started || stopped) return;
+    if (!settings.getScan().watchEnabled) return;
+
+    const libraries = libraryRepo.list();
+    const live = new Set(libraries.map((library) => library.id));
+
+    for (const [libraryId, entry] of [...watchHandles]) {
+      if (!live.has(libraryId)) closeWatch(libraryId, entry);
+    }
+
+    for (const library of libraries) {
+      const key = watchKeyOf(library);
+      const existing = watchHandles.get(library.id);
+      if (existing !== undefined) {
+        if (existing.key === key) continue;
+        closeWatch(library.id, existing);
+      }
       try {
-        watchHandles.push(
-          watchPort.watch({
+        watchHandles.set(library.id, {
+          key,
+          handle: watchPort.watch({
             libraryId: library.id,
             roots: library.roots,
             // The SAME helper the walk prunes with. A watcher that ignored
@@ -364,7 +432,7 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
               onError(error, { libraryId: library.id, phase: 'watch' });
             },
           }),
-        );
+        });
       } catch (error) {
         // One library whose roots cannot be watched (a mount that is down
         // at startup, an inotify limit) must not cost the others their
@@ -377,6 +445,7 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
 
   return {
     request,
+    syncWatchers,
 
     idle: async (): Promise<void> => {
       if (isIdle()) return;
@@ -392,7 +461,7 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
       if (started) return;
       started = true;
       armRescan();
-      if (settings.getScan().watchEnabled) startWatchers();
+      syncWatchers();
     },
 
     stop: async (): Promise<void> => {
@@ -409,8 +478,8 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
         // has to redo it.
         state.pending = null;
       }
-      await Promise.all(watchHandles.map((handle) => handle.close()));
-      watchHandles.length = 0;
+      await Promise.all([...watchHandles.values()].map((entry) => entry.handle.close()));
+      watchHandles.clear();
       await Promise.all([...inFlight.values()]);
     },
 

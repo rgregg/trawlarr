@@ -105,14 +105,20 @@ const fakeSupervisor = (running: string[] = []): FakeSupervisor => {
 
 interface FakeScans extends ScanCoordinator {
   requests: { libraryId: string; reason: ScanReason }[];
+  /** How many times the API asked the coordinator to re-derive its watches. */
+  syncs: number;
 }
 
 const fakeScans = (): FakeScans => {
   const requests: { libraryId: string; reason: ScanReason }[] = [];
-  return {
+  const fake = {
     requests,
+    syncs: 0,
     request: (libraryId: string, reason: ScanReason) => {
       requests.push({ libraryId, reason });
+    },
+    syncWatchers: () => {
+      fake.syncs += 1;
     },
     idle: async () => {
       await Promise.resolve();
@@ -123,6 +129,7 @@ const fakeScans = (): FakeScans => {
     },
     scanning: () => [],
   };
+  return fake;
 };
 
 let db: Db;
@@ -354,6 +361,54 @@ describe('libraries', () => {
     expect(after.allowHardlinked).toBe(true);
   });
 
+  /**
+   * The defect the daemon end-to-end suite found. Watchers were derived once,
+   * at daemon start, so a library created through the API — the only way a UI
+   * creates one — was never watched: a file dropped into it sat undiscovered
+   * until the periodic rescan, up to an hour later. Both halves are asserted
+   * here, because both were missing: the watch, and the initial walk.
+   */
+  it('watches and scans a library created through the API, without waiting for the rescan', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'trawlarr-api-'));
+
+    const created = await api('POST', '/libraries', { name: 'Movies', roots: [root] });
+
+    expect(scans.syncs).toBeGreaterThan(0);
+    expect(scans.requests).toEqual([{ libraryId: created.body.id, reason: 'startup' }]);
+  });
+
+  it('re-derives its watches and rescans when a library gets a different flow', async () => {
+    const flow = createFlowRepo(db).create({ name: 'f', definition: VALID_FLOW, nowMs: NOW });
+    const library = seedLibrary();
+    const syncsBefore = scans.syncs;
+
+    await api('PATCH', `/libraries/${library.id}`, { flowId: flow.id });
+
+    expect(scans.syncs).toBeGreaterThan(syncsBefore);
+    // What a file must contain changed, so the library is re-walked now
+    // rather than at the next hourly rescan.
+    expect(scans.requests).toEqual([{ libraryId: library.id, reason: 'manual' }]);
+  });
+
+  it('does not walk a whole library just because it was renamed', async () => {
+    const library = seedLibrary();
+
+    await api('PATCH', `/libraries/${library.id}`, { name: 'renamed' });
+
+    // A walk of a 100,000-file library is not the right cost for an edit
+    // that cannot have changed what any file must contain.
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('closes the watch of a deleted library', async () => {
+    const library = seedLibrary();
+    const syncsBefore = scans.syncs;
+
+    await api('DELETE', `/libraries/${library.id}`);
+
+    expect(scans.syncs).toBeGreaterThan(syncsBefore);
+  });
+
   it('deletes a library and its files with it', async () => {
     const library = seedLibrary();
     const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv' });
@@ -566,6 +621,36 @@ describe('flows', () => {
     expect(createFlowRepo(db).getById(created.body.id)!.definitionHash).not.toBe(
       created.body.definitionHash,
     );
+  });
+
+  /**
+   * Editing a flow changes what "converged" MEANS for every library using it,
+   * and only a scan re-derives that (`scanLibrary`'s rule 7). Without this,
+   * a library kept reporting "100% converged" under a flow none of its files
+   * had ever been run through, until the periodic rescan came round.
+   */
+  it('rescans exactly the libraries attached to an edited flow', async () => {
+    const created = await api('POST', '/flows', { name: 'good', definition: VALID_FLOW });
+    const attached = seedLibrary({ flowId: created.body.id });
+    seedLibrary(); // attached to nothing, and must not be walked for this
+    scans.requests.length = 0;
+
+    await api('PUT', `/flows/${created.body.id}`, {
+      definition: {
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'check',
+            pluginId: 'trawlarr:checkVideoCodec',
+            pluginVersion: '1.0.0',
+            inputs: { codec: 'hevc' },
+          },
+        ],
+        edges: [{ fromNodeId: 'start', toNodeId: 'check', outputNumber: 1 }],
+      },
+    });
+
+    expect(scans.requests).toEqual([{ libraryId: attached.id, reason: 'manual' }]);
   });
 
   it('deleting a flow pauses the library that was using it, with a stated reason', async () => {

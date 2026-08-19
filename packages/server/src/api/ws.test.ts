@@ -53,6 +53,7 @@ const fakeSupervisor = (): Supervisor => ({
 
 const fakeScans = (): ScanCoordinator => ({
   request: () => {},
+  syncWatchers: () => {},
   idle: async () => {
     await Promise.resolve();
   },

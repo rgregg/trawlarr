@@ -1,6 +1,7 @@
 import { FlowValidationError, validateFlowDefinition, type FlowDefinition } from '@trawlarr/core';
 import { checkAllLibraries } from '../../daemon/library-health.js';
 import { createFlowRepo, type FlowRecord } from '../../db/flow-repo.js';
+import { createLibraryRepo } from '../../db/library-repo.js';
 import { createNodeCapabilityResolver } from '../../flow/node-capabilities.js';
 import { dryRunFlow, DryRunInputError } from '../../flow/dry-run.js';
 import {
@@ -122,6 +123,14 @@ export const flowRoutes: Route[] = [
       // unrunnable. Re-checked here so the library's `pausedReason` is
       // correct immediately rather than at the next daemon tick.
       checkAllLibraries({ db: ctx.db, bus: ctx.bus });
+      // The edit also changed what "converged" MEANS for every library using
+      // this flow: their files' signatures no longer match the flow's hash.
+      // Only a scan re-derives that (see `scanLibrary`'s rule 7), so one is
+      // requested per affected library rather than leaving a library visibly
+      // "100% converged" under a flow it has never been run through.
+      for (const library of createLibraryRepo(ctx.db).list()) {
+        if (library.flowId === updated.id) ctx.scans.request(library.id, 'manual');
+      }
       return toFlowResource(updated);
     },
   },

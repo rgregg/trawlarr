@@ -144,6 +144,19 @@ export const libraryRoutes: Route[] = [
       } catch (error) {
         return asLibraryError(error);
       }
+      // A library that exists but is not WATCHED is a library where dropping
+      // a file in does nothing until the periodic rescan comes round — up to
+      // an hour later, with nothing anywhere saying why. Watchers used to be
+      // started once, at daemon start, over the libraries that existed then;
+      // since the API is how a UI creates one, every library ever created
+      // through it was unwatched until the daemon was restarted. Proved by
+      // the daemon end-to-end suite, fixed here and in `syncWatchers`.
+      ctx.scans.syncWatchers();
+      // And the same reasoning the daemon's own startup uses: a new library
+      // is walked now rather than at the next interval, because "I added my
+      // library and nothing happened" is indistinguishable from broken.
+      ctx.scans.request(library.id, 'startup');
+
       // A brand-new library with no flow cannot converge anything, and this
       // is where it says so — in `pausedReason`, immediately, rather than
       // looking healthy until someone wonders why nothing ever runs.
@@ -179,7 +192,23 @@ export const libraryRoutes: Route[] = [
       } catch (error) {
         return asLibraryError(error);
       }
-      return toLibraryResource(withHealth(ctx, library.id));
+      const after = withHealth(ctx, library.id);
+
+      // Unconditional, because it is idempotent: `syncWatchers` re-watches
+      // only when this library's roots or reserved directories actually
+      // changed, and moving a root without moving the watch leaves the
+      // daemon watching a directory nothing will ever appear in.
+      ctx.scans.syncWatchers();
+
+      // A scan, on the other hand, only when what this library must contain
+      // changed — new roots, or a different flow. Both are re-evaluations,
+      // and both happen now rather than at the next periodic rescan; a walk
+      // of a 100,000-file library is not the right cost for renaming one.
+      const rootsChanged = JSON.stringify(after.roots) !== JSON.stringify(library.roots);
+      if (rootsChanged || after.flowId !== library.flowId) {
+        ctx.scans.request(library.id, 'manual');
+      }
+      return toLibraryResource(after);
     },
   },
 
@@ -189,6 +218,9 @@ export const libraryRoutes: Route[] = [
     handler: ({ params, ctx }) => {
       requireLibrary(ctx, params.id!);
       createLibraryRepo(ctx.db).remove(params.id!);
+      // Its watch outlives the row otherwise, and every event it delivers
+      // asks for a scan of a library id `scanLibrary` refuses by name.
+      ctx.scans.syncWatchers();
       return noContent();
     },
   },
