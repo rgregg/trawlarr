@@ -26,6 +26,7 @@ export * from './worker/protocol.js';
 export * from './worker/agent-handle.js';
 export * from './worker/loop.js';
 export * from './daemon/events.js';
+export * from './daemon/library-health.js';
 export * from './daemon/supervisor.js';
 export * from './daemon/watcher.js';
 export * from './daemon/scan-coordinator.js';
