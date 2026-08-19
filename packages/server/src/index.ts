@@ -30,6 +30,8 @@ export * from './daemon/library-health.js';
 export * from './daemon/supervisor.js';
 export * from './daemon/watcher.js';
 export * from './daemon/scan-coordinator.js';
+export * from './daemon/lockfile.js';
+export * from './daemon/daemon.js';
 export * from './library/pause-explanation.js';
 export * from './library/trash-sweep.js';
 export * from './flow/dry-run.js';
@@ -38,3 +40,7 @@ export * from './api/auth.js';
 export * from './api/server.js';
 export * from './api/ws.js';
 export * from './api/routes/nodes.js';
+// The CLI's own entry point (`cli.js`) stays out of the barrel for the same
+// reason `worker/agent.js` does: importing it runs a command. Its HTTP client
+// is a library, and belongs here.
+export * from './cli-client.js';

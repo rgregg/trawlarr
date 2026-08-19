@@ -40,20 +40,22 @@ plugin.
 
 ## Status
 
-Early. There is no HTTP API, no UI, no filesystem watcher, and no scheduler
-yet. What exists is a `trawlarr` command-line tool that can point at a real
-folder of media, scan it, and drain the queue against real `ffmpeg`/`ffprobe`
-— see "Try it" below — plus the libraries behind it.
+Early. There is no UI yet. What exists is a `trawlarr` command-line tool
+that can point at a real folder of media, scan it, and drain the queue
+against real `ffmpeg`/`ffprobe` — see "Try it" below — and a `trawlarr
+daemon` that does the same thing unattended behind an HTTP API, a filesystem
+watcher and a schedule (see "Run it as a service"), plus the libraries behind
+both.
 
 The pnpm workspace holds five packages:
 
-| Package                  | What it is                                                                                                                                                                                                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@trawlarr/core`         | Pure domain logic: file identity, fact extraction, the convergence ledger, flow definitions and their signature hash, and the cooperative ffmpeg command model (build → compile to argv). No I/O.                                                                                     |
-| `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                          |
-| `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute.                                                                                                                                                                     |
-| `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run. |
-| `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the unattended worker loop that drains the queue, and the `trawlarr` CLI itself.                                                                       |
+| Package                  | What it is                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@trawlarr/core`         | Pure domain logic: file identity, fact extraction, the convergence ledger, flow definitions and their signature hash, and the cooperative ffmpeg command model (build → compile to argv). No I/O.                                                                                                                                                                                              |
+| `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                                                                                                                                   |
+| `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute.                                                                                                                                                                                                                                                                              |
+| `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run.                                                                                                          |
+| `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the worker supervisor and its forked worker processes, the filesystem watcher and scan coordinator, the REST API and its event stream, the daemon that composes all of it, and the `trawlarr` CLI — which becomes that daemon's client whenever one is running. |
 
 ### Try it
 
@@ -150,6 +152,62 @@ It only ever removes entries inside a resolved trash directory, and only
 ones trawlarr itself named — a file you put there by hand is left alone.
 Entries are aged by when trawlarr trashed them, not by their file
 timestamps.
+
+### Run it as a service
+
+`trawlarr daemon` is the same engine, unattended: it scans on a filesystem
+watch and a periodic rescan, keeps as many workers running as the schedule
+allows, sweeps expired trash daily, reclaims stalled rows hourly, and serves
+the REST API and the live event stream.
+
+```bash
+trawlarr daemon                       # foreground; Ctrl-C stops it
+trawlarr daemon --port 9000 --bind 0.0.0.0
+```
+
+It runs in the FOREGROUND, which is what systemd and Docker both want, and it
+owns its data directory while it runs: `<data-dir>/daemon.json` records its
+pid, the address it bound and the API key it accepts. A daemon that is killed
+outright leaves that file behind — the next start takes it over rather than
+refusing, so a crash never locks you out of your own installation.
+
+**The API key** is generated on first start and printed once, on that run
+only. After that it lives in the database (setting `daemon.apiKey`, also
+returned by `GET /api/v1/system/settings`), because a daemon that reprinted a
+live credential on every start would be spraying it into every log that
+captures stdout. Send it as `X-Api-Key`; only `GET /api/v1/system/health` is
+reachable without it, so a container health check needs no secret.
+
+**It binds `127.0.0.1` by default and speaks plain HTTP.** There is no TLS
+here on purpose: put a reverse proxy in front of it if it needs to be
+reachable from anywhere else. Binding `0.0.0.0` would otherwise expose an API
+whose only authentication is a shared key to the whole local network on first
+run, before anyone had configured anything.
+
+Two behaviours surprise people, so they are stated rather than discovered:
+
+- **A schedule window closing does not interrupt work already in progress.**
+  Windows set the TARGET number of workers; a worker retires when its file is
+  done and the freed slot simply is not refilled. Cancelling a two-hour
+  transcode produces nothing at all and costs those two hours again later, in
+  exactly the hours the window was protecting. The hard stop is an explicit
+  cancel, never a window edge.
+- **While a daemon is running, the CLI talks to it rather than to the
+  database.** `trawlarr status`, `reap`, `trash purge`, `forget`, `requeue`,
+  `library add` and the rest detect the daemon from `daemon.json` and go over
+  its API, so they report and change exactly what the daemon sees. The one
+  command that cannot be forwarded is `trawlarr run`, which IS a drain: the
+  daemon is already draining that queue, and it says so, naming the pid,
+  rather than claiming files beside it — two workers on one file is how a
+  replacement destroys data. Everything still works with no daemon running;
+  that is the path "Try it" above describes.
+
+Shutdown is orderly, and it has a deadline. `SIGINT`/`SIGTERM` stop new work,
+stop the watcher and the timers, then wait up to five minutes for running jobs
+to finish; anything still running past that is cancelled through its process
+GROUP, which is what reaches an ffmpeg a plugin spawned for itself. A daemon
+that exited leaving an orphaned ffmpeg writing into a library nothing is
+watching would be a defect, not a shortcut.
 
 ### The development CLI
 

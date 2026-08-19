@@ -7,14 +7,20 @@ import { pathToFileURL } from 'node:url';
 import { FlowValidationError, type FileState, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
-import { createLibraryRepo, DEFAULT_EXTENSIONS, type LibraryRecord } from './db/library-repo.js';
+import { createLibraryRepo, DEFAULT_EXTENSIONS } from './db/library-repo.js';
 import { sweepLibraryTrash as sweepTrashForLibrary } from './library/trash-sweep.js';
+import type { LibraryTrashSweep } from './library/trash-sweep.js';
+import { explainPause } from './library/pause-explanation.js';
 import { createFlowRepo } from './db/flow-repo.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
-import { forgetMissing } from './scanner/forget-missing.js';
+import { forgetMissing, type ForgetSummary } from './scanner/forget-missing.js';
 import { runQueue } from './worker/loop.js';
-import { DEFAULT_STALE_AFTER_MS, reapStalled } from './worker/reap-stalled.js';
+import { DEFAULT_STALE_AFTER_MS, reapStalled, type ReapSummary } from './worker/reap-stalled.js';
+import { startDaemon } from './daemon/daemon.js';
+import { DaemonAlreadyRunningError, readDaemonRecord } from './daemon/lockfile.js';
+import type { DaemonRecord } from './daemon/lockfile.js';
+import { ApiRequestError, createCliClient, type CliClient } from './cli-client.js';
 
 /** Raised by a command handler to report a clean, diagnosable failure — never a raw stack trace. */
 class CliError extends Error {}
@@ -22,13 +28,145 @@ class CliError extends Error {}
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** Opens (creating if needed) the database this invocation's `--data-dir` points at, migrated. */
+// ---------------------------------------------------------------------------
+// daemon-or-direct
+// ---------------------------------------------------------------------------
+
+/**
+ * Who owns this data directory: a running daemon, or nobody.
+ *
+ * THIS IS THE ROUTING DECISION, and it is made from one fact — the lock file
+ * `<data-dir>/daemon.json` and whether the pid it names still exists. A LIVE
+ * daemon holds the SQLite file open and is claiming from the same queue, so
+ * the CLI becomes its client and never opens the database. A DEAD pid is
+ * taken over rather than obeyed: a daemon killed with SIGKILL leaves its lock
+ * behind, and treating that as ownership would mean one crash locks the user
+ * out of their own installation.
+ */
+const resolveDaemon = async (dataDir: string): Promise<DaemonRecord | null> =>
+  await readDaemonRecord({ dataDir: resolve(dataDir) });
+
+/**
+ * The message a command gets when it needs the database a live daemon owns.
+ *
+ * Specific, and it names the pid: "database is locked" is what the user would
+ * otherwise eventually see, from sqlite, about a situation trawlarr already
+ * knew everything about.
+ */
+const notWhileDaemonRuns = (record: DaemonRecord, input: { what: string; instead: string }) =>
+  new CliError(
+    `${input.what} while the trawlarr daemon (pid ${String(record.pid)}) owns this data ` +
+      `directory — it holds the database open and is claiming from the same queue, and a second ` +
+      `process writing there would race it: two workers on one file is how a replacement ` +
+      `destroys data. ${input.instead}`,
+  );
+
+/**
+ * Opens (creating if needed) the database this invocation's `--data-dir`
+ * points at, migrated — and refuses outright while a daemon owns it.
+ *
+ * The refusal lives HERE rather than only in each command, so a command that
+ * has not been taught to route through the API fails with a sentence naming
+ * the daemon instead of quietly becoming a second writer.
+ */
 const openDb = async (dataDir: string): Promise<Db> => {
   const dir = resolve(dataDir);
+  const record = await resolveDaemon(dir);
+  if (record !== null) {
+    throw notWhileDaemonRuns(record, {
+      what: 'This command needs the database directly, which it cannot have',
+      instead:
+        `Stop the daemon (Ctrl-C, or "systemctl stop trawlarr") and run this again, or use the ` +
+        `daemon's own API at http://${record.bind}:${String(record.port)}/api/v1.`,
+    });
+  }
   await mkdir(dir, { recursive: true });
   const db = openDatabase({ file: join(dir, 'trawlarr.db') });
   migrate(db);
   return db;
+};
+
+/**
+ * The daemon's error, as the CLI's error.
+ *
+ * An `ApiError`'s message was written for exactly this reader, so it is
+ * surfaced verbatim — a second wording here would drift from the API's, and
+ * the two would eventually disagree about the same refusal.
+ */
+const asCliError = (error: unknown, label: string): never => {
+  if (error instanceof ApiRequestError) throw new CliError(`${label}: ${error.message}`);
+  throw error;
+};
+
+// ---------------------------------------------------------------------------
+// resources, as the API reports them
+// ---------------------------------------------------------------------------
+
+interface LibraryResource {
+  id: string;
+  name: string;
+  roots: string[];
+  extensions: string[];
+  flowId: string | null;
+  enabled: boolean;
+  paused: boolean;
+  pausedReason: string | null;
+  pausedExplanation: string | null;
+}
+
+interface FlowResource {
+  id: string;
+  name: string;
+  definition: FlowDefinition;
+}
+
+interface FileResource {
+  id: string;
+  path: string;
+  state: FileState;
+  attemptCount: number;
+  missingSinceMs: number | null;
+}
+
+interface FilePage {
+  total: number;
+  items: FileResource[];
+}
+
+interface StatsResource {
+  total: number;
+  byState: Record<FileState, number>;
+  missing: number;
+}
+
+/** Page size for the CLI's own listings: the API's cap, so a listing is one call per 500 rows. */
+const PAGE_SIZE = 500;
+
+/**
+ * Every file matching a filter, paged.
+ *
+ * `GET /files` is capped (a listing that returns a whole library holds the
+ * daemon's single writer thread while it serialises), so the CLI — which
+ * really does print every matching row — pages rather than asking for a
+ * number the daemon would refuse.
+ */
+const fetchAllFiles = async (
+  client: CliClient,
+  filter: { libraryId: string; state?: FileState; missing?: boolean },
+): Promise<FileResource[]> => {
+  const items: FileResource[] = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const query = new URLSearchParams({
+      libraryId: filter.libraryId,
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+    });
+    if (filter.state !== undefined) query.set('state', filter.state);
+    if (filter.missing !== undefined) query.set('missing', String(filter.missing));
+    const page = await client.get<FilePage>(`/files?${query.toString()}`);
+    items.push(...page.items);
+    if (items.length >= page.total || page.items.length === 0) return items;
+  }
 };
 
 const requireLibrary = (db: Db, name: string) => {
@@ -37,9 +175,24 @@ const requireLibrary = (db: Db, name: string) => {
   return library;
 };
 
+/** The same message `requireLibrary` produces, against the daemon's own listing. */
+const requireLibraryResource = (libraries: LibraryResource[], name: string): LibraryResource => {
+  const library = libraries.find((candidate) => candidate.name === name);
+  if (library === undefined) {
+    throw new CliError(`Unknown library: "${name}". Run "library add" first.`);
+  }
+  return library;
+};
+
 const requireFlow = (db: Db, name: string) => {
   const flow = createFlowRepo(db).getByName(name);
   if (flow === null) throw new CliError(`Unknown flow: "${name}". Run "flow add" first.`);
+  return flow;
+};
+
+const requireFlowResource = (flows: FlowResource[], name: string): FlowResource => {
+  const flow = flows.find((candidate) => candidate.name === name);
+  if (flow === undefined) throw new CliError(`Unknown flow: "${name}". Run "flow add" first.`);
   return flow;
 };
 
@@ -123,6 +276,41 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
   if (values.root === undefined || values.root.length === 0) {
     throw new CliError('library add: at least one --root is required.');
   }
+  const extensions =
+    values.extensions !== undefined ? parseExtensions(values.extensions) : [...DEFAULT_EXTENSIONS];
+
+  const announce = (library: { name: string; id: string; roots: string[] }): number => {
+    console.log(
+      `Added library "${library.name}" (${library.id}) with ${library.roots.length} root(s): ` +
+        library.roots.join(', '),
+    );
+    return 0;
+  };
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    requireNameAvailable({
+      kind: 'library',
+      existing:
+        (await client.get<LibraryResource[]>('/libraries')).find(
+          (library) => library.name === values.name,
+        ) ?? null,
+      name: values.name,
+    });
+    try {
+      return announce(
+        await client.post<LibraryResource>('/libraries', {
+          name: values.name,
+          roots: values.root,
+          extensions,
+          allowHardlinked: values['allow-hardlinked'],
+        }),
+      );
+    } catch (error) {
+      return asCliError(error, 'library add');
+    }
+  }
 
   const db = await openDb(values['data-dir']!);
   requireNameAvailable({
@@ -130,22 +318,16 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
     existing: createLibraryRepo(db).getByName(values.name),
     name: values.name,
   });
-  const extensions =
-    values.extensions !== undefined ? parseExtensions(values.extensions) : [...DEFAULT_EXTENSIONS];
 
-  const library = createLibraryRepo(db).create({
-    name: values.name,
-    roots: values.root,
-    extensions,
-    allowHardlinked: values['allow-hardlinked'],
-    nowMs: Date.now(),
-  });
-
-  console.log(
-    `Added library "${library.name}" (${library.id}) with ${library.roots.length} root(s): ` +
-      library.roots.join(', '),
+  return announce(
+    createLibraryRepo(db).create({
+      name: values.name,
+      roots: values.root,
+      extensions,
+      allowHardlinked: values['allow-hardlinked'],
+      nowMs: Date.now(),
+    }),
   );
-  return 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -173,6 +355,34 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
     throw new CliError(`flow add: could not read/parse "${values.file}": ${messageOf(err)}`);
   }
 
+  const announce = (flow: { name: string; id: string; definition: FlowDefinition }): number => {
+    console.log(`Added flow "${flow.name}" (${flow.id}), ${flow.definition.nodes.length} node(s).`);
+    return 0;
+  };
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    requireNameAvailable({
+      kind: 'flow',
+      existing:
+        (await client.get<FlowResource[]>('/flows')).find((flow) => flow.name === values.name) ??
+        null,
+      name: values.name,
+    });
+    try {
+      return announce(await client.post<FlowResource>('/flows', { name: values.name, definition }));
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.code === 'flow-invalid') {
+        throw new CliError(
+          `flow add: "${values.file}" is not a flow trawlarr will run, so nothing was stored. ` +
+            error.message,
+        );
+      }
+      return asCliError(error, 'flow add');
+    }
+  }
+
   const db = await openDb(values['data-dir']!);
   requireNameAvailable({
     kind: 'flow',
@@ -184,9 +394,10 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
   // message a user sees belongs here: a FlowValidationError carries one
   // sentence per problem, and a flow file usually has more than one thing
   // wrong with it, so they are listed rather than joined into a paragraph.
-  let flow;
   try {
-    flow = createFlowRepo(db).create({ name: values.name, definition, nowMs: Date.now() });
+    return announce(
+      createFlowRepo(db).create({ name: values.name, definition, nowMs: Date.now() }),
+    );
   } catch (err) {
     if (err instanceof FlowValidationError) {
       throw new CliError(
@@ -197,8 +408,6 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
     }
     throw err;
   }
-  console.log(`Added flow "${flow.name}" (${flow.id}), ${flow.definition.nodes.length} node(s).`);
-  return 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -218,13 +427,33 @@ const cmdLibrarySetFlow = async (args: string[]): Promise<number> => {
   if (values.library === undefined) throw new CliError('library set-flow: --library is required.');
   if (values.flow === undefined) throw new CliError('library set-flow: --flow is required.');
 
+  const announce = (libraryName: string, flowName: string): number => {
+    console.log(`Library "${libraryName}" now uses flow "${flowName}".`);
+    return 0;
+  };
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    const library = requireLibraryResource(
+      await client.get<LibraryResource[]>('/libraries'),
+      values.library,
+    );
+    const flow = requireFlowResource(await client.get<FlowResource[]>('/flows'), values.flow);
+    try {
+      await client.patch(`/libraries/${library.id}`, { flowId: flow.id });
+    } catch (error) {
+      return asCliError(error, 'library set-flow');
+    }
+    return announce(library.name, flow.name);
+  }
+
   const db = await openDb(values['data-dir']!);
   const library = requireLibrary(db, values.library);
   const flow = requireFlow(db, values.flow);
 
   createLibraryRepo(db).setFlow(library.id, flow.id);
-  console.log(`Library "${library.name}" now uses flow "${flow.name}".`);
-  return 0;
+  return announce(library.name, flow.name);
 };
 
 // ---------------------------------------------------------------------------
@@ -244,14 +473,42 @@ const cmdScan = async (args: string[]): Promise<number> => {
 
   if (values.library === undefined) throw new CliError('scan: --library is required.');
 
+  const noFlow = (name: string): CliError =>
+    new CliError(
+      `Library "${name}" has no flow attached, so a scan cannot queue anything for it. ` +
+        `Run "library set-flow --library ${name} --flow <name>" first.`,
+    );
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    const library = requireLibraryResource(
+      await client.get<LibraryResource[]>('/libraries'),
+      values.library,
+    );
+    if (library.flowId === null) throw noFlow(library.name);
+    try {
+      await client.post(`/libraries/${library.id}/scan`);
+    } catch (error) {
+      return asCliError(error, 'scan');
+    }
+    // Deliberately NOT the summary the direct path prints, because there is
+    // none to print: the daemon owns scanning, one walk per library at a
+    // time, and it has queued this one rather than performed it. Pretending
+    // otherwise would mean holding this command open for a walk that takes
+    // minutes and reporting numbers that were never computed here.
+    console.log(
+      `Asked the trawlarr daemon (pid ${String(record.pid)}) to scan "${library.name}". The walk ` +
+        `runs inside the daemon — it is the only process allowed to write this library, and it ` +
+        `coalesces overlapping triggers into one scan — so this command does not wait for it. ` +
+        `Watch it finish with "trawlarr status --library ${library.name}".`,
+    );
+    return 0;
+  }
+
   const db = await openDb(values['data-dir']!);
   const library = requireLibrary(db, values.library);
-  if (library.flowId === null) {
-    throw new CliError(
-      `Library "${library.name}" has no flow attached, so a scan cannot queue anything for it. ` +
-        `Run "library set-flow --library ${library.name} --flow <name>" first.`,
-    );
-  }
+  if (library.flowId === null) throw noFlow(library.name);
 
   const summary = await scanLibrary({
     db,
@@ -312,6 +569,21 @@ const cmdRun = async (args: string[]): Promise<number> => {
       ffprobe: { type: 'string', default: 'ffprobe' },
     },
   });
+
+  // The one command a daemon cannot be asked to perform on this process's
+  // behalf: `run` IS a drain, and the daemon is already draining this queue
+  // with a worker pool the schedule sizes. A second drain in this process
+  // would claim from the same queue.
+  const daemonRecord = await resolveDaemon(values['data-dir']!);
+  if (daemonRecord !== null) {
+    throw notWhileDaemonRuns(daemonRecord, {
+      what: '"run" drains the queue itself, which it cannot do',
+      instead:
+        `The daemon is already draining it, as many files at a time as the schedule allows — ` +
+        `watch it with "trawlarr status". To drain by hand instead, stop the daemon first. ` +
+        `Nothing was claimed here.`,
+    });
+  }
 
   const db = await openDb(values['data-dir']!);
 
@@ -391,7 +663,7 @@ const cmdRun = async (args: string[]): Promise<number> => {
       : createLibraryRepo(db).list();
   for (const library of sweepTargets) {
     try {
-      await sweepLibraryTrash(db, library, { quiet: true });
+      renderSweep(await sweepTrashForLibrary({ db, library, nowMs: Date.now() }), { quiet: true });
     } catch (err) {
       console.log(`  Trash sweep for "${library.name}" did not run: ${messageOf(err)}`);
     }
@@ -404,37 +676,23 @@ const cmdRun = async (args: string[]): Promise<number> => {
 // ---------------------------------------------------------------------------
 
 /**
- * Sweep one library's trash, reporting what went.
+ * Report one library's sweep.
  *
- * The retention comes from the library's own flow — the `trashRetentionDays`
- * input on its Replace Original File node(s) — so the setting a user typed
- * into the flow is the setting that takes effect, which is exactly what was
- * missing while nothing read it. `--days` overrides it for one invocation.
+ * The sweep itself — including how the retention is resolved from the
+ * library's own flow — lives in `library/trash-sweep.ts`, shared verbatim
+ * with `POST /system/maintenance/trash-purge`, which is also where the
+ * daemon-routed path of this command gets its summaries from. This function
+ * is only the CLI's presentation of that value; a second copy of the
+ * retention rule here is how the two would eventually disagree about when a
+ * user's only remaining copy of a file may be deleted.
  */
-const sweepLibraryTrash = async (
-  db: Db,
-  library: LibraryRecord,
-  options: { days?: number; dryRun?: boolean; quiet?: boolean },
-): Promise<void> => {
-  // The sweep itself — including how the retention is resolved from the
-  // library's own flow — lives in `library/trash-sweep.ts`, shared verbatim
-  // with `POST /system/maintenance/trash-purge`. This function is only the
-  // CLI's presentation of what that returned; a second copy of the retention
-  // rule here is how the two would eventually disagree about when a user's
-  // only remaining copy of a file may be deleted.
-  const { retentionDays, summary } = await sweepTrashForLibrary({
-    db,
-    library,
-    days: options.days,
-    nowMs: Date.now(),
-    dryRun: options.dryRun,
-  });
+const renderSweep = (sweep: LibraryTrashSweep, options?: { quiet?: boolean }): void => {
+  const { summary } = sweep;
+  if (options?.quiet === true && summary.removed === 0 && summary.failed === 0) return;
 
-  if (options.quiet === true && summary.removed === 0 && summary.failed === 0) return;
-
-  const verb = options.dryRun === true ? 'would remove' : 'removed';
+  const verb = sweep.dryRun ? 'would remove' : 'removed';
   console.log(
-    `Trash for "${library.name}" (retention ${retentionDays} day(s)): ${verb} ` +
+    `Trash for "${sweep.libraryName}" (retention ${sweep.retentionDays} day(s)): ${verb} ` +
       `${summary.removed} file(s), ${formatBytes(summary.bytesFreed)}; ${summary.retained} still ` +
       `within retention, ${summary.skipped} left alone (not trawlarr trash entries).`,
   );
@@ -473,10 +731,35 @@ const cmdTrashPurge = async (args: string[]): Promise<number> => {
     },
   });
 
-  const db = await openDb(values['data-dir']!);
   const days =
     values.days === undefined ? undefined : parseNonNegativeInt(values.days, 'trash purge: --days');
 
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    const libraryId =
+      values.library === undefined
+        ? undefined
+        : requireLibraryResource(await client.get<LibraryResource[]>('/libraries'), values.library)
+            .id;
+    let sweeps: LibraryTrashSweep[];
+    try {
+      ({ sweeps } = await client.post<{ sweeps: LibraryTrashSweep[] }>(
+        '/system/maintenance/trash-purge',
+        { libraryId, days, dryRun: values['dry-run'] },
+      ));
+    } catch (error) {
+      return asCliError(error, 'trash purge');
+    }
+    if (sweeps.length === 0) {
+      console.log('No libraries configured.');
+      return 0;
+    }
+    for (const sweep of sweeps) renderSweep(sweep);
+    return 0;
+  }
+
+  const db = await openDb(values['data-dir']!);
   const libraries =
     values.library !== undefined
       ? [requireLibrary(db, values.library)]
@@ -487,7 +770,15 @@ const cmdTrashPurge = async (args: string[]): Promise<number> => {
   }
 
   for (const library of libraries) {
-    await sweepLibraryTrash(db, library, { days, dryRun: values['dry-run'] });
+    renderSweep(
+      await sweepTrashForLibrary({
+        db,
+        library,
+        days,
+        nowMs: Date.now(),
+        dryRun: values['dry-run'],
+      }),
+    );
   }
   return 0;
 };
@@ -495,6 +786,37 @@ const cmdTrashPurge = async (args: string[]): Promise<number> => {
 // ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------
+
+/**
+ * One library as `status` prints it, gathered identically whether it came
+ * from the database or from a running daemon's API.
+ *
+ * The point of the shape is that there is exactly ONE renderer: a `status`
+ * that printed differently depending on whether a daemon happened to be
+ * running is a bug report waiting to be filed, and the difference would be
+ * invisible to whoever introduced it.
+ */
+interface StatusLibrary {
+  name: string;
+  roots: string[];
+  extensions: string[];
+  counts: Record<FileState, number>;
+  missing: number;
+  /**
+   * Why this library is not converging, or null when it is not paused.
+   * Produced by `explainPause` on both paths — directly here, and inside the
+   * daemon for the API path — never re-derived, because a second explanation
+   * would drift from the API's the first time either was edited.
+   */
+  pausedExplanation: string | null;
+  files: {
+    id: string;
+    state: FileState;
+    attemptCount: number;
+    path: string;
+    gone: number | null;
+  }[];
+}
 
 const cmdStatus = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
@@ -507,10 +829,6 @@ const cmdStatus = async (args: string[]): Promise<number> => {
       missing: { type: 'boolean', default: false },
     },
   });
-
-  const db = await openDb(values['data-dir']!);
-  const libraryRepo = createLibraryRepo(db);
-  const mediaFileRepo = createMediaFileRepo(db);
 
   if (values.missing && values.state !== undefined) {
     throw new CliError(
@@ -526,8 +844,68 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   // same summary.
   const showFiles = values.files || stateFilter !== undefined || values.missing;
 
-  const libraries =
-    values.library !== undefined ? [requireLibrary(db, values.library)] : libraryRepo.list();
+  const record = await resolveDaemon(values['data-dir']!);
+  const libraries: StatusLibrary[] = [];
+
+  if (record !== null) {
+    const client = createCliClient(record);
+    const all = await client.get<LibraryResource[]>('/libraries');
+    const wanted =
+      values.library !== undefined ? [requireLibraryResource(all, values.library)] : all;
+    for (const library of wanted) {
+      const stats = await client.get<StatsResource>(`/libraries/${library.id}/stats`);
+      const files = showFiles
+        ? await fetchAllFiles(client, {
+            libraryId: library.id,
+            state: stateFilter,
+            missing: values.missing ? true : undefined,
+          })
+        : [];
+      libraries.push({
+        name: library.name,
+        roots: library.roots,
+        extensions: library.extensions,
+        counts: stats.byState,
+        missing: stats.missing,
+        pausedExplanation: library.pausedExplanation,
+        files: files.map((file) => ({
+          id: file.id,
+          state: file.state,
+          attemptCount: file.attemptCount,
+          path: file.path,
+          gone: file.missingSinceMs,
+        })),
+      });
+    }
+  } else {
+    const db = await openDb(values['data-dir']!);
+    const libraryRepo = createLibraryRepo(db);
+    const mediaFileRepo = createMediaFileRepo(db);
+    const wanted =
+      values.library !== undefined ? [requireLibrary(db, values.library)] : libraryRepo.list();
+    for (const library of wanted) {
+      const rows = !showFiles
+        ? []
+        : values.missing
+          ? mediaFileRepo.listMissing(library.id)
+          : mediaFileRepo.listByLibrary({ libraryId: library.id, state: stateFilter });
+      libraries.push({
+        name: library.name,
+        roots: library.roots,
+        extensions: library.extensions,
+        counts: mediaFileRepo.countsByState(library.id),
+        missing: mediaFileRepo.missingCount(library.id),
+        pausedExplanation: explainPause(library)?.explanation ?? null,
+        files: rows.map((row) => ({
+          id: row.id,
+          state: row.state,
+          attemptCount: row.attempt_count,
+          path: row.path,
+          gone: row.missing_since_ms,
+        })),
+      });
+    }
+  }
 
   if (libraries.length === 0) {
     console.log('No libraries configured.');
@@ -535,13 +913,13 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   }
 
   for (const library of libraries) {
-    const counts = mediaFileRepo.countsByState(library.id);
+    const counts = library.counts;
     const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
     // Deliberately outside `total`: `countsByState` already excludes these,
     // and a file that no longer exists can never reach `good`, so counting
     // it would cap the percentage below 100% forever for a file the user
     // deleted on purpose. Reported on its own line instead of hidden.
-    const missing = mediaFileRepo.missingCount(library.id);
+    const missing = library.missing;
 
     // A library that has never been scanned — or whose roots point
     // somewhere with no matching media — has no percentage to report, and
@@ -555,6 +933,7 @@ const cmdStatus = async (args: string[]): Promise<number> => {
           `check the roots above and --extensions (currently ` +
           `${library.extensions.join(', ')}).`,
       );
+      renderPause(library);
       continue;
     }
 
@@ -569,6 +948,8 @@ const cmdStatus = async (args: string[]): Promise<number> => {
         `not_converging ${counts.not_converging}, unknown ${counts.unknown} ` +
         `(${pct}% converged)`,
     );
+
+    renderPause(library);
 
     if (missing > 0) {
       console.log(
@@ -593,11 +974,7 @@ const cmdStatus = async (args: string[]): Promise<number> => {
     // the documented recovery path named a row the user had no way to
     // name back.
     if (showFiles) {
-      const rows = (
-        values.missing
-          ? mediaFileRepo.listMissing(library.id)
-          : mediaFileRepo.listByLibrary({ libraryId: library.id, state: stateFilter })
-      ).sort((a, b) => a.path.localeCompare(b.path));
+      const rows = [...library.files].sort((a, b) => a.path.localeCompare(b.path));
       if (rows.length === 0) {
         console.log(
           values.missing
@@ -611,17 +988,31 @@ const cmdStatus = async (args: string[]): Promise<number> => {
         // The marker matters on the unfiltered listing too: a `queued` row
         // whose file is gone is never going to be claimed, and nothing else
         // in this line says so.
-        const gone =
-          row.missing_since_ms === null
-            ? ''
-            : `  MISSING since ${new Date(row.missing_since_ms).toISOString()}`;
+        const gone = row.gone === null ? '' : `  MISSING since ${new Date(row.gone).toISOString()}`;
         console.log(
-          `  ${row.id}  ${row.state.padEnd(15)} attempts ${row.attempt_count}  ${row.path}${gone}`,
+          `  ${row.id}  ${row.state.padEnd(15)} attempts ${row.attemptCount}  ${row.path}${gone}`,
         );
       }
     }
   }
   return 0;
+};
+
+/**
+ * THE LINE THAT WAS MISSING.
+ *
+ * `library.paused_reason` has been written since the flow-health check
+ * existed, and the API has reported it since the API existed — but `status`,
+ * the one command an operator actually runs, did not. A paused library is
+ * indistinguishable from a converged one from the outside: no jobs, no
+ * errors, no output, and a percentage that simply stops moving. So the
+ * explanation is printed HERE, in full, and it is `explainPause`'s — the same
+ * text `GET /api/v1/libraries` returns, never a second wording that could
+ * drift from it.
+ */
+const renderPause = (library: StatusLibrary): void => {
+  if (library.pausedExplanation === null) return;
+  console.log(`  PAUSED: ${library.pausedExplanation}`);
 };
 
 // ---------------------------------------------------------------------------
@@ -665,40 +1056,91 @@ const cmdRequeue = async (args: string[]): Promise<number> => {
     );
   }
 
-  const db = await openDb(values['data-dir']!);
-  const mediaFileRepo = createMediaFileRepo(db);
+  const unknownFile = (id: string): CliError =>
+    new CliError(`requeue: no file with id "${id}". Ids come from "trawlarr status --files".`);
 
-  const targets = byFile
-    ? values.file!.map((id) => {
-        const row = mediaFileRepo.getById(id);
-        if (row === null) {
-          throw new CliError(
-            `requeue: no file with id "${id}". Ids come from "trawlarr status --files".`,
-          );
+  /** What each requeued row looked like BEFORE it was requeued. */
+  let targets: { path: string; state: string; gone: number | null; requeue: () => Promise<void> }[];
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    if (byFile) {
+      targets = [];
+      for (const id of values.file!) {
+        let file: FileResource;
+        try {
+          ({ file } = await client.get<{ file: FileResource }>(`/files/${id}`));
+        } catch (error) {
+          if (error instanceof ApiRequestError && error.status === 404) throw unknownFile(id);
+          throw error;
         }
-        return row;
-      })
-    : mediaFileRepo.listByLibrary({
-        libraryId: requireLibrary(db, values.library!).id,
+        targets.push({
+          path: file.path,
+          state: file.state,
+          gone: file.missingSinceMs,
+          requeue: async () => {
+            await client.post(`/files/${file.id}/requeue`);
+          },
+        });
+      }
+    } else {
+      const library = requireLibraryResource(
+        await client.get<LibraryResource[]>('/libraries'),
+        values.library!,
+      );
+      const files = await fetchAllFiles(client, {
+        libraryId: library.id,
         state: parseState(values.state!, 'requeue: --state'),
       });
+      targets = files.map((file) => ({
+        path: file.path,
+        state: file.state,
+        gone: file.missingSinceMs,
+        requeue: async () => {
+          await client.post(`/files/${file.id}/requeue`);
+        },
+      }));
+    }
+  } else {
+    const db = await openDb(values['data-dir']!);
+    const mediaFileRepo = createMediaFileRepo(db);
+    const rows = byFile
+      ? values.file!.map((id) => {
+          const row = mediaFileRepo.getById(id);
+          if (row === null) throw unknownFile(id);
+          return row;
+        })
+      : mediaFileRepo.listByLibrary({
+          libraryId: requireLibrary(db, values.library!).id,
+          state: parseState(values.state!, 'requeue: --state'),
+        });
+    targets = rows.map((row) => ({
+      path: row.path,
+      state: row.state,
+      gone: row.missing_since_ms,
+      requeue: async () => {
+        mediaFileRepo.requeue(row.id);
+      },
+    }));
+  }
 
   if (targets.length === 0) {
     console.log(`No files in state "${values.state!}" in library "${values.library!}".`);
     return 0;
   }
 
-  for (const row of targets) {
-    mediaFileRepo.requeue(row.id);
+  for (const target of targets) {
+    await target.requeue();
     // Requeueing a row whose file is gone is legal (the ledger state really
     // does go back to `queued`) but does nothing until the file returns,
     // since `claimNext` skips missing rows. Saying so beats a user watching
     // "trawlarr run" claim nothing and finding no explanation anywhere.
     const gone =
-      row.missing_since_ms === null
+      target.gone === null
         ? ''
         : '  (file is gone from disk; it will not be claimed until it comes back)';
-    console.log(`  ${row.path}: ${row.state} -> queued${gone}`);
+    console.log(`  ${target.path}: ${target.state} -> queued${gone}`);
   }
   console.log(
     `Requeued ${targets.length} file(s). Run "trawlarr run" to work through them ` +
@@ -728,23 +1170,42 @@ const cmdReap = async (args: string[]): Promise<number> => {
     },
   });
 
-  const db = await openDb(values['data-dir']!);
-
   const hours =
     values['stale-after-hours'] === undefined
       ? undefined
       : parseNonNegativeInt(values['stale-after-hours'], 'reap: --stale-after-hours');
 
-  const libraryIds =
-    values.library === undefined ? undefined : [requireLibrary(db, values.library).id];
+  let summary: ReapSummary;
 
-  const summary = reapStalled({
-    db,
-    nowMs: Date.now(),
-    staleAfterMs: hours === undefined ? undefined : hours * 60 * 60 * 1000,
-    libraryIds,
-    dryRun: values['dry-run'],
-  });
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    const libraryId =
+      values.library === undefined
+        ? undefined
+        : requireLibraryResource(await client.get<LibraryResource[]>('/libraries'), values.library)
+            .id;
+    try {
+      summary = await client.post<ReapSummary>('/system/maintenance/reap', {
+        libraryId,
+        staleAfterHours: hours,
+        dryRun: values['dry-run'],
+      });
+    } catch (error) {
+      return asCliError(error, 'reap');
+    }
+  } else {
+    const db = await openDb(values['data-dir']!);
+    const libraryIds =
+      values.library === undefined ? undefined : [requireLibrary(db, values.library).id];
+    summary = reapStalled({
+      db,
+      nowMs: Date.now(),
+      staleAfterMs: hours === undefined ? undefined : hours * 60 * 60 * 1000,
+      libraryIds,
+      dryRun: values['dry-run'],
+    });
+  }
 
   const staleAfterHours = hours ?? DEFAULT_STALE_AFTER_MS / (60 * 60 * 1000);
   if (summary.running === 0) {
@@ -771,6 +1232,11 @@ const cmdReap = async (args: string[]): Promise<number> => {
 // ---------------------------------------------------------------------------
 // forget
 // ---------------------------------------------------------------------------
+
+interface ForgetResult {
+  libraryName: string;
+  summary: ForgetSummary;
+}
 
 /**
  * Discard rows whose file is gone for good. The counterpart to the scanner's
@@ -806,22 +1272,51 @@ const cmdForget = async (args: string[]): Promise<number> => {
     throw new CliError('forget: use either --file or --missing, not both.');
   }
 
-  const db = await openDb(values['data-dir']!);
-  const libraries =
-    values.library !== undefined
-      ? [requireLibrary(db, values.library)]
-      : createLibraryRepo(db).list();
+  let results: ForgetResult[];
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    const client = createCliClient(record);
+    const libraryId =
+      values.library === undefined
+        ? undefined
+        : requireLibraryResource(await client.get<LibraryResource[]>('/libraries'), values.library)
+            .id;
+    try {
+      ({ results } = await client.post<{ results: ForgetResult[] }>('/system/maintenance/forget', {
+        libraryId,
+        fileIds: byFile ? values.file : undefined,
+        missing: values.missing ? true : undefined,
+        includeTerminal: values['include-terminal'],
+        dryRun: values['dry-run'],
+      }));
+    } catch (error) {
+      return asCliError(error, 'forget');
+    }
+  } else {
+    const db = await openDb(values['data-dir']!);
+    const libraries =
+      values.library !== undefined
+        ? [requireLibrary(db, values.library)]
+        : createLibraryRepo(db).list();
+    results = [];
+    for (const library of libraries) {
+      results.push({
+        libraryName: library.name,
+        summary: await forgetMissing({
+          db,
+          library,
+          fileIds: byFile ? values.file : undefined,
+          includeTerminal: values['include-terminal'],
+          dryRun: values['dry-run'],
+        }),
+      });
+    }
+  }
 
   let forgotten = 0;
-  for (const library of libraries) {
-    const summary = await forgetMissing({
-      db,
-      library,
-      fileIds: byFile ? values.file : undefined,
-      includeTerminal: values['include-terminal'],
-      dryRun: values['dry-run'],
-    });
-
+  for (const result of results) {
+    const summary = result.summary;
     for (const file of summary.files) {
       console.log(
         `  ${values['dry-run'] ? 'would forget' : 'forgot'} ${file.fileId}  ${file.state}  ` +
@@ -832,22 +1327,22 @@ const cmdForget = async (args: string[]): Promise<number> => {
 
     if (summary.restored > 0) {
       console.log(
-        `  ${summary.restored} row(s) in "${library.name}" turned out to have their file back ` +
-          `after all; their missing mark was cleared instead of being forgotten.`,
+        `  ${summary.restored} row(s) in "${result.libraryName}" turned out to have their file ` +
+          `back after all; their missing mark was cleared instead of being forgotten.`,
       );
     }
     if (summary.unconfirmed > 0) {
       console.log(
-        `  ${summary.unconfirmed} row(s) in "${library.name}" left alone: their path could not ` +
-          `be examined just now, and "I could not check" is not "it is gone".`,
+        `  ${summary.unconfirmed} row(s) in "${result.libraryName}" left alone: their path could ` +
+          `not be examined just now, and "I could not check" is not "it is gone".`,
       );
     }
     if (summary.keptTerminal > 0) {
       console.log(
-        `  ${summary.keptTerminal} missing row(s) in "${library.name}" are in a terminal state ` +
-          `(failed / not_converging) and were KEPT: their attempt history is the only record ` +
-          `of why trawlarr gave up on that file. Add --include-terminal, or name them with ` +
-          `--file <id>, to forget those too.`,
+        `  ${summary.keptTerminal} missing row(s) in "${result.libraryName}" are in a terminal ` +
+          `state (failed / not_converging) and were KEPT: their attempt history is the only ` +
+          `record of why trawlarr gave up on that file. Add --include-terminal, or name them ` +
+          `with --file <id>, to forget those too.`,
       );
     }
     if (summary.notMissing > 0) {
@@ -868,10 +1363,69 @@ const cmdForget = async (args: string[]): Promise<number> => {
 };
 
 // ---------------------------------------------------------------------------
+// daemon
+// ---------------------------------------------------------------------------
+
+/**
+ * Run trawlarr as a service, in the foreground.
+ *
+ * Foreground on purpose: this is what an init system, a container, or a
+ * terminal supervises, and a process that daemonises itself is one systemd
+ * and Docker both have to be told to work around. Ctrl-C (SIGINT) and
+ * `systemctl stop` (SIGTERM) both reach `stop()`, which drains rather than
+ * killing — see `daemon.ts` for why the drain has a deadline.
+ */
+const cmdDaemon = async (args: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args,
+    options: {
+      'data-dir': { type: 'string', default: './trawlarr-data' },
+      port: { type: 'string' },
+      bind: { type: 'string' },
+    },
+  });
+
+  const port =
+    values.port === undefined ? undefined : parseNonNegativeInt(values.port, 'daemon: --port');
+
+  let daemon;
+  try {
+    daemon = await startDaemon({ dataDir: values['data-dir']!, port, bind: values.bind });
+  } catch (error) {
+    if (error instanceof DaemonAlreadyRunningError) throw new CliError(error.message);
+    throw error;
+  }
+
+  console.log(
+    `trawlarr daemon listening on http://${daemon.bind}:${String(daemon.port)}/api/v1 ` +
+      `(data directory ${resolve(values['data-dir']!)}).`,
+  );
+  if (daemon.apiKeyGenerated) {
+    // Printed exactly once, on the run that minted it. It is stored in the
+    // database from now on (setting "daemon.apiKey", also readable at
+    // GET /system/settings), so a later start printing it again would be
+    // spraying a live credential into every log that captures stdout.
+    console.log(`  API key (generated on this first run, stored from now on): ${daemon.apiKey}`);
+  }
+  console.log(
+    `  The API binds ${daemon.bind} by default and speaks plain HTTP: put a reverse proxy in ` +
+      `front of it if it needs to be reachable from anywhere else. While this daemon is running ` +
+      `it owns the data directory, and "trawlarr" commands in other terminals talk to it rather ` +
+      `than opening the database. Stop it with Ctrl-C: work already in progress is drained, not ` +
+      `killed.`,
+  );
+
+  await daemon.stopped;
+  console.log('trawlarr daemon stopped.');
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
 const USAGE = `Usage:
+  trawlarr daemon [--port <n>] [--bind <addr>]
   trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked]
   trawlarr flow add --name <name> --file <flow.json>
   trawlarr library set-flow --library <name> --flow <name>
@@ -885,7 +1439,9 @@ const USAGE = `Usage:
   trawlarr forget --missing [--library <name>] [--include-terminal] [--dry-run]
   trawlarr forget --file <id> [--file <id>...] [--dry-run]
 
-All commands accept --data-dir <path> (default ./trawlarr-data).`;
+All commands accept --data-dir <path> (default ./trawlarr-data).
+While a daemon owns that directory, every command talks to it over its API
+instead of opening the database — the daemon is the only writer.`;
 
 const dispatch = async (argv: string[]): Promise<number> => {
   const [cmd, ...rest] = argv;
@@ -917,6 +1473,7 @@ const dispatch = async (argv: string[]): Promise<number> => {
     if (sub === 'purge') return cmdTrashPurge(subRest);
     throw new CliError(`Unknown command: "trash ${sub ?? ''}".\n\n${USAGE}`);
   }
+  if (cmd === 'daemon') return cmdDaemon(rest);
   if (cmd === 'scan') return cmdScan(rest);
   if (cmd === 'run') return cmdRun(rest);
   if (cmd === 'status') return cmdStatus(rest);
