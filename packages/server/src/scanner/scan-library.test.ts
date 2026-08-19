@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process';
 import {
+  chmodSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   renameSync,
   symlinkSync,
   unlinkSync,
@@ -413,4 +415,164 @@ describe('scanLibrary excludes reserved staging/trash directories', () => {
     },
     60_000,
   );
+});
+
+/**
+ * Probing is the expensive part of a scan, and spec §4.1 requires it to be
+ * RESUMABLE: "a scan interrupted at 60,000 of 100,000 files does not restart
+ * from zero". It only resumes if each probe is on disk by the time the
+ * process dies — a result held in memory until the walk finishes is lost to
+ * a deploy, a crash or an OOM kill, and the daemon restarts far more often
+ * than a one-shot CLI did.
+ *
+ * These use a stub ffprobe that LOGS every invocation, so the count of real
+ * probes is evidence independent of the summary's own counter, and fake
+ * `.mkv` files, since nothing here decodes anything.
+ */
+describe('scanLibrary: an interrupted scan resumes rather than restarting', () => {
+  const FILE_COUNT = 5;
+  const INTERRUPT_AT = 3; // Throw as the third file is reached: two are done.
+
+  class Interrupted extends Error {}
+
+  let resumeRoot: string;
+  let probeLog: string;
+  let stubFfprobe: string;
+  let resumeLibraryId: string;
+
+  const probedPaths = (): string[] => {
+    try {
+      return readFileSync(probeLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+
+  const rows = (): MediaFileRow[] =>
+    createMediaFileRepo(db).listByLibrary({ libraryId: resumeLibraryId });
+
+  const probedRowCount = (): number => rows().filter((row) => row.probe_json !== null).length;
+
+  const resumeScan = (onProgress?: (seen: number) => void) =>
+    scanLibrary({
+      db,
+      libraryId: resumeLibraryId,
+      ffprobePath: stubFfprobe,
+      nowMs: now,
+      onProgress,
+    });
+
+  beforeEach(() => {
+    const base = mkdtempSync(join(tmpdir(), 'trawlarr-resume-'));
+    resumeRoot = join(base, 'media');
+    mkdirSync(resumeRoot, { recursive: true });
+    for (let i = 0; i < FILE_COUNT; i += 1) {
+      writeFileSync(join(resumeRoot, `file-${i}.mkv`), `contents of file ${i}`);
+    }
+
+    probeLog = join(base, 'probed.log');
+    stubFfprobe = join(base, 'ffprobe.sh');
+    writeFileSync(
+      stubFfprobe,
+      [
+        '#!/bin/sh',
+        'for arg in "$@"; do last=$arg; done',
+        `printf '%s\\n' "$last" >> ${JSON.stringify(probeLog)}`,
+        `printf '%s' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}],"format":{"duration":"60.0","size":"4096","bit_rate":"16384"}}'`,
+        '',
+      ].join('\n'),
+    );
+    chmodSync(stubFfprobe, 0o755);
+
+    const flow = createFlowRepo(db).create({ name: 'HEVC-resume', definition, nowMs: NOW });
+    resumeLibraryId = createLibraryRepo(db).create({
+      name: 'Resumable',
+      roots: [resumeRoot],
+      extensions: ['mkv'],
+      flowId: flow.id,
+      nowMs: NOW,
+    }).id;
+  });
+
+  it('keeps the probes a killed scan already did, and re-probes only what it never reached', async () => {
+    let probedWhenInterrupted = -1;
+    await expect(
+      resumeScan((seen) => {
+        if (seen !== INTERRUPT_AT) return;
+        // Read the DATABASE from inside the walk: the two finished files
+        // must already be durable here, not merely queued up in memory for
+        // a phase that this interruption is about to prevent.
+        probedWhenInterrupted = probedRowCount();
+        throw new Interrupted('killed mid-walk');
+      }),
+    ).rejects.toBeInstanceOf(Interrupted);
+
+    expect(probedWhenInterrupted).toBe(INTERRUPT_AT - 1);
+    expect(probedPaths()).toHaveLength(INTERRUPT_AT - 1);
+    expect(probedRowCount()).toBe(INTERRUPT_AT - 1);
+
+    // The resuming scan pays only for the files the interrupted one never
+    // reached — the whole property: 5 files, 2 already done, 3 to do.
+    const resumed = await resumeScan();
+    expect(resumed.seen).toBe(FILE_COUNT);
+    expect(resumed.probed).toBe(FILE_COUNT - (INTERRUPT_AT - 1));
+    // Every file probed exactly once across BOTH scans.
+    expect(probedPaths()).toHaveLength(FILE_COUNT);
+    expect(new Set(probedPaths()).size).toBe(FILE_COUNT);
+    expect(probedRowCount()).toBe(FILE_COUNT);
+
+    // And a settled library costs nothing at all.
+    const settled = await resumeScan();
+    expect(settled.seen).toBe(FILE_COUNT);
+    expect(settled.probed).toBe(0);
+    expect(probedPaths()).toHaveLength(FILE_COUNT);
+  });
+
+  it('reconciles nothing when the walk is interrupted, however stale the rows it never reached', async () => {
+    // The sharpest risk in making a scan incremental: reconciliation seeing
+    // a PARTIAL picture. Every row's recorded path is made stale by a
+    // rename, so a reconciliation run before the walk reaches the new paths
+    // would find ENOENT on each one and mark live files missing.
+    await resumeScan();
+    expect(rows()).toHaveLength(FILE_COUNT);
+    for (let i = 0; i < FILE_COUNT; i += 1) {
+      renameSync(join(resumeRoot, `file-${i}.mkv`), join(resumeRoot, `renamed-${i}.mkv`));
+    }
+
+    await expect(
+      resumeScan((seen) => {
+        if (seen === INTERRUPT_AT) throw new Interrupted('killed mid-walk');
+      }),
+    ).rejects.toBeInstanceOf(Interrupted);
+
+    // Not one row marked missing, including the ones whose path still
+    // points at a file that no longer exists there.
+    expect(rows().filter((row) => row.missing_since_ms !== null)).toHaveLength(0);
+
+    // Reconciliation happens once the walk is complete, and with the whole
+    // picture it correctly finds nothing missing: the files were renamed,
+    // not deleted, and the rows followed them.
+    const complete = await resumeScan();
+    expect(complete.missing).toBe(0);
+    expect(complete.seen).toBe(FILE_COUNT);
+    const after = rows();
+    expect(after).toHaveLength(FILE_COUNT);
+    expect(after.filter((row) => row.missing_since_ms !== null)).toHaveLength(0);
+    expect(after.map((row) => row.path).sort()).toEqual(
+      Array.from({ length: FILE_COUNT }, (_, i) => join(resumeRoot, `renamed-${i}.mkv`)).sort(),
+    );
+  });
+
+  it('still marks a genuinely deleted file missing when the walk completes', async () => {
+    // The counterpart: incremental commits must not make reconciliation
+    // toothless. The scanner is the only thing that moves a file out of
+    // `good`, so a scan that stops reconciling is a silent failure.
+    await resumeScan();
+    unlinkSync(join(resumeRoot, 'file-0.mkv'));
+    const summary = await resumeScan();
+    expect(summary.seen).toBe(FILE_COUNT - 1);
+    expect(summary.missing).toBe(1);
+    const gone = rows().find((row) => row.path === join(resumeRoot, 'file-0.mkv'));
+    expect(gone?.missing_since_ms).not.toBeNull();
+  });
 });

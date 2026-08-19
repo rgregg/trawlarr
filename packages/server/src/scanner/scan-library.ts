@@ -12,7 +12,7 @@ import { reconcileMissing } from './reconcile.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
 import { partialHashFile, identityFromStat } from '../fs/partial-hash.js';
 import { probeFile, ProbeError } from '../probe/ffprobe.js';
-import { runChunked } from '../db/chunked.js';
+import { DEFAULT_CHUNK_SIZE, runChunked } from '../db/chunked.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import {
@@ -164,28 +164,109 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   };
 
   /**
-   * Every row this scan actually walked a file for. Reconciliation (phase 4)
-   * only considers rows NOT in here — a file the walk yielded is present by
-   * definition, whatever its path column happens to say afterwards.
+   * Every row this scan actually walked a file for. Reconciliation (the
+   * final step) only considers rows NOT in here — a file the walk yielded
+   * is present by definition, whatever its path column says afterwards.
    */
   const seenFileIds = new Set<string>();
 
-  interface Decision {
+  /**
+   * One file, settled: probed if it needed probing, and carrying whatever
+   * came back. `facts`/`probe` are null when the file was skipped (rule 5)
+   * or its probe failed, both of which still need their ledger considered.
+   */
+  interface Probed {
     fileId: string;
-    isNew: boolean;
-    doProbe: boolean;
-    path: string;
-    sizeBytes: number;
-    mtimeMs: number;
     container: string;
+    sizeBytes: number;
+    facts: ReturnType<typeof extractFacts> | null;
+    probe: Awaited<ReturnType<typeof probeFile>> | null;
   }
 
-  const decisions: Decision[] = [];
+  /**
+   * Write one settled file: its probe (if any) and the ledger transition
+   * that probe implies. Always called inside `runChunked`'s transaction.
+   */
+  const persist = (item: Probed): void => {
+    if (item.probe !== null && item.facts !== null) {
+      mediaFileRepo.setProbe({ fileId: item.fileId, probe: item.probe, facts: item.facts });
+    }
 
-  // Phase 1: walk + upsert identity. This determines, for every file seen,
-  // whether it is new, changed, or unchanged, and whether it needs probing.
-  // Kept out of runChunked's transactions because probing (phase 2) does
-  // filesystem/process IO that must never happen inside a sqlite transaction.
+    const row = mediaFileRepo.getById(item.fileId);
+    if (row === null) return;
+
+    // Terminal states, and files already mid-flight, are left alone: a
+    // scan must not silently retry a file the system has given up on.
+    if (NEVER_REQUEUE_STATES.has(row.state)) return;
+
+    if (flowDefinitionHash === null) return; // No flow: cannot compute a signature.
+
+    // A signature needs facts as of THIS scan's container/size, not
+    // whatever the row happens to hold now: extracted directly here
+    // rather than through getProbe, which deliberately re-derives from
+    // the row's current container/size and would silently drift from
+    // "facts as of this scan" if the row were mutated again later.
+    const facts =
+      item.facts ??
+      (row.probe_json === null
+        ? null
+        : extractFacts({
+            probe: JSON.parse(row.probe_json) as Parameters<typeof extractFacts>[0]['probe'],
+            container: item.container,
+            sizeBytes: item.sizeBytes,
+          }));
+    if (facts === null) return; // Never probed (e.g. probe failure on a new file).
+
+    const signature = computeSignature({ flowDefinitionHash, facts });
+
+    const ledger: LedgerRecord = mediaFileRepo.getLedger(item.fileId) ?? newLedgerRecord();
+
+    if (isKnownGood(ledger, signature)) {
+      summary.alreadyGood += 1;
+      return;
+    }
+
+    // Signature doesn't match (or file was never converged): (re-)queue it.
+    // `signature` is deliberately NOT written here — it records the
+    // signature the file last converged under, and only applyRunOutcome
+    // (a successful run) is entitled to set it. Leaving it unchanged is
+    // rule 7's "resetting nothing else". This is the step the whole
+    // convergence design depends on.
+    mediaFileRepo.setLedger({
+      fileId: item.fileId,
+      record: { ...ledger, state: 'queued' },
+    });
+    summary.queued += 1;
+  };
+
+  /** Settled files not yet written. Never allowed to grow past a chunk. */
+  const pending: Probed[] = [];
+
+  /**
+   * Commit everything settled so far, in bounded transactions.
+   *
+   * Called DURING the walk, not once at the end, and that is the whole
+   * point: probing is the expensive part of a scan (spec §4.1), and a
+   * result that lives only in this process's memory is lost to a deploy, a
+   * crash or an OOM kill. A scan interrupted at 60,000 of 100,000 files must
+   * resume, not restart, and it resumes because the 60,000 probes are on
+   * disk when the next scan applies its skip rule (`probe_json === null`, or
+   * size/mtime changed) to them.
+   *
+   * `pending` is drained into `runChunked` rather than written per row so
+   * that a settled library — where nothing is probed and the walk is pure
+   * bookkeeping — still commits in chunk-sized transactions exactly as
+   * before, instead of paying a transaction per file.
+   */
+  const flush = async (): Promise<void> => {
+    if (pending.length === 0) return;
+    await runChunked({ db, items: pending.splice(0, pending.length), apply: persist });
+  };
+
+  // Walk, upsert identity, probe what needs it, and commit as we go. Probing
+  // deliberately happens between transactions, never inside one: spawning
+  // ffprobe while holding sqlite's write lock would block every other writer
+  // for the length of an external process.
   for await (const entry of walkFiles({
     roots: library.roots,
     extensions: library.extensions,
@@ -216,7 +297,10 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     // (no insert, no probe, no queue) and let the run that owns it record
     // it; the next scan sees it as the row it belongs to. Queried fresh
     // here rather than once per scan, so a job that started after this scan
-    // began is still covered — see `listRunningPaths`.
+    // began is still covered — see `listRunningPaths`. Committing this
+    // scan's earlier files as it goes makes that freshness matter MORE, not
+    // less: a row this very walk queued can be claimed and start producing
+    // its replacement before the walk ends.
     if (isNew) {
       const running = mediaFileRepo.listRunningPaths(libraryId);
       if (running.some((runningPath) => isInFlightOutput(runningPath, entry.path))) {
@@ -294,132 +378,51 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       existingBeforeUpsert.size_bytes !== entry.stat.size ||
       existingBeforeUpsert.mtime_ms !== entry.stat.mtimeMs;
 
-    decisions.push({
+    const settled: Probed = {
       fileId,
-      isNew,
-      doProbe,
-      path: entry.path,
-      sizeBytes: entry.stat.size,
-      mtimeMs: entry.stat.mtimeMs,
       container,
-    });
-  }
+      sizeBytes: entry.stat.size,
+      facts: null,
+      probe: null,
+    };
 
-  // Phase 2: probe files that need it. Kept outside any sqlite transaction
-  // since spawning ffprobe per file would otherwise hold a write lock open
-  // for the duration of external process IO.
-  interface Probed {
-    fileId: string;
-    container: string;
-    sizeBytes: number;
-    facts: ReturnType<typeof extractFacts> | null;
-    probe: Awaited<ReturnType<typeof probeFile>> | null;
-  }
-  const probed: Probed[] = [];
-
-  for (const decision of decisions) {
-    if (!decision.doProbe) {
-      probed.push({
-        fileId: decision.fileId,
-        container: decision.container,
-        sizeBytes: decision.sizeBytes,
-        facts: null,
-        probe: null,
-      });
-      continue;
-    }
-    summary.probed += 1;
-    try {
-      const probe = await probeFile({ ffprobePath, path: decision.path });
-      const facts = extractFacts({
-        probe,
-        container: decision.container,
-        sizeBytes: decision.sizeBytes,
-      });
-      probed.push({
-        fileId: decision.fileId,
-        container: decision.container,
-        sizeBytes: decision.sizeBytes,
-        facts,
-        probe,
-      });
-    } catch (err) {
-      if (err instanceof ProbeError) {
+    if (doProbe) {
+      summary.probed += 1;
+      try {
+        const probe = await probeFile({ ffprobePath, path: entry.path });
+        settled.probe = probe;
+        settled.facts = extractFacts({ probe, container, sizeBytes: entry.stat.size });
+      } catch (err) {
+        if (!(err instanceof ProbeError)) throw err;
         summary.unreadable += 1;
-        probed.push({
-          fileId: decision.fileId,
-          container: decision.container,
-          sizeBytes: decision.sizeBytes,
-          facts: null,
-          probe: null,
-        });
-        continue;
       }
-      throw err;
     }
+
+    pending.push(settled);
+
+    // Commit as soon as anything expensive has been done, so at most one
+    // probe is ever at risk; otherwise let cheap bookkeeping accumulate to
+    // a full chunk. Either way `pending` never exceeds one transaction's
+    // worth, which is why a 100k-file library still never opens a single
+    // giant transaction.
+    if (doProbe || pending.length >= DEFAULT_CHUNK_SIZE) await flush();
   }
 
-  // Phase 3: persist probe results and ledger transitions in bounded chunks.
-  await runChunked({
-    db,
-    items: probed,
-    apply: (item) => {
-      if (item.probe !== null && item.facts !== null) {
-        mediaFileRepo.setProbe({ fileId: item.fileId, probe: item.probe, facts: item.facts });
-      }
+  // Everything the walk settled but did not fill a chunk with.
+  await flush();
 
-      const row = mediaFileRepo.getById(item.fileId);
-      if (row === null) return;
-
-      // Terminal states, and files already mid-flight, are left alone: a
-      // scan must not silently retry a file the system has given up on.
-      if (NEVER_REQUEUE_STATES.has(row.state)) return;
-
-      if (flowDefinitionHash === null) return; // No flow: cannot compute a signature.
-
-      // A signature needs facts as of THIS scan's container/size, not
-      // whatever the row happens to hold now: extracted directly here
-      // rather than through getProbe, which deliberately re-derives from
-      // the row's current container/size and would silently drift from
-      // "facts as of this scan" if the row were mutated again later.
-      const facts =
-        item.facts ??
-        (row.probe_json === null
-          ? null
-          : extractFacts({
-              probe: JSON.parse(row.probe_json) as Parameters<typeof extractFacts>[0]['probe'],
-              container: item.container,
-              sizeBytes: item.sizeBytes,
-            }));
-      if (facts === null) return; // Never probed (e.g. probe failure on a new file).
-
-      const signature = computeSignature({ flowDefinitionHash, facts });
-
-      const ledger: LedgerRecord = mediaFileRepo.getLedger(item.fileId) ?? newLedgerRecord();
-
-      if (isKnownGood(ledger, signature)) {
-        summary.alreadyGood += 1;
-        return;
-      }
-
-      // Signature doesn't match (or file was never converged): (re-)queue it.
-      // `signature` is deliberately NOT written here — it records the
-      // signature the file last converged under, and only applyRunOutcome
-      // (a successful run) is entitled to set it. Leaving it unchanged is
-      // rule 7's "resetting nothing else". This is the step the whole
-      // convergence design depends on.
-      mediaFileRepo.setLedger({
-        fileId: item.fileId,
-        record: { ...ledger, state: 'queued' },
-      });
-      summary.queued += 1;
-    },
-  });
-
-  // Phase 4: reconcile the rows the walk did NOT account for. Deliberately
-  // last: it compares against `seenFileIds`, which is only complete once the
-  // whole walk has finished, and it must never run against a partial walk —
-  // that is the shape that would purge a library whose scan was interrupted.
+  // Reconcile the rows the walk did NOT account for. Deliberately the last
+  // thing, OUTSIDE the walk loop and reached only by the loop running to
+  // completion: it compares against `seenFileIds`, which is only complete
+  // once the whole walk has finished, and it must never run against a
+  // partial walk — that is the shape that would purge a library whose scan
+  // was interrupted. This is why probe results are committed incrementally
+  // but reconciliation is NOT: an interrupted scan keeps its probes (the
+  // expensive work, safe to keep because the next scan re-derives every
+  // decision from the row) and reconciles nothing at all (a judgement that
+  // is only sound with the complete picture a finished walk gives). A scan
+  // killed mid-walk therefore leaves no row marked missing, however many
+  // rows it never reached.
   const reconciled = await reconcileMissing({
     library,
     mediaFileRepo,
