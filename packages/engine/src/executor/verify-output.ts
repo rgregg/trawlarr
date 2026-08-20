@@ -13,7 +13,7 @@ export interface VerifyReport {
  * Pure on purpose: the whole decision table — including the combinations that
  * would need a deliberately corrupted 40 GB file to reproduce on a real
  * filesystem — is testable without touching one. The runner below is the only
- * part that does IO, and it does nothing but gather these six inputs and route
+ * part that does IO, and it does nothing but gather these inputs and route
  * on the result.
  */
 export const verifyOutput = (input: {
@@ -23,6 +23,35 @@ export const verifyOutput = (input: {
   originalSizeBytes: number;
   durationToleranceSeconds: number;
   minSizeRatio: number;
+  /**
+   * How many streams the flow's own ffmpeg command intended to write, or
+   * `null` when no command described one (a flow that verifies a file it
+   * merely copied, for instance).
+   *
+   * Comparing against the ORIGINAL's count was a host defect that made every
+   * stream-removing community plugin unusable: `Remove Stream By Property`,
+   * `Remove Subtitles`, `Remove Data Streams` and `Set Container` with
+   * `forceConform` all produce an output with fewer streams BY DESIGN, and
+   * verification rejected all of them, refused the replacement, and burned
+   * three attempts per file before it landed in `failed`.
+   */
+  intendedStreamCount: number | null;
+  /**
+   * Refuse an output with no audio when the original had some.
+   *
+   * This is the fail-safe that deliberately replaces the accidental one the
+   * field above removes. It is deliberately NOT satisfied by the flow's
+   * intent: a language filter matching nothing removes every audio track, and
+   * the command it builds says so, so an intent-following check would approve
+   * a silent film and trash the original. Unmanic exposes this concern as
+   * `fail_safe` on its own language plugin; it lives in the HOST GATE here
+   * instead because a gate protects against every plugin — community ones
+   * nobody here wrote and future ones nobody here has seen — while a node
+   * input protects only against the node that declares it. That is the same
+   * reasoning `docs/engineering-notes/p2-prerequisites.md` records under "An
+   * allow-list is not a rule".
+   */
+  requireAudioIfOriginalHadAudio: boolean;
 }): VerifyReport => {
   const reasons: string[] = [];
   const streams = input.probe.streams ?? [];
@@ -33,9 +62,29 @@ export const verifyOutput = (input: {
     return { ok: false, reasons };
   }
 
-  const expected = (input.originalProbe.streams ?? []).length;
+  const originalStreams = input.originalProbe.streams ?? [];
+  // The flow's own intent is the baseline, falling back to the original's
+  // count only when nothing described one. One-sided on purpose: MORE streams
+  // than expected is what `Ensure Audio Stream` produces, and is never a
+  // symptom of a truncated encode. Fewer is.
+  const expected = input.intendedStreamCount ?? originalStreams.length;
   if (streams.length < expected) {
-    reasons.push(`the output has ${streams.length} streams, fewer than the original's ${expected}`);
+    reasons.push(
+      `the output has ${streams.length} streams, fewer than the ${expected} this flow ` +
+        `intended to write`,
+    );
+  }
+
+  if (input.requireAudioIfOriginalHadAudio) {
+    const originalHadAudio = originalStreams.some((stream) => stream.codec_type === 'audio');
+    const outputHasAudio = streams.some((stream) => stream.codec_type === 'audio');
+    if (originalHadAudio && !outputHasAudio) {
+      reasons.push(
+        `the original has audio and the output has none — a stream filter that matched ` +
+          `nothing removes every audio track, which is why this is refused even though the ` +
+          `flow asked for it`,
+      );
+    }
   }
 
   // "Unknown" must never read as "fine" — on EITHER side. ffmpeg can hit a
@@ -165,6 +214,24 @@ export const createVerifyOutputRunner =
         const durationToleranceSeconds = numberInput(args.inputs.durationToleranceSeconds, 1);
         const minSizeRatio = numberInput(args.inputs.minSizeRatio, 0.05);
 
+        // The command survives `closeFfmpegCommand` (which clears `init` and
+        // `shouldProcess` but keeps `streams`), so the Execute node that just
+        // ran has left behind exactly what it intended to write. A flow with
+        // no Begin Command carries an empty stream array, which means "nothing
+        // described an intent" rather than "zero streams" — hence `null`
+        // there, which falls back to the original's count.
+        const commandStreams = args.variables.ffmpegCommand?.streams ?? [];
+        const intendedStreamCount =
+          commandStreams.length === 0
+            ? null
+            : commandStreams.filter((stream) => stream.removed !== true).length;
+        // A node input arrives as the STRING 'false' from a stored flow and as
+        // the boolean false from a test. Reading only one of those makes the
+        // switch look wired while doing nothing, so both are normalised here,
+        // and an absent input keeps the protection ON.
+        const requireAudioIfOriginalHadAudio =
+          String(args.inputs.requireAudioIfOriginalHadAudio ?? 'true') !== 'false';
+
         let report: VerifyReport;
         try {
           const [probe, originalProbe, outputStats, originalStats] = await Promise.all([
@@ -180,6 +247,8 @@ export const createVerifyOutputRunner =
             originalSizeBytes: originalStats.size,
             durationToleranceSeconds,
             minSizeRatio,
+            intendedStreamCount,
+            requireAudioIfOriginalHadAudio,
           });
         } catch (error) {
           // A file that cannot be read or probed is a failed verification, not

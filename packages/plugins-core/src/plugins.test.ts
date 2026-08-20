@@ -166,6 +166,9 @@ describe('trawlarr:verifyOutput', () => {
       .inputs.map((i) => i.name);
     expect(names).toContain('durationToleranceSeconds');
     expect(names).toContain('minSizeRatio');
+    // The audio fail-safe is a host gate, but the flow author still has to be
+    // able to see it and turn it off for a deliberately silent flow.
+    expect(names).toContain('requireAudioIfOriginalHadAudio');
   });
 
   it('refuses to run outside an engine that supplies its behaviour', async () => {

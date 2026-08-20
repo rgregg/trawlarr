@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import { createPluginLoader } from '../../src/host/loader.js';
+import { verifyOutput } from '../../src/executor/verify-output.js';
 import { toolAvailableSync } from '../../../../test-support/tool-availability.js';
 import { corpusAvailable, pluginPath } from './corpus.js';
 
@@ -379,5 +380,35 @@ describe.runIf(available)('Custom Arguments against real ffmpeg', () => {
     expect(argv.slice(-3)).toEqual(['-max_muxing_queue_size', '2048', outputPath]);
     // ffmpeg accepted the flag and wrote a file with every stream intact.
     expect(await streamSummary(outputPath)).toEqual(await streamSummary(sourcePath));
+  }, 120_000);
+});
+
+describe.runIf(available)('verification accepts a real language-filtered output', () => {
+  it('passes the output the removal plugin actually produced', async () => {
+    const { outputPath, command } = await runThroughFfmpeg({
+      rel: 'ffmpegCommand/ffmpegCommandRemoveStreamByProperty/1.0.0/index.js',
+      inputs: {
+        codecType: 'audio',
+        propertyToCheck: 'tags.language',
+        valuesToRemove: 'eng',
+        condition: 'not_includes',
+      },
+      outputName: 'verified.mkv',
+    });
+
+    const report = verifyOutput({
+      probe: await probeOf(outputPath),
+      originalProbe: await probeOf(sourcePath),
+      outputSizeBytes: statSync(outputPath).size,
+      originalSizeBytes: statSync(sourcePath).size,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: command.streams.filter((s) => s.removed !== true).length,
+      requireAudioIfOriginalHadAudio: true,
+    });
+    // Before this task, this assertion was false and every file his language
+    // filter touched would have been refused and eventually marked failed.
+    expect(report.reasons).toEqual([]);
+    expect(report.ok).toBe(true);
   }, 120_000);
 });

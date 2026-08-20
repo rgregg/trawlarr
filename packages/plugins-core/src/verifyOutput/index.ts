@@ -4,8 +4,9 @@ export const details = (): PluginDetails => ({
   name: 'Verify Output',
   description:
     'Check that a transcode actually produced a sound file before anything downstream ' +
-    'trusts it: the output probes cleanly, its duration and stream count match the ' +
-    'original within tolerance, and its size is sane.',
+    'trusts it: the output probes cleanly, its duration matches the original within ' +
+    'tolerance, it carries every stream the flow intended to write, and its size is sane.' +
+    ' It also refuses an output that lost all of its audio.',
   style: { borderColor: '#33aa66' },
   tags: 'safety,verify',
   isStartPlugin: false,
@@ -32,6 +33,19 @@ export const details = (): PluginDetails => ({
         'The smallest fraction of the original file size the output may be. A 40 GB file ' +
         'becoming 200 MB is a failure, not a success — this is the sanity floor.',
       inputUI: { type: 'text' },
+    },
+    {
+      label: 'Require audio if the original had audio',
+      name: 'requireAudioIfOriginalHadAudio',
+      type: 'boolean',
+      defaultValue: 'true',
+      tooltip:
+        'Refuse an output with no audio streams when the original had some. A stream filter ' +
+        'whose language list matches nothing removes every audio track, and the flow will ' +
+        'have asked for exactly that — so this is the only thing that stops a silent file ' +
+        'replacing your original. Turn it off only for a flow that deliberately produces ' +
+        'video with no sound.',
+      inputUI: { type: 'switch' },
     },
   ],
   outputs: [

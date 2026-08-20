@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -391,3 +393,259 @@ describe.runIf(available)('CLI end-to-end: a library actually converges', () => 
     expect(stdout).toContain('No libraries configured.');
   }, 30_000);
 });
+
+/**
+ * The community plugin the whole of P2d is about, loaded by PATH exactly as a
+ * user's flow refers to it. Absent when the Tdarr plugin corpus has not been
+ * fetched, which is the same condition the engine's parity suites gate on.
+ */
+const REMOVE_STREAM_PLUGIN = join(
+  process.cwd(),
+  'cache/tdarr-plugins/FlowPlugins/CommunityFlowPlugins/ffmpegCommand',
+  'ffmpegCommandRemoveStreamByProperty/1.0.0/index.js',
+);
+const corpusAvailable = existsSync(REMOVE_STREAM_PLUGIN);
+
+/** A file with one video track and two audio tracks, tagged eng and jpn. */
+const makeMultiAudioSample = (path: string) =>
+  execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc=duration=2:size=320x240:rate=10',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=440:duration=2',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=660:duration=2',
+    '-map',
+    '0:v:0',
+    '-map',
+    '1:a:0',
+    '-map',
+    '2:a:0',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-c:a',
+    'aac',
+    '-metadata:s:a:0',
+    'language=eng',
+    '-metadata:s:a:1',
+    'language=jpn',
+    path,
+  ]);
+
+/** Every stream on disk, as `codec_type:language`, straight from ffprobe. */
+const streamSummaryOf = async (path: string): Promise<string[]> => {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'error',
+    '-show_entries',
+    'stream=codec_type:stream_tags=language',
+    '-of',
+    'json',
+    path,
+  ]);
+  const parsed = JSON.parse(stdout) as {
+    streams: { codec_type: string; tags?: { language?: string } }[];
+  };
+  return parsed.streams.map((stream) => `${stream.codec_type}:${stream.tags?.language ?? 'none'}`);
+};
+
+const md5Of = (path: string): string => createHash('md5').update(readFileSync(path)).digest('hex');
+
+/** start → begin → the community removal plugin → execute → verify → replace. */
+const removalFlow = (removalInputs: Record<string, string>): FlowDefinition => ({
+  nodes: [
+    { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+    { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'remove',
+      pluginId: REMOVE_STREAM_PLUGIN,
+      pluginVersion: '1.0.0',
+      inputs: removalInputs,
+    },
+    { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'verify',
+      pluginId: 'trawlarr:verifyOutput',
+      pluginVersion: '1.0.0',
+      inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+    },
+    {
+      id: 'replace',
+      pluginId: 'trawlarr:replaceOriginal',
+      pluginVersion: '1.0.0',
+      inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+    },
+  ],
+  edges: [
+    { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
+    { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'remove' },
+    { fromNodeId: 'remove', outputNumber: 1, toNodeId: 'execute' },
+    { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
+    { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+  ],
+});
+
+/**
+ * Configures a library with a removal flow, scans, and runs — the real CLI,
+ * the real database, real ffmpeg — and hands back what is on disk afterwards.
+ */
+const runRemovalLibrary = async (input: {
+  prefix: string;
+  removalInputs: Record<string, string>;
+}) => {
+  const workDir = mkdtempSync(join(tmpdir(), input.prefix));
+  const libraryRoot = join(workDir, 'library');
+  const dataDir = join(workDir, 'data');
+  mkdirSync(libraryRoot, { recursive: true });
+  const mediaPath = join(libraryRoot, 'movie.mkv');
+  await makeMultiAudioSample(mediaPath);
+  // Captured BEFORE anything runs, so "untouched" can be asserted on bytes.
+  const md5Before = md5Of(mediaPath);
+
+  const flowPath = join(workDir, 'flow.json');
+  writeFileSync(flowPath, JSON.stringify(removalFlow(input.removalInputs)), 'utf8');
+
+  await runCli([
+    'library',
+    'add',
+    '--name',
+    'Movies',
+    '--root',
+    libraryRoot,
+    '--data-dir',
+    dataDir,
+  ]);
+  await runCli(['flow', 'add', '--name', 'Filter', '--file', flowPath, '--data-dir', dataDir]);
+  await runCli([
+    'library',
+    'set-flow',
+    '--library',
+    'Movies',
+    '--flow',
+    'Filter',
+    '--data-dir',
+    dataDir,
+  ]);
+  await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+  await runCli(['run', '--data-dir', dataDir]);
+
+  return {
+    workDir,
+    libraryRoot,
+    dataDir,
+    mediaPath,
+    md5Before,
+    trashDir: join(libraryRoot, '.trawlarr', 'trash'),
+  };
+};
+
+/**
+ * The seam this whole task exists for: a STREAM-REMOVING plugin, driven
+ * through a WHOLE flow that ends in Replace Original File.
+ *
+ * Every piece of this was already tested in isolation and every piece was
+ * already correct. `verifyOutput` compared the output's stream count against
+ * the ORIGINAL probe's, so a plugin whose entire purpose is to produce fewer
+ * streams routed to output 2 on every file: the replacement was refused,
+ * three attempts burned, and the file landed in `failed` — with nothing
+ * anywhere in the suite noticing, because plugin tests stop at the ffmpeg
+ * command and verification tests never ran a plugin.
+ */
+describe.runIf(available && corpusAvailable)(
+  'a stream-removing community plugin, through a full flow ending in Replace Original File',
+  () => {
+    beforeAll(() => {
+      assertBuiltCliIsFresh();
+    });
+
+    it('replaces the original with the filtered file and the library converges', async () => {
+      const { dataDir, mediaPath, md5Before, trashDir } = await runRemovalLibrary({
+        prefix: 'trawlarr-remove-e2e-',
+        removalInputs: {
+          codecType: 'audio',
+          propertyToCheck: 'tags.language',
+          valuesToRemove: 'eng',
+          condition: 'not_includes',
+        },
+      });
+
+      // The library file on disk really lost the Japanese track and kept the
+      // English one — read back with ffprobe, not inferred from a log line.
+      expect(await streamSummaryOf(mediaPath)).toEqual(['video:none', 'audio:eng']);
+      // And the bytes at the library path really are a different file.
+      expect(md5Of(mediaPath)).not.toBe(md5Before);
+
+      // The replacement really happened: the original is in trash, intact,
+      // still carrying both audio tracks.
+      const trashed = readdirSync(trashDir);
+      expect(trashed).toHaveLength(1);
+      expect(await streamSummaryOf(join(trashDir, trashed[0]!))).toEqual([
+        'video:none',
+        'audio:eng',
+        'audio:jpn',
+      ]);
+
+      // And the ledger agrees: converged, on the first attempt, with nothing
+      // held or failed. Before this task every one of these was the opposite.
+      const db = openStateDb(dataDir);
+      const library = createLibraryRepo(db).getByName('Movies');
+      const counts = createMediaFileRepo(db).countsByState(library!.id);
+      expect(counts.good).toBe(1);
+      expect(counts.failed).toBe(0);
+      expect(counts.held).toBe(0);
+      expect(counts.queued).toBe(0);
+      expect((db.prepare('SELECT COUNT(*) AS n FROM job').get() as { n: number }).n).toBe(1);
+      db.close();
+
+      // Converged means it stays converged: a second scan re-queues nothing.
+      await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+      const after = openStateDb(dataDir);
+      const libraryAgain = createLibraryRepo(after).getByName('Movies');
+      const countsAgain = createMediaFileRepo(after).countsByState(libraryAgain!.id);
+      expect(countsAgain.good).toBe(1);
+      expect(countsAgain.queued).toBe(0);
+      after.close();
+    }, 600_000);
+
+    it('still refuses a flow that would remove EVERY audio track', async () => {
+      // The fail-safe, at the same full-flow altitude. This flow's filter
+      // matches both audio tracks, so the command it builds asks for a silent
+      // file and the intended-count check is satisfied by it. Only the host
+      // gate stands between the user and a silent library — and it must stop
+      // the destructive step, not merely log about it.
+      const { dataDir, mediaPath, md5Before, trashDir } = await runRemovalLibrary({
+        prefix: 'trawlarr-silent-e2e-',
+        removalInputs: {
+          codecType: 'audio',
+          propertyToCheck: 'codec_type',
+          valuesToRemove: 'audio',
+          condition: 'includes',
+        },
+      });
+
+      // Untouched, byte for byte: the original was never replaced.
+      expect(md5Of(mediaPath)).toBe(md5Before);
+      expect(await streamSummaryOf(mediaPath)).toEqual(['video:none', 'audio:eng', 'audio:jpn']);
+      // Nothing was trashed, because nothing was swapped in.
+      expect(existsSync(trashDir) ? readdirSync(trashDir) : []).toEqual([]);
+
+      const db = openStateDb(dataDir);
+      const library = createLibraryRepo(db).getByName('Movies');
+      const counts = createMediaFileRepo(db).countsByState(library!.id);
+      // Not converged: a refused run is a failed attempt, never a `good` row.
+      expect(counts.good).toBe(0);
+      expect(counts.held + counts.failed).toBe(1);
+      db.close();
+    }, 600_000);
+  },
+);

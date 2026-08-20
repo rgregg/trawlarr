@@ -54,12 +54,23 @@ const argsFor = (input: {
   outputPath: string;
   originalPath: string;
   jobLog: (text: string) => void;
+  /**
+   * The command the Execute node left behind, as `closeFfmpegCommand` leaves
+   * it: `init` cleared, `streams` intact. Omitted means a flow with no Begin
+   * Command, which describes no intent at all.
+   */
+  commandStreams?: { removed?: boolean }[];
+  inputs?: Record<string, unknown>;
 }): PluginInputArgs =>
   ({
     inputFileObj: { _id: input.outputPath },
     originalLibraryFile: { _id: input.originalPath },
-    inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
-    variables: { ffmpegCommand: { init: false }, flowFailed: false, user: {} },
+    inputs: input.inputs ?? { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+    variables: {
+      ffmpegCommand: { init: false, streams: input.commandStreams ?? [] },
+      flowFailed: false,
+      user: {},
+    },
     jobLog: input.jobLog,
     updateWorker: () => {},
   }) as unknown as PluginInputArgs;
@@ -73,6 +84,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report).toEqual({ ok: true, reasons: [] });
@@ -86,6 +99,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -104,6 +119,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report).toEqual({ ok: true, reasons: [] });
@@ -117,6 +134,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 40 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -135,6 +154,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report).toEqual({ ok: true, reasons: [] });
@@ -148,6 +169,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -159,6 +182,10 @@ describe('verifyOutput', () => {
   it('reports every problem at once, not just the first', () => {
     // Fixing one problem and rediscovering the next on the following run is a
     // bad experience, so all three reasons must come back together.
+    // The audio fail-safe is off here ONLY so this stays a statement about
+    // those three checks aggregating: this output is video-only, so leaving
+    // it on would add a fourth reason that the fail-safe's own tests below
+    // already pin.
     const report = verifyOutput({
       probe: probeOf({ streams: 1, durationSeconds: 60 }),
       originalProbe: probeOf({ streams: 4, durationSeconds: 3600 }),
@@ -166,6 +193,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 40 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: false,
     });
 
     expect(report.ok).toBe(false);
@@ -185,6 +214,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report).toEqual({ ok: true, reasons: [] });
@@ -201,6 +232,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -220,6 +253,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -238,6 +273,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -252,6 +289,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 0,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -271,6 +310,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -296,6 +337,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
@@ -319,6 +362,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
     expect(good).toEqual({ ok: true, reasons: [] });
 
@@ -331,6 +376,8 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
     expect(truncated.ok).toBe(false);
     expect(truncated.reasons[0]).toContain('1200.0s');
@@ -344,12 +391,170 @@ describe('verifyOutput', () => {
       originalSizeBytes: 8 * GIGABYTE,
       durationToleranceSeconds: 1,
       minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: true,
     });
 
     expect(report.ok).toBe(false);
     // Nothing else is meaningful once the file is unreadable: one reason only.
     expect(report.reasons).toHaveLength(1);
     expect(report.reasons[0]).toContain('ffprobe');
+  });
+});
+
+describe('the expected stream count follows the flow, not the original', () => {
+  const original: ProbeData = {
+    format: { duration: '100' },
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264' },
+      { index: 1, codec_type: 'audio', codec_name: 'aac' },
+      { index: 2, codec_type: 'audio', codec_name: 'ac3' },
+    ],
+  };
+
+  it('accepts an output missing exactly the streams the flow removed', () => {
+    // The whole defect, at its smallest: a language filter that took three
+    // streams to two. Comparing against the ORIGINAL's count refused this,
+    // which made every stream-removing plugin unusable in any flow ending in
+    // Replace Original File.
+    const report = verifyOutput({
+      probe: {
+        format: { duration: '100' },
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      originalProbe: original,
+      outputSizeBytes: 900,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: 2,
+      requireAudioIfOriginalHadAudio: true,
+    });
+    expect(report.ok).toBe(true);
+    expect(report.reasons).toEqual([]);
+  });
+
+  it('still rejects an output missing a stream the flow did NOT remove', () => {
+    // The check is real, not merely relaxed: ffmpeg dropping a stream the
+    // command asked for is exactly the truncated-output shape this gate
+    // exists to catch.
+    const report = verifyOutput({
+      probe: {
+        format: { duration: '100' },
+        streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }],
+      },
+      originalProbe: original,
+      outputSizeBytes: 900,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: 2,
+      requireAudioIfOriginalHadAudio: false,
+    });
+    expect(report.ok).toBe(false);
+  });
+
+  it('falls back to the original count when no command described an intent', () => {
+    const report = verifyOutput({
+      probe: {
+        format: { duration: '100' },
+        streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }],
+      },
+      originalProbe: original,
+      outputSizeBytes: 900,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: null,
+      requireAudioIfOriginalHadAudio: false,
+    });
+    expect(report.ok).toBe(false);
+  });
+
+  it('accepts an output with MORE streams than the original, as Ensure Audio Stream produces', () => {
+    const report = verifyOutput({
+      probe: {
+        format: { duration: '100' },
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'aac' },
+          { index: 2, codec_type: 'audio', codec_name: 'ac3' },
+          { index: 3, codec_type: 'audio', codec_name: 'aac' },
+        ],
+      },
+      originalProbe: original,
+      outputSizeBytes: 1100,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: 4,
+      requireAudioIfOriginalHadAudio: true,
+    });
+    expect(report.ok).toBe(true);
+  });
+});
+
+describe('the audio fail-safe', () => {
+  const original: ProbeData = {
+    format: { duration: '100' },
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264' },
+      { index: 1, codec_type: 'audio', codec_name: 'ac3', tags: { language: 'jpn' } },
+    ],
+  };
+
+  const audioless: ProbeData = {
+    format: { duration: '100' },
+    streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }],
+  };
+
+  it('refuses a silent output even when the flow intended exactly that', () => {
+    // The catastrophic case: every audio track is jpn and the filter keeps
+    // only eng. The flow's intent is honoured by the count check, so ONLY
+    // this gate stands between the user and a library of silent films.
+    const report = verifyOutput({
+      probe: audioless,
+      originalProbe: original,
+      outputSizeBytes: 900,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: 1,
+      requireAudioIfOriginalHadAudio: true,
+    });
+    expect(report.ok).toBe(false);
+    expect(report.reasons).toHaveLength(1);
+  });
+
+  it('permits it when the flow author turned the gate off deliberately', () => {
+    const report = verifyOutput({
+      probe: audioless,
+      originalProbe: original,
+      outputSizeBytes: 900,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: 1,
+      requireAudioIfOriginalHadAudio: false,
+    });
+    expect(report.ok).toBe(true);
+  });
+
+  it('says nothing about audio when the original had none', () => {
+    const report = verifyOutput({
+      probe: audioless,
+      originalProbe: audioless,
+      outputSizeBytes: 900,
+      originalSizeBytes: 1000,
+      durationToleranceSeconds: 1,
+      minSizeRatio: 0.05,
+      intendedStreamCount: 1,
+      requireAudioIfOriginalHadAudio: true,
+    });
+    expect(report.ok).toBe(true);
   });
 });
 
@@ -446,6 +651,106 @@ describe('createVerifyOutputRunner', () => {
 
     expect(out.outputNumber).toBe(2);
     expect(logged.join('\n')).toContain('/work/missing.mkv');
+  });
+
+  it('takes its expected stream count from the command the flow actually built', async () => {
+    // The seam this task exists for, at runner level: a removal plugin marked
+    // one of five streams `removed`, ffmpeg wrote four, and the original
+    // still has five. Reading the ORIGINAL's count here sent this to output
+    // 2 and refused the replacement.
+    const probes = {
+      '/work/movie.mkv': probeOf({ streams: 4, durationSeconds: 3600 }),
+      '/library/movie.mkv': probeOf({ streams: 5, durationSeconds: 3600 }),
+    };
+    const sizes = { '/work/movie.mkv': 7 * GIGABYTE, '/library/movie.mkv': 8 * GIGABYTE };
+    const module = runnerFor({ probes, sizes })(verifyPlugin())!;
+
+    const filtered = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, {}, {}, {}, { removed: true }],
+      }),
+    );
+    expect(filtered.outputNumber).toBe(1);
+
+    // And it is still a real check: the same four-stream output, with a
+    // command that removed NOTHING, is a lost stream and is refused.
+    const unexplained = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, {}, {}, {}, {}],
+      }),
+    );
+    expect(unexplained.outputNumber).toBe(2);
+  });
+
+  it('refuses a silent output by default, and only stands down when told to', async () => {
+    // The original is video + one jpn audio track; the flow's filter kept
+    // only eng, so the command legitimately says "one stream" and the count
+    // check is satisfied. This gate is the only thing left.
+    const silent: ProbeData = {
+      format: { duration: '3600' },
+      streams: [{ index: 0, codec_type: 'video', codec_name: 'hevc' }],
+    };
+    const module = runnerFor({
+      probes: {
+        '/work/movie.mkv': silent,
+        '/library/movie.mkv': probeOf({ streams: 2, durationSeconds: 3600 }),
+      },
+      sizes: { '/work/movie.mkv': 4 * GIGABYTE, '/library/movie.mkv': 8 * GIGABYTE },
+    })(verifyPlugin())!;
+
+    const byDefault = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, { removed: true }],
+        // No `requireAudioIfOriginalHadAudio` at all: an absent input must
+        // keep the protection ON, because a stored flow written before this
+        // input existed has no value for it.
+        inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+      }),
+    );
+    expect(byDefault.outputNumber).toBe(2);
+
+    // A stored flow supplies node inputs as STRINGS, so 'false' is the form
+    // this actually arrives in; reading only a boolean would leave the switch
+    // looking wired while doing nothing.
+    const turnedOff = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, { removed: true }],
+        inputs: {
+          durationToleranceSeconds: '1',
+          minSizeRatio: '0.05',
+          requireAudioIfOriginalHadAudio: 'false',
+        },
+      }),
+    );
+    expect(turnedOff.outputNumber).toBe(1);
+
+    // And 'true' is not read as "any string is truthy elsewhere": it refuses.
+    const turnedOn = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, { removed: true }],
+        inputs: {
+          durationToleranceSeconds: '1',
+          minSizeRatio: '0.05',
+          requireAudioIfOriginalHadAudio: 'true',
+        },
+      }),
+    );
+    expect(turnedOn.outputNumber).toBe(2);
   });
 
   it('honours the node inputs rather than hard-coded thresholds', async () => {
