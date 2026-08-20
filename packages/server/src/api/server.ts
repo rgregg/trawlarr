@@ -8,6 +8,7 @@ import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
+import { createStaticHandler, resolveWebRoot } from './static-files.js';
 import { fileRoutes } from './routes/files.js';
 import { flowRoutes } from './routes/flows.js';
 import { jobRoutes } from './routes/jobs.js';
@@ -93,6 +94,12 @@ export interface CreateApiHandlerOptions {
   routes?: Route[];
   /** Where an internal (non-`ApiError`) failure is reported. Defaults to stderr. */
   onError?: (error: unknown, context: { method: string; path: string }) => void;
+  /**
+   * Where the built web bundle lives. Omitted means "look for it"
+   * ({@link resolveWebRoot}); an explicit `null` means "there is none", which
+   * is how a test asks for a daemon that serves the API and nothing else.
+   */
+  webRoot?: string | null;
 }
 
 /**
@@ -124,6 +131,13 @@ export const createApiHandler = (
       );
     });
 
+  // Built once, consulted first. It answers `false` for every path under
+  // API_PREFIX, so the API becomes unreachable only through a bug in that
+  // single check — which `api.test.ts` pins against the real server.
+  const serveStatic = createStaticHandler({
+    root: options?.webRoot === undefined ? resolveWebRoot() : options.webRoot,
+  });
+
   const send = (res: ServerResponse, status: number, payload: string | null): void => {
     if (payload === null) {
       res.writeHead(status);
@@ -138,6 +152,7 @@ export const createApiHandler = (
   };
 
   return (req, res) => {
+    if (serveStatic(req, res)) return;
     void (async () => {
       const method = req.method ?? 'GET';
       const url = new URL(req.url ?? '/', 'http://localhost');

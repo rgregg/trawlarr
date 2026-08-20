@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, symlink, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -1208,5 +1208,125 @@ describe('maintenance, sharing the operations the CLI runs', () => {
     expect(response.status).toBe(200);
     expect(response.body.sweeps[0].summary.removed).toBe(1);
     expect(await readdir(trashDir)).toEqual([]);
+  });
+});
+
+/**
+ * The bundle is served by the SAME server on the SAME port as the API, so
+ * there is one thing to publish and one origin — which is what lets the UI
+ * send its key as a header with no cross-origin machinery at all. These run
+ * against a real `http.Server` over a real socket, because the whole risk
+ * here is ordering inside `createApiHandler`, and a handler called directly
+ * cannot demonstrate that ordering.
+ */
+describe('the web bundle, on the daemon’s own port', () => {
+  let webServer: Server;
+  let webBase: string;
+
+  /**
+   * A bundle containing a file at `api/v1/system/health` — the exact shape
+   * that would shadow the REST surface if the API-prefix check in
+   * `static-files.ts` were removed.
+   */
+  const bundleWithApiShapedFile = async (): Promise<string> => {
+    const root = await mkdtemp(join(tmpdir(), 'trawlarr-bundle-'));
+    await writeFile(join(root, 'index.html'), '<!doctype html><title>trawlarr</title>');
+    await mkdir(join(root, 'assets'), { recursive: true });
+    await writeFile(join(root, 'assets', 'app-abc123.js'), 'console.log("trawlarr")');
+    await mkdir(join(root, 'api', 'v1', 'system'), { recursive: true });
+    await writeFile(join(root, 'api', 'v1', 'system', 'health'), 'SHADOWED');
+    return root;
+  };
+
+  const startWith = async (webRoot: string | null): Promise<void> => {
+    const ctx = createApiContext({
+      db,
+      settings,
+      bus: createEventBus(),
+      supervisor,
+      scans,
+      nowMs: () => NOW,
+      version: '0.0.0-test',
+    });
+    webServer = createApiServer(ctx, { onError: () => {}, webRoot });
+    await new Promise<void>((resolve) => webServer.listen(0, '127.0.0.1', resolve));
+    webBase = `http://127.0.0.1:${(webServer.address() as AddressInfo).port}`;
+  };
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => webServer.close(() => resolve()));
+  });
+
+  it('routes /api/v1 to the API even with a bundle that would shadow it', async () => {
+    await startWith(await bundleWithApiShapedFile());
+
+    const health = await fetch(`${webBase}/api/v1/system/health`);
+    const body = (await health.json()) as { status: string };
+
+    expect(health.status).toBe(200);
+    expect(body.status).toBe('ok');
+  });
+
+  it('serves index.html for a client-side route, over the same port', async () => {
+    await startWith(await bundleWithApiShapedFile());
+
+    const page = await fetch(`${webBase}/libraries/abc`);
+    const text = await page.text();
+
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-type')).toContain('text/html');
+    expect(text).toContain('<!doctype html>');
+  });
+
+  it('serves the hashed asset bytes verbatim, with a JavaScript content type', async () => {
+    await startWith(await bundleWithApiShapedFile());
+
+    const asset = await fetch(`${webBase}/assets/app-abc123.js`);
+
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get('content-type')).toContain('javascript');
+    expect(await asset.text()).toBe('console.log("trawlarr")');
+  });
+
+  it('serves the bundle without an API key, and still refuses the API without one', async () => {
+    await startWith(await bundleWithApiShapedFile());
+
+    // The bundle is public bytes; the KEY is what guards the data, and the
+    // bundle has none in it. An operator who could not load the page could
+    // never paste a key into it.
+    const page = await fetch(`${webBase}/`);
+    const libraries = await fetch(`${webBase}/api/v1/libraries`);
+
+    expect(page.status).toBe(200);
+    expect(libraries.status).toBe(401);
+  });
+
+  it('never reads outside the bundle, even through a symlink inside it', async () => {
+    const root = await bundleWithApiShapedFile();
+    const secret = join(root, '..', `secret-${randomUUID()}.txt`);
+    await writeFile(secret, 'the-daemon-api-key');
+    await symlink(secret, join(root, 'escape.txt'));
+    await startWith(root);
+
+    const traversal = await fetch(`${webBase}/%2e%2e/${secret.split('/').pop()!}`);
+    const viaSymlink = await fetch(`${webBase}/escape.txt`);
+
+    expect(traversal.status).toBe(404);
+    expect(await traversal.text()).not.toContain('the-daemon-api-key');
+    expect(viaSymlink.status).toBe(404);
+    expect(await viaSymlink.text()).not.toContain('the-daemon-api-key');
+  });
+
+  it('explains itself instead of 404ing when no bundle was built', async () => {
+    await startWith(null);
+
+    const page = await fetch(`${webBase}/`);
+    const body = (await page.json()) as { error: { code: string } };
+    const health = await fetch(`${webBase}/api/v1/system/health`);
+
+    expect(page.status).toBe(503);
+    expect(body.error.code).toBe('web-ui-not-built');
+    // The point of the 503: the API is unaffected.
+    expect(health.status).toBe(200);
   });
 });

@@ -53,6 +53,13 @@ const request = async (
     rawBody?: string;
     apiKey?: string | null;
     routes?: Route[];
+    /**
+     * Defaults to `null` — "this daemon has no web bundle". Pinned rather
+     * than resolved, so these router assertions do not change meaning
+     * depending on whether the checkout running them happens to have run
+     * the web build.
+     */
+    webRoot?: string | null;
   } = {},
 ): Promise<TestResponse> => {
   const payload =
@@ -85,7 +92,11 @@ const request = async (
       },
     } as unknown as ServerResponse;
 
-    createApiHandler(ctx, { routes: options.routes, onError: () => {} })(req, res);
+    createApiHandler(ctx, {
+      routes: options.routes,
+      onError: () => {},
+      webRoot: options.webRoot ?? null,
+    })(req, res);
   });
 };
 
@@ -131,11 +142,14 @@ describe('the router', () => {
     expect(response.raw).not.toContain('<html');
   });
 
-  it('answers a path outside the version prefix with the same 404', async () => {
+  it('hands a path outside the version prefix to the web bundle, not to the router', async () => {
+    // `/libraries` is a CLIENT-SIDE route now. The router must not claim it,
+    // and a daemon with no bundle must say why rather than return a
+    // `not-found` that reads like the API lost an endpoint.
     const response = await request(stubContext(), 'GET', '/libraries');
 
-    expect(response.status).toBe(404);
-    expect(response.body).toMatchObject({ error: { code: 'not-found' } });
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({ error: { code: 'web-ui-not-built' } });
   });
 
   it('answers an unparseable body with 400 bad-json, and never calls the handler', async () => {

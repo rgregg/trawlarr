@@ -8,5 +8,5 @@
     { "path": "../plugins-core" }
   ],
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/api/test-doubles.ts"]
 }
