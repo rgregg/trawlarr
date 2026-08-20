@@ -24,6 +24,7 @@ export interface ScanSettings {
   watchEnabled: boolean;
   rescanIntervalMs: number;
   settleMs: number;
+  scanOnStart: boolean;
 }
 
 export interface HardwareSettings {
@@ -42,6 +43,7 @@ export interface SettingsRepo {
   setHardware(patch: Partial<HardwareSettings>): void;
   getSchedule(): ScheduleConfig;
   setSchedule(config: ScheduleConfig): void;
+  isSet(key: string): boolean;
 }
 
 /**
@@ -72,6 +74,7 @@ const DEFAULT_SCAN: ScanSettings = {
   watchEnabled: true,
   rescanIntervalMs: 3_600_000,
   settleMs: 30_000,
+  scanOnStart: true,
 };
 const DEFAULT_HARDWARE: HardwareSettings = { available: ['cpu'], caps: {} };
 
@@ -119,6 +122,7 @@ const validateScan = (value: {
   watchEnabled: unknown;
   rescanIntervalMs: unknown;
   settleMs: unknown;
+  scanOnStart: unknown;
 }): ScanSettings => ({
   watchEnabled: requireBoolean(value.watchEnabled, 'scan.watchEnabled'),
   rescanIntervalMs: requireWholeNumber(
@@ -128,6 +132,7 @@ const validateScan = (value: {
     Number.MAX_SAFE_INTEGER,
   ),
   settleMs: requireWholeNumber(value.settleMs, 'scan.settleMs', 0, Number.MAX_SAFE_INTEGER),
+  scanOnStart: requireBoolean(value.scanOnStart, 'scan.scanOnStart'),
 });
 
 const validateHardware = (value: { available: unknown; caps: unknown }): HardwareSettings => {
@@ -201,6 +206,8 @@ export const createSettingsRepo = (input: {
     upsertStmt.run(key, JSON.stringify(value));
   };
 
+  const isSet = (key: string): boolean => selectStmt.get(key) !== undefined;
+
   const readField = (group: string, field: string): unknown => readRawKey(`${group}.${field}`);
   const writeField = (group: string, field: string, value: unknown): void =>
     writeRawKey(`${group}.${field}`, value);
@@ -246,6 +253,7 @@ export const createSettingsRepo = (input: {
       rescanIntervalMs:
         readField(SETTING_KEYS.scan, 'rescanIntervalMs') ?? DEFAULT_SCAN.rescanIntervalMs,
       settleMs: readField(SETTING_KEYS.scan, 'settleMs') ?? DEFAULT_SCAN.settleMs,
+      scanOnStart: readField(SETTING_KEYS.scan, 'scanOnStart') ?? DEFAULT_SCAN.scanOnStart,
     });
 
   const setScan = (patch: Partial<ScanSettings>): void => {
@@ -253,6 +261,7 @@ export const createSettingsRepo = (input: {
     writeField(SETTING_KEYS.scan, 'watchEnabled', next.watchEnabled);
     writeField(SETTING_KEYS.scan, 'rescanIntervalMs', next.rescanIntervalMs);
     writeField(SETTING_KEYS.scan, 'settleMs', next.settleMs);
+    writeField(SETTING_KEYS.scan, 'scanOnStart', next.scanOnStart);
   };
 
   const getHardware = (): HardwareSettings =>
@@ -310,5 +319,6 @@ export const createSettingsRepo = (input: {
     setHardware,
     getSchedule,
     setSchedule,
+    isSet,
   };
 };

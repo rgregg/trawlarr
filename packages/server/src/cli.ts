@@ -264,7 +264,7 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       name: { type: 'string' },
       root: { type: 'string', multiple: true },
       extensions: { type: 'string' },
@@ -338,7 +338,7 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       name: { type: 'string' },
       file: { type: 'string' },
     },
@@ -418,7 +418,7 @@ const cmdLibrarySetFlow = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       flow: { type: 'string' },
     },
@@ -464,7 +464,7 @@ const cmdScan = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       ffprobe: { type: 'string', default: 'ffprobe' },
       'allow-empty-roots': { type: 'boolean', default: false },
@@ -562,7 +562,7 @@ const cmdRun = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       max: { type: 'string' },
       ffmpeg: { type: 'string', default: 'ffmpeg' },
@@ -724,7 +724,7 @@ const cmdTrashPurge = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       days: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
@@ -822,7 +822,7 @@ const cmdStatus = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       files: { type: 'boolean', default: false },
       state: { type: 'string' },
@@ -1031,7 +1031,7 @@ const cmdRequeue = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       file: { type: 'string', multiple: true },
       library: { type: 'string' },
       state: { type: 'string' },
@@ -1163,7 +1163,7 @@ const cmdReap = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       'stale-after-hours': { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
@@ -1251,7 +1251,7 @@ const cmdForget = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       library: { type: 'string' },
       missing: { type: 'boolean', default: false },
       file: { type: 'string', multiple: true },
@@ -1379,18 +1379,19 @@ const cmdDaemon = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
     options: {
-      'data-dir': { type: 'string', default: './trawlarr-data' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       port: { type: 'string' },
       bind: { type: 'string' },
     },
   });
 
-  const port =
-    values.port === undefined ? undefined : parseNonNegativeInt(values.port, 'daemon: --port');
+  const portRaw = values.port ?? process.env.TRAWLARR_PORT;
+  const port = portRaw === undefined ? undefined : parseNonNegativeInt(portRaw, 'daemon: --port');
+  const bind = values.bind ?? process.env.TRAWLARR_BIND;
 
   let daemon;
   try {
-    daemon = await startDaemon({ dataDir: values['data-dir']!, port, bind: values.bind });
+    daemon = await startDaemon({ dataDir: values['data-dir']!, port, bind });
   } catch (error) {
     if (error instanceof DaemonAlreadyRunningError) throw new CliError(error.message);
     throw error;

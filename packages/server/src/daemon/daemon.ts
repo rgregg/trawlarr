@@ -7,6 +7,7 @@ import { openDatabase, type Db } from '../db/connection.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
+import { applyEnvSettings, type EnvApplication } from '../config/env-settings.js';
 import { sweepLibraryTrash } from '../library/trash-sweep.js';
 import { reapStalled } from '../worker/reap-stalled.js';
 import { createEventBus } from './events.js';
@@ -66,6 +67,8 @@ export interface Daemon {
   readonly apiKeyGenerated: boolean;
   /** Resolves when the daemon has fully stopped, however that was triggered. */
   readonly stopped: Promise<void>;
+  /** What each seed-once environment variable did on this start. */
+  readonly envApplications: EnvApplication[];
   stop: () => Promise<void>;
 }
 
@@ -214,6 +217,11 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   const apiKeyGenerated =
     db.prepare(`SELECT value FROM setting WHERE key = 'daemon.apiKey'`).get() === undefined;
 
+  // Seed-once environment variables, before anything else reads settings:
+  // TZ/NUMBER_OF_WORKERS/etc. only ever fill a setting that has never been
+  // written, so a value the operator changed in the UI survives a restart.
+  const envApplications = applyEnvSettings({ settings, env: process.env });
+
   if (input.bind !== undefined) settings.setDaemon({ bind: input.bind });
   // Port 0 is "ask the kernel", which is a request about THIS run and must
   // never be persisted as the configured port — a stored 0 would make every
@@ -253,6 +261,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     scans,
     nowMs,
     version: DAEMON_VERSION,
+    envApplications,
   });
 
   // Before any work is attempted, and before the API can be asked: a library
@@ -336,9 +345,13 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   // A startup walk per enabled library. A paused library is deliberately
   // still scanned by the periodic rescan (discovery is not claiming), but
   // the startup burst is spent on the libraries that can actually converge.
-  for (const library of libraryRepo.list()) {
-    if (!library.enabled) continue;
-    scans.request(library.id, 'startup');
+  // Skippable via RUN_FULL_SCAN_ON_START=false for a large network mount
+  // where every restart re-walking everything is itself the cost.
+  if (settings.getScan().scanOnStart) {
+    for (const library of libraryRepo.list()) {
+      if (!library.enabled) continue;
+      scans.request(library.id, 'startup');
+    }
   }
   scans.start();
 
@@ -464,6 +477,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     bind,
     apiKey: daemonSettings.apiKey,
     apiKeyGenerated,
+    envApplications,
     stopped,
     stop,
   };

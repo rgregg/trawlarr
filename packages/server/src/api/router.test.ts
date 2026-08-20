@@ -25,6 +25,7 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   nowMs: () => 1_700_000_000_000,
   version: '0.0.0-test',
   schemaVersion: 4,
+  envApplications: [],
   ...over,
 });
 

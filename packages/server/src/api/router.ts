@@ -3,6 +3,7 @@ import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
+import type { EnvApplication } from '../config/env-settings.js';
 
 /**
  * Everything a route handler is allowed to reach.
@@ -22,6 +23,8 @@ export interface ApiContext {
   nowMs: () => number;
   version: string;
   schemaVersion: number;
+  /** What each seed-once environment variable did on this start. */
+  envApplications: EnvApplication[];
   /**
    * Does spawning this binary with `-version` work? A SEAM, defaulting to a
    * real spawn: `GET /system/version` reports it, and a test must not depend

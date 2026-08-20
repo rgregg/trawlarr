@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { ScheduleConfig } from '@trawlarr/core';
+import { envProvenance } from '../../config/env-settings.js';
 import { createLibraryRepo } from '../../db/library-repo.js';
 import { SettingValidationError } from '../../db/settings-repo.js';
 import { sweepLibraryTrash } from '../../library/trash-sweep.js';
@@ -63,6 +64,11 @@ const readSettings = (ctx: ApiContext) => ({
   binaries: ctx.settings.getBinaries(),
   scan: ctx.settings.getScan(),
   hardware: ctx.settings.getHardware(),
+  environment: envProvenance({
+    settings: ctx.settings,
+    env: process.env,
+    applications: ctx.envApplications,
+  }),
 });
 
 const librariesFor = (ctx: ApiContext, libraryId: unknown) => {

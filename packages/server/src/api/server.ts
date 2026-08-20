@@ -5,6 +5,7 @@ import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
 import { SCHEMA_VERSION } from '../db/migrate.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
+import type { EnvApplication } from '../config/env-settings.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
 import { fileRoutes } from './routes/files.js';
 import { flowRoutes } from './routes/flows.js';
@@ -250,6 +251,8 @@ export interface CreateApiContextInput {
   nowMs?: () => number;
   version: string;
   checkBinary?: (path: string) => Promise<boolean>;
+  /** What each seed-once environment variable did on this start. Defaults to none. */
+  envApplications?: EnvApplication[];
 }
 
 /**
@@ -272,6 +275,7 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     version: input.version,
     schemaVersion: SCHEMA_VERSION,
     checkBinary: input.checkBinary,
+    envApplications: input.envApplications ?? [],
   };
 };
 

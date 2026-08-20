@@ -949,6 +949,48 @@ describe('system', () => {
     expect(settings.getSchedule().baseCounts.transcode).toBe(2);
     expect((await api('GET', '/system/schedule')).body.baseCounts.transcode).toBe(2);
   });
+
+  it('reports an environment variable that did not win', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    server = createApiServer(
+      createApiContext({
+        db,
+        settings,
+        bus: createEventBus(),
+        supervisor,
+        scans,
+        nowMs: () => NOW,
+        version: '0.0.0-test',
+        envApplications: [
+          {
+            name: 'NUMBER_OF_WORKERS',
+            target: 'schedule.baseCounts.transcode',
+            envValue: '6',
+            applied: 'ignored-already-set',
+            problem: null,
+          },
+        ],
+      }),
+      { onError: () => {} },
+    );
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const response = await api('GET', '/system/settings');
+
+    expect(response.status).toBe(200);
+    expect(response.body.environment).toEqual([
+      {
+        name: 'NUMBER_OF_WORKERS',
+        target: 'schedule.baseCounts.transcode',
+        envValue: '6',
+        applied: 'ignored-already-set',
+        problem: null,
+        currentValue: '1',
+        matchesEnv: false,
+      },
+    ]);
+  });
 });
 
 describe('maintenance, sharing the operations the CLI runs', () => {

@@ -20,6 +20,7 @@ describe('settings repo', () => {
       watchEnabled: true,
       rescanIntervalMs: 3_600_000,
       settleMs: 30_000,
+      scanOnStart: true,
     });
     expect(repo.getHardware()).toEqual({ available: ['cpu'], caps: {} });
   });
