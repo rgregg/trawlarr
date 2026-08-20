@@ -232,6 +232,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   hardwareType: 'cpu',
   ffmpegPath: 'ffmpeg',
   ffprobePath: 'ffprobe',
+  logPath: null,
 });
 
 /** The daemon side of the document store: a plain map, in THIS process. */

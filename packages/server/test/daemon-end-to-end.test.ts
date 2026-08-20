@@ -418,6 +418,7 @@ describe.runIf(available)('daemon end-to-end: a library converges with nobody dr
         fileId: string;
         state: string;
         outcome: string | null;
+        logPath: string | null;
       }
       const allJobs = async (): Promise<JobResource[]> =>
         (await api<{ items: JobResource[] }>('GET', '/jobs?limit=500')).items;
@@ -553,6 +554,20 @@ describe.runIf(available)('daemon end-to-end: a library converges with nobody dr
         for (const job of await allJobs()) {
           expect(['succeeded', 'failed']).toContain(job.state);
         }
+
+        // THE POINT OF THIS TASK: a real daemon, real forked workers, and the
+        // log each one wrote is actually on disk and actually fetchable —
+        // bytes on disk and the API's own response, never log text used as a
+        // stand-in for behaviour.
+        const jobWithLog = (await allJobs()).find((job) => job.logPath !== null);
+        expect(jobWithLog).toBeDefined();
+        expect(statSync(jobWithLog!.logPath!).size).toBeGreaterThan(0);
+        const fetchedLog = await api<{ jobId: string; path: string; text: string }>(
+          'GET',
+          `/jobs/${jobWithLog!.id}/log`,
+        );
+        expect(fetchedLog.jobId).toBe(jobWithLog!.id);
+        expect(fetchedLog.text.length).toBeGreaterThan(0);
 
         // Concurrency, from the ORDERED event stream rather than timestamps:
         // the schedule allowed two workers, so at no point were three jobs

@@ -4,6 +4,7 @@ import type { Db } from '../db/connection.js';
 import { createMediaFileRepo, type ClaimedFile } from '../db/media-file-repo.js';
 import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
+import { jobLogPath } from '../job-log/job-log-store.js';
 
 /**
  * Everything running one job needs, as plain data.
@@ -50,12 +51,27 @@ export interface JobPayload {
   hardwareType: HardwareType;
   ffmpegPath: string;
   ffprobePath: string;
+  /**
+   * Where THIS job's on-disk log lives, allocated here — before the worker
+   * ever runs — so a worker that vanishes without writing a byte still
+   * leaves a findable path on the job row. Null only for a caller that never
+   * gives this a data directory (the dry-run harness, which writes no job
+   * row at all).
+   */
+  logPath: string | null;
 }
 
 export interface BuildJobPayloadInput {
   db: Db;
   claimed: ClaimedFile;
   jobId: string;
+  /**
+   * Where per-job logs live under (`<dataDir>/logs/jobs/<jobId>.log`).
+   * Optional/null for a caller with no on-disk home for one — the in-process
+   * `trawlarr run` CLI path and the dry-run endpoint, neither of which forks
+   * a worker that could vanish out from under a daemon watching for it.
+   */
+  dataDir?: string | null;
   /**
    * Run THIS flow instead of the one the library is attached to.
    *
@@ -128,6 +144,8 @@ export const buildJobPayload = (input: BuildJobPayloadInput): JobPayload => {
     flow: { id: flow.id, definition: flow.definition, definitionHash: flow.definitionHash },
     workerClass: input.workerClass,
     hardwareType: input.hardwareType,
+    logPath:
+      input.dataDir == null ? null : jobLogPath({ dataDir: input.dataDir, jobId: input.jobId }),
     ffmpegPath: input.ffmpegPath,
     ffprobePath: input.ffprobePath,
   };

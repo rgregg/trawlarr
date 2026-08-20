@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   evaluateSchedule,
   flowRequiredHardware,
@@ -84,6 +85,13 @@ export interface CreateSupervisorInput {
   bus: EventBus;
   settings: SettingsRepo;
   nowMs: () => number;
+  /**
+   * Where per-job logs are allocated under. Optional so a test exercising
+   * the supervisor's scheduling arithmetic against a fake agent (which never
+   * writes a byte to any log) does not have to invent one; production always
+   * passes the daemon's real data directory.
+   */
+  dataDir?: string;
   /** Seam for tests: substitute the worker process. Production never sets it. */
   createAgent?: CreateAgentFn;
 }
@@ -204,7 +212,7 @@ const messageOf = (error: unknown): string =>
  * completion that lands mid-tick still gets its slot refilled.
  */
 export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
-  const { db, bus, settings, nowMs } = input;
+  const { db, bus, settings, nowMs, dataDir } = input;
   const mediaFileRepo = createMediaFileRepo(db);
   const jobRepo = createJobRepo(db);
 
@@ -335,23 +343,32 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
 
     let payload: JobPayload;
     try {
+      // Generated HERE, before the row exists: the on-disk log path is
+      // named after this job's id (`jobLogPath`), and both the `job` row's
+      // `log_path` and the payload the worker actually writes to have to
+      // agree on it, which is only possible if the id is chosen before
+      // either of them is built rather than handed back by one of them.
+      const jobId = randomUUID();
       const draft = buildJobPayload({
         db,
         claimed,
-        jobId: '',
+        jobId,
+        dataDir,
         workerClass,
         hardwareType,
         ffmpegPath: binaries.ffmpeg,
         ffprobePath: binaries.ffprobe,
       });
-      const jobId = jobRepo.start({
+      jobRepo.start({
+        id: jobId,
         fileId: draft.fileId,
         flowId: draft.flow.id,
         flowHash: draft.flow.definitionHash,
         nowMs: nowMs(),
         workerClass,
+        logPath: draft.logPath,
       });
-      payload = { ...draft, jobId };
+      payload = draft;
     } catch (error) {
       const row = mediaFileRepo.getById(claimed.fileId);
       if (row !== null) {
@@ -437,6 +454,11 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
       libraryId: payload.libraryId,
       path: payload.path,
       workerId: id,
+      // The fork's own pid, straight from the daemon's own knowledge of
+      // what it created — never `ready.pid`, the agent's self-report over a
+      // channel a plugin can write to. `agent.pid` is set synchronously by
+      // `createAgentHandle`'s `fork()` call, before `ready` ever arrives.
+      pid: agent.pid ?? null,
     });
 
     void agent

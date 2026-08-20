@@ -74,6 +74,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   hardwareType: 'cpu',
   ffmpegPath: 'ffmpeg',
   ffprobePath: 'ffprobe',
+  logPath: null,
 });
 
 const payloadForFixture = (name: 'two-node-flow'): JobPayload => {

@@ -19,6 +19,18 @@ export type TrawlarrEvent =
       libraryId: string;
       path: string;
       workerId: string;
+      /**
+       * The forked worker's own pid, straight from the daemon's own fork —
+       * never the agent's self-reported `ready.pid`, which arrives on a
+       * channel a plugin can write to. Null only for a fake agent in a test
+       * that never forked anything.
+       *
+       * Closes the gap a prior end-to-end suite named: sampling
+       * `GET /workers` every 25ms cannot see a worker that starts and
+       * finishes between two samples, but this event cannot be missed by a
+       * subscriber that was listening before the job started.
+       */
+      pid: number | null;
     }
   | { type: 'job.progress'; jobId: string; percent: number | null; stage: string }
   | {

@@ -9,6 +9,7 @@ import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { applyEnvSettings, type EnvApplication } from '../config/env-settings.js';
 import { sweepLibraryTrash } from '../library/trash-sweep.js';
+import { sweepJobLogs } from '../job-log/job-log-store.js';
 import { reapStalled } from '../worker/reap-stalled.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
@@ -241,6 +242,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     db,
     bus,
     settings,
+    dataDir,
     nowMs,
     createAgent: input.createAgent,
   });
@@ -414,6 +416,17 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       } catch (error) {
         onError(error, { phase: `trash purge:${library.name}` });
       }
+    }
+
+    // Same retention principle as the trash sweep, same interval so it
+    // costs nothing extra: a job log an operator will never look at again
+    // is exactly the kind of thing that fills the `/config` volume if
+    // nothing ever removes it. One failure here costs one day's sweep, not
+    // the reaper or the trash purge that share this callback.
+    try {
+      await sweepJobLogs({ dataDir, nowMs: nowMs() });
+    } catch (error) {
+      onError(error, { phase: 'job log purge' });
     }
   });
 

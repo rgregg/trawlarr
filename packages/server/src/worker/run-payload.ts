@@ -37,6 +37,7 @@ import {
 } from '../library/replace-seams.js';
 import { probeFile } from '../probe/ffprobe.js';
 import { partialHashFile } from '../fs/partial-hash.js';
+import { createJobLogWriter } from '../job-log/job-log-writer.js';
 import type { JobPayload } from './job-payload.js';
 
 /**
@@ -199,423 +200,454 @@ export const runPayload = async (input: {
   const { payload, ports } = input;
   const { library } = payload;
 
-  // Extracted directly from the probe/container/size the payload was built
-  // from, never re-read through `MediaFileRepo.getProbe` — that method
-  // recomputes facts against the row's CURRENT container/size_bytes on every
-  // call, which is exactly wrong for "facts as of the moment this run
-  // started" once the run itself goes on to touch the row (see its doc
-  // comment). Here it cannot even be attempted: there is no row to read.
-  const preFacts = extractFacts({
-    probe: payload.probe,
-    container: payload.container,
-    sizeBytes: payload.sizeBytes,
-  });
-
-  // A fresh `running` job is not yet stale, but it should read that way from
-  // the start rather than leaving heartbeat_at NULL until the first step
-  // completes (or forever, for a flow with none).
-  ports.onHeartbeat(ports.nowMs());
-
-  // The job's scratch directory lives INSIDE the library it is working on —
-  // under the same root as the file, which is what `resolveStagingDir`
-  // answers — and not under `os.tmpdir()`.
-  //
-  // The two looked equivalent on a developer's machine, where /tmp and the
-  // media happen to share a filesystem, and are not equivalent anywhere this
-  // is actually deployed. In a container /tmp is the container's own
-  // writable layer and the library is a bind mount, so EVERY replacement was
-  // a cross-device one: refused outright by Replace Original File, or, with
-  // `allowCrossDevice` on, degraded from an atomic rename into a full copy of
-  // the finished encode. A 40GB transcode also filled the container's disk
-  // rather than the disk the film came from.
-  //
-  // Staging beside the file makes the install a rename(2) by construction,
-  // per root, for a multi-root library too. `.trawlarr` is pruned from every
-  // scan (`reservedDirsForLibrary`), so nothing staged here is ever ingested
-  // as media.
-  //
-  // The fallback is `os.tmpdir()`, and it is deliberately a WARNING rather
-  // than a hard failure: a library whose root cannot host a directory (a
-  // read-only mount, a path no longer under any configured root) should
-  // still get as far as Replace Original File, which already detects the
-  // cross-device condition and reports it by name, rather than failing the
-  // job before the encode with a message about directories.
-  const workParent = await stagingParentFor({ library, filePath: payload.path }).catch(
-    (error: unknown) => {
-      ports.onLog(
-        `Could not create a staging directory inside the library for "${payload.path}" ` +
-          `(${messageOf(error)}). Falling back to "${tmpdir()}", which may well be on another ` +
-          `filesystem — if it is, installing the result cannot be an atomic rename.`,
-      );
-      return tmpdir();
-    },
-  );
-  const workDir = await mkdtemp(join(workParent, 'trawlarr-job-'));
+  // Written by THIS process, synchronously, never by the daemon replaying
+  // IPC frames — see the module-level doc comment on why: the daemon only
+  // ever has what crossed the channel before a SIGKILL, and this writer's
+  // whole reason to exist is the line written a moment before that. Null
+  // when the caller gave this run no on-disk home (the in-process `run`
+  // CLI, a dry run) — every append below is then a no-op via `log?.append`.
+  const log = payload.logPath === null ? null : createJobLogWriter({ path: payload.logPath });
   try {
-    const originalFileObject = toPluginFileObject({
-      fileId: payload.fileId,
-      libraryId: payload.libraryId,
-      footprintId: payload.footprintId,
-      path: payload.path,
+    // Wraps `ports.onLog`, never replaces it: the daemon (or a fake agent in
+    // a test) still gets every line over its own channel, for the LIVE
+    // WebSocket tail — this is the durable, uncapped twin of that liveness
+    // path, not a substitute for it.
+    const onLog = (text: string): void => {
+      log?.append(text);
+      ports.onLog(text);
+    };
+
+    // Extracted directly from the probe/container/size the payload was built
+    // from, never re-read through `MediaFileRepo.getProbe` — that method
+    // recomputes facts against the row's CURRENT container/size_bytes on every
+    // call, which is exactly wrong for "facts as of the moment this run
+    // started" once the run itself goes on to touch the row (see its doc
+    // comment). Here it cannot even be attempted: there is no row to read.
+    const preFacts = extractFacts({
+      probe: payload.probe,
       container: payload.container,
       sizeBytes: payload.sizeBytes,
-      originalSizeBytes: payload.originalSizeBytes,
-      mtimeMs: payload.mtimeMs,
-      ctimeMs: payload.ctimeMs,
-      probe: payload.probe,
-      state: payload.state,
-      lastRunModified: false,
-      holdUntilMs: payload.holdUntilMs,
-      lastTranscodeMs: null,
-      lastHealthCheckMs: null,
-      history: '',
-      discoveredAtMs: payload.discoveredAtMs,
     });
 
-    const configVars = pluginConfigVars({ ffmpegPath: payload.ffmpegPath });
-    // The document store is a PORT, not a repository: in the daemon it is
-    // the same sqlite-backed store every invocation of this job (and every
-    // future job for this file) shares, so a plugin's skip-list survives
-    // restarts — a fresh in-memory map per job would make `processedCheck`
-    // report "not processed" forever. In a forked worker it is the same
-    // store, reached over IPC, which is why `DocumentPort` is async.
-    let pauseAllNodes = false;
+    // A fresh `running` job is not yet stale, but it should read that way from
+    // the start rather than leaving heartbeat_at NULL until the first step
+    // completes (or forever, for a flow with none).
+    ports.onHeartbeat(ports.nowMs());
 
-    const deps = buildPluginDeps({
-      configVars,
-      crudTransDBN: createCrudTransDbn({
-        documents: ports.documents,
-        hostSettings: {
-          setPauseAllNodes: (value) => {
-            pauseAllNodes = value;
-          },
-          getPauseAllNodes: () => pauseAllNodes,
-        },
-        log: ports.onLog,
-        nowMs: ports.nowMs,
-      }),
-      axiosMiddleware: createAxiosMiddleware({
-        probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
-        log: ports.onLog,
-      }),
-    });
-
-    const outputPathFor = (path: string, container: string) => {
-      const stem = path.slice(path.lastIndexOf('/') + 1).replace(/\.[^.]*$/, '');
-      return join(workDir, `${stem}.${container || 'mkv'}`);
-    };
-
-    const loader = createPluginLoader();
-
-    // The args object `buildArgs` most recently produced — i.e. the one
-    // belonging to the step currently executing. `runFlow` REASSIGNS
-    // `args.jobLog` on that same object after `buildArgs` returns, wrapping
-    // it so everything written lands in that step's `logExcerpt`; going
-    // through this reference (rather than capturing the function) is what
-    // makes a runner's own log output reach the wrapper, and therefore the
-    // `job_step.log_excerpt` column.
-    let currentArgs: PluginInputArgs | null = null;
-
-    const runners = [
-      createExecuteRunner({
-        ffmpegPath: payload.ffmpegPath,
-        outputPathFor,
-        // Cancellation reaches the ffmpeg child itself, not just the loop
-        // around it: a worker asked to stop must not leave an encode running
-        // for another hour.
-        signal: ports.signal,
-        onProgress: (percent) => ports.onProgress({ percent, stage: 'execute' }),
-        // Without this, `execute-node.ts`'s `ffmpeg failed (code N):
-        // <stderrTail>` — the ONLY record of why an encode failed — went
-        // nowhere, and the Execute step's log excerpt was empty: an
-        // operator saw a held file with no reason attached anywhere in the
-        // database.
-        log: (text) => currentArgs?.jobLog(text),
-      }),
-      createVerifyOutputRunner({
-        probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
-        statFile: statFileSeam,
-      }),
-      createReplaceOriginalRunner({
-        trashDirFor: (originalPath) => resolveTrashDir({ library, filePath: originalPath }),
-        companionExtensions: library.companionExtensions,
-        findCompanions: findCompanionsSeam,
-        moveCompanions: ports.moveCompanions ?? moveCompanionsSeam,
-        allowHardlinked: library.allowHardlinked,
-        statFile: ports.statFile ?? statFileSeam,
-        crossDeviceError: crossDeviceErrorSeam,
-        nowMs: ports.nowMs,
-      }),
-    ];
-
-    // The `outputFileObj` Replace Original File itself RETURNED, from EVERY
-    // invocation in this run, oldest first — captured by wrapping its
-    // substituted `plugin()` function, not by reading what was fed IN to
-    // the node. This is the fix for I-4: the node's own return value is
-    // authoritative for "what path now holds the library file", on EVERY
-    // output number, because `replaceOriginal` sets `outputFileObj._id` to
-    // the real swapped-in path on the two branches where a swap lands but
-    // the node still reports failure (left hardlinked; a companion move
-    // that split) — reading the INPUT object instead would miss those, and
-    // reading only `outputNumber === 1` (an earlier version of this fix)
-    // missed them too. `runFlow` itself updates its OWN `currentPath` from
-    // this same value after every step regardless of output number, so
-    // this mirrors exactly what the engine already treats as authoritative
-    // — captured here only because `result.currentPath` alone conflates
-    // every node, not just Replace (see the loop-back comment below).
+    // The job's scratch directory lives INSIDE the library it is working on —
+    // under the same root as the file, which is what `resolveStagingDir`
+    // answers — and not under `os.tmpdir()`.
     //
-    // Recording EVERY invocation, not just the last, is the fix for I-5: a
-    // flow with two Replace nodes where the first changes the container
-    // (`sample.mkv` -> `sample.mp4`) and a LATER one refuses reports the
-    // pre-run `originalPath` (`sample.mkv`) in ITS OWN `outputFileObj` —
-    // correctly, as far as that node's own contract goes, but that path no
-    // longer exists on disk. Below, the most RECENT invocation whose
-    // reported path can still be stat'd wins, so a stale later report can
-    // never erase the record of an earlier, real swap. The guard on
-    // `outputFileObj?._id` being a string is defensive: only the
-    // substituted first-party runner is ever wrapped below, so it always
-    // returns a well-formed `outputFileObj`, but nothing should silently
-    // misread a malformed one as "no replacement happened" without at
-    // least being written to make that reasoning explicit.
-    const replaceOutputs: { _id: string }[] = [];
-
-    const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
-      const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
-      if (firstParty !== undefined) {
-        const base: LoadedPlugin = {
-          id: firstParty.id,
-          absPath: `builtin:${firstParty.id}`,
-          version: '1.0.0',
-          details: firstParty.module.details(),
-          module: firstParty.module,
-        };
-        const substitute = runners.reduce<ReturnType<(typeof runners)[number]>>(
-          (found, runner) => found ?? runner(base),
-          null,
+    // The two looked equivalent on a developer's machine, where /tmp and the
+    // media happen to share a filesystem, and are not equivalent anywhere this
+    // is actually deployed. In a container /tmp is the container's own
+    // writable layer and the library is a bind mount, so EVERY replacement was
+    // a cross-device one: refused outright by Replace Original File, or, with
+    // `allowCrossDevice` on, degraded from an atomic rename into a full copy of
+    // the finished encode. A 40GB transcode also filled the container's disk
+    // rather than the disk the film came from.
+    //
+    // Staging beside the file makes the install a rename(2) by construction,
+    // per root, for a multi-root library too. `.trawlarr` is pruned from every
+    // scan (`reservedDirsForLibrary`), so nothing staged here is ever ingested
+    // as media.
+    //
+    // The fallback is `os.tmpdir()`, and it is deliberately a WARNING rather
+    // than a hard failure: a library whose root cannot host a directory (a
+    // read-only mount, a path no longer under any configured root) should
+    // still get as far as Replace Original File, which already detects the
+    // cross-device condition and reports it by name, rather than failing the
+    // job before the encode with a message about directories.
+    const workParent = await stagingParentFor({ library, filePath: payload.path }).catch(
+      (error: unknown) => {
+        onLog(
+          `Could not create a staging directory inside the library for "${payload.path}" ` +
+            `(${messageOf(error)}). Falling back to "${tmpdir()}", which may well be on another ` +
+            `filesystem — if it is, installing the result cannot be an atomic rename.`,
         );
-        if (substitute === null) return base;
-        if (node.pluginId !== REPLACE_ORIGINAL_PLUGIN_ID) return { ...base, module: substitute };
-        return {
-          ...base,
-          module: {
-            details: substitute.details,
-            plugin: async (args) => {
-              const output = await substitute.plugin(args);
-              if (typeof output.outputFileObj?._id === 'string') {
-                replaceOutputs.push(output.outputFileObj);
-              }
-              return output;
-            },
-          },
-        };
-      }
-      return loader.load(node.pluginId);
-    };
-
-    // Carries a node's mutations to the file object (container, file_size,
-    // newSize/oldSize, codec names — everything Replace Original File's
-    // `describeReplacement` writes onto it) forward into the NEXT node's
-    // input. Reset only `_id`/`file` per invocation, from `originalFileObject`,
-    // would make a node placed after Execute or Replace read PRE-run values
-    // for everything else — the same convention the engine CLI uses today,
-    // but one the server is the first place to actually run flows where it
-    // would silently feed a downstream codec/size check stale data.
-    let lastFileObject: PluginFileObject = originalFileObject;
-
-    const buildArgs = (invocation: NodeInvocation) => {
-      const args = buildPluginInputArgs({
-        fileObject: {
-          ...lastFileObject,
-          _id: invocation.currentPath,
-          file: invocation.currentPath,
-        },
-        originalFileObject,
-        nodeInputs: invocation.node.inputs,
-        variables: invocation.variables,
-        // The LibraryRecord itself: community plugins read librarySettings
-        // (30 hits in the corpus).
-        librarySettings: library as unknown as Record<string, unknown>,
-        userVariables: { global: {}, library: library.userVariables },
-        configVars,
-        deps,
-        workDir,
-        jobId: payload.jobId,
-        footprintId: payload.footprintId,
-        fileId: payload.fileId,
-        jobStartMs: ports.nowMs(),
-        // The ONLY place trawlarr's class x hardware split is projected onto
-        // Tdarr's flat `workerType` string — a plugin reading
-        // `args.workerType` sees `transcodecpu`/`transcodegpu`, while
-        // everything in trawlarr keeps the two apart.
-        workerClass: tdarrWorkerType({
-          workerClass: payload.workerClass,
-          hardwareType: payload.hardwareType,
-        }),
-        hardwareType: payload.hardwareType,
-        log: ports.onLog,
-      });
-      lastFileObject = args.inputFileObj;
-      currentArgs = args;
-      return args;
-    };
-
-    const result = await runFlow({
-      flow: payload.flow.definition,
-      initialPath: payload.path,
-      loadPlugin,
-      buildArgs,
-      nowMs: ports.nowMs,
-      onStep: (step) => {
-        ports.onStep(step);
-        // Once per completed step: the natural unit of progress here, since
-        // every long-running node (Execute, Verify, Replace) is itself one
-        // step. A worker that dies mid-step leaves `heartbeat_at` at its
-        // last COMPLETED step, which is exactly what a stall reaper compares
-        // against — never advancing was the actual defect, not the exact
-        // granularity.
-        ports.onHeartbeat(ports.nowMs());
+        return tmpdir();
       },
-    });
+    );
+    const workDir = await mkdtemp(join(workParent, 'trawlarr-job-'));
+    try {
+      const originalFileObject = toPluginFileObject({
+        fileId: payload.fileId,
+        libraryId: payload.libraryId,
+        footprintId: payload.footprintId,
+        path: payload.path,
+        container: payload.container,
+        sizeBytes: payload.sizeBytes,
+        originalSizeBytes: payload.originalSizeBytes,
+        mtimeMs: payload.mtimeMs,
+        ctimeMs: payload.ctimeMs,
+        probe: payload.probe,
+        state: payload.state,
+        lastRunModified: false,
+        holdUntilMs: payload.holdUntilMs,
+        lastTranscodeMs: null,
+        lastHealthCheckMs: null,
+        history: '',
+        discoveredAtMs: payload.discoveredAtMs,
+      });
 
-    // THE RULE: a terminal output the flow author did not route, on a node
-    // that is reporting failure, is not success.
-    //
-    // Both halves are read from things that already exist and generalise:
-    //
-    //  - "terminal and unrouted" is `stopReason === 'end-of-flow'`, which
-    //    `runFlow` returns from exactly one place — the branch where no edge
-    //    leaves the output the node just took. The flow definition knows
-    //    which outputs have no outgoing edge; this is that fact, already
-    //    computed. Only the LAST step can be the unrouted one, so that is
-    //    the step judged. A flow that DOES route its failure output
-    //    somewhere (quarantine, alert, retry with different settings) and
-    //    finishes on its own terms downstream is unaffected.
-    //
-    //  - "reporting failure" is the node's OWN `details()` declaration for
-    //    the output it took (`PluginOutputDescriptor.outcome`), captured on
-    //    the step by `runFlow`. Not a plugin-id allow-list: that shape
-    //    listed Verify Output and Replace Original File and silently
-    //    omitted Execute, so ffmpeg exiting non-zero — a missing hardware
-    //    encoder, a corrupt source, ENOSPC in staging — ended the flow with
-    //    `success = true` and stored the PRE-transcode signature as `good`,
-    //    which `isKnownGood` then matched forever: a whole library
-    //    reporting "100% converged" with nothing transcoded and no error
-    //    anywhere. An id list has to be extended for every future
-    //    first-party node and can never cover a community plugin at all;
-    //    a declaration travels with the node that owns the meaning.
-    //
-    // A node that declares nothing (the Tdarr-compatible shape) is neutral,
-    // which is deliberate and conservative in the safe direction: guessing
-    // "failure" from an undeclared output — say, by pattern-matching the
-    // tooltip — would misread a filter node's "no, this file is not hevc"
-    // as a failure and hold files that had genuinely converged.
-    const lastStep = result.steps.at(-1);
-    const endedOnUnroutedFailure =
-      result.stopReason === 'end-of-flow' &&
-      lastStep !== undefined &&
-      lastStep.outputOutcome === 'failure';
+      const configVars = pluginConfigVars({ ffmpegPath: payload.ffmpegPath });
+      // The document store is a PORT, not a repository: in the daemon it is
+      // the same sqlite-backed store every invocation of this job (and every
+      // future job for this file) shares, so a plugin's skip-list survives
+      // restarts — a fresh in-memory map per job would make `processedCheck`
+      // report "not processed" forever. In a forked worker it is the same
+      // store, reached over IPC, which is why `DocumentPort` is async.
+      let pauseAllNodes = false;
 
-    const success = !result.failed && !endedOnUnroutedFailure;
+      const deps = buildPluginDeps({
+        configVars,
+        crudTransDBN: createCrudTransDbn({
+          documents: ports.documents,
+          hostSettings: {
+            setPauseAllNodes: (value) => {
+              pauseAllNodes = value;
+            },
+            getPauseAllNodes: () => pauseAllNodes,
+          },
+          log: onLog,
+          nowMs: ports.nowMs,
+        }),
+        axiosMiddleware: createAxiosMiddleware({
+          probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
+          log: onLog,
+        }),
+      });
 
-    // What the LIBRARY FILE is now, decided from the Replace node's OWN
-    // returned path — never from the step's output number, and never from
-    // whether the job as a whole succeeded. The output number says whether
-    // the JOB considers itself successful; it does not say whether the
-    // FILESYSTEM changed, and those are different questions.
-    // `replaceOriginal` can swap the file in and still route to its failure
-    // output — landed-but-left-hardlinked
-    // (`packages/engine/src/executor/replace-original.ts` around the
-    // `leftLinked` check) and landed-but-companions-split are both real,
-    // reachable branches where `describeReplacement` already ran (setting
-    // `outputFileObj._id` to the new path) before the node returned output
-    // 2. Requiring output 1 missed exactly those two branches: the row's
-    // probe/identity were never updated even though the file on disk
-    // already had a new inode and new content — the same orphaned-row bug
-    // this whole mechanism exists to eliminate, still live in the branches
-    // the earlier, output-number-based check did not reach.
-    //
-    // Tried most-recent-invocation first, falling back to earlier ones: a
-    // container-changing Replace followed by a LATER Replace that refuses
-    // reports that later node's own `originalPath` — correct for that
-    // node's own contract, but a path an earlier, successful swap in THIS
-    // SAME run may have already renamed away, so `fsStat`/hashing it
-    // throws ENOENT. That must never propagate out of this function: the
-    // read that DETECTS a change must never be able to DESTROY the record
-    // of a change that already happened. Falling back to the invocation
-    // before it is what lets a real, still-on-disk swap still be found and
-    // recorded even when the LAST report about it is stale.
-    let replaced: ReplacedFile | null = null;
-    for (let i = replaceOutputs.length - 1; i >= 0; i -= 1) {
-      const candidate = replaceOutputs[i]!._id;
-      try {
-        const stats = await fsStat(candidate);
-        const hash = await partialHashFile(candidate);
-        replaced = {
-          path: candidate,
-          container: containerOf(candidate),
-          sizeBytes: stats.size,
-          mtimeMs: stats.mtimeMs,
-          ctimeMs: stats.ctimeMs,
-          nlink: stats.nlink,
-          deviceId: stats.dev,
-          inode: stats.ino,
-          hash,
-          probe: null,
-          probeError: null,
-        };
-        break;
-      } catch {
-        // This invocation's reported path is gone — try the one before it.
-      }
-    }
+      const outputPathFor = (path: string, container: string) => {
+        const stem = path.slice(path.lastIndexOf('/') + 1).replace(/\.[^.]*$/, '');
+        return join(workDir, `${stem}.${container || 'mkv'}`);
+      };
 
-    // Extracted from the probe and stat this run just took, alongside the
-    // container/size it actually means — never from a repository's "facts as
-    // of now", which recompute against columns nothing has updated yet.
-    //
-    // A probe failure is recorded rather than thrown for the same reason the
-    // stat search above swallows ENOENT: a Replace that REFUSED reports the
-    // untouched original, and a run that changed nothing must not be stalled
-    // by an unreadable one. `applyJobReport` raises `probeError` if — and
-    // only if — the identity comparison says the file really did change, in
-    // which case the probe is load-bearing.
-    let postFacts: FactSet | null = null;
-    if (replaced !== null) {
-      try {
-        const probe = await probeFile({ ffprobePath: payload.ffprobePath, path: replaced.path });
-        replaced.probe = probe;
-        postFacts = extractFacts({
-          probe,
-          container: replaced.container,
-          sizeBytes: replaced.sizeBytes,
+      const loader = createPluginLoader();
+
+      // The args object `buildArgs` most recently produced — i.e. the one
+      // belonging to the step currently executing. `runFlow` REASSIGNS
+      // `args.jobLog` on that same object after `buildArgs` returns, wrapping
+      // it so everything written lands in that step's `logExcerpt`; going
+      // through this reference (rather than capturing the function) is what
+      // makes a runner's own log output reach the wrapper, and therefore the
+      // `job_step.log_excerpt` column.
+      let currentArgs: PluginInputArgs | null = null;
+
+      const runners = [
+        createExecuteRunner({
+          ffmpegPath: payload.ffmpegPath,
+          outputPathFor,
+          // Cancellation reaches the ffmpeg child itself, not just the loop
+          // around it: a worker asked to stop must not leave an encode running
+          // for another hour.
+          signal: ports.signal,
+          onProgress: (percent) => ports.onProgress({ percent, stage: 'execute' }),
+          // Without this, `execute-node.ts`'s `ffmpeg failed (code N):
+          // <stderrTail>` — the ONLY record of why an encode failed — went
+          // nowhere, and the Execute step's log excerpt was empty: an
+          // operator saw a held file with no reason attached anywhere in the
+          // database.
+          log: (text) => currentArgs?.jobLog(text),
+        }),
+        createVerifyOutputRunner({
+          probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
+          statFile: statFileSeam,
+        }),
+        createReplaceOriginalRunner({
+          trashDirFor: (originalPath) => resolveTrashDir({ library, filePath: originalPath }),
+          companionExtensions: library.companionExtensions,
+          findCompanions: findCompanionsSeam,
+          moveCompanions: ports.moveCompanions ?? moveCompanionsSeam,
+          allowHardlinked: library.allowHardlinked,
+          statFile: ports.statFile ?? statFileSeam,
+          crossDeviceError: crossDeviceErrorSeam,
+          nowMs: ports.nowMs,
+        }),
+      ];
+
+      // The `outputFileObj` Replace Original File itself RETURNED, from EVERY
+      // invocation in this run, oldest first — captured by wrapping its
+      // substituted `plugin()` function, not by reading what was fed IN to
+      // the node. This is the fix for I-4: the node's own return value is
+      // authoritative for "what path now holds the library file", on EVERY
+      // output number, because `replaceOriginal` sets `outputFileObj._id` to
+      // the real swapped-in path on the two branches where a swap lands but
+      // the node still reports failure (left hardlinked; a companion move
+      // that split) — reading the INPUT object instead would miss those, and
+      // reading only `outputNumber === 1` (an earlier version of this fix)
+      // missed them too. `runFlow` itself updates its OWN `currentPath` from
+      // this same value after every step regardless of output number, so
+      // this mirrors exactly what the engine already treats as authoritative
+      // — captured here only because `result.currentPath` alone conflates
+      // every node, not just Replace (see the loop-back comment below).
+      //
+      // Recording EVERY invocation, not just the last, is the fix for I-5: a
+      // flow with two Replace nodes where the first changes the container
+      // (`sample.mkv` -> `sample.mp4`) and a LATER one refuses reports the
+      // pre-run `originalPath` (`sample.mkv`) in ITS OWN `outputFileObj` —
+      // correctly, as far as that node's own contract goes, but that path no
+      // longer exists on disk. Below, the most RECENT invocation whose
+      // reported path can still be stat'd wins, so a stale later report can
+      // never erase the record of an earlier, real swap. The guard on
+      // `outputFileObj?._id` being a string is defensive: only the
+      // substituted first-party runner is ever wrapped below, so it always
+      // returns a well-formed `outputFileObj`, but nothing should silently
+      // misread a malformed one as "no replacement happened" without at
+      // least being written to make that reasoning explicit.
+      const replaceOutputs: { _id: string }[] = [];
+
+      const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
+        const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
+        if (firstParty !== undefined) {
+          const base: LoadedPlugin = {
+            id: firstParty.id,
+            absPath: `builtin:${firstParty.id}`,
+            version: '1.0.0',
+            details: firstParty.module.details(),
+            module: firstParty.module,
+          };
+          const substitute = runners.reduce<ReturnType<(typeof runners)[number]>>(
+            (found, runner) => found ?? runner(base),
+            null,
+          );
+          if (substitute === null) return base;
+          if (node.pluginId !== REPLACE_ORIGINAL_PLUGIN_ID) return { ...base, module: substitute };
+          return {
+            ...base,
+            module: {
+              details: substitute.details,
+              plugin: async (args) => {
+                const output = await substitute.plugin(args);
+                if (typeof output.outputFileObj?._id === 'string') {
+                  replaceOutputs.push(output.outputFileObj);
+                }
+                return output;
+              },
+            },
+          };
+        }
+        return loader.load(node.pluginId);
+      };
+
+      // Carries a node's mutations to the file object (container, file_size,
+      // newSize/oldSize, codec names — everything Replace Original File's
+      // `describeReplacement` writes onto it) forward into the NEXT node's
+      // input. Reset only `_id`/`file` per invocation, from `originalFileObject`,
+      // would make a node placed after Execute or Replace read PRE-run values
+      // for everything else — the same convention the engine CLI uses today,
+      // but one the server is the first place to actually run flows where it
+      // would silently feed a downstream codec/size check stale data.
+      let lastFileObject: PluginFileObject = originalFileObject;
+
+      const buildArgs = (invocation: NodeInvocation) => {
+        const args = buildPluginInputArgs({
+          fileObject: {
+            ...lastFileObject,
+            _id: invocation.currentPath,
+            file: invocation.currentPath,
+          },
+          originalFileObject,
+          nodeInputs: invocation.node.inputs,
+          variables: invocation.variables,
+          // The LibraryRecord itself: community plugins read librarySettings
+          // (30 hits in the corpus).
+          librarySettings: library as unknown as Record<string, unknown>,
+          userVariables: { global: {}, library: library.userVariables },
+          configVars,
+          deps,
+          workDir,
+          jobId: payload.jobId,
+          footprintId: payload.footprintId,
+          fileId: payload.fileId,
+          jobStartMs: ports.nowMs(),
+          // The ONLY place trawlarr's class x hardware split is projected onto
+          // Tdarr's flat `workerType` string — a plugin reading
+          // `args.workerType` sees `transcodecpu`/`transcodegpu`, while
+          // everything in trawlarr keeps the two apart.
+          workerClass: tdarrWorkerType({
+            workerClass: payload.workerClass,
+            hardwareType: payload.hardwareType,
+          }),
+          hardwareType: payload.hardwareType,
+          log: onLog,
         });
-      } catch (error) {
-        replaced.probeError = messageOf(error);
+        lastFileObject = args.inputFileObj;
+        currentArgs = args;
+        return args;
+      };
+
+      const result = await runFlow({
+        flow: payload.flow.definition,
+        initialPath: payload.path,
+        loadPlugin,
+        buildArgs,
+        nowMs: ports.nowMs,
+        onStep: (step) => {
+          // A boundary marker, not the step's own log lines — those already
+          // reached the file through `onLog` while the node ran. This is what
+          // lets a reader of the raw log tell one node's output from the
+          // next's without cross-referencing `job_step` rows.
+          log?.append(`--- step ${String(step.seq)}: ${step.pluginId} ---`);
+          ports.onStep(step);
+          // Once per completed step: the natural unit of progress here, since
+          // every long-running node (Execute, Verify, Replace) is itself one
+          // step. A worker that dies mid-step leaves `heartbeat_at` at its
+          // last COMPLETED step, which is exactly what a stall reaper compares
+          // against — never advancing was the actual defect, not the exact
+          // granularity.
+          ports.onHeartbeat(ports.nowMs());
+        },
+      });
+
+      // THE RULE: a terminal output the flow author did not route, on a node
+      // that is reporting failure, is not success.
+      //
+      // Both halves are read from things that already exist and generalise:
+      //
+      //  - "terminal and unrouted" is `stopReason === 'end-of-flow'`, which
+      //    `runFlow` returns from exactly one place — the branch where no edge
+      //    leaves the output the node just took. The flow definition knows
+      //    which outputs have no outgoing edge; this is that fact, already
+      //    computed. Only the LAST step can be the unrouted one, so that is
+      //    the step judged. A flow that DOES route its failure output
+      //    somewhere (quarantine, alert, retry with different settings) and
+      //    finishes on its own terms downstream is unaffected.
+      //
+      //  - "reporting failure" is the node's OWN `details()` declaration for
+      //    the output it took (`PluginOutputDescriptor.outcome`), captured on
+      //    the step by `runFlow`. Not a plugin-id allow-list: that shape
+      //    listed Verify Output and Replace Original File and silently
+      //    omitted Execute, so ffmpeg exiting non-zero — a missing hardware
+      //    encoder, a corrupt source, ENOSPC in staging — ended the flow with
+      //    `success = true` and stored the PRE-transcode signature as `good`,
+      //    which `isKnownGood` then matched forever: a whole library
+      //    reporting "100% converged" with nothing transcoded and no error
+      //    anywhere. An id list has to be extended for every future
+      //    first-party node and can never cover a community plugin at all;
+      //    a declaration travels with the node that owns the meaning.
+      //
+      // A node that declares nothing (the Tdarr-compatible shape) is neutral,
+      // which is deliberate and conservative in the safe direction: guessing
+      // "failure" from an undeclared output — say, by pattern-matching the
+      // tooltip — would misread a filter node's "no, this file is not hevc"
+      // as a failure and hold files that had genuinely converged.
+      const lastStep = result.steps.at(-1);
+      const endedOnUnroutedFailure =
+        result.stopReason === 'end-of-flow' &&
+        lastStep !== undefined &&
+        lastStep.outputOutcome === 'failure';
+
+      const success = !result.failed && !endedOnUnroutedFailure;
+
+      // What the LIBRARY FILE is now, decided from the Replace node's OWN
+      // returned path — never from the step's output number, and never from
+      // whether the job as a whole succeeded. The output number says whether
+      // the JOB considers itself successful; it does not say whether the
+      // FILESYSTEM changed, and those are different questions.
+      // `replaceOriginal` can swap the file in and still route to its failure
+      // output — landed-but-left-hardlinked
+      // (`packages/engine/src/executor/replace-original.ts` around the
+      // `leftLinked` check) and landed-but-companions-split are both real,
+      // reachable branches where `describeReplacement` already ran (setting
+      // `outputFileObj._id` to the new path) before the node returned output
+      // 2. Requiring output 1 missed exactly those two branches: the row's
+      // probe/identity were never updated even though the file on disk
+      // already had a new inode and new content — the same orphaned-row bug
+      // this whole mechanism exists to eliminate, still live in the branches
+      // the earlier, output-number-based check did not reach.
+      //
+      // Tried most-recent-invocation first, falling back to earlier ones: a
+      // container-changing Replace followed by a LATER Replace that refuses
+      // reports that later node's own `originalPath` — correct for that
+      // node's own contract, but a path an earlier, successful swap in THIS
+      // SAME run may have already renamed away, so `fsStat`/hashing it
+      // throws ENOENT. That must never propagate out of this function: the
+      // read that DETECTS a change must never be able to DESTROY the record
+      // of a change that already happened. Falling back to the invocation
+      // before it is what lets a real, still-on-disk swap still be found and
+      // recorded even when the LAST report about it is stale.
+      let replaced: ReplacedFile | null = null;
+      for (let i = replaceOutputs.length - 1; i >= 0; i -= 1) {
+        const candidate = replaceOutputs[i]!._id;
+        try {
+          const stats = await fsStat(candidate);
+          const hash = await partialHashFile(candidate);
+          replaced = {
+            path: candidate,
+            container: containerOf(candidate),
+            sizeBytes: stats.size,
+            mtimeMs: stats.mtimeMs,
+            ctimeMs: stats.ctimeMs,
+            nlink: stats.nlink,
+            deviceId: stats.dev,
+            inode: stats.ino,
+            hash,
+            probe: null,
+            probeError: null,
+          };
+          break;
+        } catch {
+          // This invocation's reported path is gone — try the one before it.
+        }
       }
+
+      // Extracted from the probe and stat this run just took, alongside the
+      // container/size it actually means — never from a repository's "facts as
+      // of now", which recompute against columns nothing has updated yet.
+      //
+      // A probe failure is recorded rather than thrown for the same reason the
+      // stat search above swallows ENOENT: a Replace that REFUSED reports the
+      // untouched original, and a run that changed nothing must not be stalled
+      // by an unreadable one. `applyJobReport` raises `probeError` if — and
+      // only if — the identity comparison says the file really did change, in
+      // which case the probe is load-bearing.
+      let postFacts: FactSet | null = null;
+      if (replaced !== null) {
+        try {
+          const probe = await probeFile({ ffprobePath: payload.ffprobePath, path: replaced.path });
+          replaced.probe = probe;
+          postFacts = extractFacts({
+            probe,
+            container: replaced.container,
+            sizeBytes: replaced.sizeBytes,
+          });
+        } catch (error) {
+          replaced.probeError = messageOf(error);
+        }
+      }
+
+      const outcome = success
+        ? `Flow finished: ${result.stopReason}.`
+        : endedOnUnroutedFailure
+          ? `Flow finished, but "${lastStep?.pluginName ?? lastStep?.pluginId}" reported failure ` +
+            `on output ${String(lastStep?.outputNumber)}, which this flow routes nowhere.`
+          : `Flow failed: ${result.error ?? result.stopReason}`;
+
+      return {
+        jobId: payload.jobId,
+        fileId: payload.fileId,
+        steps: result.steps,
+        stopReason: result.stopReason,
+        failed: result.failed,
+        error: result.error,
+        success,
+        outcome,
+        replaced,
+        preFacts,
+        postFacts,
+        cancelled: ports.signal?.aborted === true,
+      };
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
     }
-
-    const outcome = success
-      ? `Flow finished: ${result.stopReason}.`
-      : endedOnUnroutedFailure
-        ? `Flow finished, but "${lastStep?.pluginName ?? lastStep?.pluginId}" reported failure ` +
-          `on output ${String(lastStep?.outputNumber)}, which this flow routes nowhere.`
-        : `Flow failed: ${result.error ?? result.stopReason}`;
-
-    return {
-      jobId: payload.jobId,
-      fileId: payload.fileId,
-      steps: result.steps,
-      stopReason: result.stopReason,
-      failed: result.failed,
-      error: result.error,
-      success,
-      outcome,
-      replaced,
-      preFacts,
-      postFacts,
-      cancelled: ports.signal?.aborted === true,
-    };
   } finally {
-    await rm(workDir, { recursive: true, force: true });
+    // Runs even when the try above throws — the only case where the log
+    // matters LESS is one where the run finished cleanly and reported
+    // through the normal channel. Never runs for a SIGKILL, by construction:
+    // there is no JavaScript left to run a `finally` in a process the
+    // kernel just tore down, which is exactly why every `append` above is
+    // synchronous rather than buffered for this moment to flush.
+    log?.close();
   }
 };

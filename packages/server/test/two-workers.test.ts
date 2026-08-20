@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -184,13 +184,14 @@ const transcodeFlow = (): FlowDefinition => ({
   ],
 });
 
-const daemonFor = (db: Db) => {
+const daemonFor = (db: Db, dataDir: string) => {
   const bus = createEventBus();
   const settings = createSettingsRepo({ db });
   const supervisor = createSupervisor({
     db,
     bus,
     settings,
+    dataDir,
     nowMs: () => Date.now(),
     createAgent: realAgents,
   });
@@ -229,7 +230,7 @@ describe.runIf(ffmpegAvailable)('two workers converge a library', () => {
       nowMs: Date.now(),
     });
 
-    const { settings, supervisor } = daemonFor(db);
+    const { settings, supervisor } = daemonFor(db, workDir);
     settings.setHardware({ available: ['cpu'], caps: {} });
     settings.setSchedule({
       timezone: 'UTC',
@@ -421,6 +422,10 @@ const details = () => ({
 });
 
 const plugin = async (args) => {
+  // Written through the SAME jobLog seam a real plugin's progress lines use,
+  // so it lands in the on-disk job log via the SYNCHRONOUS writer before the
+  // marker file even exists — proving the SIGKILL below cannot outrun it.
+  args.jobLog('hanging plugin: about to hang');
   fs.writeFileSync(path.join(${JSON.stringify(markerDir)}, 'started-' + process.pid), '');
   await new Promise(() => {});
   return { outputNumber: 1, outputFileObj: args.inputFileObj, variables: args.variables };
@@ -523,7 +528,7 @@ describe('a worker killed mid-job', () => {
       return fileId;
     });
 
-    const { settings, supervisor } = daemonFor(db);
+    const { settings, supervisor } = daemonFor(db, workDir);
     settings.setHardware({ available: ['cpu'], caps: {} });
     settings.setSchedule({
       timezone: 'UTC',
@@ -570,9 +575,19 @@ describe('a worker killed mid-job', () => {
     const victimJob = db.prepare(`SELECT * FROM job WHERE file_id = ?`).get(victimFileId) as {
       state: string;
       ended_at: number | null;
+      log_path: string | null;
     };
     expect(victimJob.state).toBe('failed');
     expect(victimJob.ended_at).not.toBeNull();
+
+    // THE SIGKILL PROOF: the daemon allocated this path before the fork, and
+    // the AGENT — not the daemon — wrote to it synchronously, on its way to
+    // the hang. A SIGKILL leaves no chance to flush a buffer or send one more
+    // IPC frame, so bytes on disk here can only have come from `writeSync`
+    // inside the child before the kernel tore it down.
+    expect(victimJob.log_path).not.toBeNull();
+    expect(statSync(victimJob.log_path!).size).toBeGreaterThan(0);
+    expect(readFileSync(victimJob.log_path!, 'utf8')).toContain('hanging plugin: about to hang');
 
     // And the pool carried on: the OTHER file is now claimed and running in
     // a NEW process. A supervisor that died with its child would leave this

@@ -1,5 +1,7 @@
+import { readFile } from 'node:fs/promises';
 import { createJobRepo } from '../../db/job-repo.js';
-import { accepted, ApiError, notImplemented, parsePaging, type Route } from '../router.js';
+import { JOB_LOG_RETENTION_DAYS } from '../../job-log/job-log-store.js';
+import { accepted, ApiError, parsePaging, type Route } from '../router.js';
 
 export const jobRoutes: Route[] = [
   {
@@ -34,12 +36,30 @@ export const jobRoutes: Route[] = [
   {
     method: 'GET',
     path: '/jobs/:id/log',
-    handler: notImplemented(
-      `Per-job log files are not implemented in this build; this endpoint arrives with them. ` +
-        `A named 501 rather than a 404 because the route is specified and a client author would ` +
-        `otherwise go hunting for a path they got right. Until then, each step's log excerpt is ` +
-        `on GET /api/v1/jobs/:id, and live log lines are pushed on the websocket.`,
-    ),
+    handler: async ({ params, ctx }) => {
+      const job = createJobRepo(ctx.db).getById(params.id!);
+      if (job === null) throw new ApiError(404, 'job-not-found', `No job with id "${params.id!}".`);
+      if (job.logPath === null) {
+        throw new ApiError(
+          404,
+          'job-log-absent',
+          `Job "${job.id}" has no log file. Jobs recorded before per-job logs existed have ` +
+            `none; each step's log excerpt is still on GET /api/v1/jobs/${job.id}.`,
+        );
+      }
+      try {
+        return { jobId: job.id, path: job.logPath, text: await readFile(job.logPath, 'utf8') };
+      } catch {
+        // A swept log is a NAMED absence, never an empty string: an empty
+        // log and a deleted one must not look the same to a reader.
+        throw new ApiError(
+          410,
+          'job-log-expired',
+          `Job "${job.id}" recorded a log at "${job.logPath}", but it is no longer on disk — ` +
+            `job logs are kept for ${String(JOB_LOG_RETENTION_DAYS)} days.`,
+        );
+      }
+    },
   },
 
   {

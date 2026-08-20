@@ -169,6 +169,7 @@ const jobStarted = (jobId: string): TrawlarrEvent => ({
   libraryId: 'l',
   path: '/media/a.mkv',
   workerId: 'w1',
+  pid: 4242,
 });
 
 const jobFinished = (jobId: string): TrawlarrEvent => ({

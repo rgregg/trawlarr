@@ -898,11 +898,61 @@ describe('jobs', () => {
     expect(supervisor.cancelled).toEqual([]);
   });
 
-  it('returns 501, not 404, for the per-job log route', async () => {
+  it('returns 404 for a job that does not exist', async () => {
     const response = await api('GET', '/jobs/anything/log');
 
-    expect(response.status).toBe(501);
-    expect(response.body.error.code).toBe('not-implemented');
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('job-not-found');
+  });
+
+  it('returns 404, named, for a job that predates per-job logs', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/nolog.mkv' });
+    const jobId = createJobRepo(db).start({ fileId, flowId: 'f', flowHash: 'h', nowMs: NOW });
+
+    const response = await api('GET', `/jobs/${jobId}/log`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('job-log-absent');
+  });
+
+  it('serves the bytes actually on disk for a job with a log file', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/haslog.mkv' });
+    const logPath = join(await mkdtemp(join(tmpdir(), 'trawlarr-joblog-api-')), 'job.log');
+    await writeFile(logPath, 'line one\nline two\n');
+    const jobId = createJobRepo(db).start({
+      fileId,
+      flowId: 'f',
+      flowHash: 'h',
+      nowMs: NOW,
+      logPath,
+    });
+
+    const response = await api('GET', `/jobs/${jobId}/log`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.jobId).toBe(jobId);
+    expect(response.body.path).toBe(logPath);
+    expect(response.body.text).toBe('line one\nline two\n');
+  });
+
+  it('returns 410, named, for a job whose log has been swept off disk', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/expiredlog.mkv' });
+    const logPath = join(await mkdtemp(join(tmpdir(), 'trawlarr-joblog-api-')), 'gone.log');
+    const jobId = createJobRepo(db).start({
+      fileId,
+      flowId: 'f',
+      flowHash: 'h',
+      nowMs: NOW,
+      logPath,
+    });
+
+    const response = await api('GET', `/jobs/${jobId}/log`);
+
+    expect(response.status).toBe(410);
+    expect(response.body.error.code).toBe('job-log-expired');
   });
 });
 

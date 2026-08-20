@@ -43,6 +43,24 @@ export interface StartJobInput {
   workerClass?: WorkerClass;
   /** The node this job ran on. NULL until the local node registers itself. */
   nodeId?: string | null;
+  /**
+   * A caller-supplied id, generated with `randomUUID()` before the row
+   * exists. Optional and rare: the one real caller is the supervisor, which
+   * has to know the job's id BEFORE this call returns — the on-disk log
+   * path both this row's `log_path` and the payload handed to the worker
+   * must agree on is named after it, and there is no way to allocate a path
+   * from an id this function has not generated yet. Every other caller
+   * leaves this unset and gets the usual freshly generated id.
+   */
+  id?: string;
+  /**
+   * Where this job's on-disk log will live, allocated by the daemon before
+   * the worker even starts — so a worker that vanishes without writing a
+   * byte still leaves a findable path on the job row. Optional — callers
+   * that predate per-job logs (and tests exercising unrelated behaviour)
+   * leave the column NULL, the same default the column has always had.
+   */
+  logPath?: string | null;
 }
 
 export interface RecordStepInput {
@@ -190,8 +208,8 @@ const truncateLogExcerpt = (text: string): string => {
  */
 export const createJobRepo = (db: Db): JobRepo => {
   const insertJob = db.prepare(
-    `INSERT INTO job (id, file_id, flow_id, flow_hash, worker_class, node_id, state, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'running', ?)`,
+    `INSERT INTO job (id, file_id, flow_id, flow_hash, worker_class, node_id, log_path, state, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
   );
 
   const insertStep = db.prepare(
@@ -209,7 +227,7 @@ export const createJobRepo = (db: Db): JobRepo => {
 
   return {
     start(input) {
-      const id = randomUUID();
+      const id = input.id ?? randomUUID();
       insertJob.run(
         id,
         input.fileId,
@@ -217,6 +235,7 @@ export const createJobRepo = (db: Db): JobRepo => {
         input.flowHash,
         input.workerClass ?? 'transcode',
         input.nodeId ?? null,
+        input.logPath ?? null,
         input.nowMs,
       );
       return id;
