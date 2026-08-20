@@ -284,6 +284,71 @@ describe('cli: flow add', () => {
     expect(createFlowRepo(db).list()).toHaveLength(0);
     db.close();
   });
+
+  it('builds a flow from a template, with --set values in the stored definition', async () => {
+    const dataDir = newDataDir();
+
+    expect(
+      await main([
+        'flow',
+        'add',
+        '--name',
+        'Movies HEVC',
+        '--template',
+        'transcode-hevc',
+        '--set',
+        'encoder=hevc_nvenc',
+        '--set',
+        'quality=22',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+
+    // The STORED definition, not the printed line: a template that rendered
+    // correctly and stored something else would look identical on stdout.
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    const stored = createFlowRepo(db).getByName('Movies HEVC')!;
+    expect(stored.definition.nodes.find((node) => node.id === 'encoder')!.inputs).toEqual({
+      encoder: 'hevc_nvenc',
+      quality: '22',
+    });
+    // Output 1 of the codec check is "already hevc" and must stay a dead end.
+    expect(stored.definition.edges.filter((edge) => edge.fromNodeId === 'check')).toEqual([
+      { fromNodeId: 'check', outputNumber: 2, toNodeId: 'begin' },
+    ]);
+    db.close();
+  });
+
+  it('refuses an unknown template, and a --set naming a parameter it does not have', async () => {
+    const dataDir = newDataDir();
+
+    expect(
+      await main(['flow', 'add', '--name', 'A', '--template', 'nope', '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('transcode-hevc');
+
+    expect(
+      await main([
+        'flow',
+        'add',
+        '--name',
+        'B',
+        '--template',
+        'transcode-hevc',
+        '--set',
+        'encodr=hevc_nvenc',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('"encodr"');
+
+    // Neither attempt got as far as opening a database, which is the strongest
+    // form of "nothing was stored" available here.
+    expect(existsSync(join(dataDir, 'trawlarr.db'))).toBe(false);
+  });
 });
 
 describe('cli: library set-flow', () => {

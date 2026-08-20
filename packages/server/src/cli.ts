@@ -12,6 +12,7 @@ import { sweepLibraryTrash as sweepTrashForLibrary } from './library/trash-sweep
 import type { LibraryTrashSweep } from './library/trash-sweep.js';
 import { explainPause } from './library/pause-explanation.js';
 import { createFlowRepo } from './db/flow-repo.js';
+import { buildFromTemplate, FLOW_TEMPLATES } from './flow/templates.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
 import { forgetMissing, type ForgetSummary } from './scanner/forget-missing.js';
@@ -341,18 +342,79 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
       'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
       name: { type: 'string' },
       file: { type: 'string' },
+      template: { type: 'string' },
+      set: { type: 'string', multiple: true },
     },
   });
 
   if (values.name === undefined) throw new CliError('flow add: --name is required.');
-  if (values.file === undefined) throw new CliError('flow add: --file is required.');
+  if (values.file === undefined && values.template === undefined) {
+    throw new CliError(
+      `flow add: one of --file <flow.json> or --template <id> is required. The templates ` +
+        `available are: ${FLOW_TEMPLATES.map((template) => template.id).join(', ')}.`,
+    );
+  }
+  // Both, and the file would be silently ignored — which is the shape of a
+  // command someone edits from one form to the other and half-finishes.
+  if (values.file !== undefined && values.template !== undefined) {
+    throw new CliError(
+      `flow add: --file and --template are alternatives; pass one. --file loads a flow you ` +
+        `wrote, --template builds one from a built-in.`,
+    );
+  }
+  if (values.set !== undefined && values.template === undefined) {
+    throw new CliError(`flow add: --set only means something with --template.`);
+  }
+
+  // `--set key=value`, split on the FIRST `=` only: a value may contain one
+  // (an ffmpeg argument, a path), and a template parameter name never does.
+  const templateValues: Record<string, string> = {};
+  for (const entry of values.set ?? []) {
+    const at = entry.indexOf('=');
+    if (at <= 0) {
+      throw new CliError(
+        `flow add: --set "${entry}" is not "key=value". For example: --set encoder=hevc_nvenc.`,
+      );
+    }
+    templateValues[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+
+  // A parameter name the template does not have is a typo that would
+  // otherwise be accepted in silence and produce the DEFAULT flow — which
+  // validates, stores, runs, and does the wrong thing to a library.
+  if (values.template !== undefined) {
+    const template = FLOW_TEMPLATES.find((candidate) => candidate.id === values.template);
+    if (template === undefined) {
+      throw new CliError(
+        `flow add: no flow template "${values.template}". Available: ` +
+          `${FLOW_TEMPLATES.map((candidate) => candidate.id).join(', ')}.`,
+      );
+    }
+    const known = new Set(template.parameters.map((parameter) => parameter.name));
+    const unknown = Object.keys(templateValues).filter((key) => !known.has(key));
+    if (unknown.length > 0) {
+      throw new CliError(
+        `flow add: template "${template.id}" has no parameter(s) ${unknown
+          .map((key) => `"${key}"`)
+          .join(', ')}. It takes: ${[...known].join(', ')}. Nothing was stored — a name with ` +
+          `a typo in it would have been ignored and the template's default used instead.`,
+      );
+    }
+  }
+
+  const source =
+    values.template === undefined ? `"${values.file!}"` : `template "${values.template}"`;
 
   let definition: FlowDefinition;
-  try {
-    const text = await readFile(values.file, 'utf8');
-    definition = JSON.parse(text) as FlowDefinition;
-  } catch (err) {
-    throw new CliError(`flow add: could not read/parse "${values.file}": ${messageOf(err)}`);
+  if (values.template !== undefined) {
+    definition = buildFromTemplate({ templateId: values.template, values: templateValues });
+  } else {
+    try {
+      const text = await readFile(values.file!, 'utf8');
+      definition = JSON.parse(text) as FlowDefinition;
+    } catch (err) {
+      throw new CliError(`flow add: could not read/parse "${values.file!}": ${messageOf(err)}`);
+    }
   }
 
   const announce = (flow: { name: string; id: string; definition: FlowDefinition }): number => {
@@ -371,11 +433,21 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
       name: values.name,
     });
     try {
-      return announce(await client.post<FlowResource>('/flows', { name: values.name, definition }));
+      // The daemon is the only writer, so the TEMPLATE travels rather than the
+      // definition it produced: the flow stored is the one that daemon's own
+      // template built, not one an older CLI on the host happened to render.
+      const payload =
+        values.template === undefined
+          ? { name: values.name, definition }
+          : { name: values.name, templateId: values.template, templateValues };
+      return announce(await client.post<FlowResource>('/flows', payload));
     } catch (error) {
+      if (error instanceof ApiRequestError && error.code === 'unknown-template') {
+        throw new CliError(`flow add: ${error.message}`);
+      }
       if (error instanceof ApiRequestError && error.code === 'flow-invalid') {
         throw new CliError(
-          `flow add: "${values.file}" is not a flow trawlarr will run, so nothing was stored. ` +
+          `flow add: ${source} is not a flow trawlarr will run, so nothing was stored. ` +
             error.message,
         );
       }
@@ -401,7 +473,7 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
   } catch (err) {
     if (err instanceof FlowValidationError) {
       throw new CliError(
-        `flow add: "${values.file}" is not a flow trawlarr will run, so nothing was stored ` +
+        `flow add: ${source} is not a flow trawlarr will run, so nothing was stored ` +
           `(${err.problems.length} problem(s)):\n` +
           err.problems.map((problem) => `  - ${problem.message}`).join('\n'),
       );
@@ -1429,6 +1501,7 @@ const USAGE = `Usage:
   trawlarr daemon [--port <n>] [--bind <addr>]
   trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked]
   trawlarr flow add --name <name> --file <flow.json>
+  trawlarr flow add --name <name> --template <id> [--set key=value...]
   trawlarr library set-flow --library <name> --flow <name>
   trawlarr scan --library <name> [--allow-empty-roots]
   trawlarr run [--library <name>] [--max <n>]
@@ -1439,6 +1512,10 @@ const USAGE = `Usage:
   trawlarr reap [--library <name>] [--stale-after-hours <n>] [--dry-run]
   trawlarr forget --missing [--library <name>] [--include-terminal] [--dry-run]
   trawlarr forget --file <id> [--file <id>...] [--dry-run]
+
+Flow templates: transcode-hevc
+  e.g. trawlarr flow add --name Movies --template transcode-hevc \
+         --set encoder=hevc_nvenc --set quality=22
 
 All commands accept --data-dir <path> (default ./trawlarr-data).
 While a daemon owns that directory, every command talks to it over its API

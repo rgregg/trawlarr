@@ -1,0 +1,89 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "pluginId": "trawlarr:start",
+      "pluginVersion": "1.0.0",
+      "inputs": {}
+    },
+    {
+      "id": "check",
+      "pluginId": "trawlarr:checkVideoCodec",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "codec": "hevc"
+      }
+    },
+    {
+      "id": "begin",
+      "pluginId": "trawlarr:beginCommand",
+      "pluginVersion": "1.0.0",
+      "inputs": {}
+    },
+    {
+      "id": "encoder",
+      "pluginId": "trawlarr:setVideoEncoder",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "encoder": "hevc_nvenc",
+        "quality": "24"
+      }
+    },
+    {
+      "id": "execute",
+      "pluginId": "trawlarr:execute",
+      "pluginVersion": "1.0.0",
+      "inputs": {}
+    },
+    {
+      "id": "verify",
+      "pluginId": "trawlarr:verifyOutput",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "durationToleranceSeconds": "1",
+        "minSizeRatio": "0.05"
+      }
+    },
+    {
+      "id": "replace",
+      "pluginId": "trawlarr:replaceOriginal",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "trashRetentionDays": "14",
+        "allowCrossDevice": "true"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "fromNodeId": "start",
+      "outputNumber": 1,
+      "toNodeId": "check"
+    },
+    {
+      "fromNodeId": "check",
+      "outputNumber": 2,
+      "toNodeId": "begin"
+    },
+    {
+      "fromNodeId": "begin",
+      "outputNumber": 1,
+      "toNodeId": "encoder"
+    },
+    {
+      "fromNodeId": "encoder",
+      "outputNumber": 1,
+      "toNodeId": "execute"
+    },
+    {
+      "fromNodeId": "execute",
+      "outputNumber": 1,
+      "toNodeId": "verify"
+    },
+    {
+      "fromNodeId": "verify",
+      "outputNumber": 1,
+      "toNodeId": "replace"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import { createFlowRepo, type FlowRecord } from '../../db/flow-repo.js';
 import { createLibraryRepo } from '../../db/library-repo.js';
 import { createNodeCapabilityResolver } from '../../flow/node-capabilities.js';
 import { dryRunFlow, DryRunInputError } from '../../flow/dry-run.js';
+import { buildFromTemplate, FLOW_TEMPLATES, UnknownTemplateError } from '../../flow/templates.js';
 import {
   ApiError,
   created,
@@ -69,6 +70,26 @@ const asFlowValidationError = (error: unknown): never => {
   throw error;
 };
 
+/**
+ * `buildFromTemplate`, with the one failure a caller can cause turned into a
+ * 400 that names the templates that DO exist — a typo'd template id is the
+ * most likely way this endpoint is used wrongly, and a 500 would report it as
+ * the server's fault.
+ */
+const fromTemplate = (templateId: string, values: unknown): FlowDefinition => {
+  try {
+    return buildFromTemplate({
+      templateId,
+      values: (values as Record<string, string> | undefined) ?? {},
+    });
+  } catch (error) {
+    if (error instanceof UnknownTemplateError) {
+      throw new ApiError(400, 'unknown-template', error.message);
+    }
+    throw error;
+  }
+};
+
 export const flowRoutes: Route[] = [
   {
     method: 'GET',
@@ -81,8 +102,15 @@ export const flowRoutes: Route[] = [
     path: '/flows',
     handler: ({ body, ctx }) => {
       const name = requireString(body, 'name');
-      const definition = requireDefinition(body);
       const patch = body as Record<string, unknown>;
+      // A template in place of a definition, never as well as one: a caller
+      // that sent both would otherwise get whichever this code happened to
+      // prefer, and would find out which from the stored flow rather than
+      // from the response.
+      const definition =
+        typeof patch.templateId === 'string'
+          ? fromTemplate(patch.templateId, patch.templateValues)
+          : requireDefinition(body);
       try {
         const flow = createFlowRepo(ctx.db).create({
           name,
@@ -96,6 +124,23 @@ export const flowRoutes: Route[] = [
         return asFlowValidationError(error);
       }
     },
+  },
+
+  /**
+   * Listed BEFORE `/flows/:id` for a reader's sake only — the router matches
+   * by specificity, so a flow whose id is literally "templates" is not what
+   * this returns either way.
+   */
+  {
+    method: 'GET',
+    path: '/flows/templates',
+    handler: () =>
+      FLOW_TEMPLATES.map(({ id, name, description, parameters }) => ({
+        id,
+        name,
+        description,
+        parameters,
+      })),
   },
 
   {

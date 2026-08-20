@@ -653,6 +653,47 @@ describe('flows', () => {
     expect(scans.requests).toEqual([{ libraryId: attached.id, reason: 'manual' }]);
   });
 
+  it('lists the built-in templates with the parameters each one exposes', async () => {
+    const response = await api('GET', '/flows/templates');
+
+    expect(response.status).toBe(200);
+    expect(response.body.map((template: ResponseBody) => template.id)).toContain('transcode-hevc');
+    const transcode = response.body.find(
+      (template: ResponseBody) => template.id === 'transcode-hevc',
+    );
+    expect(transcode.parameters.map((parameter: ResponseBody) => parameter.name)).toEqual([
+      'targetCodec',
+      'encoder',
+      'quality',
+      'trashRetentionDays',
+    ]);
+  });
+
+  it('creates a flow from a template', async () => {
+    const response = await api('POST', '/flows', {
+      name: 'Movies HEVC',
+      templateId: 'transcode-hevc',
+      templateValues: { encoder: 'hevc_nvenc', quality: '22' },
+    });
+
+    expect(response.status).toBe(201);
+    // The stored row, not the echo: a template that validated and did not
+    // persist would look identical here.
+    const stored = await api('GET', `/flows/${response.body.id}`);
+    expect(
+      stored.body.definition.nodes.find((n: ResponseBody) => n.id === 'encoder').inputs,
+    ).toEqual({ encoder: 'hevc_nvenc', quality: '22' });
+    expect(stored.body.definitionHash).toBe(response.body.definitionHash);
+  });
+
+  it('refuses an unknown template by name, storing nothing', async () => {
+    const response = await api('POST', '/flows', { name: 'x', templateId: 'nope' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('unknown-template');
+    expect(createFlowRepo(db).list()).toHaveLength(0);
+  });
+
   it('deleting a flow pauses the library that was using it, with a stated reason', async () => {
     const flow = createFlowRepo(db).create({ name: 'good', definition: VALID_FLOW, nowMs: NOW });
     const library = seedLibrary({ flowId: flow.id });
