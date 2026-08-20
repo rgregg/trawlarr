@@ -18,6 +18,7 @@ export default defineConfig({
       'packages/*/src/**/*.test.ts',
       'packages/*/test/**/*.test.ts',
       'test-support/**/*.test.ts',
+      'docker/**/*.test.ts',
     ],
     environment: 'node',
     typecheck: {
@@ -33,6 +34,7 @@ export default defineConfig({
         'packages/*/src/**/*.test.ts',
         'packages/*/test/**/*.test.ts',
         'test-support/**/*.test.ts',
+        'docker/**/*.test.ts',
       ],
       tsconfig: './tsconfig.typecheck.json',
     },
