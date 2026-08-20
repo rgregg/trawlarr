@@ -177,9 +177,18 @@ trawlarr daemon --port 9000 --bind 0.0.0.0
 
 It runs in the FOREGROUND, which is what systemd and Docker both want, and it
 owns its data directory while it runs: `<data-dir>/daemon.json` records its
-pid, the address it bound and the API key it accepts. A daemon that is killed
-outright leaves that file behind — the next start takes it over rather than
-refusing, so a crash never locks you out of your own installation.
+pid, the address it bound and the API key it accepts, and it holds a kernel
+lock on `<data-dir>/daemon.lock` for as long as it lives. The lock is what
+ownership means; the pid is there to be read. A daemon that is killed outright
+leaves `daemon.json` behind but cannot keep the lock — the kernel drops that
+when the process dies — so the next start takes the directory over rather than
+refusing, and a crash never locks you out of your own installation. This is
+the difference between recovering and not inside a container, where every
+daemon is pid 1 and a pid check would see the dead daemon's number on itself.
+Two daemons that really are running against one data directory are still
+refused, naming the pid that holds it. (On a filesystem that cannot lock at
+all — NFS without `lockd`, some SMB mounts — the daemon says so and falls back
+to the pid check rather than refusing to run.)
 
 **The API key** is generated on first start and printed once, on that run
 only. After that it lives in the database (setting `daemon.apiKey`, also

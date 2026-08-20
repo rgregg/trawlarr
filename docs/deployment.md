@@ -82,7 +82,7 @@ and is what runs the encode. `allowCrossDevice: "false"` is deliberate — see
 
 | Container path | What it is                                                                                                    |
 | -------------- | ------------------------------------------------------------------------------------------------------------- |
-| `/config`      | All state: `trawlarr.db` (SQLite), `daemon.json` (the running daemon's lock record), and `logs/jobs/`, which the entrypoint creates so that a wrong `PUID` fails at start rather than an hour into a transcode. (Per-job log *files* are not written yet; each step's log excerpt is on `GET /api/v1/jobs/:id`, and live lines are pushed on the WebSocket.) |
+| `/config`      | All state: `trawlarr.db` (SQLite), `daemon.json` (the running daemon's record: pid, bind, port), `daemon.lock` (the file the kernel lock is held on — created once, never deleted), and `logs/jobs/`, which the entrypoint creates so that a wrong `PUID` fails at start rather than an hour into a transcode. (Per-job log *files* are not written yet; each step's log excerpt is on `GET /api/v1/jobs/:id`, and live lines are pushed on the WebSocket.) |
 | `/library`     | Your media. Bind-mount the real directory; mount as many as you like and add each as a library root.            |
 
 `/config` is the whole backup. Stop the container, copy the directory, start it
@@ -110,31 +110,47 @@ That is the designed behaviour, not a bug: it fails loudly instead of quietly
 corrupting. If you want a second instance, give it a second `/config`. If you
 want more throughput, raise `NUMBER_OF_WORKERS` on the one you have.
 
-### After an unclean stop, clear the lock
+### After an unclean stop, nothing to clear
 
-A clean `docker stop` removes the lock (`SIGTERM` reaches the daemon as PID 1,
-it drains, and it deletes `/config/daemon.json`). A container that is *killed*
-— `docker kill`, an OOM kill, a host that lost power — cannot, and leaves the
-record behind.
+A clean `docker stop` removes the record (`SIGTERM` reaches the daemon as PID
+1, it drains, and it deletes `/config/daemon.json`). A container that is
+*killed* — `docker kill`, an OOM kill, `docker compose down -t 0`, a host that
+lost power — cannot, and leaves that file behind. **Start the container again
+and it takes the directory over by itself.** There is nothing to delete by
+hand.
 
-Normally a stale lock is reclaimed automatically, by checking whether the pid
-in it is still alive. **Inside a container that check cannot work**, because
-the daemon is always pid 1: the record says `"pid": 1`, and the replacement
-container's own pid 1 is very much alive, so the new daemon concludes another
-daemon owns the directory and refuses to start — for ever, restarting into the
-same message every few seconds.
+That is worth spelling out, because the obvious implementation of this does
+not work in a container. Ownership is *not* decided by the pid in
+`daemon.json`: inside a container the daemon is always pid 1, so a killed
+container leaves a record saying `"pid": 1`, and the replacement container's
+own pid 1 is very much alive — the daemon would recognise ITSELF as the
+incumbent and refuse to start for ever.
 
-The recovery is one command, once you have confirmed no trawlarr container is
-running:
+So ownership is decided by a **kernel lock** held on `/config/daemon.lock` for
+as long as the daemon process lives. The kernel releases that lock when the
+holder dies, however it dies, so "is the previous daemon still running?" is
+answered by the operating system rather than guessed from a number. The pid in
+`daemon.json` is there for you to read, and for the CLI to name in its
+messages; it decides nothing.
 
-```bash
-docker compose -f docker/compose.yml down
-rm ./config/daemon.json
-docker compose -f docker/compose.yml up -d
-```
+Two daemons that are genuinely running against one `/config` are still
+refused, for the same reason as ever: they would hold one SQLite file open
+twice, claim the same queued files, and start two workers on one media file.
+The refusal names the pid that holds the lock.
 
-Deleting that file while a daemon really is running would let a second one in,
-which is the situation the lock exists to prevent — so check first.
+`daemon.lock` is created once and never removed, including on a clean
+shutdown. Do not delete it while a daemon is running (that is the one way to
+get two daemons into one directory); deleting it while nothing is running is
+harmless — the next start recreates it.
+
+**On a network filesystem.** If `/config` is on an NFS mount without a running
+`lockd`, or on some SMB/FUSE mounts, the kernel cannot hold a lock there at
+all. The daemon does not refuse to start — a mount that cannot lock is still a
+directory one daemon can own, and failing closed would brick every such
+install. It falls back to the old pid check and logs a line saying so at every
+start. On such a mount the container case above is *not* protected, so keep
+`/config` on local storage if you can: it is a SQLite database, and SQLite on
+NFS is a bad idea for reasons that have nothing to do with this lock.
 
 ## 3. The staging trap — read this before you translate an Unmanic compose file
 
@@ -416,7 +432,7 @@ configuration at all.
 | Symptom                                              | Cause                                                                                                                       |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Container exits immediately, code **78**             | `TZ` names a zone the image does not know. Use an IANA name, e.g. `America/Los_Angeles`.                                       |
-| Container exits, "already owns this data directory" | Either two containers really do share one `/config` (give the second its own), or a killed container left a stale `/config/daemon.json` behind. See §2. |
+| Container exits, "already owns this data directory" | Two containers really do share one `/config` — give the second its own. A *killed* container is not a cause: its lock dies with it and the next start takes the directory over. See §2. |
 | Nothing is ever queued                                | The library has no flow (`library set-flow`), is paused because its flow is invalid (`trawlarr status` says so), or is empty. |
 | Files sit at `unknown` with `attempts 0`, nothing is queued | Hardlinks — the scanner skipped them. See §8.                                                                            |
 | Files probe fine but every replacement fails          | `PUID`/`PGID` do not own the *directory*. See §6.                                                                            |

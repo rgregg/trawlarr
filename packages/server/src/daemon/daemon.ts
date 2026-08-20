@@ -304,6 +304,20 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
         schemaVersion: SCHEMA_VERSION,
       },
     });
+    if (lock.exclusivity === 'pid-liveness') {
+      // Worth a line in the log every start: on this filesystem the daemon
+      // cannot be protected by a kernel lock, so "is the other daemon still
+      // running?" is back to being a guess about a pid — which is wrong in
+      // exactly the way that matters if this directory is ever shared, or if
+      // the daemon is PID 1 in a container.
+      console.warn(
+        `[daemon] "${dataDir}" is on a filesystem that cannot hold a lock ` +
+          `(${lock.degradedReason ?? 'unknown reason'}), so ownership of it falls back to ` +
+          `checking whether the recorded pid still exists. That check cannot tell a restarted ` +
+          `container from a running one; keep the data directory on local storage if you can, ` +
+          `and never point two daemons at this one.`,
+      );
+    }
   } catch (error) {
     await unwind();
     throw error;
