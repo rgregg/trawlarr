@@ -11,6 +11,7 @@ export default defineConfig({
       '@trawlarr/plugins-core': pkg('plugins-core'),
       '@trawlarr/engine': pkg('engine'),
       '@trawlarr/server': pkg('server'),
+      '@trawlarr/web': pkg('web'),
     },
   },
   test: {

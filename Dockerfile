@@ -28,6 +28,7 @@ COPY packages/plugin-api/package.json packages/plugin-api/
 COPY packages/plugins-core/package.json packages/plugins-core/
 COPY packages/engine/package.json packages/engine/
 COPY packages/server/package.json packages/server/
+COPY packages/web/package.json packages/web/
 RUN pnpm install --frozen-lockfile
 
 COPY . .
@@ -72,6 +73,12 @@ RUN set -eux; \
 RUN cp --remove-destination /usr/share/zoneinfo/Etc/UTC /etc/localtime
 
 COPY --from=build /out /app
+# The web bundle, alongside the deployed server rather than inside it: `pnpm
+# deploy --prod` prunes to @trawlarr/server's own files, and the UI is a
+# separate private package that is never a runtime dependency of it. /app/web/dist
+# is `resolveWebRoot`'s `../../web/dist` candidate relative to /app/dist/api/,
+# so the daemon finds it with no configuration at all.
+COPY --from=build /src/packages/web/dist /app/web/dist
 COPY docker/entrypoint.sh /entrypoint.sh
 # `tsc` emits the CLI 0644, so the shebang alone is not enough: exec would
 # skip a non-executable file and the ENTRYPOINT's `gosu trawlarr` would fail

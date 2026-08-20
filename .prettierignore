@@ -1,3 +1,4 @@
 docs/
 pnpm-lock.yaml
 tsconfig.vitest-temp.json
+packages/web/dist

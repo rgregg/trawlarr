@@ -67,17 +67,42 @@ for (const dir of packageDirs) {
   }
 }
 
-/** The root solution file must reference every package, or it is never built. */
+/**
+ * The root solution file must reference every package, or it is never built.
+ *
+ * ONE alternative is accepted, and only because it satisfies the same
+ * invariant by another route: a package may type-check itself from its own
+ * `build` script, provided the root `build` script actually runs it. That is
+ * how `@trawlarr/web` is handled — it emits with Vite rather than
+ * `tsc --build`, and its `.tsx` files need DOM lib and `jsx: react-jsx`,
+ * neither of which the shared base config has. It is NOT a way to opt out:
+ * both halves are checked here, so deleting either the package's own
+ * type-check or the root script's call to it fails this gate exactly as a
+ * missing reference would.
+ */
 const rootReferences = new Set(
   (readJsonc('tsconfig.json').references ?? []).map((reference) =>
     reference.path.replace(/^packages\//, ''),
   ),
 );
+const rootBuildScript = readJsonc('package.json').scripts?.build ?? '';
 for (const dir of packageDirs) {
-  if (!rootReferences.has(dir)) {
+  if (rootReferences.has(dir)) continue;
+
+  const manifest = readJsonc(join(PACKAGES_DIR, dir, 'package.json'));
+  const ownBuild = manifest.scripts?.build ?? '';
+  if (!ownBuild.includes('tsc --noEmit')) {
     problems.push(
       `tsconfig.json: missing root reference { "path": "packages/${dir}" } — ` +
-        `packages/${dir} is never type-checked by \`pnpm build\``,
+        `packages/${dir} is never type-checked by \`pnpm build\`. A package outside the ` +
+        `root solution must type-check itself with \`tsc --noEmit\` from its own build script.`,
+    );
+    continue;
+  }
+  if (!rootBuildScript.includes(manifest.name)) {
+    problems.push(
+      `package.json: the root "build" script never runs ${manifest.name}, so its own ` +
+        `\`tsc --noEmit\` never runs either and packages/${dir} is unchecked by \`pnpm build\``,
     );
   }
 }

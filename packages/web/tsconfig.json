@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true, "composite": false, "declaration": false },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../plugin-api" }]
+}
