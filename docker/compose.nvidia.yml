@@ -1,0 +1,35 @@
+# The NVIDIA (NVENC) variant. It runs the SAME image as docker/compose.yml —
+# Debian's ffmpeg already carries h264_nvenc/hevc_nvenc, and the driver
+# libraries it dlopen()s at run time are injected by the NVIDIA container
+# runtime, never baked into an image (they are not redistributable).
+#
+# `runtime: nvidia` requires the NVIDIA Container Toolkit on the host. If
+# your Docker is set up for it, `deploy.resources.reservations.devices` with
+# `driver: nvidia` is the equivalent, newer spelling.
+services:
+  trawlarr:
+    image: ghcr.io/rgregg/trawlarr:latest
+    container_name: trawlarr
+    restart: unless-stopped
+    runtime: nvidia
+    ports:
+      - '8265:8265'
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - NUMBER_OF_WORKERS=2
+      - SCHEDULE_FULL_SCAN_MINUTES=60
+      - RUN_FULL_SCAN_ON_START=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      # `video` is the capability that injects libnvidia-encode. The default
+      # (compute,utility) does NOT, and hevc_nvenc then fails at run time
+      # with an error that names nothing useful.
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - TRAWLARR_HARDWARE=cpu,nvenc
+      # Consumer NVIDIA cards cap concurrent NVENC sessions and FAIL jobs past
+      # the cap rather than queueing them. Set this to your card's limit.
+      - TRAWLARR_HARDWARE_CAPS=nvenc=2
+    volumes:
+      - ./config:/config
+      - /srv/media:/library

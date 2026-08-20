@@ -13,6 +13,7 @@ import { reapStalled } from '../worker/reap-stalled.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
 import { acquireDaemonLock, type DaemonLock } from './lockfile.js';
+import { listEncodersWith, preflightHardware, probeEncoderWith } from './hardware-preflight.js';
 import { createScanCoordinator, type ScanCoordinator } from './scan-coordinator.js';
 import { createSupervisor, type CreateAgentFn, type Supervisor } from './supervisor.js';
 import type { WatchPort } from './watcher.js';
@@ -163,18 +164,21 @@ const listen = async (server: Server, port: number, bind: string): Promise<numbe
  *  2. Build the settings repo, the event bus, the supervisor and the scan
  *     coordinator; `createApiContext` registers this node, so `job.node_id`
  *     has a row to point at from the very first job.
- *  3. `checkAllLibraries`, BEFORE any work is attempted: a library whose
+ *  3. The hardware preflight, which CHECKS the operator's declaration
+ *     against the configured ffmpeg and says once, by name, when it does not
+ *     hold — it never edits the declaration, and never pauses anything.
+ *  4. `checkAllLibraries`, BEFORE any work is attempted: a library whose
  *     flow cannot run is paused with the reason recorded, rather than
  *     producing one identical failure per file.
- *  4. Start the HTTP server and the WebSocket, and only then take the lock —
+ *  5. Start the HTTP server and the WebSocket, and only then take the lock —
  *     so the port it advertises is the port something is really listening
  *     on, which matters the moment `--port 0` is used.
- *  5. Request a startup scan for every enabled library, then start the
+ *  6. Request a startup scan for every enabled library, then start the
  *     watcher and the periodic rescan.
- *  6. Start the supervisor tick, the daily trash purge (each library's own
+ *  7. Start the supervisor tick, the daily trash purge (each library's own
  *     flow-declared retention, exactly as `trawlarr run` does it) and the
  *     hourly stall reaper.
- *  7. Install the signal handlers that call `stop()`.
+ *  8. Install the signal handlers that call `stop()`.
  *
  * Anything that fails part way through unwinds what it already started: a
  * daemon that threw out of `startDaemon` must leave no listening socket, no
@@ -253,6 +257,29 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     },
   });
 
+  // Check the operator's hardware DECLARATION against the ffmpeg that will
+  // have to honour it — once, here, rather than one failed job per file for
+  // ever. Nothing is corrected: `hardware.available` is what the operator
+  // said, and it stays what the operator said.
+  const ffmpegPath = settings.getBinaries().ffmpeg;
+  const hardwareFindings = await preflightHardware({
+    available: settings.getHardware().available,
+    listEncoders: async () => await listEncodersWith(ffmpegPath),
+    tryEncode: async (hardwareType) => await probeEncoderWith(ffmpegPath, hardwareType),
+  });
+  for (const finding of hardwareFindings) {
+    console.warn(
+      `[trawlarr] hardware.available declares "${finding.hardwareType}", but ffmpeg at ` +
+        `"${ffmpegPath}" could not encode a single frame with "${finding.expectedEncoder}" on ` +
+        `this machine. Nothing has been changed for you — the declaration stands, so every job ` +
+        `a flow routes to that hardware will be attempted and will fail, three attempts each, ` +
+        `one file at a time. In Docker this is almost always one of: the container was started ` +
+        `without "runtime: nvidia", or NVIDIA_DRIVER_CAPABILITIES does not include "video" ` +
+        `(its default, "compute,utility", does not, and without it the encoder library is ` +
+        `never injected). Fix that, or drop "${finding.hardwareType}" from TRAWLARR_HARDWARE.`,
+    );
+  }
+
   const ctx = createApiContext({
     db,
     settings,
@@ -262,6 +289,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     nowMs,
     version: DAEMON_VERSION,
     envApplications,
+    hardwareFindings,
   });
 
   // Before any work is attempted, and before the API can be asked: a library

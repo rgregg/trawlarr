@@ -6,6 +6,7 @@ import type { Supervisor } from '../daemon/supervisor.js';
 import { SCHEMA_VERSION } from '../db/migrate.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EnvApplication } from '../config/env-settings.js';
+import type { HardwareFinding } from '../daemon/hardware-preflight.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
 import { fileRoutes } from './routes/files.js';
 import { flowRoutes } from './routes/flows.js';
@@ -253,6 +254,12 @@ export interface CreateApiContextInput {
   checkBinary?: (path: string) => Promise<boolean>;
   /** What each seed-once environment variable did on this start. Defaults to none. */
   envApplications?: EnvApplication[];
+  /**
+   * What the hardware preflight found. Defaults to none — which is what a
+   * context built without one means: nothing was checked, and nothing is
+   * claimed to be wrong.
+   */
+  hardwareFindings?: HardwareFinding[];
 }
 
 /**
@@ -276,6 +283,7 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     schemaVersion: SCHEMA_VERSION,
     checkBinary: input.checkBinary,
     envApplications: input.envApplications ?? [],
+    hardwareFindings: input.hardwareFindings ?? [],
   };
 };
 

@@ -4,6 +4,7 @@ import type { EventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
 import type { EnvApplication } from '../config/env-settings.js';
+import type { HardwareFinding } from '../daemon/hardware-preflight.js';
 
 /**
  * Everything a route handler is allowed to reach.
@@ -25,6 +26,13 @@ export interface ApiContext {
   schemaVersion: number;
   /** What each seed-once environment variable did on this start. */
   envApplications: EnvApplication[];
+  /**
+   * Declared hardware whose encoder this node could not be shown to have.
+   * Empty when every declaration checked out — and empty is what a caller
+   * should expect, because a finding here means jobs routed to that hardware
+   * will fail.
+   */
+  hardwareFindings: HardwareFinding[];
   /**
    * Does spawning this binary with `-version` work? A SEAM, defaulting to a
    * real spawn: `GET /system/version` reports it, and a test must not depend

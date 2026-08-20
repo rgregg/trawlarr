@@ -919,6 +919,46 @@ describe('system', () => {
     expect(body.binaries.ffprobe).toEqual({ path: 'ffprobe', resolved: false });
   });
 
+  it('reports no hardware findings when the preflight found nothing to report', async () => {
+    // Empty, not absent: a client checking a deployment reads this array, and
+    // a missing key would read the same as "nothing wrong" on a build that
+    // never checked at all.
+    const { body } = await api('GET', '/system/version');
+
+    expect(body.hardware).toEqual([]);
+  });
+
+  it('reports what the hardware preflight found, verbatim', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    server = createApiServer(
+      createApiContext({
+        db,
+        settings,
+        bus: createEventBus(),
+        supervisor,
+        scans,
+        nowMs: () => NOW,
+        version: '0.0.0-test',
+        hardwareFindings: [
+          { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
+        ],
+      }),
+      { onError: () => {} },
+    );
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const { status, body } = await api('GET', '/system/version');
+
+    expect(status).toBe(200);
+    expect(body.hardware).toEqual([
+      { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
+    ]);
+    // The declaration itself is untouched by the finding — reporting is not
+    // correcting.
+    expect((await api('GET', '/system/settings')).body.hardware.available).toEqual(['cpu']);
+  });
+
   it('patches a settings group and the stored value really changes', async () => {
     const response = await api('PATCH', '/system/settings', {
       binaries: { ffmpeg: '/opt/ffmpeg' },

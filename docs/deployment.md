@@ -90,7 +90,7 @@ again — copying a live SQLite database from a running container gives you a
 file that may not open. There is nothing else to back up: flows, libraries,
 settings and the convergence ledger all live in there.
 
-The container writes `/config` as `PUID:PGID` (see §6). It **never** chowns
+The container writes `/config` as `PUID:PGID` (see §7). It **never** chowns
 your library.
 
 ### Two containers, one `/config`, is a configuration error
@@ -221,9 +221,9 @@ mistyped optional variable should not take a media server offline.
 | `TRAWLARR_HARDWARE`          | `hardware.available` (seed)      | Which hardware this node **declares** it has, comma-separated (e.g. `cpu,nvenc`). See §5.                                                          |
 | `TRAWLARR_HARDWARE_CAPS`     | `hardware.caps` (seed)           | Concurrency cap per hardware type, e.g. `nvenc=2` for a consumer NVIDIA card whose NVENC session limit fails jobs rather than queueing them.        |
 | `TRAWLARR_PORT`              | `daemon.port` (this run only)    | Same meaning as `trawlarr daemon --port`. Not stored.                                                                                              |
-| `TRAWLARR_BIND`              | `daemon.bind` (this run only)    | Same meaning as `trawlarr daemon --bind`. Not stored. **The image sets this to `0.0.0.0`** — see §7.                                                |
+| `TRAWLARR_BIND`              | `daemon.bind` (this run only)    | Same meaning as `trawlarr daemon --bind`. Not stored. **The image sets this to `0.0.0.0`** — see §8.                                                |
 | `TRAWLARR_DATA_DIR`          | `--data-dir` (this run only)     | Default for every command's `--data-dir`. The image sets it to `/config`. Not stored.                                                              |
-| `PUID` / `PGID`              | read by the entrypoint           | The uid/gid the daemon runs as. See §6.                                                                                                            |
+| `PUID` / `PGID`              | read by the entrypoint           | The uid/gid the daemon runs as. See §7.                                                                                                            |
 
 You never have to guess whether a variable did anything.
 `GET /api/v1/system/settings` reports, for every variable you set, whether it
@@ -241,7 +241,7 @@ both reported as `(redacted)` in that list. (The live key itself is still in
 the response, under `daemon.apiKey` — that endpoint needs the key to call, so
 it is the way to recover a key you failed to write down, not a leak.)
 
-## 5. Hardware is declared, never detected
+## 5. Hardware is declared, never detected — and the declaration is checked
 
 Trawlarr does not probe the machine for encoders. `TRAWLARR_HARDWARE=nvenc` on
 a host without a working NVENC device does not fall back to software — it
@@ -252,20 +252,134 @@ Declare only what you have:
 
 - CPU-only host: leave `TRAWLARR_HARDWARE` unset, or set `cpu`.
 - NVIDIA host: you need the NVIDIA container runtime and a compose file that
-  requests the GPU **as well as** `TRAWLARR_HARDWARE=nvenc`. The image already
-  contains an `ffmpeg` with `h264_nvenc`/`hevc_nvenc` compiled in; the driver
-  libraries are injected at run time by the runtime, not baked in.
+  requests the GPU **as well as** `TRAWLARR_HARDWARE=nvenc`. See §6.
 
-To see what the image's ffmpeg can actually do on your host:
+`TRAWLARR_HARDWARE_CAPS` is a separate promise: how many jobs may use that
+hardware at once. The supervisor enforces it **before** a worker claims a
+file, so a node never hands GPU work to a worker that has no GPU slot free.
 
-```bash
-docker exec trawlarr ffmpeg -hide_banner -encoders | grep nvenc
+### The startup preflight
+
+Declaring is not the same as being right, and a wrong declaration used to show
+up as every GPU job failing — three attempts per file, one file at a time,
+each failure identical and none of them naming the actual problem.
+
+So at every start the daemon **checks the declaration**, once:
+
+1. it asks the configured ffmpeg which encoders it was built with, and
+2. for `nvenc`, it encodes a single 64×64 frame to `/dev/null` with
+   `hevc_nvenc`, which takes about half a second and reads nothing.
+
+If that does not work, it says so by name, once, and then **carries on
+exactly as you told it to**:
+
+```
+[trawlarr] hardware.available declares "nvenc", but ffmpeg at "ffmpeg" could not
+encode a single frame with "hevc_nvenc" on this machine. Nothing has been changed
+for you — the declaration stands, so every job a flow routes to that hardware will
+be attempted and will fail, three attempts each, one file at a time. In Docker this
+is almost always one of: the container was started without "runtime: nvidia", or
+NVIDIA_DRIVER_CAPABILITIES does not include "video" ...
 ```
 
-That lists what ffmpeg was **built** with. Whether a given encoder *works* is
-decided by the device and driver visible to the container.
+The same finding is on the API, which is the thing to assert in a deployment
+check — **an empty array is the healthy answer**:
 
-## 6. Users and permissions
+```bash
+curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardware
+[]
+```
+
+Note what the preflight deliberately does **not** do. It does not go looking
+for GPUs, it does not edit `hardware.available`, and it does not pause
+anything. It checks the one claim you made and reports on it: a node whose
+card merely happened to be busy at start would otherwise disable itself for
+the whole run, and "trawlarr quietly decided you did not have a GPU" is a far
+worse failure than a warning you can read.
+
+Two consequences of that honesty are worth knowing:
+
+- **"Could not check" is reported as "not shown to work."** An ffmpeg that
+  cannot be spawned at all produces a finding for every declared hardware
+  type, not silence.
+- **`vaapi` and `qsv` get the build check only.** Neither can be exercised
+  without naming a render node (`/dev/dri/renderD128` or another), and
+  choosing one for you would be detection. A correct VAAPI declaration is
+  never reported as broken here — and a VAAPI device that is missing at run
+  time is still your job to notice.
+
+## 6. NVIDIA / NVENC
+
+The same image, a different compose file:
+
+```bash
+docker compose -f docker/compose.nvidia.yml up -d
+```
+
+```yaml
+services:
+  trawlarr:
+    image: ghcr.io/rgregg/trawlarr:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - TRAWLARR_HARDWARE=cpu,nvenc
+      - TRAWLARR_HARDWARE_CAPS=nvenc=2
+```
+
+You need the **NVIDIA Container Toolkit** on the host. `runtime: nvidia` is
+the spelling most existing Unmanic and Tdarr compose files use and works
+unchanged here; `deploy.resources.reservations.devices` with `driver: nvidia`
+is the newer equivalent if your Docker is configured that way.
+
+No second image and no ffmpeg build is involved. Debian's ffmpeg — the one in
+this image — is compiled with `h264_nvenc` and `hevc_nvenc`, and loads
+`libcuda.so.1` / `libnvidia-encode.so.1` at run time. Those libraries belong to
+the driver, are not redistributable, and are injected into the container from
+your host by the NVIDIA runtime. That is also why trawlarr stays MIT: it
+`exec`s ffmpeg as a separate process and links nothing.
+
+### `NVIDIA_DRIVER_CAPABILITIES` is the trap
+
+The runtime's **default** is `compute,utility`. That injects CUDA and
+`nvidia-smi` — so `nvidia-smi` inside the container works, which is exactly
+why this is so confusing — and does **not** inject `libnvidia-encode`. NVENC
+is then absent, every transcode fails, and nothing in the ffmpeg error names
+the capability you left out. Set it explicitly, including `video`, as the
+compose file above does.
+
+### How to confirm it, in the order worth doing it
+
+```bash
+# 1. What ffmpeg was BUILT with. Says nothing about this machine: this prints
+#    the same two lines on a laptop with no GPU at all.
+docker exec trawlarr ffmpeg -hide_banner -encoders | grep nvenc
+
+# 2. What this machine can actually do, which is the question you have.
+#    Empty means every declaration checked out.
+curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardware
+
+# 3. If it is not empty, the daemon already said why, once, at start:
+docker logs trawlarr | grep hardware.available
+```
+
+### `TRAWLARR_HARDWARE_CAPS=nvenc=2`
+
+Consumer GeForce cards limit how many NVENC sessions may be open at once
+(historically 2, raised to 3, 5 or 8 by driver version and card). Past the
+limit the driver does not queue the extra session — it **fails** it, so the
+job fails, the file takes an attempt, and after three it is `failed` and
+terminal. Set the cap to your card's real limit and the supervisor never
+starts the job that would have been refused: it holds it in the queue
+instead, which is the difference between a slow night and a morning of
+requeueing.
+
+Raising `NUMBER_OF_WORKERS` above the cap is fine and often right: the extra
+workers do the CPU-side work (probing, verification, files whose flow routes
+to `libx265`) while the GPU-bound ones wait for a slot.
+
+## 7. Users and permissions
 
 `PUID`/`PGID` must match the owner of your media. The entrypoint renumbers the
 in-image `trawlarr` user to those ids, chowns **only** `/config`, and then
@@ -292,7 +406,7 @@ write on the media, give the container a umask
 (`user: "1000:1000"` plus your own wrapper, or fix the group bits afterwards)
 rather than assuming the old bits survive.
 
-## 7. Ports and exposure
+## 8. Ports and exposure
 
 The daemon binds `127.0.0.1` by default. That is the right default for a
 process on a shared machine and the wrong one inside a container, where
@@ -318,7 +432,7 @@ terminate TLS there.
 that the image's `HEALTHCHECK` (and yours, and your monitoring) needs no
 secret. Everything else 401s without the key.
 
-## 8. Hardlinked files are skipped by default
+## 9. Hardlinked files are skipped by default
 
 **If trawlarr appears to do nothing at all with a library fed by a torrent
 client, this is almost certainly why.** It is the single most likely reason a
@@ -387,7 +501,7 @@ That refusal does cost the file an attempt: it is `held` with a backoff, and
 after three attempts `failed`, which is terminal and needs
 `trawlarr requeue --library Movies --state failed`.
 
-## 9. Upgrading
+## 10. Upgrading
 
 ```bash
 docker compose -f docker/compose.yml pull
@@ -399,7 +513,7 @@ than killing it, so an upgrade during a transcode does not leave debris.
 Database migrations are forward-only and run on start. Back up `/config`
 (container stopped) before a major-version upgrade.
 
-## 10. Licensing of the image
+## 11. Licensing of the image
 
 Trawlarr's own code is **MIT** — see [`LICENSE`](../LICENSE).
 
@@ -427,15 +541,15 @@ and point `binaries.ffmpeg` / `binaries.ffprobe` at them — trawlarr resolves
 both by bare name on `PATH` by default, so a drop-in replacement needs no
 configuration at all.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom                                              | Cause                                                                                                                       |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Container exits immediately, code **78**             | `TZ` names a zone the image does not know. Use an IANA name, e.g. `America/Los_Angeles`.                                       |
 | Container exits, "already owns this data directory" | Two containers really do share one `/config` — give the second its own. A *killed* container is not a cause: its lock dies with it and the next start takes the directory over. See §2. |
 | Nothing is ever queued                                | The library has no flow (`library set-flow`), is paused because its flow is invalid (`trawlarr status` says so), or is empty. |
-| Files sit at `unknown` with `attempts 0`, nothing is queued | Hardlinks — the scanner skipped them. See §8.                                                                            |
-| Files probe fine but every replacement fails          | `PUID`/`PGID` do not own the *directory*. See §6.                                                                            |
-| Every job fails immediately on an NVIDIA host         | `TRAWLARR_HARDWARE=nvenc` declared without the GPU actually reaching the container. See §5.                                    |
+| Files sit at `unknown` with `attempts 0`, nothing is queued | Hardlinks — the scanner skipped them. See §9.                                                                            |
+| Files probe fine but every replacement fails          | `PUID`/`PGID` do not own the *directory*. See §7.                                                                            |
+| Every job fails immediately on an NVIDIA host         | `TRAWLARR_HARDWARE=nvenc` declared without the GPU actually reaching the container — most often `NVIDIA_DRIVER_CAPABILITIES` without `video`. The daemon said so once at start: `docker logs trawlarr \| grep hardware.available`, or read `.hardware` from `GET /api/v1/system/version`. See §6. |
 | Replacements are slow and the disk churns             | A `stagingDir` was pointed at another filesystem. See §3.                                                                    |
 | `docker logs` no longer shows the API key             | By design; it is printed only on the run that minted it. Read it from `GET /api/v1/system/settings`, or set it explicitly.    |

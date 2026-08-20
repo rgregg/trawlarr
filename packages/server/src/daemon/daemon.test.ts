@@ -1,14 +1,15 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { extractFacts, type FactSet, type FlowDefinition } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
+import { createSettingsRepo } from '../db/settings-repo.js';
 import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { AgentFailure, type AgentHandle } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
@@ -198,6 +199,46 @@ const fakeAgents = (): { agents: FakeAgent[]; createAgent: CreateAgentFn } => {
   return { agents, createAgent };
 };
 
+/**
+ * A stand-in ffmpeg that LISTS `hevc_nvenc` — as Debian's real one does on a
+ * machine with no GPU at all — and either can or cannot actually encode with
+ * it. That asymmetry is the whole point of the preflight.
+ */
+const fakeNvencFfmpeg = (options: { encodeWorks: boolean }): string => {
+  const path = join(mkdtempSync(join(tmpdir(), 'trawlarr-fake-ffmpeg-')), 'ffmpeg');
+  writeFileSync(
+    path,
+    `#!/bin/sh\n` +
+      `case "$*" in\n` +
+      `  *-encoders*)\n` +
+      `    echo " V....D hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)"\n` +
+      `    exit 0;;\n` +
+      `esac\n` +
+      `exit ${options.encodeWorks ? '0' : '1'}\n`,
+    'utf8',
+  );
+  chmodSync(path, 0o755);
+  return path;
+};
+
+/** Declare hardware and an ffmpeg before any daemon starts, as the env seeds would. */
+const seedHardware = (dataDir: string, ffmpeg: string): void => {
+  const db = openDataDb(dataDir);
+  migrate(db);
+  const settings = createSettingsRepo({ db });
+  settings.setHardware({ available: ['cpu', 'nvenc'], caps: { nvenc: 2 } });
+  settings.setBinaries({ ffmpeg });
+  db.close();
+};
+
+const versionBody = async (dataDir: string, port: number): Promise<Record<string, unknown>> => {
+  const record = (await readDaemonRecord({ dataDir }))!;
+  const response = await fetch(`http://127.0.0.1:${String(port)}/api/v1/system/version`, {
+    headers: { 'x-api-key': record.apiKey },
+  });
+  return (await response.json()) as Record<string, unknown>;
+};
+
 const running: Daemon[] = [];
 
 const start = async (input: Parameters<typeof startDaemon>[0]): Promise<Daemon> => {
@@ -368,5 +409,52 @@ describe('startDaemon', () => {
     const daemon = await start({ dataDir });
     await Promise.all([daemon.stop(), daemon.stop()]);
     await expect(daemon.stopped).resolves.toBeUndefined();
+  });
+});
+
+describe('the hardware preflight', () => {
+  it('reports a declared encoder this machine cannot really run, and changes nothing', async () => {
+    const dataDir = newDataDir();
+    // A GPU-less host that declares nvenc: the container was started without
+    // `runtime: nvidia`, or without NVIDIA_DRIVER_CAPABILITIES=…,video.
+    seedHardware(dataDir, fakeNvencFfmpeg({ encodeWorks: false }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const daemon = await start({ dataDir });
+
+    expect((await versionBody(dataDir, daemon.port)).hardware).toEqual([
+      { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
+    ]);
+    // The declaration is the operator's, and it stands: nothing was rewritten
+    // to something trawlarr preferred, and the daemon came up serving.
+    const db = openDataDb(dataDir);
+    expect(createSettingsRepo({ db }).getHardware()).toEqual({
+      available: ['cpu', 'nvenc'],
+      caps: { nvenc: 2 },
+    });
+    db.close();
+    expect((await health(daemon.port)).status).toBe(200);
+  });
+
+  it('reports nothing when the declared encoder both lists and runs', async () => {
+    const dataDir = newDataDir();
+    seedHardware(dataDir, fakeNvencFfmpeg({ encodeWorks: true }));
+
+    const daemon = await start({ dataDir });
+
+    expect((await versionBody(dataDir, daemon.port)).hardware).toEqual([]);
+  });
+
+  it('starts, and reports the declaration as unproven, when ffmpeg cannot be run at all', async () => {
+    const dataDir = newDataDir();
+    seedHardware(dataDir, join(tmpdir(), 'trawlarr-no-such-ffmpeg-4f21'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const daemon = await start({ dataDir });
+
+    expect((await versionBody(dataDir, daemon.port)).hardware).toEqual([
+      { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
+    ]);
+    expect((await health(daemon.port)).status).toBe(200);
   });
 });

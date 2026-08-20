@@ -26,6 +26,7 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   version: '0.0.0-test',
   schemaVersion: 4,
   envApplications: [],
+  hardwareFindings: [],
   ...over,
 });
 
