@@ -28,7 +28,7 @@ import {
   type StepRecord,
   type StopReason,
 } from '@trawlarr/engine';
-import { resolveTrashDir } from '../library/paths.js';
+import { ensureDir, resolveStagingDir, resolveTrashDir } from '../library/paths.js';
 import {
   crossDeviceErrorSeam,
   findCompanionsSeam,
@@ -163,6 +163,21 @@ export const pluginConfigVars = (input: { ffmpegPath: string }): ConfigVars => (
 });
 
 /**
+ * Directory a job's scratch directory is created in: the library's own
+ * staging directory for the root that holds this file. Separated out only so
+ * that the two ways it can fail — a file under no root, a root that cannot be
+ * written — are one `catch` at the call site.
+ */
+const stagingParentFor = async (input: {
+  library: JobPayload['library'];
+  filePath: string;
+}): Promise<string> => {
+  const stagingDir = resolveStagingDir({ library: input.library, filePath: input.filePath });
+  await ensureDir(stagingDir);
+  return stagingDir;
+};
+
+/**
  * Drive one payload through its flow and report what happened — WITHOUT
  * touching a database.
  *
@@ -201,7 +216,41 @@ export const runPayload = async (input: {
   // completes (or forever, for a flow with none).
   ports.onHeartbeat(ports.nowMs());
 
-  const workDir = await mkdtemp(join(tmpdir(), 'trawlarr-job-'));
+  // The job's scratch directory lives INSIDE the library it is working on —
+  // under the same root as the file, which is what `resolveStagingDir`
+  // answers — and not under `os.tmpdir()`.
+  //
+  // The two looked equivalent on a developer's machine, where /tmp and the
+  // media happen to share a filesystem, and are not equivalent anywhere this
+  // is actually deployed. In a container /tmp is the container's own
+  // writable layer and the library is a bind mount, so EVERY replacement was
+  // a cross-device one: refused outright by Replace Original File, or, with
+  // `allowCrossDevice` on, degraded from an atomic rename into a full copy of
+  // the finished encode. A 40GB transcode also filled the container's disk
+  // rather than the disk the film came from.
+  //
+  // Staging beside the file makes the install a rename(2) by construction,
+  // per root, for a multi-root library too. `.trawlarr` is pruned from every
+  // scan (`reservedDirsForLibrary`), so nothing staged here is ever ingested
+  // as media.
+  //
+  // The fallback is `os.tmpdir()`, and it is deliberately a WARNING rather
+  // than a hard failure: a library whose root cannot host a directory (a
+  // read-only mount, a path no longer under any configured root) should
+  // still get as far as Replace Original File, which already detects the
+  // cross-device condition and reports it by name, rather than failing the
+  // job before the encode with a message about directories.
+  const workParent = await stagingParentFor({ library, filePath: payload.path }).catch(
+    (error: unknown) => {
+      ports.onLog(
+        `Could not create a staging directory inside the library for "${payload.path}" ` +
+          `(${messageOf(error)}). Falling back to "${tmpdir()}", which may well be on another ` +
+          `filesystem — if it is, installing the result cannot be an atomic rename.`,
+      );
+      return tmpdir();
+    },
+  );
+  const workDir = await mkdtemp(join(workParent, 'trawlarr-job-'));
   try {
     const originalFileObject = toPluginFileObject({
       fileId: payload.fileId,

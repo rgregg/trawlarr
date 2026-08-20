@@ -1,0 +1,24 @@
+services:
+  trawlarr:
+    image: ghcr.io/rgregg/trawlarr:latest
+    container_name: trawlarr
+    restart: unless-stopped
+    ports:
+      - '8265:8265'
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - NUMBER_OF_WORKERS=2
+      - SCHEDULE_FULL_SCAN_MINUTES=60
+      - RUN_FULL_SCAN_ON_START=true
+      # Set this to know the API key in advance. Leave it out and one is
+      # generated on the first run and printed once, to `docker logs`.
+      # - TRAWLARR_API_KEY=change-me-to-something-long
+      # Hardware is DECLARED, never detected. Naming an encoder this machine
+      # does not have produces failing jobs, not a fallback to software.
+      # - TRAWLARR_HARDWARE=cpu
+      # - TRAWLARR_HARDWARE_CAPS=nvenc=2
+    volumes:
+      - ./config:/config
+      - /srv/media:/library

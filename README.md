@@ -57,6 +57,16 @@ The pnpm workspace holds five packages:
 | `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run.                                                                                                          |
 | `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the worker supervisor and its forked worker processes, the filesystem watcher and scan coordinator, the REST API and its event stream, the daemon that composes all of it, and the `trawlarr` CLI — which becomes that daemon's client whenever one is running. |
 
+### Run it in Docker
+
+`docker compose -f docker/compose.yml up -d` brings up the daemon, its API and
+`ffmpeg`, with `/config` for state and `/library` for media.
+
+[`docs/deployment.md`](docs/deployment.md) is the deployment guide: volumes,
+`PUID`/`PGID`, the environment variables and what they seed, why staging lives
+inside the library, and why a library hardlinked into a torrent client looks
+like it is doing nothing.
+
 ### Try it
 
 `@trawlarr/server` builds the `trawlarr` CLI: point it at a real folder of

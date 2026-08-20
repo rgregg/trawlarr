@@ -24,6 +24,7 @@ import {
 } from '../src/worker/agent-handle.js';
 import { fakeTimers } from './fake-child.js';
 import { probeFile } from '../src/probe/ffprobe.js';
+import { RESERVED_DIR_NAME } from '../src/library/paths.js';
 import { ffmpegAvailableSync } from '../../../test-support/tool-availability.js';
 
 /**
@@ -704,15 +705,14 @@ describe.skipIf(!posixProcessGroups || !ffmpegPresent)(
       makeLongSample(filePath);
       const probe = await probeFile({ ffprobePath: 'ffprobe', path: filePath });
 
-      // The worker builds its scratch directory under its OWN tmpdir, so
-      // giving it a private one makes "did the staged output get cleaned up"
-      // an assertion about this worker rather than about a shared /tmp that
-      // every other suite is also writing to. `forkAgent` copies
-      // `process.env` at fork time, and the fork happens synchronously
-      // inside `createAgentHandle`, so this is set only across that call.
-      const workRoot = mkdtempSync(join(tmpdir(), 'trawlarr-cancel-tmp-'));
-      const previousTmp = process.env['TMPDIR'];
-      process.env['TMPDIR'] = workRoot;
+      // The worker builds its scratch directory INSIDE the library it is
+      // working on — `<root>/.trawlarr/staging`, from `resolveStagingDir` —
+      // so that installing a finished encode is a rename(2) and can never be
+      // a cross-device copy. That is therefore where a cancelled job's
+      // half-written output has to be cleaned up from, and this library root
+      // is private to this test, which is what makes "did the staged output
+      // get cleaned up" an assertion about THIS worker.
+      const workRoot = join(libDir, RESERVED_DIR_NAME, 'staging');
 
       const { port } = recordingDocuments();
       const timers = fakeTimers();
@@ -730,9 +730,6 @@ describe.skipIf(!posixProcessGroups || !ffmpegPresent)(
         setTimer: timers.setTimer,
         clearTimer: timers.clearTimer,
       });
-
-      if (previousTmp === undefined) delete process.env['TMPDIR'];
-      else process.env['TMPDIR'] = previousTmp;
 
       const base = payloadFor(TRANSCODE_FLOW);
       const running = handle.run({
@@ -788,7 +785,9 @@ describe.skipIf(!posixProcessGroups || !ffmpegPresent)(
       // library file itself untouched — a cancelled job leaves nothing for
       // the next run to trip over.
       expect(readdirSync(workRoot)).toEqual([]);
-      expect(readdirSync(libDir)).toEqual(['movie.mkv']);
+      // `.trawlarr` is the reserved directory the staging dir above lives in;
+      // it stays (empty) and is pruned from every scan by construction.
+      expect(readdirSync(libDir).sort()).toEqual([RESERVED_DIR_NAME, 'movie.mkv']);
     }, 120_000);
   },
 );
