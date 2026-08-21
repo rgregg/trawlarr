@@ -130,6 +130,19 @@ const SEEDS: SeedBinding[] = [
     read: (settings) => String(settings.getScan().scanOnStart),
   },
   {
+    name: 'TRAWLARR_PROBE_CONCURRENCY',
+    target: 'scan.probeConcurrency',
+    settingKey: 'scan.probeConcurrency',
+    describe:
+      'How many ffprobe processes a scan runs at once. Higher means a faster FIRST scan (every ' +
+      'file is probed) and more IO contention with the transcodes beside it; a rescan probes ' +
+      'nothing and is unaffected. 1 is the serial behaviour.',
+    apply: (settings, raw) => {
+      settings.setScan({ probeConcurrency: parseWholeNumber(raw, 'TRAWLARR_PROBE_CONCURRENCY') });
+    },
+    read: (settings) => String(settings.getScan().probeConcurrency),
+  },
+  {
     name: 'TRAWLARR_API_KEY',
     target: 'daemon.apiKey',
     settingKey: 'daemon.apiKey',

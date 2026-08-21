@@ -12,6 +12,12 @@ services:
       - NUMBER_OF_WORKERS=2
       - SCHEDULE_FULL_SCAN_MINUTES=60
       - RUN_FULL_SCAN_ON_START=true
+      # How many ffprobe processes a scan runs at once (default 4). Higher
+      # is a faster FIRST scan, when every file is probed, at the cost of IO
+      # contention with the transcodes beside it; a rescan probes nothing and
+      # is unaffected. Worth raising on a slow network mount, where a probe
+      # waits on round-trips rather than on this machine.
+      # - TRAWLARR_PROBE_CONCURRENCY=4
       # Set this to know the API key in advance. Leave it out and one is
       # generated on the first run and printed once, to `docker logs`.
       # - TRAWLARR_API_KEY=change-me-to-something-long

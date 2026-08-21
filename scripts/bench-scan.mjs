@@ -18,6 +18,15 @@
  *   --data-dir <path> where they go (default a fresh dir under $TMPDIR)
  *   --keep            do not delete the tree afterwards
  *   --yes             skip the "this is the disk I am about to fill" pause
+ *   --probe-concurrency <n>  probes in flight at once (default: the
+ *                     scanner's own default). 1 is the serial behaviour, so
+ *                     "--probe-concurrency 1" is how the before/after of
+ *                     bounded-concurrency probing is measured on one build.
+ *   --probe-latency-ms <n>  make the fake probe WAIT this long before
+ *                     answering (default 0). A local fake probe is pure
+ *                     spawn cost; a probe over NFS is mostly waiting, and
+ *                     waiting is what concurrency is for — so this is how a
+ *                     network mount is approximated without one.
  */
 import {
   chmodSync,
@@ -39,12 +48,35 @@ const { values } = parseArgs({
     'data-dir': { type: 'string' },
     keep: { type: 'boolean', default: false },
     yes: { type: 'boolean', default: false },
+    'probe-concurrency': { type: 'string' },
+    'probe-latency-ms': { type: 'string', default: '0' },
   },
 });
 
 const fileCount = Number(values.files);
 if (!Number.isInteger(fileCount) || fileCount < 1) {
   console.error(`--files must be a positive integer, got ${String(values.files)}`);
+  process.exit(2);
+}
+
+const probeConcurrency =
+  values['probe-concurrency'] === undefined ? undefined : Number(values['probe-concurrency']);
+if (
+  probeConcurrency !== undefined &&
+  (!Number.isInteger(probeConcurrency) || probeConcurrency < 1)
+) {
+  console.error(
+    `--probe-concurrency must be a positive integer, got ${String(values['probe-concurrency'])}`,
+  );
+  process.exit(2);
+}
+
+const probeLatencyMs = Number(values['probe-latency-ms']);
+if (!Number.isInteger(probeLatencyMs) || probeLatencyMs < 0) {
+  console.error(
+    `--probe-latency-ms must be a whole number of 0 or more, got ` +
+      `${String(values['probe-latency-ms'])}`,
+  );
   process.exit(2);
 }
 
@@ -100,6 +132,8 @@ console.log(
   [
     `trawlarr scan benchmark`,
     `  files          ${String(fileCount)}`,
+    `  probe concurrency ${probeConcurrency === undefined ? "the scanner's default" : String(probeConcurrency)}`,
+    `  probe latency  ${String(probeLatencyMs)} ms`,
     `  data dir       ${dataDir}`,
     `  block size     ${String(fs.bsize)} bytes`,
     `  free on that filesystem  ${(freeBytes / 1024 ** 3).toFixed(1)} GiB`,
@@ -126,13 +160,15 @@ if (estimatedBytes > freeBytes) {
 const probePath = join(dataDir, 'fake-ffprobe');
 writeFileSync(
   probePath,
-  `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify({
-    streams: [
-      { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
-      { index: 1, codec_type: 'audio', codec_name: 'aac', channels: 2 },
-    ],
-    format: { format_name: 'matroska,webm', duration: '120.0', size: '1024', bit_rate: '68' },
-  })}\nJSON\n`,
+  `#!/bin/sh\n${probeLatencyMs === 0 ? '' : `sleep ${String(probeLatencyMs / 1000)}\n`}cat <<'JSON'\n${JSON.stringify(
+    {
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+        { index: 1, codec_type: 'audio', codec_name: 'aac', channels: 2 },
+      ],
+      format: { format_name: 'matroska,webm', duration: '120.0', size: '1024', bit_rate: '68' },
+    },
+  )}\nJSON\n`,
 );
 chmodSync(probePath, 0o755);
 
@@ -172,6 +208,7 @@ const pass = async (label) => {
     db,
     libraryId: library.id,
     ffprobePath: probePath,
+    probeConcurrency,
     nowMs: () => Date.now(),
     // `elapsedMs` is the transaction's own blocking span. The gap between
     // commits is tracked separately: it is the interesting number for
@@ -191,6 +228,8 @@ const pass = async (label) => {
     JSON.stringify(
       {
         pass: label,
+        probeConcurrency: probeConcurrency ?? 'default',
+        probeLatencyMs,
         files: summary.seen,
         probed: summary.probed,
         wallMs: Math.round(wallMs),

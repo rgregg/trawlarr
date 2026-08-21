@@ -79,4 +79,21 @@ describe('applyEnvSettings', () => {
     applyEnvSettings({ settings, env: { RUN_FULL_SCAN_ON_START: 'false' } });
     expect(settings.getScan().scanOnStart).toBe(false);
   });
+
+  it('seeds probe concurrency from TRAWLARR_PROBE_CONCURRENCY, and refuses a value a scan would not honour', () => {
+    const settings = repo();
+    expect(settings.getScan().probeConcurrency).toBe(4);
+    applyEnvSettings({ settings, env: { TRAWLARR_PROBE_CONCURRENCY: '8' } });
+    expect(settings.getScan().probeConcurrency).toBe(8);
+
+    const tooMany = repo();
+    const applications = applyEnvSettings({
+      settings: tooMany,
+      env: { TRAWLARR_PROBE_CONCURRENCY: '10000' },
+    });
+    // Recorded and skipped, never fatal: one mistyped optional variable must
+    // not take a media server offline.
+    expect(applications[0]!.applied).toBe('invalid');
+    expect(tooMany.getScan().probeConcurrency).toBe(4);
+  });
 });

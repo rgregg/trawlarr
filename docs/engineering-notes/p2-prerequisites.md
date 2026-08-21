@@ -863,9 +863,12 @@ enough to run in CI, and fatal at the size the spec names by number. It is now g
 — the suite asserts the *query plan*, which is observable state rather than a stopwatch, and fails
 if the index is removed.
 
-### Bounded-concurrency probing (spec §4.1) is still owed
+### Bounded-concurrency probing (spec §4.1): the case for it
 
-Probing here is bounded at a concurrency of **one**: `scanLibrary` awaits each `probeFile` before
+*This was the case made from the numbers above, before Task 14 built it. Kept as it was written;
+what was actually built, and what it measured, is the section after it.*
+
+Probing was bounded at a concurrency of **one**: `scanLibrary` awaits each `probeFile` before
 walking on. Against a fake probe that costs ~7 ms, that is 100,000 × 7 ms and the cold pass takes
 about 13 minutes. Against **real `ffprobe` on real media over NFS**, a probe is tens to hundreds of
 milliseconds, dominated by process spawn and network round-trips rather than CPU — so the same
@@ -878,6 +881,76 @@ helps most and the case where it is nearly free. The structural work that makes 
 done — probing happens strictly *outside* any transaction, and the flush-after-probe rule bounds
 what an interruption costs — so a bounded pool changes "at most one probe is at risk" to "at most
 N", which is still bounded and still resumable.
+
+### Bounded-concurrency probing, measured (Task 14)
+
+Built as a **window**: files needing a probe accumulate up to `scan.probeConcurrency`, the window's
+probes run together, their results are written in one transaction, and only then does the walk
+continue. Not a streaming pool, and the reason is the ghost-row fix: `observeFile`'s confirming
+`stat` has to be the last `await` before a wholly synchronous block, and a pool would have probes
+resolving inside exactly that gap. With a window there is never a probe in flight while the walk is
+observing anything — either the walk runs or the window does — so the property holds by
+construction rather than by review. The cost is that the walk's own IO does not overlap the probes
+(`walk + probes/N` rather than `max(walk, probes/N)`), which is small because the cold pass is
+almost entirely the probe term.
+
+Same box, same tree, 100,000 files, `ffprobe` still faked:
+
+| | cold, serial (before) | cold, window of 4 (after) | warm, before | warm, after |
+|---|---|---|---|---|
+| probed | 100,000 | 100,000 | 0 | 0 |
+| wall | 746,680 ms (12.4 min) | **548,900 ms (9.1 min)** | 203,269 ms | 198,108 ms |
+| files/second | 134 | **182** | 492 | 505 |
+| transactions | 100,000 | **25,000** | 200 | **200** |
+| p99 transaction | 6.7 ms | 8.4 ms | 12.2 ms | 9.5 ms |
+| max transaction | 360.9 ms | 342.0 ms | 21.6 ms | 42.6 ms |
+| peak RSS | 155 MB | 155 MB | 421 MB | 419 MB |
+
+**1.36×, not 4×, and the shortfall is the fake probe rather than the window.** This benchmark's
+`ffprobe` is a `/bin/sh` that prints a document and exits: it is *spawn* cost, and spawning is
+partly serial in the Node process doing the spawning, on six vCPUs it is competing with itself.
+The owner's library is on NFS, where a probe is mostly *waiting* — and waiting is what
+concurrency is for. Measured directly, with
+`pnpm bench:scan --files 2000 --probe-latency-ms 50 --probe-concurrency N` — a fake probe that
+waits 50 ms before answering, which is what a probe over a network mount mostly does:
+
+| probes at once | cold wall | files/second | speedup |
+|---|---|---|---|
+| 1 | 124,458 ms | 16 | 1.0× |
+| 2 | 66,784 ms | 30 | 1.9× |
+| 4 | **36,376 ms** | **55** | **3.4×** |
+| 8 | 20,491 ms | 98 | 6.1× |
+| 16 | 12,602 ms | 159 | 9.9× |
+
+`--probe-latency-ms` was added to the benchmark for exactly this: without it the tool can only
+measure the case concurrency helps least.
+
+So the fake-probe number (1.36×) is the FLOOR and the latency-bound number (3.4× at four) is what
+the owner's first scan should see: the same 100,000-file scan at a 50 ms probe goes from about 1.7
+hours to about 30 minutes. Scaling is near-linear to 8 and falls off after, which is the spawn cost
+reappearing.
+
+**The default is 4, and it is not `cpus().length`.** A probe is spawn- and round-trip-bound rather
+than CPU-bound, so the cores are not the constraint the number should track — and the scan runs
+*beside* the transcodes, which are what the cores are actually for. Four is a floor on the benefit
+and a ceiling on the harm. It is configurable end to end (`scan.probeConcurrency`, 1–64,
+`TRAWLARR_PROBE_CONCURRENCY`, `PATCH /system/settings`), so a slow mount can have 8 or 16 and a
+machine that hates parallel reads can have 1, which is byte-for-byte the old behaviour.
+
+**What an interruption now costs: one window, not one probe.** At most `probeConcurrency` probes
+are in flight and unwritten at any instant, so a scan killed mid-walk loses at most that many
+probe results and the next scan re-derives exactly those from `probe_json IS NULL`. That is
+bounded by the setting and not by the size of the library, it is 4 out of 100,000 at the default,
+and the work lost is re-derivable by definition — which is the same argument that made the
+one-probe version acceptable, with N substituted for 1. What did NOT change: `reconcileMissing` is
+still one call outside the `for await`, reachable only by the walk running to completion, so an
+interrupted scan still marks nothing missing.
+
+**The rescan asymmetry is untouched**, and the table above is the evidence: the warm pass still
+commits 200 transactions for 100,000 files, because a file that was *skipped* still accumulates to
+a full chunk and only a closing window forces a flush. The cold pass's transaction count fell from
+100,000 to 25,000 for the same reason it fell in wall time — one transaction per window of four
+rather than one per probe.
 
 ### What the suite asserts, and why each assertion is there
 

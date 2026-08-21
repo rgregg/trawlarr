@@ -16,11 +16,14 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { computeSignature, extractFacts, type FlowDefinition } from '@trawlarr/core';
+import type { ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
+import { ProbeError } from '../probe/ffprobe.js';
+import { FAKE_PROBE_DOCUMENT } from '../../test/helpers/fake-ffprobe.js';
 import { scanLibrary } from './scan-library.js';
 
 const execFileAsync = promisify(execFile);
@@ -453,13 +456,14 @@ describe('scanLibrary: an interrupted scan resumes rather than restarting', () =
 
   const probedRowCount = (): number => rows().filter((row) => row.probe_json !== null).length;
 
-  const resumeScan = (onProgress?: (seen: number) => void) =>
+  const resumeScan = (input?: { onProgress?: (seen: number) => void; probeConcurrency?: number }) =>
     scanLibrary({
       db,
       libraryId: resumeLibraryId,
       ffprobePath: stubFfprobe,
       nowMs: now,
-      onProgress,
+      onProgress: input?.onProgress,
+      probeConcurrency: input?.probeConcurrency,
     });
 
   beforeEach(() => {
@@ -497,13 +501,21 @@ describe('scanLibrary: an interrupted scan resumes rather than restarting', () =
   it('keeps the probes a killed scan already did, and re-probes only what it never reached', async () => {
     let probedWhenInterrupted = -1;
     await expect(
-      resumeScan((seen) => {
-        if (seen !== INTERRUPT_AT) return;
-        // Read the DATABASE from inside the walk: the two finished files
-        // must already be durable here, not merely queued up in memory for
-        // a phase that this interruption is about to prevent.
-        probedWhenInterrupted = probedRowCount();
-        throw new Interrupted('killed mid-walk');
+      // `probeConcurrency: 1` on purpose. The rule is "at most one WINDOW's
+      // probes are at risk", and this pins the sharpest case of it — a
+      // window of one, where every probe is durable the instant it finishes
+      // and an interruption costs exactly nothing. The window-sized case is
+      // the test below.
+      resumeScan({
+        probeConcurrency: 1,
+        onProgress: (seen) => {
+          if (seen !== INTERRUPT_AT) return;
+          // Read the DATABASE from inside the walk: the two finished files
+          // must already be durable here, not merely queued up in memory for
+          // a phase that this interruption is about to prevent.
+          probedWhenInterrupted = probedRowCount();
+          throw new Interrupted('killed mid-walk');
+        },
       }),
     ).rejects.toBeInstanceOf(Interrupted);
 
@@ -513,7 +525,7 @@ describe('scanLibrary: an interrupted scan resumes rather than restarting', () =
 
     // The resuming scan pays only for the files the interrupted one never
     // reached — the whole property: 5 files, 2 already done, 3 to do.
-    const resumed = await resumeScan();
+    const resumed = await resumeScan({ probeConcurrency: 1 });
     expect(resumed.seen).toBe(FILE_COUNT);
     expect(resumed.probed).toBe(FILE_COUNT - (INTERRUPT_AT - 1));
     // Every file probed exactly once across BOTH scans.
@@ -522,10 +534,38 @@ describe('scanLibrary: an interrupted scan resumes rather than restarting', () =
     expect(probedRowCount()).toBe(FILE_COUNT);
 
     // And a settled library costs nothing at all.
-    const settled = await resumeScan();
+    const settled = await resumeScan({ probeConcurrency: 1 });
     expect(settled.seen).toBe(FILE_COUNT);
     expect(settled.probed).toBe(0);
     expect(probedPaths()).toHaveLength(FILE_COUNT);
+  });
+
+  it('spends real ffprobe processes only on files it will record, up to one window', async () => {
+    // The same property at the DEFAULT bound, measured through the probe log
+    // — an independent record of how many ffprobe processes were actually
+    // spawned, not the scanner's own counter.
+    //
+    // Interrupted at the fifth file, a window of four has closed and its four
+    // probes are durable; had it been interrupted at the third, none would
+    // be, and the next scan would re-derive them from `probe_json IS NULL`.
+    // That is exactly what "at most N at risk" costs, and it is bounded by N
+    // rather than by the size of the library.
+    await expect(
+      resumeScan({
+        probeConcurrency: 4,
+        onProgress: (seen) => {
+          if (seen === 5) throw new Interrupted('killed mid-walk');
+        },
+      }),
+    ).rejects.toBeInstanceOf(Interrupted);
+
+    expect(probedPaths()).toHaveLength(4);
+    expect(probedRowCount()).toBe(4);
+
+    const resumed = await resumeScan({ probeConcurrency: 4 });
+    expect(resumed.probed).toBe(FILE_COUNT - 4);
+    expect(new Set(probedPaths()).size).toBe(FILE_COUNT);
+    expect(probedRowCount()).toBe(FILE_COUNT);
   });
 
   it('reconciles nothing when the walk is interrupted, however stale the rows it never reached', async () => {
@@ -540,8 +580,10 @@ describe('scanLibrary: an interrupted scan resumes rather than restarting', () =
     }
 
     await expect(
-      resumeScan((seen) => {
-        if (seen === INTERRUPT_AT) throw new Interrupted('killed mid-walk');
+      resumeScan({
+        onProgress: (seen) => {
+          if (seen === INTERRUPT_AT) throw new Interrupted('killed mid-walk');
+        },
       }),
     ).rejects.toBeInstanceOf(Interrupted);
 
@@ -574,5 +616,253 @@ describe('scanLibrary: an interrupted scan resumes rather than restarting', () =
     expect(summary.missing).toBe(1);
     const gone = rows().find((row) => row.path === join(resumeRoot, 'file-0.mkv'));
     expect(gone?.missing_since_ms).not.toBeNull();
+  });
+});
+
+/**
+ * Spec §4.1: probing "runs at a bounded concurrency". These pin BOTH halves
+ * of that sentence — that several probes really do overlap, and that the
+ * overlap has a ceiling — plus the three properties the window was not
+ * allowed to cost:
+ *
+ *  - a probe that fails is `unreadable` for its own file and nothing more,
+ *  - a window closes with ONE transaction, not one per probe,
+ *  - and a file that was SKIPPED still accumulates to a full chunk, which is
+ *    what keeps a 100,000-file rescan at ~200 transactions rather than
+ *    100,000.
+ *
+ * All of it is forced through the `probeFileImpl` seam and asserted as
+ * counts of observable state — probes in flight, transactions committed,
+ * rows written. Never elapsed time, and never "run two things and hope the
+ * scheduler interleaves them", which is how a concurrency test passes
+ * against broken code.
+ */
+describe('scanLibrary: bounded-concurrency probing', () => {
+  /** A migrated in-memory database, a flow, and `count` one-byte .mkv files. */
+  const seedLibraryWithFiles = (count: number): { db: Db; libraryId: string; root: string } => {
+    const filesRoot = mkdtempSync(join(tmpdir(), 'trawlarr-concurrency-'));
+    for (let i = 0; i < count; i += 1) {
+      writeFileSync(join(filesRoot, `f${String(i)}.mkv`), `contents of file ${String(i)}`);
+    }
+    const seeded = openDatabase({ file: ':memory:' });
+    migrate(seeded);
+    const flow = createFlowRepo(seeded).create({ name: 'HEVC-conc', definition, nowMs: NOW });
+    const library = createLibraryRepo(seeded).create({
+      name: 'Concurrent',
+      roots: [filesRoot],
+      extensions: ['mkv'],
+      flowId: flow.id,
+      nowMs: NOW,
+    });
+    return { db: seeded, libraryId: library.id, root: filesRoot };
+  };
+
+  /**
+   * The document `fakeFfprobe` prints, returned in-process. Takes the path
+   * it is answering for so these tests read like the real probe seam, which
+   * is per file, even though the answer is fixed.
+   */
+  const fixedProbe = (path: string): ProbeData =>
+    ({
+      ...FAKE_PROBE_DOCUMENT,
+      format: { ...FAKE_PROBE_DOCUMENT.format, filename: path },
+    }) as ProbeData;
+
+  const probedRows = (database: Db, libraryId: string): number =>
+    createMediaFileRepo(database)
+      .query({ libraryId, limit: 1000, offset: 0 })
+      .items.filter((row) => row.probe_json !== null).length;
+
+  it('probes several files at once, without exceeding the configured bound', async () => {
+    const { db: seeded, libraryId: id } = seedLibraryWithFiles(20);
+    let inFlight = 0;
+    let peak = 0;
+
+    const summary = await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 4,
+      probeFileImpl: async (input) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setImmediate(resolve));
+        inFlight -= 1;
+        return fixedProbe(input.path);
+      },
+    });
+
+    // Both halves matter: a bound that is never reached proves nothing, and
+    // a bound that is exceeded is an unbounded fan-out at 100,000 files.
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+    // And every file was still probed exactly once and written — a window
+    // that dropped its tail would satisfy the two bounds above happily.
+    expect(summary.probed).toBe(20);
+    expect(probedRows(seeded, id)).toBe(20);
+    seeded.close();
+  });
+
+  it('probes strictly one at a time when the bound is 1', async () => {
+    // The setting really is the bound, in the direction that matters for an
+    // operator who wants the old behaviour back on a mount that hates
+    // parallel reads.
+    const { db: seeded, libraryId: id } = seedLibraryWithFiles(6);
+    let inFlight = 0;
+    let peak = 0;
+
+    await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 1,
+      probeFileImpl: async (input) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setImmediate(resolve));
+        inFlight -= 1;
+        return fixedProbe(input.path);
+      },
+    });
+
+    expect(peak).toBe(1);
+    seeded.close();
+  });
+
+  it('records a failed probe against its own file, without losing the rest of its window', async () => {
+    // One undecodable file in a window must not discard the other three
+    // probes: that would make a single bad file cost N probes on every scan
+    // for the rest of the library's life.
+    const { db: seeded, libraryId: id, root: filesRoot } = seedLibraryWithFiles(4);
+    const broken = join(filesRoot, 'f2.mkv');
+
+    const summary = await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 4,
+      probeFileImpl: async (input) => {
+        if (input.path === broken) throw new ProbeError(input.path, 'not a media file');
+        return Promise.resolve(fixedProbe(input.path));
+      },
+    });
+
+    expect(summary.probed).toBe(4);
+    expect(summary.unreadable).toBe(1);
+    expect(probedRows(seeded, id)).toBe(3);
+    seeded.close();
+  });
+
+  it('commits one transaction per window, and still lets skipped files reach a full chunk', async () => {
+    // The asymmetry rule 3 of the incremental flush is about, restated for a
+    // window: 20 files at a bound of 4 is FIVE transactions, not twenty (a
+    // flush per probe) and not one (a scan that buffers everything and loses
+    // it all to a restart).
+    const { db: seeded, libraryId: id } = seedLibraryWithFiles(20);
+    const cold: number[] = [];
+    await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 4,
+      probeFileImpl: (input) => Promise.resolve(fixedProbe(input.path)),
+      onTransactionCommitted: (rows) => cold.push(rows),
+    });
+    expect(cold).toEqual([4, 4, 4, 4, 4]);
+
+    // And on the rescan nothing is probed, so nothing forces a flush and the
+    // whole library commits as one chunk.
+    const warm: number[] = [];
+    const second = await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 4,
+      probeFileImpl: (input) => Promise.resolve(fixedProbe(input.path)),
+      onTransactionCommitted: (rows) => warm.push(rows),
+    });
+    expect(second.probed).toBe(0);
+    expect(warm).toEqual([20]);
+    seeded.close();
+  });
+
+  it('still keeps every completed probe when the walk is interrupted', async () => {
+    const { db: seeded, libraryId: id } = seedLibraryWithFiles(20);
+    await expect(
+      scanLibrary({
+        db: seeded,
+        libraryId: id,
+        ffprobePath: 'unused',
+        nowMs: () => 0,
+        probeConcurrency: 4,
+        probeFileImpl: (input) => Promise.resolve(fixedProbe(input.path)),
+        onProgress: (seen) => {
+          if (seen >= 12) throw new Error('interrupted');
+        },
+      }),
+    ).rejects.toThrow('interrupted');
+
+    // Two full windows closed before the eleventh file, so eight probes are
+    // on disk: the interruption cost at most one window, never the scan.
+    expect(probedRows(seeded, id)).toBe(8);
+    // Facts about one file are re-derivable and are kept; a judgement needing
+    // the whole picture is not made at all.
+    expect(createMediaFileRepo(seeded).missingCount(id)).toBe(0);
+    seeded.close();
+  });
+
+  it('loses at most one window of probes to an interruption, and re-derives exactly those', async () => {
+    // What "N at risk" MEANS, stated as rows rather than as prose: interrupt
+    // with a partly-filled window and the scan keeps everything the closed
+    // windows wrote, while the open window's files are simply re-probed by
+    // the next scan. Nothing is lost, and nothing beyond the window is
+    // repeated.
+    const { db: seeded, libraryId: id } = seedLibraryWithFiles(20);
+    await expect(
+      scanLibrary({
+        db: seeded,
+        libraryId: id,
+        ffprobePath: 'unused',
+        nowMs: () => 0,
+        probeConcurrency: 4,
+        probeFileImpl: (input) => Promise.resolve(fixedProbe(input.path)),
+        onProgress: (seen) => {
+          if (seen >= 11) throw new Error('interrupted');
+        },
+      }),
+    ).rejects.toThrow('interrupted');
+
+    // Ten files walked, two windows closed, two files sitting in the open
+    // third window when the walk died.
+    expect(probedRows(seeded, id)).toBe(8);
+
+    const resumed = await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 4,
+      probeFileImpl: (input) => Promise.resolve(fixedProbe(input.path)),
+    });
+    // 20 files, 8 already durable: the resumed scan pays for the 12 it never
+    // recorded and not one probe more.
+    expect(resumed.probed).toBe(12);
+    expect(probedRows(seeded, id)).toBe(20);
+
+    const settled = await scanLibrary({
+      db: seeded,
+      libraryId: id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeConcurrency: 4,
+      probeFileImpl: (input) => Promise.resolve(fixedProbe(input.path)),
+    });
+    expect(settled.probed).toBe(0);
+    seeded.close();
   });
 });

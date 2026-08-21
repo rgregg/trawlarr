@@ -18,6 +18,7 @@ import { createFlowRepo } from './db/flow-repo.js';
 import { buildFromTemplate, FLOW_TEMPLATES } from './flow/templates.js';
 import { ALL_STATES, createMediaFileRepo } from './db/media-file-repo.js';
 import { scanLibrary } from './scanner/scan-library.js';
+import { createSettingsRepo } from './db/settings-repo.js';
 import { forgetMissing, type ForgetSummary } from './scanner/forget-missing.js';
 import { runQueue } from './worker/loop.js';
 import { DEFAULT_STALE_AFTER_MS, reapStalled, type ReapSummary } from './worker/reap-stalled.js';
@@ -663,6 +664,9 @@ const cmdScan = async (args: string[]): Promise<number> => {
     libraryId: library.id,
     ffprobePath: values.ffprobe!,
     nowMs: Date.now,
+    // The same stored setting the daemon uses, so a scan run from the CLI
+    // against a stopped daemon behaves the way the operator configured it.
+    probeConcurrency: createSettingsRepo({ db }).getScan().probeConcurrency,
     allowEmptyRoots: values['allow-empty-roots'],
   });
 

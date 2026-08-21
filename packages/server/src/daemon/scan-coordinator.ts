@@ -191,6 +191,10 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
       libraryId,
       reason,
       ffprobePath: settings.getBinaries().ffprobe,
+      // Read per scan, not once at construction: an operator who raises the
+      // dial while a library is still being walked wants the NEXT scan to
+      // use it, without restarting the daemon.
+      probeConcurrency: settings.getScan().probeConcurrency,
       nowMs,
       onProgress: (seen) => {
         const at = nowMs();

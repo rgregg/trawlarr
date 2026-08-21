@@ -7,6 +7,7 @@ import {
   type HardwareType,
   type ScheduleConfig,
 } from '@trawlarr/core';
+import { DEFAULT_PROBE_CONCURRENCY } from '../scanner/scan-library.js';
 import type { Db } from './connection.js';
 
 export interface DaemonSettings {
@@ -25,6 +26,16 @@ export interface ScanSettings {
   rescanIntervalMs: number;
   settleMs: number;
   scanOnStart: boolean;
+  /**
+   * How many `ffprobe` processes a scan may have in flight at once.
+   *
+   * A performance dial, not a correctness one: every value produces exactly
+   * the same rows. Higher means a faster first scan and more IO contention
+   * with the transcodes running beside it; `1` is the strictly serial
+   * behaviour. See `DEFAULT_PROBE_CONCURRENCY` for why the default is 4
+   * rather than the CPU count.
+   */
+  probeConcurrency: number;
 }
 
 export interface HardwareSettings {
@@ -75,6 +86,7 @@ const DEFAULT_SCAN: ScanSettings = {
   rescanIntervalMs: 3_600_000,
   settleMs: 30_000,
   scanOnStart: true,
+  probeConcurrency: DEFAULT_PROBE_CONCURRENCY,
 };
 const DEFAULT_HARDWARE: HardwareSettings = { available: ['cpu'], caps: {} };
 
@@ -123,6 +135,7 @@ const validateScan = (value: {
   rescanIntervalMs: unknown;
   settleMs: unknown;
   scanOnStart: unknown;
+  probeConcurrency: unknown;
 }): ScanSettings => ({
   watchEnabled: requireBoolean(value.watchEnabled, 'scan.watchEnabled'),
   rescanIntervalMs: requireWholeNumber(
@@ -133,6 +146,11 @@ const validateScan = (value: {
   ),
   settleMs: requireWholeNumber(value.settleMs, 'scan.settleMs', 0, Number.MAX_SAFE_INTEGER),
   scanOnStart: requireBoolean(value.scanOnStart, 'scan.scanOnStart'),
+  // Bounded at 64 by the same reasoning `scanLibrary` clamps to: past a
+  // point more outstanding probes is more contention with the transcodes
+  // and no more throughput, and an operator who types 10000 wants a
+  // named error rather than ten thousand processes.
+  probeConcurrency: requireWholeNumber(value.probeConcurrency, 'scan.probeConcurrency', 1, 64),
 });
 
 const validateHardware = (value: { available: unknown; caps: unknown }): HardwareSettings => {
@@ -254,6 +272,8 @@ export const createSettingsRepo = (input: {
         readField(SETTING_KEYS.scan, 'rescanIntervalMs') ?? DEFAULT_SCAN.rescanIntervalMs,
       settleMs: readField(SETTING_KEYS.scan, 'settleMs') ?? DEFAULT_SCAN.settleMs,
       scanOnStart: readField(SETTING_KEYS.scan, 'scanOnStart') ?? DEFAULT_SCAN.scanOnStart,
+      probeConcurrency:
+        readField(SETTING_KEYS.scan, 'probeConcurrency') ?? DEFAULT_SCAN.probeConcurrency,
     });
 
   const setScan = (patch: Partial<ScanSettings>): void => {
@@ -262,6 +282,7 @@ export const createSettingsRepo = (input: {
     writeField(SETTING_KEYS.scan, 'rescanIntervalMs', next.rescanIntervalMs);
     writeField(SETTING_KEYS.scan, 'settleMs', next.settleMs);
     writeField(SETTING_KEYS.scan, 'scanOnStart', next.scanOnStart);
+    writeField(SETTING_KEYS.scan, 'probeConcurrency', next.probeConcurrency);
   };
 
   const getHardware = (): HardwareSettings =>

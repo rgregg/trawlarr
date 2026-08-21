@@ -21,8 +21,19 @@ describe('settings repo', () => {
       rescanIntervalMs: 3_600_000,
       settleMs: 30_000,
       scanOnStart: true,
+      probeConcurrency: 4,
     });
     expect(repo.getHardware()).toEqual({ available: ['cpu'], caps: {} });
+  });
+
+  it('rejects a probe concurrency outside the range a scan will honour', () => {
+    const repo = createSettingsRepo({ db: freshDb() });
+    // A performance dial is still validated: an operator who types 10000
+    // wants a named error, not ten thousand ffprobe processes.
+    expect(() => repo.setScan({ probeConcurrency: 0 })).toThrow(SettingValidationError);
+    expect(() => repo.setScan({ probeConcurrency: 65 })).toThrow(SettingValidationError);
+    repo.setScan({ probeConcurrency: 8 });
+    expect(repo.getScan().probeConcurrency).toBe(8);
   });
 
   it('generates an api key once and then keeps returning the same one', () => {

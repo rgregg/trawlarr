@@ -10,6 +10,7 @@ import {
   type LedgerRecord,
   type PartialHashParts,
 } from '@trawlarr/core';
+import type { ProbeData } from '@trawlarr/plugin-api';
 import { walkFiles } from '../fs/walk.js';
 import { reconcileMissing } from './reconcile.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
@@ -102,7 +103,49 @@ export interface ScanLibraryInput {
    * almost every time (see the P2 prerequisites note on concurrency tests).
    */
   hashFile?: (path: string) => Promise<PartialHashParts>;
+  /**
+   * How many probes may be in flight at once. Defaults to
+   * `DEFAULT_PROBE_CONCURRENCY`; the daemon and the CLI pass
+   * `scan.probeConcurrency` (see `ScanSettings`).
+   *
+   * Clamped rather than validated here, because this is a performance dial
+   * and not a correctness one: every value produces the same rows, only
+   * sooner or later. `1` restores the strictly serial behaviour, and with
+   * it the "at most one probe's work is at risk" rule exactly as it was.
+   */
+  probeConcurrency?: number;
+  /**
+   * Seam for tests: how a file is probed. Defaults to the real `probeFile`;
+   * production code never sets it.
+   *
+   * It exists because the property this scanner's window is about — how many
+   * probes run at once — is not observable from outside without standing
+   * inside the probe. Spawning N real `ffprobe` processes and timing them
+   * would measure the machine, and this project never asserts elapsed time.
+   */
+  probeFileImpl?: (input: { ffprobePath: string; path: string }) => Promise<ProbeData>;
 }
+
+/**
+ * Probes in flight at once, when nothing says otherwise.
+ *
+ * FOUR, and deliberately not `cpus().length`. An `ffprobe` of one file is
+ * spawn- and IO-latency-bound, not CPU-bound: it reads a container's header
+ * off the mount and exits, so the thing a bigger number buys is more
+ * outstanding requests to the filesystem, which is what a network mount
+ * needs and what a local SSD does not care about. Meanwhile the scan runs
+ * BESIDE the transcodes, which are what the cores are for — sizing the scan
+ * to the CPU count would take the machine away from the work the user
+ * actually asked for, on the one code path that walks their entire library.
+ *
+ * Four is a floor on the benefit (four-way on a latency-bound loop) and a
+ * ceiling on the harm (four short-lived processes and four outstanding
+ * reads). An operator whose mount wants more raises `scan.probeConcurrency`.
+ */
+export const DEFAULT_PROBE_CONCURRENCY = 4;
+
+/** Widest window we will open, however the setting was written. */
+const MAX_PROBE_CONCURRENCY = 64;
 
 /** States a scan must never touch: terminal or already mid-flight. */
 const NEVER_REQUEUE_STATES = new Set(['failed', 'not_converging', 'running']);
@@ -206,6 +249,11 @@ const isInFlightOutput = (runningPath: string, candidate: string): boolean =>
 export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary> => {
   const { db, libraryId, ffprobePath, nowMs, onProgress } = input;
   const hashFile = input.hashFile ?? partialHashFile;
+  const runProbe = input.probeFileImpl ?? probeFile;
+  const probeConcurrency = Math.min(
+    MAX_PROBE_CONCURRENCY,
+    Math.max(1, Math.floor(input.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY)),
+  );
 
   /**
    * One walked file, observed: the stat and the partial hash that together
@@ -369,6 +417,74 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     });
   };
 
+  /**
+   * Files that have been observed, upserted and found to need a probe, whose
+   * probes have NOT been started yet. Never longer than `probeConcurrency`.
+   */
+  const probeWindow: { settled: Probed; path: string }[] = [];
+
+  /**
+   * Probe everything in the window at once, settle each result onto its own
+   * file, and commit the lot in one transaction.
+   *
+   * A WINDOW, not a streaming pool, and the difference is the point. A pool
+   * would keep probes in flight WHILE the walk observes the next file, which
+   * is the one thing this loop cannot afford: `observeFile`'s confirming
+   * `stat` is the last `await` before a wholly synchronous block (lookup,
+   * in-flight guard, upsert), and that is what makes the identity handed to
+   * the in-flight-output guard true of the file at that path NOW. A probe
+   * resolving inside that block is impossible today because the block
+   * contains no `await`; a probe resolving BETWEEN the confirming stat and
+   * the block would be scheduled by the same microtask queue and reopen
+   * exactly the gap the ghost-row fix closed. With a window there is never a
+   * probe in flight while the walk is observing anything: either the walk
+   * runs (no probes outstanding) or the window does (no walking). The
+   * property is preserved by construction rather than by review.
+   *
+   * The cost of that choice is real and small: the walk's own IO does not
+   * overlap the probes, so the scan takes `walk + probes/N` rather than
+   * `max(walk, probes/N)`. The whole `probes` term is what a cold scan is
+   * made of (see the P2c note), so the win is the same order either way, and
+   * this version cannot reorder or interleave anything.
+   *
+   * ORDERING. Results are pushed in window order, and windows close in walk
+   * order, so the database still sees files in the order the walk yielded
+   * them. Nothing downstream depends on that — every row is upserted by
+   * identity and every ledger transition is derived from that row alone —
+   * but a scan whose writes follow its walk is a scan whose progress is
+   * legible, and preserving it costs nothing here.
+   *
+   * A probe that fails is `unreadable` for its own file and nothing more:
+   * one undecodable file must never discard the other N-1 probes in its
+   * window, so the rejection is caught per file rather than by `Promise.all`.
+   */
+  const closeWindow = async (): Promise<void> => {
+    if (probeWindow.length === 0) return;
+    const batch = probeWindow.splice(0, probeWindow.length);
+    await Promise.all(
+      batch.map(async (item) => {
+        summary.probed += 1;
+        try {
+          const probe = await runProbe({ ffprobePath, path: item.path });
+          item.settled.probe = probe;
+          item.settled.facts = extractFacts({
+            probe,
+            container: item.settled.container,
+            sizeBytes: item.settled.sizeBytes,
+          });
+        } catch (err) {
+          // A non-ProbeError is a bug or an exhausted machine, not a bad
+          // file: it aborts the scan here exactly as it did when probing
+          // was serial.
+          if (!(err instanceof ProbeError)) throw err;
+          summary.unreadable += 1;
+        }
+      }),
+    );
+    for (const item of batch) pending.push(item.settled);
+    await flush();
+  };
+
   // Walk, upsert identity, probe what needs it, and commit as we go. Probing
   // deliberately happens between transactions, never inside one: spawning
   // ffprobe while holding sqlite's write lock would block every other writer
@@ -493,29 +609,29 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       probe: null,
     };
 
+    // A file needing a probe joins the window and is written when the window
+    // closes, so at most one WINDOW's probes are ever at risk — the same rule
+    // as before, generalised from one to `probeConcurrency`, and identical to
+    // it at `probeConcurrency: 1`. A file NOT needing a probe goes straight
+    // to `pending` and accumulates to a full chunk without flushing: that
+    // asymmetry is what keeps a 100,000-file rescan at ~200 transactions
+    // rather than 100,000, and the window must not disturb it.
     if (doProbe) {
-      summary.probed += 1;
-      try {
-        const probe = await probeFile({ ffprobePath, path: entry.path });
-        settled.probe = probe;
-        settled.facts = extractFacts({ probe, container, sizeBytes: stat.size });
-      } catch (err) {
-        if (!(err instanceof ProbeError)) throw err;
-        summary.unreadable += 1;
-      }
+      probeWindow.push({ settled, path: entry.path });
+      if (probeWindow.length >= probeConcurrency) await closeWindow();
+      continue;
     }
 
     pending.push(settled);
-
-    // Commit as soon as anything expensive has been done, so at most one
-    // probe is ever at risk; otherwise let cheap bookkeeping accumulate to
-    // a full chunk. Either way `pending` never exceeds one transaction's
-    // worth, which is why a 100k-file library still never opens a single
-    // giant transaction.
-    if (doProbe || pending.length >= DEFAULT_CHUNK_SIZE) await flush();
+    if (pending.length >= DEFAULT_CHUNK_SIZE) await flush();
   }
 
-  // Everything the walk settled but did not fill a chunk with.
+  // The last, partial window — and then everything the walk settled but did
+  // not fill a chunk with. Both are inside the `for await`'s successful
+  // completion, so an interrupted scan reaches neither: its open window is
+  // the N-at-risk this design accepts, re-derived by the next scan from
+  // `probe_json IS NULL`.
+  await closeWindow();
   await flush();
 
   // Reconcile the rows the walk did NOT account for. Deliberately the last
