@@ -422,7 +422,7 @@ A template id with a typo in it is refused by name, and nothing is stored:
 
 ```
 $ docker exec trawlarr-lab trawlarr flow add --name Bad --template transcode-hvec
-Error: flow add: no flow template "transcode-hvec". Available: transcode-hevc.
+Error: flow add: no flow template "transcode-hvec". Available: transcode-hevc, conform-library.
 (exit 1)
 ```
 
