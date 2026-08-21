@@ -7,6 +7,7 @@ import { openDatabase } from './db/connection.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo } from './db/library-repo.js';
 import { createFlowRepo } from './db/flow-repo.js';
+import { createPluginRepo } from './plugins/plugin-repo.js';
 import { main } from './cli.js';
 import { toolAvailableSync } from '../../../test-support/tool-availability.js';
 
@@ -985,4 +986,334 @@ describe.runIf(ffmpegAvailable)('cli: run --library restricts the drain', () => 
     expect(stateOf(b.id)).toBe('queued'); // untouched: run was restricted to A
     db.close();
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// plugin sources
+// ---------------------------------------------------------------------------
+
+/** Writes <tmp>/p/myPlugin/1.0.0/index.js — the layout `discoverFlowPlugins` looks for. */
+const writeFixturePluginTree = (): string => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-plugins-'));
+  const dir = join(root, 'p', 'myPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'index.js'),
+    `
+exports.details = () => ({
+  name: 'Fixture Plugin',
+  description: 'x',
+  style: { borderColor: '#fff' },
+  tags: '',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [{
+    label: 'Container',
+    name: 'container',
+    type: 'string',
+    defaultValue: 'mp4',
+    tooltip: 'the container to write',
+    inputUI: { type: 'text' },
+  }],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: args.inputFileObj._id },
+  variables: args.variables,
+});
+`,
+    'utf8',
+  );
+  return root;
+};
+
+/** A tree whose only candidate throws on load: the "skipped, and why" path. */
+const writeBrokenPluginTree = (): string => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-broken-'));
+  const dir = join(root, 'p', 'brokenPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'index.js'), `throw new Error('deliberately unloadable');\n`, 'utf8');
+  return root;
+};
+
+/** The plugin rows this data directory really holds — state, not printed text. */
+const readPlugins = (dataDir: string) => {
+  const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+  migrate(db);
+  try {
+    const repo = createPluginRepo(db);
+    return {
+      sources: repo.listSources().map((source) => ({ id: source.id, url: source.url, kind: source.kind, lastSyncedAtMs: source.lastSyncedAtMs })), // prettier-ignore
+      pluginIds: repo.listPlugins().map((plugin) => plugin.id),
+    };
+  } finally {
+    db.close();
+  }
+};
+
+describe('cli: plugin source', () => {
+  it('adds a local source and lists it', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    expect(
+      await main([
+        'plugin',
+        'source',
+        'add',
+        '--name',
+        'fx',
+        '--path',
+        tree,
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+
+    // The row, not the sentence: the source is stored as a local one at the
+    // path given, and has never been synced.
+    expect(readPlugins(dataDir).sources).toEqual([
+      { id: 'fx', url: tree, kind: 'local', lastSyncedAtMs: null },
+    ]);
+
+    expect(await main(['plugin', 'source', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('fx');
+    expect(stdout()).toContain(tree);
+    expect(stdout()).toContain('never synced');
+  });
+
+  it('names the consequence of installing when a source is added', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    expect(
+      await main([
+        'plugin',
+        'source',
+        'add',
+        '--name',
+        'fx',
+        '--path',
+        tree,
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+    // Adding a source is the trust decision, so the command that takes it
+    // says what it costs rather than leaving it to the documentation.
+    expect(stdout()).toContain("runs its author's code");
+    expect(stdout()).toContain('the same user trawlarr runs as');
+  });
+
+  it('refuses a source named trawlarr, by name', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main([
+        'plugin', 'source', 'add', '--name', 'trawlarr', '--path', '/tmp', '--data-dir', dataDir,
+      ]), // prettier-ignore
+    ).not.toBe(0);
+    expect(stderr()).toMatch(/reserved/i);
+    // And nothing was created: a refused name must not leave a row behind.
+    expect(existsSync(join(dataDir, 'trawlarr.db'))).toBe(false);
+  });
+
+  it('refuses both --url and --path together rather than picking one', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main([
+        'plugin', 'source', 'add', '--name', 'fx',
+        '--url', 'https://example.test/x.tar.gz', '--path', '/tmp',
+        '--data-dir', dataDir,
+      ]), // prettier-ignore
+    ).not.toBe(0);
+    expect(stderr()).toMatch(/one of/i);
+  });
+
+  it('refuses neither --url nor --path', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'source', 'add', '--name', 'fx', '--data-dir', dataDir])).not.toBe(
+      0,
+    );
+    expect(stderr()).toMatch(/one of/i);
+  });
+
+  it('refuses a plain-http --url, because this is code it will execute', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main([
+        'plugin', 'source', 'add', '--name', 'fx',
+        '--url', 'http://example.test/x.tar.gz', '--data-dir', dataDir,
+      ]), // prettier-ignore
+    ).not.toBe(0);
+    expect(stderr()).toContain('must be an https URL');
+    expect(existsSync(join(dataDir, 'trawlarr.db'))).toBe(false);
+  });
+
+  it('refuses a --path that is not there, instead of storing a source of nothing', async () => {
+    const dataDir = newDataDir();
+    const missing = join(tmpdir(), 'trawlarr-cli-no-such-tree-x9');
+    expect(
+      await main(['plugin', 'source', 'add', '--name', 'fx', '--path', missing, '--data-dir', dataDir]), // prettier-ignore
+    ).not.toBe(0);
+    expect(stderr()).toContain(missing);
+  });
+
+  it('syncs a local source, and the installed plugin appears beside the first-party ones', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', tree, '--data-dir', dataDir]);
+    expect(await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir])).toBe(0);
+
+    // The row is what makes the plugin resolvable everywhere else.
+    const after = readPlugins(dataDir);
+    expect(after.pluginIds).toEqual(['fx:myPlugin']);
+    expect(after.sources[0]!.lastSyncedAtMs).not.toBeNull();
+
+    expect(await main(['plugin', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('fx:myPlugin');
+    expect(stdout()).toContain('trawlarr:execute');
+  });
+
+  it('syncs every enabled source with --all', async () => {
+    const dataDir = newDataDir();
+    await main(['plugin', 'source', 'add', '--name', 'one', '--path', writeFixturePluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    await main(['plugin', 'source', 'add', '--name', 'two', '--path', writeFixturePluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    expect(await main(['plugin', 'source', 'sync', '--all', '--data-dir', dataDir])).toBe(0);
+    expect(readPlugins(dataDir).pluginIds).toEqual(['one:myPlugin', 'two:myPlugin']);
+  });
+
+  it('prints every skipped plugin and why, so half a source does not look like none', async () => {
+    const dataDir = newDataDir();
+    await main(['plugin', 'source', 'add', '--name', 'bad', '--path', writeBrokenPluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    expect(await main(['plugin', 'source', 'sync', '--name', 'bad', '--data-dir', dataDir])).toBe(
+      0,
+    );
+    expect(readPlugins(dataDir).pluginIds).toEqual([]);
+    expect(stdout()).toContain('brokenPlugin');
+    expect(stdout()).toContain('deliberately unloadable');
+  });
+
+  it('requires --name or --all rather than syncing everything by default', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'source', 'sync', '--data-dir', dataDir])).not.toBe(0);
+    expect(stderr()).toContain('--name <source> or --all is required');
+  });
+
+  it('names the source that does not exist rather than failing anonymously', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main(['plugin', 'source', 'sync', '--name', 'nope', '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('nope');
+  });
+
+  it('removing a source removes its plugins', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', tree, '--data-dir', dataDir]);
+    await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
+    expect(readPlugins(dataDir).pluginIds).toEqual(['fx:myPlugin']);
+
+    expect(await main(['plugin', 'source', 'remove', '--name', 'fx', '--data-dir', dataDir])).toBe(
+      0,
+    );
+    // Both rows are gone — the source AND the plugins it installed.
+    expect(readPlugins(dataDir)).toEqual({ sources: [], pluginIds: [] });
+
+    logSpy.mockClear();
+    await main(['plugin', 'list', '--data-dir', dataDir]);
+    expect(stdout()).not.toContain('fx:myPlugin');
+  });
+
+  it('says what a flow naming a removed plugin will now do', async () => {
+    const dataDir = newDataDir();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', writeFixturePluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
+    logSpy.mockClear();
+    expect(await main(['plugin', 'source', 'remove', '--name', 'fx', '--data-dir', dataDir])).toBe(0); // prettier-ignore
+    expect(stdout()).toContain('fx:myPlugin');
+    expect(stdout()).toContain('pauses');
+  });
+
+  it('names the source that cannot be removed', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main(['plugin', 'source', 'remove', '--name', 'ghost', '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('ghost');
+  });
+
+  it('answers an empty source list with what to do about it', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'source', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('No plugin sources');
+  });
+
+  it('names the unknown plugin subcommand', async () => {
+    expect(await main(['plugin', 'frobnicate'])).not.toBe(0);
+    expect(stderr()).toContain('Unknown command: "plugin frobnicate".');
+    expect(await main(['plugin', 'source', 'frobnicate'])).not.toBe(0);
+    expect(stderr()).toContain('Unknown command: "plugin source frobnicate".');
+  });
+});
+
+describe('cli: plugin list / show', () => {
+  it('lists the first-party plugins with no source added at all', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('trawlarr:start');
+    expect(stdout()).toContain('trawlarr:execute');
+    expect(stdout()).toContain('No plugins installed from a source yet');
+  });
+
+  it('restricts the listing to one source, and names an unknown one', async () => {
+    const dataDir = newDataDir();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', writeFixturePluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
+    logSpy.mockClear();
+
+    expect(await main(['plugin', 'list', '--source', 'fx', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('fx:myPlugin');
+    expect(stdout()).not.toContain('trawlarr:execute');
+
+    expect(await main(['plugin', 'list', '--source', 'other', '--data-dir', dataDir])).not.toBe(0);
+    expect(stderr()).toContain('no plugin source "other"');
+    expect(stderr()).toContain('fx');
+  });
+
+  it("shows an installed plugin's inputs with defaults and outputs with tooltips", async () => {
+    const dataDir = newDataDir();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', writeFixturePluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
+    logSpy.mockClear();
+
+    expect(await main(['plugin', 'show', '--id', 'fx:myPlugin', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('Fixture Plugin');
+    expect(stdout()).toContain('container');
+    expect(stdout()).toContain('"mp4"'); // the default a flow gets by omitting it
+    expect(stdout()).toContain('the container to write');
+    expect(stdout()).toContain('ok'); // the output tooltip an edge is chosen by
+  });
+
+  it('shows a first-party plugin without any source at all', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'show', '--id', 'trawlarr:execute', '--data-dir', dataDir])).toBe(0); // prettier-ignore
+    expect(stdout()).toContain('trawlarr:execute');
+    expect(stdout()).toContain('Outputs (');
+  });
+
+  it('refuses an id nothing here can resolve, saying what the shapes are', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'show', '--id', 'nope:missing', '--data-dir', dataDir])).not.toBe(0); // prettier-ignore
+    expect(stderr()).toContain('nope:missing');
+    expect(stderr()).toContain('needs its source added and synced');
+  });
+
+  it('requires --id', async () => {
+    const dataDir = newDataDir();
+    expect(await main(['plugin', 'show', '--data-dir', dataDir])).not.toBe(0);
+    expect(stderr()).toContain('--id is required');
+  });
 });

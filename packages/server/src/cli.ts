@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { FlowValidationError, type FileState, type FlowDefinition } from '@trawlarr/core';
+import { createPluginLoader } from '@trawlarr/engine';
+import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
+import type { PluginDetails } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from './db/connection.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo, DEFAULT_EXTENSIONS } from './db/library-repo.js';
@@ -22,6 +25,9 @@ import { startDaemon } from './daemon/daemon.js';
 import { DaemonAlreadyRunningError, readDaemonRecord } from './daemon/lockfile.js';
 import type { DaemonRecord } from './daemon/lockfile.js';
 import { ApiRequestError, createCliClient, type CliClient } from './cli-client.js';
+import { createPluginRepo, PluginRepoError, type PluginRepo } from './plugins/plugin-repo.js';
+import { assertValidSourceSlug, PluginIdError } from './plugins/plugin-id.js';
+import { syncSource } from './plugins/sync-source.js';
 
 /** Raised by a command handler to report a clean, diagnosable failure — never a raw stack trace. */
 class CliError extends Error {}
@@ -1494,6 +1500,489 @@ const cmdDaemon = async (args: string[]): Promise<number> => {
 };
 
 // ---------------------------------------------------------------------------
+// plugin
+// ---------------------------------------------------------------------------
+
+/** A plugin as `GET /plugins` reports it, and as the direct path renders it. */
+interface PluginResource {
+  id: string;
+  name: string;
+  description?: string;
+  version: string;
+  source: 'first-party' | 'installed' | 'path';
+  sourceId?: string | null;
+  absPath?: string;
+  details: PluginDetails;
+}
+
+/**
+ * What every command that installs code says out loud.
+ *
+ * Adding a source is the TRUST decision; syncing is where it takes effect,
+ * because loading a plugin to validate it runs its module body — as the
+ * trawlarr user, with this service's access to the library. That is a
+ * consequence, so it is named rather than left in the documentation.
+ */
+const TRUST_CONSEQUENCE =
+  `Installing a plugin runs its author's code on this machine as the same user trawlarr runs ` +
+  `as: syncing loads each plugin to validate it, and a flow that names one runs the rest of it ` +
+  `with this service's access to your media. Add sources you would trust with your library.`;
+
+/**
+ * The refusal a plugin-source command gets behind a live daemon.
+ *
+ * Specific about WHY it cannot be forwarded: the daemon's
+ * `/plugins/sources*` routes answer 501 in this build, so there is no
+ * request to make on the user's behalf, and opening the database behind the
+ * only writer is the thing that destroys data. `plugin list` and
+ * `plugin show` are named because they DO work, so the user is not left
+ * thinking the whole command group is unavailable.
+ */
+const pluginSourcesNeedTheDatabase = (record: DaemonRecord, what: string): CliError =>
+  new CliError(
+    `${what} while the trawlarr daemon (pid ${String(record.pid)}) owns this data directory. ` +
+      `It holds the database open as the sole writer, and this build's API has no plugin-source ` +
+      `routes yet — /api/v1/plugins/sources answers 501 — so there is nothing to ask it to do ` +
+      `instead, and a second process writing plugin rows there would race it. Stop the daemon ` +
+      `(Ctrl-C, or "systemctl stop trawlarr"), run this again, and start it back up. ` +
+      `"trawlarr plugin list" and "trawlarr plugin show" work against a running daemon.`,
+  );
+
+/** The one `--data-dir` option every plugin command shares. */
+const dataDirOption = {
+  'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
+} as const;
+
+const openPluginRepo = async (dataDir: string) => createPluginRepo(await openDb(dataDir));
+
+/** The same "which sources are there, then" answer wherever a name misses. */
+const unknownPluginSource = (label: string, repo: PluginRepo, name: string): CliError =>
+  new CliError(
+    `${label}: no plugin source "${name}". Known sources: ` +
+      `${repo.listSources().map((source) => source.id).join(', ') || '(none)'}.`, // prettier-ignore
+  );
+
+/** `a ?? throwCli(e)` — an expression, so a fallback can still be a refusal. */
+const throwCli = (error: CliError): never => {
+  throw error;
+};
+
+/** Domain errors from the plugin layer, as this command's own diagnosable failure. */
+const asPluginCliError = <T>(label: string, run: () => T): T => {
+  try {
+    return run();
+  } catch (error) {
+    if (error instanceof PluginIdError || error instanceof PluginRepoError) {
+      throw new CliError(`${label}: ${error.message}`);
+    }
+    throw error;
+  }
+};
+
+const cmdPluginSourceAdd = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      name: { type: 'string' },
+      url: { type: 'string' },
+      path: { type: 'string' },
+      ...dataDirOption,
+    },
+  });
+
+  if (values.name === undefined) throw new CliError('plugin source add: --name is required.');
+
+  const hasUrl = values.url !== undefined && values.url !== '';
+  const hasPath = values.path !== undefined && values.path !== '';
+  if (hasUrl === hasPath) {
+    // Both, or neither. Refused rather than resolved by precedence: an
+    // ignored flag silently gives the user the OTHER one's behaviour, which
+    // is a source pointing somewhere they did not ask for.
+    throw new CliError(
+      `plugin source add: exactly one of --url (an https .tar.gz, for example ` +
+        `https://codeload.github.com/HaveAGitGat/Tdarr_Plugins/tar.gz/master) or --path (a ` +
+        `directory already on this machine) is required.`,
+    );
+  }
+
+  // Before anything is created on disk: a reserved or malformed name is a
+  // typo, and answering it should not leave a data directory behind.
+  asPluginCliError('plugin source add', () => {
+    assertValidSourceSlug(values.name!);
+  });
+
+  if (hasUrl && !values.url!.startsWith('https://')) {
+    throw new CliError(
+      `plugin source add: --url must be an https URL, got "${values.url!}". Plugin code is ` +
+        `executed by this service, so it is only ever fetched over a connection that cannot be ` +
+        `rewritten in transit. Use --path for a directory already on this machine.`,
+    );
+  }
+  if (hasPath && !existsSync(values.path!)) {
+    throw new CliError(
+      `plugin source add: --path "${values.path!}" does not exist on this machine. A source ` +
+        `pointing at nothing would be added happily and then install nothing at every sync.`,
+    );
+  }
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot add a plugin source');
+
+  const repo = await openPluginRepo(values['data-dir']!);
+  const source = asPluginCliError('plugin source add', () =>
+    repo.addSource({
+      id: values.name!,
+      url: hasUrl ? values.url! : resolve(values.path!),
+      // There is exactly one sensible kind per flag, so the user never types one.
+      kind: hasUrl ? 'tarball' : 'local',
+    }),
+  );
+
+  console.log(
+    `Added plugin source "${source.id}" (${source.kind}): ${source.url}. Nothing is installed ` +
+      `yet — run "trawlarr plugin source sync --name ${source.id}" to install its plugins.`,
+  );
+  console.log(`  ${TRUST_CONSEQUENCE}`);
+  return 0;
+};
+
+const cmdPluginSourceList = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({ args: argv, options: { ...dataDirOption } });
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot list plugin sources');
+
+  const repo = await openPluginRepo(values['data-dir']!);
+  const sources = repo.listSources();
+  if (sources.length === 0) {
+    console.log(
+      'No plugin sources. Add one with "trawlarr plugin source add --name <name> --url ' +
+        '<https tarball>" or "--path <directory>"; trawlarr\'s own plugins need no source and ' +
+        'are always available.',
+    );
+    return 0;
+  }
+
+  for (const source of sources) {
+    const installed = repo.listPlugins(source.id).length;
+    // "never" rather than a blank column: a source that has never synced is
+    // the reason its plugins are missing, and that is the answer.
+    const synced =
+      source.lastSyncedAtMs === null
+        ? 'never synced'
+        : `last synced ${new Date(source.lastSyncedAtMs).toISOString()}`;
+    console.log(
+      `${source.id}  (${source.kind}${source.enabled ? '' : ', disabled'})  ${source.url}  ` +
+        `${synced}  ${String(installed)} plugin(s) installed`,
+    );
+  }
+  return 0;
+};
+
+const cmdPluginSourceRemove = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({ args: argv, options: { name: { type: 'string' }, ...dataDirOption } }); // prettier-ignore
+
+  if (values.name === undefined) throw new CliError('plugin source remove: --name is required.');
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot remove a plugin source');
+
+  const repo = await openPluginRepo(values['data-dir']!);
+  const source = repo.getSource(values.name);
+  if (source === null) throw unknownPluginSource('plugin source remove', repo, values.name);
+
+  const plugins = repo.listPlugins(source.id);
+  repo.removeSource(source.id);
+
+  console.log(
+    `Removed plugin source "${source.id}" and the ${String(plugins.length)} plugin(s) it ` +
+      `installed.`,
+  );
+  if (plugins.length > 0) {
+    console.log(
+      `  A flow that still names one of them (for example ${plugins[0]!.id}) now names a plugin ` +
+        `this host cannot resolve: the API answers 404 for it, and every library whose flow uses ` +
+        `it pauses naming that id — exactly as it would have if the plugin had never been ` +
+        `installed. Adding the source back and syncing it clears the pause on its own.`,
+    );
+  }
+  return 0;
+};
+
+const cmdPluginSourceSync = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: { name: { type: 'string' }, all: { type: 'boolean', default: false }, ...dataDirOption }, // prettier-ignore
+  });
+  if (values.name === undefined && values.all !== true) {
+    throw new CliError('plugin source sync: --name <source> or --all is required.');
+  }
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot sync a plugin source');
+
+  const dataDir = resolve(values['data-dir']!);
+  const repo = await openPluginRepo(dataDir);
+
+  const targets =
+    values.all === true
+      ? repo.listSources().filter((source) => source.enabled)
+      : [repo.getSource(values.name!) ?? throwCli(unknownPluginSource('plugin source sync', repo, values.name!))]; // prettier-ignore
+
+  if (targets.length === 0) {
+    console.log('No enabled plugin sources to sync. Add one with "trawlarr plugin source add".');
+    return 0;
+  }
+
+  console.log(TRUST_CONSEQUENCE);
+  for (const target of targets) {
+    const report = await syncSource({
+      repo,
+      sourceId: target.id,
+      // A tarball source's extracted tree IS the installed plugin, so it lives
+      // permanently under the data directory, not in a temp dir a reboot clears.
+      cacheDir: join(dataDir, 'plugins'),
+      nowMs: () => Date.now(),
+    });
+    console.log(
+      `Synced "${target.id}" (${target.kind}): ${String(report.installed)} plugin(s) installed, ` +
+        `${String(report.skipped.length)} skipped.`,
+    );
+    for (const skip of report.skipped) {
+      // Printed individually: a source where half the plugins failed to load
+      // must not look like a source where they never existed.
+      console.log(`  skipped ${skip.relPath}: ${skip.reason}`);
+    }
+  }
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
+// plugin list / show
+// ---------------------------------------------------------------------------
+
+const firstPartyResources = (): PluginResource[] =>
+  Object.values(FIRST_PARTY_PLUGINS).map((entry) => {
+    const details = entry.module.details();
+    return {
+      id: entry.id,
+      name: details.name,
+      description: details.description,
+      version: '1.0.0',
+      source: 'first-party' as const,
+      details,
+    };
+  });
+
+const installedResources = (repo: PluginRepo, sourceId?: string): PluginResource[] =>
+  repo.listPlugins(sourceId).map((row) => ({
+    id: row.id,
+    name: row.details.name,
+    description: row.details.description,
+    version: row.version,
+    source: 'installed' as const,
+    sourceId: row.sourceId,
+    absPath: row.absPath,
+    details: row.details,
+  }));
+
+const renderPluginRow = (plugin: PluginResource): void => {
+  const origin =
+    plugin.source === 'first-party'
+      ? 'first-party'
+      : plugin.source === 'path'
+        ? 'path'
+        : `from source "${plugin.sourceId ?? '?'}"`;
+  console.log(`  ${plugin.id.padEnd(40)} ${plugin.name}  (${origin})`);
+};
+
+const cmdPluginList = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: { source: { type: 'string' }, ...dataDirOption },
+  });
+
+  let firstParty: PluginResource[];
+  let installed: PluginResource[];
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    // Reading plugins IS served by the daemon, so this command works while
+    // one runs — unlike the source commands above.
+    let all: PluginResource[];
+    try {
+      all = await createCliClient(record).get<PluginResource[]>('/plugins');
+    } catch (error) {
+      return asCliError(error, 'plugin list');
+    }
+    firstParty = all.filter((plugin) => plugin.source === 'first-party');
+    installed = all.filter(
+      (plugin) =>
+        plugin.source === 'installed' &&
+        (values.source === undefined || plugin.sourceId === values.source),
+    );
+    if (values.source !== undefined && installed.length === 0) {
+      const known = [
+        ...new Set(
+          all
+            .filter((plugin) => plugin.source === 'installed')
+            .map((plugin) => plugin.sourceId ?? '?'),
+        ),
+      ];
+      throw new CliError(
+        `plugin list: no plugins installed from source "${values.source}". Sources with ` +
+          `installed plugins: ${known.join(', ') || '(none)'}.`,
+      );
+    }
+  } else {
+    const repo = await openPluginRepo(values['data-dir']!);
+    if (values.source !== undefined && repo.getSource(values.source) === null) {
+      throw unknownPluginSource('plugin list', repo, values.source);
+    }
+    firstParty = values.source === undefined ? firstPartyResources() : [];
+    installed = installedResources(repo, values.source);
+  }
+
+  if (firstParty.length > 0) {
+    console.log("trawlarr's own plugins:");
+    for (const plugin of firstParty) renderPluginRow(plugin);
+  }
+  if (installed.length > 0) {
+    console.log('Installed from a plugin source:');
+    for (const plugin of installed) renderPluginRow(plugin);
+  } else if (values.source === undefined) {
+    console.log(
+      'No plugins installed from a source yet. "trawlarr plugin source add" then ' +
+        '"trawlarr plugin source sync" installs some.',
+    );
+  }
+  console.log(
+    `${String(firstParty.length)} first-party, ${String(installed.length)} installed. ` +
+      `Name one in a flow node by its id.`,
+  );
+  return 0;
+};
+
+/** A tooltip is free-form and often a paragraph; one line is what a list can show. */
+const firstLine = (text: string | undefined): string =>
+  (text ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line !== '') ?? '';
+
+const renderPluginDetails = (plugin: PluginResource): void => {
+  const details = plugin.details;
+  console.log(`${plugin.id}  —  ${plugin.name}  (version ${plugin.version})`);
+  console.log(
+    plugin.source === 'installed'
+      ? `  installed from source "${plugin.sourceId ?? '?'}"${plugin.absPath === undefined ? '' : `: ${plugin.absPath}`}` // prettier-ignore
+      : plugin.source === 'path'
+        ? `  loaded by path: ${plugin.absPath ?? plugin.id}`
+        : "  one of trawlarr's own plugins",
+  );
+  if (firstLine(details.description) !== '') console.log(`  ${firstLine(details.description)}`);
+
+  const inputs = Array.isArray(details.inputs) ? details.inputs : [];
+  console.log(`  Inputs (${String(inputs.length)}):`);
+  for (const input of inputs) {
+    // The default is shown because a flow that omits an input gets it, and
+    // "what happens if I leave this alone" is the question this answers.
+    console.log(
+      `    ${input.name}  (${input.type}, default ${JSON.stringify(input.defaultValue)})` +
+        `${input.label === input.name || input.label === '' ? '' : ` — ${input.label}`}`,
+    );
+    if (firstLine(input.tooltip) !== '') console.log(`      ${firstLine(input.tooltip)}`);
+  }
+
+  const outputs = Array.isArray(details.outputs) ? details.outputs : [];
+  console.log(`  Outputs (${String(outputs.length)}):`);
+  for (const output of outputs) {
+    // The output NUMBER is what an edge names, so it leads the line.
+    console.log(
+      `    ${String(output.number)}  ${firstLine(output.tooltip)}` +
+        `${output.outcome === undefined ? '' : `  [${output.outcome}]`}`,
+    );
+  }
+};
+
+const cmdPluginShow = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: { id: { type: 'string' }, ...dataDirOption },
+  });
+  if (values.id === undefined) {
+    throw new CliError(
+      'plugin show: --id is required. Ids come from "trawlarr plugin list" — for example ' +
+        '"trawlarr:execute" or "tdarr:ffmpegCommandSetContainer".',
+    );
+  }
+  const id = values.id;
+
+  const notFound = (): CliError =>
+    new CliError(
+      `plugin show: no plugin "${id}" is installed here, and it is not a path this host can ` +
+        `load. First-party ids look like "trawlarr:execute"; an installed one looks like ` +
+        `"tdarr:ffmpegCommandSetContainer" and needs its source added and synced; a community ` +
+        `plugin with no source is named by its absolute path.`,
+    );
+
+  const record = await resolveDaemon(values['data-dir']!);
+  if (record !== null) {
+    try {
+      renderPluginDetails(
+        await createCliClient(record).get<PluginResource>(`/plugins/${encodeURIComponent(id)}`),
+      );
+      return 0;
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 404) throw notFound();
+      return asCliError(error, 'plugin show');
+    }
+  }
+
+  const firstParty = firstPartyResources().find((plugin) => plugin.id === id);
+  if (firstParty !== undefined) {
+    renderPluginDetails(firstParty);
+    return 0;
+  }
+
+  const repo = await openPluginRepo(values['data-dir']!);
+  const installed = installedResources(repo).find((plugin) => plugin.id === id);
+  if (installed !== undefined) {
+    renderPluginDetails(installed);
+    return 0;
+  }
+
+  // An absolute path is still how a community plugin is named without a
+  // source, so answering "not found" for one that loads fine would be wrong.
+  try {
+    const loaded = createPluginLoader().load(id);
+    renderPluginDetails({
+      id: loaded.id,
+      name: loaded.details.name,
+      description: loaded.details.description,
+      version: loaded.version,
+      source: 'path',
+      absPath: loaded.absPath,
+      details: loaded.details,
+    });
+    return 0;
+  } catch {
+    throw notFound();
+  }
+};
+
+const cmdPluginSource = async (argv: string[]): Promise<number> => {
+  const [sub, ...rest] = argv;
+  if (sub === 'add') return cmdPluginSourceAdd(rest);
+  if (sub === 'list') return cmdPluginSourceList(rest);
+  if (sub === 'remove') return cmdPluginSourceRemove(rest);
+  if (sub === 'sync') return cmdPluginSourceSync(rest);
+  throw new CliError(
+    `Unknown command: "plugin source ${sub ?? ''}". Expected one of: add, list, remove, sync.`,
+  );
+};
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -1508,6 +1997,12 @@ const USAGE = `Usage:
   trawlarr status [--library <name>] [--files] [--state <state>] [--missing]
   trawlarr requeue --file <id> [--file <id>...]
   trawlarr requeue --library <name> --state <state>
+  trawlarr plugin source add --name <name> (--url <https .tar.gz> | --path <dir>)
+  trawlarr plugin source list
+  trawlarr plugin source sync (--name <name> | --all)
+  trawlarr plugin source remove --name <name>
+  trawlarr plugin list [--source <name>]
+  trawlarr plugin show --id <plugin id>
   trawlarr trash purge [--library <name>] [--days <n>] [--dry-run]
   trawlarr reap [--library <name>] [--stale-after-hours <n>] [--dry-run]
   trawlarr forget --missing [--library <name>] [--include-terminal] [--dry-run]
@@ -1516,6 +2011,8 @@ const USAGE = `Usage:
 Flow templates: transcode-hevc
   e.g. trawlarr flow add --name Movies --template transcode-hevc \
          --set encoder=hevc_nvenc --set quality=22
+
+Installing a plugin runs its author's code as the user trawlarr runs as.
 
 All commands accept --data-dir <path> (default ./trawlarr-data).
 While a daemon owns that directory, every command talks to it over its API
@@ -1545,6 +2042,13 @@ const dispatch = async (argv: string[]): Promise<number> => {
     const [sub, ...subRest] = rest;
     if (sub === 'add') return cmdFlowAdd(subRest);
     throw new CliError(`Unknown command: "flow ${sub ?? ''}".\n\n${USAGE}`);
+  }
+  if (cmd === 'plugin') {
+    const [sub, ...subRest] = rest;
+    if (sub === 'source') return cmdPluginSource(subRest);
+    if (sub === 'list') return cmdPluginList(subRest);
+    if (sub === 'show') return cmdPluginShow(subRest);
+    throw new CliError(`Unknown command: "plugin ${sub ?? ''}".\n\n${USAGE}`);
   }
   if (cmd === 'trash') {
     const [sub, ...subRest] = rest;

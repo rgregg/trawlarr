@@ -1,5 +1,5 @@
 import { createServer, request as httpRequest, type Server } from 'node:http';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -406,5 +406,103 @@ describe('cli routing', () => {
     expect(await main(['scan', '--library', 'Shows', '--data-dir', dataDir])).toBe(1);
     expect(stderr()).toContain('has no flow attached');
     expect(daemon.port).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// plugin commands, behind a live daemon
+// ---------------------------------------------------------------------------
+
+/** The `<name>/<version>/index.js` layout a plugin source is discovered by. */
+const writePluginTree = (): string => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-client-plugins-'));
+  const dir = join(root, 'p', 'myPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'index.js'),
+    `
+exports.details = () => ({
+  name: 'Fixture Plugin',
+  description: 'x',
+  style: { borderColor: '#fff' },
+  tags: '',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: args.inputFileObj._id },
+  variables: args.variables,
+});
+`,
+    'utf8',
+  );
+  return root;
+};
+
+describe('cli routing: plugin', () => {
+  it('lists plugins through the daemon rather than opening the database', async () => {
+    const { dataDir } = seed();
+    // Installed BEFORE the daemon starts, which is the only way to install
+    // anything in this build — see the source commands below.
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', writePluginTree(), '--data-dir', dataDir]); // prettier-ignore
+    await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
+
+    const daemon = await startDaemonFor(dataDir);
+    const recorder = await recordApiCalls(daemon.port);
+    recorders.push(recorder);
+    routeThroughRecorder(dataDir, recorder.port);
+    logSpy.mockClear();
+
+    expect(await main(['plugin', 'list', '--data-dir', dataDir])).toBe(0);
+    // The proof of transport: no assertion on the text could tell this from
+    // the CLI opening the database the daemon holds.
+    expect(recorder.calls.map((call) => call.path)).toContain('/api/v1/plugins');
+    expect(stdout()).toContain('fx:myPlugin');
+    expect(stdout()).toContain('trawlarr:execute');
+  });
+
+  it('shows one plugin through the daemon, id-encoded for the path', async () => {
+    const { dataDir } = seed();
+    const daemon = await startDaemonFor(dataDir);
+    const recorder = await recordApiCalls(daemon.port);
+    recorders.push(recorder);
+    routeThroughRecorder(dataDir, recorder.port);
+    logSpy.mockClear();
+
+    expect(await main(['plugin', 'show', '--id', 'trawlarr:execute', '--data-dir', dataDir])).toBe(0); // prettier-ignore
+    expect(recorder.calls.map((call) => call.path)).toContain('/api/v1/plugins/trawlarr%3Aexecute');
+    expect(stdout()).toContain('Outputs (');
+  });
+
+  it('refuses every plugin-source command while a daemon owns the directory, saying why', async () => {
+    const { dataDir } = seed();
+    await startDaemonFor(dataDir);
+    const tree = writePluginTree();
+
+    for (const argv of [
+      ['plugin', 'source', 'add', '--name', 'fx2', '--path', tree],
+      ['plugin', 'source', 'list'],
+      ['plugin', 'source', 'sync', '--all'],
+      ['plugin', 'source', 'remove', '--name', 'fx2'],
+    ]) {
+      errorSpy.mockClear();
+      expect(await main([...argv, '--data-dir', dataDir])).toBe(1);
+      // Named, not obscure: the pid that owns the directory, and the fact
+      // that the API has no route to forward this to yet.
+      expect(stderr()).toContain(String(process.pid));
+      expect(stderr()).toContain('/api/v1/plugins/sources answers 501');
+      expect(stderr()).toContain('Stop the daemon');
+    }
+
+    // And it really did not write: no source row appeared behind the daemon.
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM plugin_source').get()).toEqual({ n: 0 });
+    db.close();
   });
 });

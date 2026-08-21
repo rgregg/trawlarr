@@ -11,7 +11,6 @@ import { createMediaFileRepo } from '../src/db/media-file-repo.js';
 import { createPluginRepo } from '../src/plugins/plugin-repo.js';
 import { checkAllLibraries } from '../src/daemon/library-health.js';
 import { createEventBus } from '../src/daemon/events.js';
-import { syncSource } from '../src/plugins/sync-source.js';
 import { ffmpegAvailableSync } from '../../../test-support/tool-availability.js';
 import { CORPUS_DIR, corpusAvailable } from '../../engine/test/compat/corpus.js';
 
@@ -111,31 +110,6 @@ const remuxFlow = {
   ],
 };
 
-/**
- * Installs the corpus as a LOCAL plugin source, through the real
- * `syncSource` — discovery, load-time validation and all.
- *
- * Done in-process rather than through `trawlarr plugin source add` because
- * that CLI surface is Task 8's; the code path underneath is the same one it
- * will call, and everything downstream of it here is the real CLI.
- */
-const installCorpusAsSource = async (dataDir: string): Promise<number> => {
-  const db = openStateDb(dataDir);
-  try {
-    const repo = createPluginRepo(db);
-    repo.addSource({ id: 'tdarr', url: CORPUS_DIR, kind: 'local' });
-    const report = await syncSource({
-      repo,
-      sourceId: 'tdarr',
-      cacheDir: join(dataDir, 'plugin-cache'),
-      nowMs: () => Date.now(),
-    });
-    return report.installed;
-  } finally {
-    db.close();
-  }
-};
-
 describe.runIf(available)('installing a community plugin and running it', () => {
   beforeAll(() => {
     assertBuiltCliIsFresh();
@@ -173,12 +147,19 @@ describe.runIf(available)('installing a community plugin and running it', () => 
     await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
 
     // The corpus IS a local plugin source — no network, and the same tree
-    // the compat suites run against.
-    const installed = await installCorpusAsSource(dataDir);
-    expect(installed).toBeGreaterThan(0);
+    // the compat suites run against. Added and synced through the REAL CLI,
+    // so this suite walks exactly the path a user walks: two commands, then
+    // a flow that names one of the plugins they installed.
+    await runCli(['plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'sync', '--name', 'tdarr', '--data-dir', dataDir]);
     {
       const db = openStateDb(dataDir);
-      const row = createPluginRepo(db).getPlugin('tdarr:ffmpegCommandSetContainer');
+      const repo = createPluginRepo(db);
+      // Rows, not the CLI's own summary line: the source is stored and the
+      // plugin the flow below names is installed, with its file on disk.
+      expect(repo.listSources().map((source) => source.id)).toEqual(['tdarr']);
+      expect(repo.listPlugins('tdarr').length).toBeGreaterThan(0);
+      const row = repo.getPlugin('tdarr:ffmpegCommandSetContainer');
       expect(row).not.toBeNull();
       expect(existsSync(row!.absPath)).toBe(true);
       db.close();
