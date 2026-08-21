@@ -1,3 +1,5 @@
+import { stat as statPath } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import { basename, dirname, extname } from 'node:path';
 import {
   computeSignature,
@@ -6,6 +8,7 @@ import {
   matchIdentity,
   newLedgerRecord,
   type LedgerRecord,
+  type PartialHashParts,
 } from '@trawlarr/core';
 import { walkFiles } from '../fs/walk.js';
 import { reconcileMissing } from './reconcile.js';
@@ -82,12 +85,52 @@ export interface ScanLibraryInput {
    * production sets it.
    */
   onTransactionCommitted?: (rows: number, elapsedMs: number) => void;
+  /**
+   * Seam for tests: how a walked file's partial hash is taken. Defaults to
+   * the real `partialHashFile`; production code never sets it.
+   *
+   * It exists because the window this scanner's in-flight guard is about
+   * lives INSIDE this call. The walk stats a file, this hash reads its
+   * bytes, and only then does the scan consult the database — so a
+   * replacement that lands, is probed, and is RECORDED while these bytes
+   * are being read leaves the scan holding an identity that describes a
+   * file which no longer exists at that path, and a database in which no
+   * row is `running` any more. There is no other point in the loop where a
+   * test can stand, because everything from the hash to the insert is one
+   * synchronous block; and a test that merely runs a scan and a job
+   * concurrently and hopes for that interleaving passes against broken code
+   * almost every time (see the P2 prerequisites note on concurrency tests).
+   */
+  hashFile?: (path: string) => Promise<PartialHashParts>;
 }
 
 /** States a scan must never touch: terminal or already mid-flight. */
 const NEVER_REQUEUE_STATES = new Set(['failed', 'not_converging', 'running']);
 
 const stemOf = (path: string): string => basename(path).replace(/\.[^.]*$/, '');
+
+/**
+ * Is `b` still the file `a` described?
+ *
+ * Device and inode are the whole answer for a replacement: `Replace Original
+ * File` links or renames a staged file into place and never writes through
+ * the original, so a swap ALWAYS lands as a new inode. Size and mtime are
+ * carried too, for the other thing that invalidates an observation — a file
+ * still being written to.
+ */
+const sameFile = (a: Stats, b: Stats): boolean =>
+  a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+
+/**
+ * How many times an observation that changed underneath the scan is retaken
+ * before the scan settles for the last one it got.
+ *
+ * A replacement lands once, so the retake after it succeeds. A file being
+ * actively written changes without limit, and that is what the bound is for:
+ * the last observation is then used exactly as it was before this loop
+ * existed, rather than the scan spinning on a download.
+ */
+const OBSERVE_ATTEMPTS = 3;
 
 /**
  * Is `candidate` a file some in-flight run is entitled to be producing right
@@ -130,6 +173,20 @@ const stemOf = (path: string): string => basename(path).replace(/\.[^.]*$/, '');
  * disk, so any file a scanner can SEE inside the window is covered by a
  * `running` row the scanner can already read — in this process or another
  * one against the same WAL database.
+ *
+ * That argument has a PRECONDITION, and stating it is the point of
+ * `observeFile`: the identity being guarded has to be true of the file that
+ * is at the path NOW. A scan observes a file with two reads — the walk's
+ * `stat` and the partial hash of its bytes — and consults the database only
+ * after both. If a run lands its replacement, probes it and RECORDS it
+ * (`updateAfterRun` plus the ledger transition) while those bytes are being
+ * read, then the identity the scan is holding is the original's, which no
+ * row claims any more, and no row is `running` either — so this guard has
+ * nothing to match and the scan inserts a ghost row from the far side of
+ * the same window. Freshness of `listRunningPaths` cannot help: it is fresh
+ * and correct, and the thing that is stale is the identity. `observeFile`
+ * is what makes the observation current; this guard is only sound on top of
+ * it.
  */
 const isInFlightOutput = (runningPath: string, candidate: string): boolean =>
   dirname(runningPath) === dirname(candidate) && stemOf(runningPath) === stemOf(candidate);
@@ -148,6 +205,39 @@ const isInFlightOutput = (runningPath: string, candidate: string): boolean =>
  */
 export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary> => {
   const { db, libraryId, ffprobePath, nowMs, onProgress } = input;
+  const hashFile = input.hashFile ?? partialHashFile;
+
+  /**
+   * One walked file, observed: the stat and the partial hash that together
+   * make up its identity, taken from the SAME file rather than from two
+   * moments that a replacement landed between.
+   *
+   * The confirming stat is deliberately the last thing this does. Everything
+   * from here to `upsertScanned` is one synchronous block — no `await`, and
+   * `better-sqlite3` is synchronous — so in this process nothing can run
+   * between confirming the observation and acting on it: not the report of a
+   * forked worker arriving over IPC, not a timer, not another scan. The
+   * identity the guard below is handed is therefore the file that is at that
+   * path, which is the precondition the guard's whole argument rests on.
+   *
+   * Across processes (`trawlarr scan` beside a daemon, the normal
+   * deployment) the residue is what a separate writer can commit inside that
+   * synchronous block — microseconds of sqlite reads, rather than the whole
+   * of a 128KB hash's IO, which is where the window used to be.
+   */
+  const observeFile = async (entry: {
+    path: string;
+    stat: Stats;
+  }): Promise<{ stat: Stats; hash: PartialHashParts }> => {
+    let stat = entry.stat;
+    for (let attempt = 1; ; attempt += 1) {
+      const hash = await hashFile(entry.path);
+      if (attempt >= OBSERVE_ATTEMPTS) return { stat, hash };
+      const after = await statPath(entry.path);
+      if (sameFile(stat, after)) return { stat: after, hash };
+      stat = after;
+    }
+  };
 
   const library = createLibraryRepo(db).getById(libraryId);
   if (library === null) throw new Error(`Unknown library: ${libraryId}`);
@@ -291,17 +381,18 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     summary.seen += 1;
     onProgress?.(summary.seen);
 
-    let hash;
+    let observed;
     try {
-      hash = await partialHashFile(entry.path);
+      observed = await observeFile(entry);
     } catch {
       summary.unreadable += 1;
       continue;
     }
+    const { stat, hash } = observed;
 
-    const identity = identityFromStat({ stat: entry.stat, hash });
+    const identity = identityFromStat({ stat, hash });
     const container = extname(entry.path).replace('.', '').toLowerCase();
-    const nlink = entry.stat.nlink;
+    const nlink = stat.nlink;
 
     const lookup = mediaFileRepo.identityLookup(libraryId);
     const match = matchIdentity(identity, lookup);
@@ -343,9 +434,9 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
         identity,
         path: entry.path,
         nlink,
-        sizeBytes: entry.stat.size,
-        mtimeMs: entry.stat.mtimeMs,
-        ctimeMs: entry.stat.ctimeMs,
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
         container,
         nowMs: nowMs(),
       });
@@ -391,13 +482,13 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       // forever — permanently capping the library's convergence
       // percentage, with its only diagnostic long scrolled past.
       existingBeforeUpsert.probe_json === null ||
-      existingBeforeUpsert.size_bytes !== entry.stat.size ||
-      existingBeforeUpsert.mtime_ms !== entry.stat.mtimeMs;
+      existingBeforeUpsert.size_bytes !== stat.size ||
+      existingBeforeUpsert.mtime_ms !== stat.mtimeMs;
 
     const settled: Probed = {
       fileId,
       container,
-      sizeBytes: entry.stat.size,
+      sizeBytes: stat.size,
       facts: null,
       probe: null,
     };
@@ -407,7 +498,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       try {
         const probe = await probeFile({ ffprobePath, path: entry.path });
         settled.probe = probe;
-        settled.facts = extractFacts({ probe, container, sizeBytes: entry.stat.size });
+        settled.facts = extractFacts({ probe, container, sizeBytes: stat.size });
       } catch (err) {
         if (!(err instanceof ProbeError)) throw err;
         summary.unreadable += 1;
