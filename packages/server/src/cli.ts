@@ -341,6 +341,55 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
 // flow add
 // ---------------------------------------------------------------------------
 
+/**
+ * The plugin source name a template's community ids will be prefixed with:
+ * whatever `--set pluginSource=` chose, else the template's own default.
+ */
+const templatePluginSource = (
+  template: (typeof FLOW_TEMPLATES)[number],
+  templateValues: Record<string, string>,
+): string => {
+  const given = templateValues.pluginSource;
+  if (given !== undefined && given !== '') return given;
+  return (
+    template.parameters.find((parameter) => parameter.name === 'pluginSource')?.defaultValue ?? ''
+  );
+};
+
+/**
+ * Refuse a template whose community plugins are not installed, rather than
+ * storing a flow that will fail per-file later.
+ *
+ * Flow validation treats a plugin it cannot resolve as UNKNOWN, not wrong —
+ * deliberately, because a flow may name a plugin this host has not synced
+ * yet. So a `conform-library` flow built before `plugin source sync` would
+ * validate, store, attach to a library, and then fail three attempts per file
+ * with an error naming the FILE. Naming the missing plugin here, before
+ * anything is written, is the only place a user can act on it.
+ */
+const assertRequiredPluginsInstalled = (input: {
+  template: (typeof FLOW_TEMPLATES)[number];
+  templateValues: Record<string, string>;
+  installedIds: readonly string[];
+}): void => {
+  const source = templatePluginSource(input.template, input.templateValues);
+  const installed = new Set(input.installedIds);
+  const missing = input.template.requiredPlugins
+    .map((name) => (source === '' ? name : `${source}:${name}`))
+    .filter((id) => !installed.has(id));
+  if (missing.length === 0) return;
+  throw new CliError(
+    `flow add: template "${input.template.id}" needs plugin(s) ` +
+      `${missing.map((id) => `"${id}"`).join(', ')} which are not installed. Add and sync a ` +
+      `plugin source first:\n` +
+      `  trawlarr plugin source add --name ${source} --url ` +
+      `https://codeload.github.com/HaveAGitGat/Tdarr_Plugins/tar.gz/master\n` +
+      `  trawlarr plugin source sync --name ${source}\n` +
+      `Nothing was stored: a flow naming a plugin this host cannot resolve still validates, ` +
+      `so it would have been accepted and then failed on every file.`,
+  );
+};
+
 const cmdFlowAdd = async (args: string[]): Promise<number> => {
   const { values } = parseArgs({
     args,
@@ -388,6 +437,7 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
   // A parameter name the template does not have is a typo that would
   // otherwise be accepted in silence and produce the DEFAULT flow — which
   // validates, stores, runs, and does the wrong thing to a library.
+  let chosenTemplate: (typeof FLOW_TEMPLATES)[number] | undefined;
   if (values.template !== undefined) {
     const template = FLOW_TEMPLATES.find((candidate) => candidate.id === values.template);
     if (template === undefined) {
@@ -406,6 +456,7 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
           `a typo in it would have been ignored and the template's default used instead.`,
       );
     }
+    chosenTemplate = template;
   }
 
   const source =
@@ -438,6 +489,16 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
         null,
       name: values.name,
     });
+    // The daemon owns the database, so the installed set is read through the
+    // API it serves rather than by opening its file underneath it.
+    if (chosenTemplate !== undefined && chosenTemplate.requiredPlugins.length > 0) {
+      const plugins = await client.get<{ id: string }[]>('/plugins');
+      assertRequiredPluginsInstalled({
+        template: chosenTemplate,
+        templateValues,
+        installedIds: plugins.map((plugin) => plugin.id),
+      });
+    }
     try {
       // The daemon is the only writer, so the TEMPLATE travels rather than the
       // definition it produced: the flow stored is the one that daemon's own
@@ -467,6 +528,15 @@ const cmdFlowAdd = async (args: string[]): Promise<number> => {
     existing: createFlowRepo(db).getByName(values.name),
     name: values.name,
   });
+  if (chosenTemplate !== undefined && chosenTemplate.requiredPlugins.length > 0) {
+    assertRequiredPluginsInstalled({
+      template: chosenTemplate,
+      templateValues,
+      installedIds: createPluginRepo(db)
+        .listPlugins()
+        .map((plugin) => plugin.id),
+    });
+  }
 
   // Validation lives in the repo (so nothing can write round it), but the
   // message a user sees belongs here: a FlowValidationError carries one
@@ -2008,9 +2078,11 @@ const USAGE = `Usage:
   trawlarr forget --missing [--library <name>] [--include-terminal] [--dry-run]
   trawlarr forget --file <id> [--file <id>...] [--dry-run]
 
-Flow templates: transcode-hevc
+Flow templates: transcode-hevc, conform-library
   e.g. trawlarr flow add --name Movies --template transcode-hevc \
          --set encoder=hevc_nvenc --set quality=22
+  conform-library also remuxes, guarantees a stereo AAC track and filters
+  audio languages; it needs a synced plugin source and says which plugins.
 
 Installing a plugin runs its author's code as the user trawlarr runs as.
 

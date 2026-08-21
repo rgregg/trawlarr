@@ -1,0 +1,154 @@
+{
+  "nodes": [
+    {
+      "id": "start",
+      "pluginId": "trawlarr:start",
+      "pluginVersion": "1.0.0",
+      "inputs": {}
+    },
+    {
+      "id": "begin",
+      "pluginId": "trawlarr:beginCommand",
+      "pluginVersion": "1.0.0",
+      "inputs": {}
+    },
+    {
+      "id": "container",
+      "pluginId": "tdarr:ffmpegCommandSetContainer",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "container": "mkv",
+        "forceConform": "false"
+      }
+    },
+    {
+      "id": "check",
+      "pluginId": "trawlarr:checkVideoCodec",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "codec": "hevc"
+      }
+    },
+    {
+      "id": "encoder",
+      "pluginId": "trawlarr:setVideoEncoder",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "encoder": "libx265",
+        "quality": "23"
+      }
+    },
+    {
+      "id": "muxqueue",
+      "pluginId": "tdarr:ffmpegCommandCustomArguments",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "inputArguments": "",
+        "outputArguments": "-max_muxing_queue_size 2048"
+      }
+    },
+    {
+      "id": "audio",
+      "pluginId": "tdarr:ffmpegCommandEnsureAudioStream",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "audioEncoder": "aac",
+        "language": "eng",
+        "channels": "2"
+      }
+    },
+    {
+      "id": "language",
+      "pluginId": "tdarr:ffmpegCommandRemoveStreamByProperty",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "codecType": "audio",
+        "propertyToCheck": "tags.language",
+        "valuesToRemove": "eng",
+        "condition": "not_includes"
+      }
+    },
+    {
+      "id": "execute",
+      "pluginId": "trawlarr:execute",
+      "pluginVersion": "1.0.0",
+      "inputs": {}
+    },
+    {
+      "id": "verify",
+      "pluginId": "trawlarr:verifyOutput",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "durationToleranceSeconds": "1",
+        "minSizeRatio": "0.05",
+        "requireAudioIfOriginalHadAudio": "true"
+      }
+    },
+    {
+      "id": "replace",
+      "pluginId": "trawlarr:replaceOriginal",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "trashRetentionDays": "14",
+        "allowCrossDevice": "true"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "fromNodeId": "start",
+      "outputNumber": 1,
+      "toNodeId": "begin"
+    },
+    {
+      "fromNodeId": "begin",
+      "outputNumber": 1,
+      "toNodeId": "container"
+    },
+    {
+      "fromNodeId": "container",
+      "outputNumber": 1,
+      "toNodeId": "check"
+    },
+    {
+      "fromNodeId": "check",
+      "outputNumber": 1,
+      "toNodeId": "muxqueue"
+    },
+    {
+      "fromNodeId": "check",
+      "outputNumber": 2,
+      "toNodeId": "encoder"
+    },
+    {
+      "fromNodeId": "encoder",
+      "outputNumber": 1,
+      "toNodeId": "muxqueue"
+    },
+    {
+      "fromNodeId": "muxqueue",
+      "outputNumber": 1,
+      "toNodeId": "audio"
+    },
+    {
+      "fromNodeId": "audio",
+      "outputNumber": 1,
+      "toNodeId": "language"
+    },
+    {
+      "fromNodeId": "language",
+      "outputNumber": 1,
+      "toNodeId": "execute"
+    },
+    {
+      "fromNodeId": "execute",
+      "outputNumber": 1,
+      "toNodeId": "verify"
+    },
+    {
+      "fromNodeId": "verify",
+      "outputNumber": 1,
+      "toNodeId": "replace"
+    }
+  ]
+}

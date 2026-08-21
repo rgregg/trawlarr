@@ -7,6 +7,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../src/db/connection.js';
 import { migrate } from '../src/db/migrate.js';
 import { createLibraryRepo } from '../src/db/library-repo.js';
+import { createFlowRepo } from '../src/db/flow-repo.js';
 import { createMediaFileRepo } from '../src/db/media-file-repo.js';
 import { isKnownGood } from '@trawlarr/core';
 import { createPluginRepo } from '../src/plugins/plugin-repo.js';
@@ -124,6 +125,32 @@ const failFlowFlow = {
     { id: 'bail', pluginId: 'tdarr:failFlow', pluginVersion: '1.0.0', inputs: {} },
   ],
   edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'bail' }],
+};
+
+/** Every stream ffprobe reports, with the fields these assertions read. */
+const streamsOf = async (
+  path: string,
+): Promise<
+  { codec_type: string; codec_name: string; channels?: number; tags?: { language?: string } }[]
+> => {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'error',
+    '-show_streams',
+    '-of',
+    'json',
+    path,
+  ]);
+  return (
+    JSON.parse(stdout) as {
+      streams: {
+        codec_type: string;
+        codec_name: string;
+        channels?: number;
+        tags?: { language?: string };
+      }[];
+    }
+  ).streams;
 };
 
 /** A 1s test file, enough for the scanner and ffprobe to have something real. */
@@ -263,6 +290,128 @@ describe.runIf(available)('installing a community plugin and running it', () => 
       db.close();
     }
   }, 300_000);
+
+  /**
+   * The owner's real Unmanic pipeline, as the `conform-library` template, run
+   * end to end through the REAL CLI against REAL ffmpeg — in its libx265
+   * form, because this machine has no NVIDIA card and the `hevc_nvenc` form
+   * shipped beside it can only be proven on his.
+   *
+   * It also pins the ONE place the template is not literal Unmanic parity:
+   * `Ensure Audio Stream` ADDS a stereo AAC track, it does not CONVERT the
+   * 5.1 one. The 6-channel track surviving next to the new 2-channel one is
+   * that difference, asserted rather than described.
+   */
+  it('conforms a real file: mp4 to mkv, h264 to hevc, stereo AAC added, non-English audio dropped', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-conform-e2e-'));
+    const libraryDir = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryDir, { recursive: true });
+    const mediaPath = join(libraryDir, 'Movie.mp4');
+
+    // h264 in mp4, with 5.1 AAC tagged eng and stereo AAC tagged jpn: one
+    // file that needs every node in the flow to do something.
+    await execFileAsync('ffmpeg', [
+      '-hide_banner', '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=10',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+      '-f', 'lavfi', '-i', 'sine=frequency=880:duration=2',
+      '-map', '0:v', '-map', '1:a', '-map', '2:a',
+      '-c:v', 'libx264', '-preset', 'ultrafast',
+      '-c:a', 'aac', '-ac:a:0', '6', '-ac:a:1', '2',
+      '-metadata:s:a:0', 'language=eng', '-metadata:s:a:1', 'language=jpn',
+      mediaPath,
+    ]); // prettier-ignore
+
+    const videoCodecs = (streams: Awaited<ReturnType<typeof streamsOf>>) =>
+      streams.filter((s) => s.codec_type === 'video').map((s) => s.codec_name);
+    const audioTracks = (streams: Awaited<ReturnType<typeof streamsOf>>) =>
+      streams
+        .filter((s) => s.codec_type === 'audio')
+        .map((s) => [s.codec_name, s.channels, s.tags?.language]);
+
+    const before = await streamsOf(mediaPath);
+    expect(videoCodecs(before)).toEqual(['h264']);
+    expect(audioTracks(before)).toEqual([
+      ['aac', 6, 'eng'],
+      ['aac', 2, 'jpn'],
+    ]);
+
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'sync', '--name', 'tdarr', '--data-dir', dataDir]);
+
+    // The template, through the CLI, with only the two settings that differ
+    // from his: libx265 in place of hevc_nvenc, and no preset (a preset name
+    // is encoder-specific and the template leaves it unset for that reason).
+    await runCli([
+      'flow', 'add', '--name', 'Conform', '--template', 'conform-library',
+      '--set', 'encoder=libx265', '--set', 'quality=23',
+      '--data-dir', dataDir,
+    ]); // prettier-ignore
+    await runCli(['library', 'set-flow', '--library', 'Movies', '--flow', 'Conform', '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--library', 'Movies', '--data-dir', dataDir]);
+
+    // The file on disk, not a log line: remuxed to mkv at the same stem.
+    const outPath = join(libraryDir, 'Movie.mkv');
+    expect(existsSync(outPath)).toBe(true);
+    expect(existsSync(mediaPath)).toBe(false);
+    expect(await formatNameOf(outPath)).toContain('matroska');
+
+    const after = await streamsOf(outPath);
+    expect(videoCodecs(after)).toEqual(['hevc']);
+    expect(audioTracks(after)).toEqual([
+      // The 5.1 English track SURVIVES: the plugin added a stereo track, it
+      // did not convert this one. Unmanic's ensure_2ch_aac_audio would have
+      // left only the stereo track here.
+      ['aac', 6, 'eng'],
+      // Added by Ensure Audio Stream, in the language asked for.
+      ['aac', 2, 'eng'],
+    ]);
+    // And the Japanese track is gone, which is the language filter working.
+    expect(after.some((s) => s.tags?.language === 'jpn')).toBe(false);
+
+    const db = openStateDb(dataDir);
+    try {
+      const library = createLibraryRepo(db).getByName('Movies')!;
+      expect(library.enabled).toBe(true);
+      expect(library.pausedReason).toBeNull();
+      const counts = createMediaFileRepo(db).countsByState(library.id);
+      expect(counts.good).toBe(1);
+      expect(counts.failed).toBe(0);
+    } finally {
+      db.close();
+    }
+  }, 300_000);
+
+  it('refuses the conform template before a plugin source is synced, naming the plugins', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-conform-refuse-'));
+    const libraryDir = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryDir, { recursive: true });
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
+
+    const failure = await runCli([
+      'flow', 'add', '--name', 'Conform', '--template', 'conform-library', '--data-dir', dataDir,
+    ]).then(
+      () => null,
+      (error: { code?: number; stderr?: string }) => error,
+    ); // prettier-ignore
+    expect(failure).not.toBeNull();
+    expect(failure!.code).toBe(1);
+    expect(failure!.stderr).toContain('"tdarr:ffmpegCommandEnsureAudioStream"');
+    expect(failure!.stderr).toContain('trawlarr plugin source sync --name tdarr');
+
+    // Nothing stored, which is the whole point: an unresolvable plugin id
+    // VALIDATES, so without the refusal this flow would have been accepted.
+    const db = openStateDb(dataDir);
+    try {
+      expect(createFlowRepo(db).list()).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  }, 120_000);
 
   it('records a file whose flow reaches Fail Flow as NOT converged', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-failflow-e2e-'));

@@ -322,6 +322,124 @@ describe('cli: flow add', () => {
     db.close();
   });
 
+  it('refuses a template whose community plugins are not installed, naming them', async () => {
+    const dataDir = newDataDir();
+
+    expect(
+      await main([
+        'flow',
+        'add',
+        '--name',
+        'Conform',
+        '--template',
+        'conform-library',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(1);
+
+    // The missing plugin ids, source-prefixed, and the two commands that fix
+    // it. A flow naming an unresolvable plugin VALIDATES (unknown is treated
+    // as neutral), so without this it would have stored and then failed on
+    // every file with an error naming the file instead.
+    expect(stderr()).toContain('"tdarr:ffmpegCommandSetContainer"');
+    expect(stderr()).toContain('"tdarr:ffmpegCommandCustomArguments"');
+    expect(stderr()).toContain('"tdarr:ffmpegCommandEnsureAudioStream"');
+    expect(stderr()).toContain('"tdarr:ffmpegCommandRemoveStreamByProperty"');
+    expect(stderr()).toContain('trawlarr plugin source add --name tdarr');
+    expect(stderr()).toContain('trawlarr plugin source sync --name tdarr');
+
+    // Nothing stored: the observable half of "refused".
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    expect(createFlowRepo(db).list()).toHaveLength(0);
+    db.close();
+  });
+
+  it('names the source the user chose when refusing, not the default one', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main([
+        'flow',
+        'add',
+        '--name',
+        'Conform',
+        '--template',
+        'conform-library',
+        '--set',
+        'pluginSource=mine',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(1);
+    expect(stderr()).toContain('"mine:ffmpegCommandSetContainer"');
+    expect(stderr()).toContain('trawlarr plugin source sync --name mine');
+  });
+
+  it('stores the conform template once its community plugins are installed', async () => {
+    const dataDir = newDataDir();
+    mkdirSync(dataDir, { recursive: true });
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    const plugins = createPluginRepo(db);
+    plugins.addSource({ id: 'tdarr', url: '/nowhere', kind: 'local' });
+    plugins.replaceSourcePlugins(
+      'tdarr',
+      [
+        'ffmpegCommandSetContainer',
+        'ffmpegCommandCustomArguments',
+        'ffmpegCommandEnsureAudioStream',
+        'ffmpegCommandRemoveStreamByProperty',
+      ].map((pluginName) => ({
+        pluginName,
+        relPath: `${pluginName}/1.0.0/index.js`,
+        absPath: `/nowhere/${pluginName}/1.0.0/index.js`,
+        version: '1.0.0',
+        details: {
+          name: pluginName,
+          description: '',
+          style: { borderColor: 'blue' },
+          tags: '',
+          isStartPlugin: false,
+          pType: '',
+          sidebarPosition: -1,
+          icon: '',
+          inputs: [],
+          outputs: [{ number: 1, tooltip: 'Continue to next plugin' }],
+          requiresVersion: '2.11.01',
+        },
+      })),
+    );
+    db.close();
+
+    expect(
+      await main([
+        'flow',
+        'add',
+        '--name',
+        'Conform',
+        '--template',
+        'conform-library',
+        '--set',
+        'encoder=libx265',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+
+    const after = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    const stored = createFlowRepo(after).getByName('Conform')!;
+    expect(stored.definition.nodes.find((node) => node.id === 'encoder')!.inputs).toEqual({
+      encoder: 'libx265',
+      quality: '23',
+    });
+    expect(stored.definition.nodes.find((node) => node.id === 'muxqueue')!.inputs).toEqual({
+      inputArguments: '',
+      outputArguments: '-max_muxing_queue_size 2048',
+    });
+    after.close();
+  });
+
   it('refuses an unknown template, and a --set naming a parameter it does not have', async () => {
     const dataDir = newDataDir();
 

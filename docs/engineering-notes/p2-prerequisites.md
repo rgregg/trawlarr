@@ -512,6 +512,13 @@ drain was making no progress and stops, leaving the rest of the queue for the ne
   unreachable and a tolerant comparison false-flagged metadata-only flows.
 - **§2.10** describes contract-level reporting and a warning when a plugin's `requiresVersion`
   exceeds ours. Not implemented.
+- **§7** anticipates 10–15 first-party plugins, naming "set audio codec, remux container, webhook
+  notify" among them. Divergent by the owner's call as of P2d: **a capability that already has a
+  Tdarr community flow plugin is not reimplemented first-party.** Trawlarr exists to run that
+  ecosystem, and shipping a duplicate node fragments it — two nodes that do the same thing
+  differently, and flows that are no longer portable. The first-party set stays at the seven
+  host-integration nodes (Start, Check Video Codec, Begin Command, Set Video Encoder, Execute,
+  Verify Output, Replace Original File); everything else is installed.
 
 ---
 
@@ -641,3 +648,98 @@ Two properties worth keeping in mind when reading that suite:
   suite that proves the product works, and report green. It also refuses to run against a stale
   `dist/`: editing anything under `packages/server/src`, INCLUDING a test file there, means
   `tsc --build --force` before this suite will run.
+
+---
+
+## P2d — plugin distribution, and what it cost
+
+Written at the end of P2d (`trawlarr plugin source add|sync`, installed-plugin resolution at every
+call site, and the `conform-library` template that expresses the owner's real Unmanic pipeline).
+
+### `Verify Output` compared the output's stream count against the ORIGINAL's
+
+The single most expensive finding of the phase. `Verify Output` refused any output with fewer
+streams than the input file had — which made **every stream-removing community plugin unusable in
+any flow that replaces its original**: `Remove Stream By Property`, `Remove Streams By Type`,
+`Set Container` with `forceConform`, and `Keep Stream By Property` all produce fewer streams *by
+design*. Each one failed three attempts per file and landed the file in `failed`, with an error
+naming the file rather than the check.
+
+One of those four is in the owner's own pipeline, so this was not a hypothetical.
+
+The fix compares against **what the flow's own ffmpeg command intended to write** —
+`ffmpegCommand.streams` minus the ones a node marked `removed` — and falls back to "no expectation"
+when nothing described one (no Begin Command, so no intent to check). It is one-sided on purpose:
+more streams than intended is fine, fewer is not.
+
+Recognise what that removed: an **accidental fail-safe**. The old check happened to catch a filter
+that matched everything and deleted all the audio. That protection is deliberately replaced by the
+`requireAudioIfOriginalHadAudio` gate — an output with no audio when the original had some is
+refused, because a language filter matching nothing removes every audio track and the result probes
+perfectly cleanly.
+
+**Why the gate is in the host and not on a node.** A node-level input would protect against the one
+plugin that carries it, and only when someone remembered to put that node in the flow. The failure
+is not "this plugin misbehaved", it is "the compiled command lost the audio" — which any of ninety
+plugins, or a combination of two well-behaved ones, can cause. The host is the only place that sees
+the original probe and the output probe, so it is the only place the check is complete.
+
+### `keep_undefined` needed no work — do not "add" it
+
+Unmanic's language filters have a `keep_undefined` option, and the natural assumption is that
+`Remove Stream By Property` needs an equivalent. It does not. The plugin reads the property and
+returns early when it is `undefined` or `null`, so a stream with no `tags.language` is **never
+judged and therefore never removed**. That is exactly `keep_undefined: true`, and it is not
+configurable off. Pinned by a compat test so nobody re-derives it, and recorded here so nobody
+"adds" the input.
+
+### No `git` in the runtime image
+
+Sources are HTTPS tarballs and local directories, not clones, because the runtime image has no
+`git` binary. This is a deliberate constraint, not an oversight: a future phase that wants git
+sources must add the binary to the `Dockerfile` first, and weigh that against the image size and
+the attack surface of shipping a VCS client in a media transcoder.
+
+### `<data-dir>/plugins` is not scratch
+
+For a tarball source, the extraction **is** the installed plugin — the row in the database points at
+the extracted file and the loader reads it there. There is no second copy and no re-fetch on start.
+Two consequences:
+
+- `syncSource`'s cleanup is **asymmetric by kind**: a tarball sync removes the previous extraction
+  before installing the new one, while a local source is read in place and never cleaned, because
+  cleaning it would delete a directory the user owns.
+- `<data-dir>/plugins` must be **backed up alongside the database, or re-synced after a restore**.
+  A backup that takes `trawlarr.db` and not `plugins/` restores a set of flows naming plugins that
+  are no longer on disk.
+
+### The standalone validate endpoint — checked, and already threaded through
+
+This phase's plan carried an item saying `packages/server/src/api/routes/flows.ts`'s standalone
+`POST /flows/validate` still constructed a registry-less `createNodeCapabilityResolver()`, so it
+under-validated a flow naming an installed plugin. **That is no longer true**: it passes
+`{ registry: createPluginRegistry(ctx.db) }` as of `2638a7c`, so `validate` and `store` now answer
+the same question. Recorded because the stale item would otherwise be re-opened; the resolver is
+registry-less only where there is genuinely no database, which is its documented default.
+
+### Both of the owner's Unmanic pipelines became one flow
+
+His Movies and Shows libraries differ only in whether "Ensure 2ch AAC Audio" sits before or after
+"Transcode". In Unmanic that is meaningful: each plugin is its own ffmpeg pass, so plugin order is
+encode order. In trawlarr every command-building node contributes to a **single** invocation
+compiled once by `compileFfmpegArgs`, and those two nodes touch different streams — so their order
+cannot change the argv. One template, `conform-library`, covers both. This is written in
+`docs/migrating-from-unmanic.md` §4.3 as well, because "why did my two pipelines become one?" is
+otherwise an unanswered question.
+
+### Where the template is NOT parity, and is documented as such
+
+- **`Ensure Audio Stream` adds; `ensure_2ch_aac_audio` converts.** Proven on disk: a file with a
+  6-channel English AAC track comes out with the 6-channel track *and* a new stereo one, where
+  Unmanic would have left only the stereo. Documented in §4.4 of the migration guide with three
+  ways out, including a `Custom Arguments` pan formula that reproduces the downmix exactly.
+- **NVENC is unverified.** `hevc_nvenc` takes `-cq` rather than `-crf` and `p1`–`p7` rather than a
+  numeric preset, so the translation of the owner's "CRF 23, preset 4" is precisely the thing that
+  needs his card. The `libx265` form of the same template is proven end to end against real ffmpeg
+  in `packages/server/test/plugin-install-end-to-end.test.ts`; the NVENC form ships beside it,
+  generated from the same template and validated, but never executed.

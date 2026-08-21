@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { validateFlowDefinition } from '@trawlarr/core';
 import { describe, expect, it } from 'vitest';
@@ -129,11 +129,37 @@ describe('FLOW_TEMPLATES', () => {
  * drifting into a hand-edited flow nobody validates.
  */
 describe('the flow files shipped in docs/flows', () => {
-  it('ships both the CPU and the NVENC form', () => {
+  it('ships a CPU and an NVENC form of both the transcode and the conform stack', () => {
     expect(SHIPPED_FLOW_FILES.map((file) => file.path)).toEqual([
       'docs/flows/transcode-hevc-cpu.json',
       'docs/flows/transcode-hevc-nvenc.json',
+      'docs/flows/conform-mkv-hevc-cpu.json',
+      'docs/flows/conform-mkv-hevc-nvenc.json',
     ]);
+  });
+
+  it('docs/flows/conform-mkv-hevc-nvenc.json matches what the template builds', () => {
+    const path = `${repoRoot}docs/flows/conform-mkv-hevc-nvenc.json`;
+    // Assert the path EXISTS rather than gating on it: gating on existsSync
+    // makes a renamed fixture skip silently, which makes a drift alarm green.
+    expect(existsSync(path)).toBe(true);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(
+      buildFromTemplate({
+        templateId: 'conform-library',
+        values: { encoder: 'hevc_nvenc', quality: '23' },
+      }),
+    );
+  });
+
+  it('docs/flows/conform-mkv-hevc-cpu.json matches what the template builds', () => {
+    const path = `${repoRoot}docs/flows/conform-mkv-hevc-cpu.json`;
+    expect(existsSync(path)).toBe(true);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(
+      buildFromTemplate({
+        templateId: 'conform-library',
+        values: { encoder: 'libx265', quality: '23' },
+      }),
+    );
   });
 
   it.each(SHIPPED_FLOW_FILES.map((file) => file.path))(
@@ -164,5 +190,86 @@ describe('the flow files shipped in docs/flows', () => {
 
     expect(encoderOf('docs/flows/transcode-hevc-cpu.json')).toBe('libx265');
     expect(encoderOf('docs/flows/transcode-hevc-nvenc.json')).toBe('hevc_nvenc');
+    expect(encoderOf('docs/flows/conform-mkv-hevc-cpu.json')).toBe('libx265');
+    expect(encoderOf('docs/flows/conform-mkv-hevc-nvenc.json')).toBe('hevc_nvenc');
+  });
+});
+
+describe('the conform-library template', () => {
+  const build = (values: Record<string, string> = {}) =>
+    buildFromTemplate({ templateId: 'conform-library', values });
+
+  it('declares the community plugins it needs, so a fresh install is told to sync', () => {
+    const template = FLOW_TEMPLATES.find((t) => t.id === 'conform-library')!;
+    expect(template.requiredPlugins).toEqual([
+      'ffmpegCommandSetContainer',
+      'ffmpegCommandCustomArguments',
+      'ffmpegCommandEnsureAudioStream',
+      'ffmpegCommandRemoveStreamByProperty',
+    ]);
+  });
+
+  it('carries his exact encoder settings into the node inputs', () => {
+    const flow = build({ encoder: 'hevc_nvenc', quality: '23' });
+    const encoder = flow.nodes.find((n) => n.id === 'encoder')!;
+    expect(encoder.inputs).toMatchObject({ encoder: 'hevc_nvenc', quality: '23' });
+  });
+
+  it('carries -max_muxing_queue_size 2048 as a custom argument, with no preset by default', () => {
+    const flow = build();
+    const custom = flow.nodes.find((n) => n.id === 'muxqueue')!;
+    // No preset by default: preset names are encoder-specific (nvenc takes
+    // p1..p7, libx265 takes ultrafast..placebo), so a default that suits one
+    // encoder is an invalid argument for the other and fails every job.
+    expect(custom.inputs.outputArguments).toBe('-max_muxing_queue_size 2048');
+  });
+
+  it('appends a preset only when one was asked for', () => {
+    const flow = build({ preset: 'p4' });
+    const custom = flow.nodes.find((n) => n.id === 'muxqueue')!;
+    expect(custom.inputs.outputArguments).toBe('-max_muxing_queue_size 2048 -preset p4');
+  });
+
+  it('defaults the destination container to mkv', () => {
+    expect(build().nodes.find((n) => n.id === 'container')!.inputs.container).toBe('mkv');
+  });
+
+  it('keeps English audio and never removes an untagged track', () => {
+    const remove = build().nodes.find((n) => n.id === 'language')!;
+    expect(remove.inputs).toMatchObject({
+      codecType: 'audio',
+      propertyToCheck: 'tags.language',
+      valuesToRemove: 'eng',
+      condition: 'not_includes',
+    });
+    // keep_undefined needs no input: the plugin never judges a stream whose
+    // property is absent. Pinned in packages/engine/test/compat.
+  });
+
+  it('leaves the already-target-codec output of the check node routed onward, not dead-ended', () => {
+    // Unlike transcode-hevc, a converged-codec file may still need a remux,
+    // an audio track or a language filter — so output 1 rejoins the chain
+    // rather than ending the flow.
+    const flow = build();
+    const fromCheck = flow.edges.filter((e) => e.fromNodeId === 'check');
+    expect(fromCheck.map((e) => e.outputNumber).sort()).toEqual([1, 2]);
+  });
+
+  it('names every community node with the source the user chose', () => {
+    const flow = build({ pluginSource: 'mine' });
+    const communityIds = flow.nodes
+      .map((node) => node.pluginId)
+      .filter((id) => !id.startsWith('trawlarr:'));
+    expect(communityIds).toEqual([
+      'mine:ffmpegCommandSetContainer',
+      'mine:ffmpegCommandCustomArguments',
+      'mine:ffmpegCommandEnsureAudioStream',
+      'mine:ffmpegCommandRemoveStreamByProperty',
+    ]);
+  });
+
+  it('validates', () => {
+    const problems = validateFlowDefinition(build(), () => null);
+    expect(problems).toEqual([]);
   });
 });

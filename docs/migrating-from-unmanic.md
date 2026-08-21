@@ -381,8 +381,13 @@ what is on offer:
 
 ```
 $ curl -fsS -H "X-Api-Key: $KEY" http://localhost:8266/api/v1/flows/templates | jq -r '.[] | .id + "  " + .name'
-transcode-hevc   Transcode video to a target codec
+transcode-hevc     Transcode video to a target codec
+conform-library    Remux, transcode, and conform audio and languages
 ```
+
+`transcode-hevc` is the smaller one and is what §3.4 walks through.
+`conform-library` is the full parity stack (remux + transcode + stereo AAC +
+language filter) and needs community plugins installed first — see §4.
 
 `GET /api/v1/flows/templates` also returns each parameter with its default,
 its allowed values and a tooltip explaining what getting it wrong costs, which
@@ -432,14 +437,16 @@ Encoder → Execute → Verify Output → Replace Original File. Output 1 of Che
 Video Codec — "already this codec" — is connected to nothing, on purpose
 (§2.2).
 
-If you prefer to read a flow before you trust it with a library, the same two
+If you prefer to read a flow before you trust it with a library, the shipped
 flows are checked in as files:
 
 - [`docs/flows/transcode-hevc-cpu.json`](flows/transcode-hevc-cpu.json) — `libx265`
 - [`docs/flows/transcode-hevc-nvenc.json`](flows/transcode-hevc-nvenc.json) — `hevc_nvenc`
+- [`docs/flows/conform-mkv-hevc-cpu.json`](flows/conform-mkv-hevc-cpu.json) — the full parity stack, `libx265`
+- [`docs/flows/conform-mkv-hevc-nvenc.json`](flows/conform-mkv-hevc-nvenc.json) — the same stack, `hevc_nvenc`
 
-Both are generated from the same template and validated by the test suite, and
-either can be loaded with
+Each is generated from the template of the same name and validated by the test
+suite, and any of them can be loaded with
 `trawlarr flow add --name "Movies HEVC" --file /config/flow.json` after
 copying it into your `./config` directory.
 
@@ -524,8 +531,10 @@ someone coming from an \*arr stack.
 
 Trawlarr's first-party node set is **seven nodes**: Start, Check Video Codec,
 Begin Command, Set Video Encoder, Execute, Verify Output, Replace Original
-File. That is enough for a transcode library and not enough for everything
-Unmanic's plugin ecosystem does.
+File. Everything else comes from the **Tdarr community flow plugins**, which
+trawlarr runs directly — that is the project's whole premise, and it is why no
+first-party duplicate of an existing community node is planned. Install them
+once (below) and roughly ninety more nodes are available to your flows.
 
 Below is every common Unmanic behaviour and an honest verdict. The rows that
 say **Not yet** are there precisely so you find out here rather than halfway
@@ -542,19 +551,176 @@ through moving your library.
 | Limit how much runs at once | `NUMBER_OF_WORKERS`, `TRAWLARR_HARDWARE_CAPS` | **Supported** |
 | Only run during certain hours | Schedule windows (`TZ` + schedule settings) | **Supported** |
 | Ignore files below a size / by extension | Library `--extensions` | **Partial.** Extension filtering yes; size/bitrate thresholds have no node. |
-| Remux to a different container (mkv ⇄ mp4) | — | **Not yet.** Needs a first-party remux node or a community plugin. |
-| Transcode or normalise audio (AAC, EAC3, loudness) | — | **Not yet.** Same. |
-| Strip tracks by language, drop commentary, keep subtitles | — | **Not yet.** Same. |
-| Rename, move or copy the result to another directory | — | **Not yet.** Same. |
-| Notify a webhook / Discord / Telegram on completion | — | **Not yet.** Same. The WebSocket carries live job events, so a small script can do it today, but there is no node. |
-| Extract or burn in subtitles | — | **Not yet.** Same. |
+| Remux to a different container (mkv ⇄ mp4) | `Set Container` (community plugin) | **Supported** |
+| Transcode or normalise audio (AAC, EAC3, loudness) | `Ensure Audio Stream`, `Normalize Audio` (community) — but read "Ensure Audio Stream adds, it does not convert" below | **Supported** |
+| Strip tracks by language, drop commentary, keep subtitles | `Remove Stream By Property` (community) | **Supported** |
+| Rename, move or copy the result to another directory | `Move To Directory`, `Rename File`, `Copy To Directory` (community) | **Supported** |
+| Notify a webhook / Discord / Telegram / Plex on completion | `Send Web Request`, `Apprise`, `Notify Radarr or Sonarr` (community) | **Supported** |
+| Extract or burn in subtitles | — | **Not yet.** No community flow plugin covers it. |
 | Any specific community Unmanic plugin | — | **Not applicable.** Trawlarr runs *Tdarr flow* plugins, not Unmanic plugins. Unmanic plugins cannot be imported, and no shim is planned. |
 
 If your Unmanic stack is "transcode everything that is not HEVC, keep the
 original for a while", every row you need is Supported and §3 is your whole
-migration. If it also normalises audio or strips foreign-language tracks,
-those steps do not come across yet — you would keep doing them elsewhere, or
-wait for the nodes.
+migration. If it also remuxes, conforms audio or strips foreign-language
+tracks, those come across too — as community plugins you install first, and as
+the `conform-library` template that wires them together. The rest of §4 is how.
+
+### 4.1 Installing plugins
+
+Two commands. There is **no central service to register with**: a source is a
+git/HTTP tarball URL or a directory on this machine, and you name it yourself.
+
+```
+$ trawlarr plugin source add --name tdarr \
+    --url https://codeload.github.com/HaveAGitGat/Tdarr_Plugins/tar.gz/master
+$ trawlarr plugin source sync --name tdarr
+Synced "tdarr" (local): 91 plugin(s) installed, 0 skipped.
+```
+
+A local checkout works the same way, with `--path /some/dir` instead of
+`--url`. Plugins are extracted into `<data-dir>/plugins` and that extraction
+**is** the installed plugin — it is not scratch space. Back it up with the
+database, or be prepared to re-run `sync` after restoring.
+
+The name you choose is the prefix of every plugin id: with `--name tdarr` the
+container node is `tdarr:ffmpegCommandSetContainer`. Templates take that name
+as a parameter (`--set pluginSource=…`), defaulting to `tdarr`.
+
+Installing a plugin runs its author's code as the user trawlarr runs as. Add
+sources you would trust with your library.
+
+### 4.2 The full parity stack: the `conform-library` template
+
+This is your Unmanic pipeline, in one command:
+
+```
+$ trawlarr flow add --name Conform --template conform-library \
+    --set encoder=hevc_nvenc --set quality=23 --set preset=p4
+Added flow "Conform" (5b78682e-…), 11 node(s).
+```
+
+It builds:
+
+```
+start -> begin -> Set Container(mkv) -> Check Video Codec
+   output 2 ("differs")      -> Set Video Encoder -> Custom Arguments
+   output 1 ("already hevc") ->                      Custom Arguments
+Custom Arguments -> Ensure Audio Stream -> Remove Stream By Property
+   -> Execute -> Verify Output -> Replace Original File
+```
+
+Unlike `transcode-hevc`, output 1 of Check Video Codec is **not** a dead end
+here: a file that is already HEVC may still need a remux, a stereo track or a
+language filter, so it skips only the encoder and rejoins the chain.
+
+If the community plugins are not installed, the command refuses and names
+them rather than storing a flow that would fail on every file:
+
+```
+$ trawlarr flow add --name Conform --template conform-library
+Error: flow add: template "conform-library" needs plugin(s)
+"tdarr:ffmpegCommandSetContainer", "tdarr:ffmpegCommandCustomArguments",
+"tdarr:ffmpegCommandEnsureAudioStream", "tdarr:ffmpegCommandRemoveStreamByProperty"
+which are not installed. Add and sync a plugin source first: …
+(exit 1)
+```
+
+That refusal exists because flow validation treats a plugin it cannot resolve
+as *unknown*, not *wrong* — so the flow would otherwise validate, store,
+attach, and only then fail three attempts per file with an error naming the
+file.
+
+### 4.3 Why your Movies and Shows libraries become one flow
+
+In Unmanic your Movies stack is Remux → Transcode → Ensure 2ch AAC → Keep by
+language, and your Shows stack has the audio step *before* the transcode. That
+difference is an **Unmanic artifact**: Unmanic runs a separate ffmpeg pass per
+plugin, so plugin order is encode order.
+
+Trawlarr does not work that way. Every command-building node contributes to
+**one** ffmpeg invocation, compiled once at Execute. The audio node and the
+encoder node touch different streams, so their order cannot change the
+resulting argv. Both libraries therefore use the same flow, and you attach it
+to both.
+
+### 4.4 Ensure Audio Stream *adds*; Unmanic's `ensure_2ch_aac_audio` *converts*
+
+This is the one place `conform-library` is not literal parity, and it is worth
+a minute before you run it over a library.
+
+Unmanic's `ensure_2ch_aac_audio` **downmixes** a 5.1 track to stereo AAC. The
+Tdarr plugin `Ensure Audio Stream` **adds** a stereo AAC track when the file
+does not already have one, and leaves the original beside it. On a file with a
+6-channel English AAC track you get:
+
+```
+before:  aac 6ch eng, aac 2ch jpn
+after:   aac 6ch eng, aac 2ch eng      ← the 5.1 track is still there
+```
+
+Three ways to deal with it, in the order most people want them:
+
+1. **Keep both.** Most players pick the track they want, and you keep the
+   surround mix. This is what the template does.
+2. **Keep only the stereo track.** Follow the audio node with a second
+   `Remove Stream By Property` — for example `codecType=audio`,
+   `propertyToCheck=channels`, `condition=equals`, `valuesToRemove=6`.
+   Verify Output counts the streams the *flow intended to write*, not the
+   ones the original had, so deliberately removing streams is safe; its audio
+   gate still refuses an output that lost all of its audio.
+3. **Actually downmix, the way Unmanic did.** Use `Custom Arguments` with your
+   own pan formula rather than `Ensure Audio Stream`, e.g. output arguments
+   `-filter:a "pan=stereo|c0=c2+0.30*c0+0.30*c4|c1=c2+0.30*c1+0.30*c5" -c:a aac -ac 2`.
+   That reproduces the downmix exactly, at the cost of applying to every audio
+   stream the command touches.
+
+### 4.5 Where your `preset 4` went
+
+`Set Video Encoder` has no preset input, so the template appends one as a
+custom argument: `--set preset=p4` becomes `-preset p4` on the ffmpeg command.
+
+Be aware that **the mapping from Unmanic's numeric preset to NVENC's `p1`–`p7`
+is a judgement, not a documented equivalence.** Unmanic's "preset 4" and
+NVENC's `p4` are not defined against each other anywhere. Run one file, look
+at the size and the encode time, and adjust before you start the library.
+
+The preset is deliberately **empty by default**, because a preset name valid
+for one encoder is an invalid argument for the other: NVENC takes `p1`–`p7`,
+libx264/libx265 take `ultrafast`…`placebo`, and ffmpeg fails outright rather
+than ignoring one it does not recognise.
+
+Two more NVENC notes, said plainly: NVENC does not take `-crf`, it takes
+`-cq`, and `Set Video Encoder` chooses the right flag for the encoder you
+name. The `hevc_nvenc` form of this flow is shipped **unverified** — the
+repository's tests prove the `libx265` form against real ffmpeg end to end,
+and no NVIDIA hardware exists in CI to prove the other. Run one file on your
+card first.
+
+### 4.6 Telling Plex, concretely
+
+There is no Plex node, and none is needed: a Plex partial scan is one HTTP
+GET, and the community `Send Web Request` node sends it.
+
+- Node: `tdarr:webRequest` (Tools → Send Web Request)
+- `method`: `get`
+- `requestUrl`: `http://<plex-host>:32400/library/sections/<section id>/refresh?X-Plex-Token=<token>`
+- `output2OnNetworkError`: **on**
+
+That last input matters. With it on, a Plex that is down routes to output 2
+instead of failing the flow — a media server being unreachable must not
+invalidate a transcode that already succeeded. Route output 2 onward to the
+same next node, or leave it as an end, but do not let it fail the file.
+
+One caution: a flow node fires **once per file**, so a library-wide conversion
+will send Plex thousands of refreshes. For a first bulk run, consider leaving
+the node out and doing one manual scan at the end.
+
+### 4.7 A note on hardlinks before you start
+
+If your library is fed by a torrent client, most of it may be hardlinked and
+trawlarr **skips hardlinked files by default** — including through this
+template. That is §5, and it is the first thing to check if a library looks
+like it is doing nothing.
 
 ---
 
