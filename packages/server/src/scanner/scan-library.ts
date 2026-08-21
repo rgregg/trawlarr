@@ -71,6 +71,17 @@ export interface ScanLibraryInput {
    * `ReconcileInput.allowEmptyRoots`.
    */
   allowEmptyRoots?: boolean;
+  /**
+   * Called after every database transaction this scan commits, with the
+   * number of rows it wrote.
+   *
+   * Spec §3.3: `better-sqlite3` is synchronous, so a transaction's duration
+   * is a span in which the API, the WebSocket and every heartbeat are
+   * frozen. This seam is how that stays MEASURED rather than asserted — the
+   * suite bounds the row counts, `pnpm bench:scan` times them. Nothing in
+   * production sets it.
+   */
+  onTransactionCommitted?: (rows: number, elapsedMs: number) => void;
 }
 
 /** States a scan must never touch: terminal or already mid-flight. */
@@ -260,7 +271,12 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
    */
   const flush = async (): Promise<void> => {
     if (pending.length === 0) return;
-    await runChunked({ db, items: pending.splice(0, pending.length), apply: persist });
+    await runChunked({
+      db,
+      items: pending.splice(0, pending.length),
+      apply: persist,
+      onTransactionCommitted: input.onTransactionCommitted,
+    });
   };
 
   // Walk, upsert identity, probe what needs it, and commit as we go. Probing

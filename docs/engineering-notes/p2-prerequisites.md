@@ -743,3 +743,159 @@ otherwise an unanswered question.
   needs his card. The `libx265` form of the same template is proven end to end against real ffmpeg
   in `packages/server/test/plugin-install-end-to-end.test.ts`; the NVENC form ships beside it,
   generated from the same template and validated, but never executed.
+
+---
+
+## P2c — what the 100k scan benchmark measured
+
+Spec §4.1 says probing "runs at a bounded concurrency and is resumable: a scan interrupted at
+60,000 of 100,000 files does not restart from zero", and §3.3 asks that no single database
+transaction take much more than about 50 ms, because `better-sqlite3` is synchronous and a long
+transaction freezes the HTTP API and the WebSocket with it. `pnpm bench:scan` is what turns those
+from assertions into numbers, and `packages/server/test/scan-bounded.test.ts` is what keeps the
+properties those numbers depend on from regressing at a size the gate can afford.
+
+**The split is deliberate.** This project never asserts elapsed time — a timing assertion is flaky
+in both directions, and this repository has already shipped one that failed one run in fifteen. So
+the benchmark *reports* and the suite *asserts*, and they assert different kinds of thing: rows per
+committed transaction, HTTP statuses answered while a walk is in flight, probes performed by the
+scan that follows an interrupted one, rows marked missing, and the query plan SQLite chooses.
+Never a duration. A benchmark that failed CI on a slow machine would be worse than no benchmark; a
+benchmark whose properties were unasserted would be theatre.
+
+### The machine these numbers came from
+
+A 6-vCPU KVM guest: Intel Core Processor (Skylake, IBRS, no TSX), 4 GiB RAM, Linux 6.8.0-136,
+Node v22.22.1. The library lived on **ext4 on a non-rotational `/dev/sda2`** — a local SSD, not the
+NFS the owner's real library is on, so every filesystem number here is a *floor*: NFS makes the
+`lstat`/`open`/`read` per file dramatically more expensive, and it is the walk, not SQLite, that
+pays that.
+
+`ffprobe` is faked (a `/bin/sh` script printing a fixed document). Real `ffprobe` at 100,000 files
+would be a benchmark of `ffprobe`. The consequence is stated plainly below, because it is the whole
+argument for or against bounded-concurrency probing.
+
+### What it measured, at 100,000 files
+
+Two passes over the same tree: `cold` (nothing known, every file probed) and `warm` (nothing
+changed, every probe skipped).
+
+| | cold, before the fix | cold, after the fix | warm, after the fix |
+|---|---|---|---|
+| files | 100,000 | 100,000 | 100,000 |
+| probed | 100,000 | 100,000 | **0** |
+| wall | **3,108,437 ms (51.8 min)** | **771,925 ms (12.9 min)** | 217,358 ms (3.6 min) |
+| files/second | **32** | **130** | 460 |
+| transactions | 100,000 | 100,000 | **200** |
+| max transaction | 661 ms | 374.2 ms | 11.6 ms |
+| p99 transaction | 6.8 ms | 6.8 ms | 10.7 ms |
+| peak RSS | 155 MB | 143 MB | 419 MB |
+
+The cold pass went from **51.8 minutes to 12.9 minutes — 4.0× — for one index**, and it stopped
+decelerating: throughput is flat at ~130 files/s from the first thousand rows to the hundred
+thousandth, where before it fell from 150 to 30.
+
+Reading them:
+
+- **`probed: 0` on the warm pass is the headline.** The skip rule works at scale: a rescan of an
+  unchanged 100,000-file library spawns no probes at all.
+- **The transaction-count asymmetry is intact and is worth 500×.** The cold pass commits 100,000
+  transactions, because a file that was actually probed is flushed immediately so that at most one
+  probe's work is ever at risk. The warm pass commits **200** — one per 500-row chunk — because a
+  file that was *skipped* accumulates to a full chunk instead. Disturbing that asymmetry in either
+  direction is the difference between a fast rescan and a pathological one.
+- **`p99TransactionMs` meets §3.3 comfortably** (6.8 ms cold, 12.8 ms warm), and a 500-row chunk
+  commits in about 14 ms — well inside the 50 ms budget the target is about.
+- **`maxTransactionMs` does not, and the outlier is not the row count.** The worst single-row
+  commit in the cold pass took **661 ms**. It cannot be the write itself — a one-row insert is
+  microseconds — so it is a WAL auto-checkpoint (default 1,000 pages) landing inside that
+  transaction and fsyncing the accumulated WAL back into the database. The consequence is real and
+  should be said out loud: **a few times per full scan, the API and the WebSocket freeze for a
+  significant fraction of a second.** It is rare (p99 is 6.8 ms) and it is not caused by anything
+  the chunking controls, so it is recorded here rather than papered over. If it ever needs fixing,
+  the lever is an explicit `wal_autocheckpoint`/`PASSIVE` checkpoint policy on a timer outside the
+  scan, not a smaller chunk.
+- **Peak RSS is not flat, and the cause is reconciliation, not the walk.** `reconcileMissing` calls
+  `listByLibrary`, which materialises *every* row in the library — `probe_json` included — into one
+  array. With this benchmark's tiny fake probes that cost a few hundred MB; with real probe
+  documents (kilobytes each, sometimes far more for many-stream files) a 100,000-file library would
+  make that array large enough to matter on a 2 GB container. The walk itself is bounded; the
+  reconcile is not. Recorded as a known divergence, not fixed here.
+
+### The finding: the in-flight-output guard was quadratic in the size of the library
+
+The cold pass did not merely run slowly, it **decelerated**: 150 files/s at 5,000 rows, 77/s at
+14,000, 68/s at 21,000, 43/s at 26,000, ~30/s at 38,000. Throughput falling as 1/n is the signature
+of an O(n) step being paid per file.
+
+It was `listRunningPaths`. `scanLibrary` asks it — `SELECT path FROM media_file WHERE library_id = ?
+AND state = 'running'` — for **every walked file that matches no existing row**, and it must keep
+asking freshly: a job that started after this scan began still has to be seen, or the scan inserts
+a second row for a file an in-flight run already owns, and `updateAfterRun` then collides on
+`UNIQUE (library_id, content_key)` and unwinds the run. That freshness is correct and is
+deliberately **not** weakened.
+
+What was wrong was the *cost* of asking. No index covered `(library_id, state)`, so SQLite answered
+through `media_file_missing_idx` on `library_id` alone: it visited every row in the library and
+filtered on `state` afterwards. On a first scan every file is new, so that is one library-wide
+index scan per file. Measured directly against the live benchmark database:
+
+| | before | after |
+|---|---|---|
+| `listRunningPaths`, one call at ~28,000 rows | **15.15 ms** | **0.0115 ms** |
+| cold throughput at ~28,000 rows | 43 files/s | 128 files/s |
+| cold throughput at ~40,000 rows | ~30 files/s | 126 files/s |
+
+For scale, the sibling identity lookup on the same table (`byContentKey`, which *is* indexed by the
+`UNIQUE` constraint) costs 0.007 ms. The guard was three orders of magnitude off its neighbours.
+
+The fix is `005_media_file_running_idx.sql`: a **partial** index,
+`ON media_file (library_id) WHERE state = 'running'`. It changes no query, no semantics and no
+freshness — only the plan. Partial rather than a plain `(library_id, state)` composite for two
+reasons: it contains only the handful of rows that are actually running, so the guard becomes
+O(number of running jobs) rather than O(size of library); and it is almost never written to, since
+rows enter and leave it on claim and completion rather than on the scan writes that touch every
+row. Verified not to disturb the plans for `claimNext` (still `media_file_queue_idx`) or
+`countsByState` (still `media_file_missing_idx`).
+
+This is exactly the class of defect a benchmark exists to find: invisible in every suite small
+enough to run in CI, and fatal at the size the spec names by number. It is now guarded structurally
+— the suite asserts the *query plan*, which is observable state rather than a stopwatch, and fails
+if the index is removed.
+
+### Bounded-concurrency probing (spec §4.1) is still owed
+
+Probing here is bounded at a concurrency of **one**: `scanLibrary` awaits each `probeFile` before
+walking on. Against a fake probe that costs ~7 ms, that is 100,000 × 7 ms and the cold pass takes
+about 13 minutes. Against **real `ffprobe` on real media over NFS**, a probe is tens to hundreds of
+milliseconds, dominated by process spawn and network round-trips rather than CPU — so the same
+100,000-file first scan is somewhere between one and six hours, on a box with six idle cores and a
+mount whose throughput is nowhere near saturated by one outstanding request.
+
+The measurement that makes this concrete: with the index fix, the cold pass's cost is now almost
+entirely the serialised probe. That is a latency-bound serial loop, which is the case concurrency
+helps most and the case where it is nearly free. The structural work that makes it safe is already
+done — probing happens strictly *outside* any transaction, and the flush-after-probe rule bounds
+what an interruption costs — so a bounded pool changes "at most one probe is at risk" to "at most
+N", which is still bounded and still resumable.
+
+### What the suite asserts, and why each assertion is there
+
+`packages/server/test/scan-bounded.test.ts`, at 5,000 files — not 100,000, because a four-minute
+test is a test people learn to skip:
+
+1. **The in-flight-output guard is answered from an index.** Asserts the `EXPLAIN QUERY PLAN`
+   output names `media_file_running_idx` and contains no `SCAN media_file`. The only guard against
+   the quadratic defect above, and the only one that can be written without a stopwatch.
+2. **No transaction exceeds the chunk size**, and the committed row counts sum to every file, so a
+   seam reporting chunks nobody committed could not satisfy it.
+3. **A rescan commits in chunks, not one transaction per file.** The skip asymmetry, pinned: a
+   100,000-file rescan must pay ~200 transactions, not 100,000.
+4. **The API answers 200 while a scan of that size runs** — and the row count it reports *goes up*
+   while `scanning` is still true. The second half is the falsifiable one: a scanner that buffered
+   every row until the end would answer 200 just as happily and report zero the whole way.
+5. **An interrupted scan resumes rather than restarting**: the following scan re-probes at most one
+   chunk more than the interruption cost, and a third scan probes nothing.
+6. **An interrupted scan marks nothing missing**, a completed scan marks exactly the 100 files that
+   went away, and the *next* completed scan marks nothing further — so `missing` is a count of what
+   that scan discovered, not a total that grows every hour a daemon is up.

@@ -18,6 +18,23 @@ export const runChunked = async <T>(input: {
   items: readonly T[];
   chunkSize?: number;
   apply: (item: T) => void;
+  /**
+   * Called after each chunk's transaction COMMITS, with the number of rows
+   * that transaction applied and how long the commit itself blocked.
+   *
+   * `elapsedMs` is the duration of the SYNCHRONOUS span — the one in which
+   * the event loop, and with it the HTTP API and the WebSocket, could not
+   * run — not the interval since the previous commit, which on a scan also
+   * contains an `ffprobe` spawn and would make the number look ten times
+   * worse than the thing spec §3.3 sets a target for.
+   *
+   * An observation seam, not a hook: it exists so a test can constrain the
+   * size of the blocking spans this function creates, and so `bench:scan`
+   * can time them. It deliberately reports committed chunks only — a
+   * transaction that threw rolled back and applied nothing, so counting it
+   * would overstate what is on disk.
+   */
+  onTransactionCommitted?: (rows: number, elapsedMs: number) => void;
 }): Promise<{ chunks: number; items: number }> => {
   const chunkSize = input.chunkSize ?? DEFAULT_CHUNK_SIZE;
   if (chunkSize < 1) throw new Error('chunkSize must be at least 1');
@@ -29,8 +46,11 @@ export const runChunked = async <T>(input: {
     const commit = input.db.transaction((batch: readonly T[]) => {
       for (const item of batch) input.apply(item);
     });
+    const startedAt = performance.now();
     commit(chunk);
+    const elapsedMs = performance.now() - startedAt;
     chunks += 1;
+    input.onTransactionCommitted?.(chunk.length, elapsedMs);
     await yieldToEventLoop();
   }
 

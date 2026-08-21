@@ -1,0 +1,29 @@
+-- The in-flight-output guard costs a full index scan of the library, per file.
+--
+-- `scanLibrary` asks `listRunningPaths(libraryId)` -- "SELECT path FROM
+-- media_file WHERE library_id = ? AND state = 'running'" -- for EVERY walked
+-- file that matches no existing row, and it must keep asking freshly: a job
+-- that started after this scan began still has to be seen, or the scan
+-- inserts a second row for a file an in-flight run already owns. That
+-- freshness is correct and is deliberately not weakened here.
+--
+-- What was wrong was the cost of asking. No index covered
+-- (library_id, state), so SQLite answered it through
+-- `media_file_missing_idx` on `library_id` alone: it visited every row in
+-- the library and filtered on `state` afterwards. On a FIRST scan every file
+-- is new, so that is one library-wide scan per file -- quadratic in the size
+-- of the library, and invisible at test scale.
+--
+-- Measured on the 100,000-file benchmark (`pnpm bench:scan`, and the numbers
+-- are written down in docs/engineering-notes/p2-prerequisites.md): at ~28,000
+-- rows one call already cost 15 ms, and the cold scan's throughput was
+-- falling roughly as 1/n -- 150 files/s at 5,000 rows, 43 files/s at 26,000.
+-- Extrapolated to the 100,000 files spec 4.1 names by number, the guard alone
+-- would have accounted for around three quarters of an hour of a single scan.
+--
+-- A partial index is the whole fix. It contains only the rows that are
+-- actually running -- at most one per worker, so a handful -- which makes the
+-- guard O(number of running jobs) instead of O(size of library), and keeps
+-- the index itself tiny and almost never written to: rows enter and leave it
+-- only on claim and completion, not on the scan writes that touch every row.
+CREATE INDEX media_file_running_idx ON media_file (library_id) WHERE state = 'running';
