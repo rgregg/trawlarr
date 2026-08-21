@@ -307,3 +307,143 @@ main {
 .worker-stage {
   color: var(--muted);
 }
+
+/* --- libraries, setup and the flow picker ------------------------------- */
+
+.libraries .row-actions,
+.library-setup .row-actions,
+.flow-picker .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.8rem 0 0;
+}
+
+.library-setup,
+.flow-picker {
+  max-width: 44rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.library-setup h2,
+.flow-picker h2 {
+  margin: 0.5rem 0 0;
+}
+
+.flow-picker h3 {
+  margin: 1.2rem 0 0.2rem;
+  font-size: 1rem;
+}
+
+.library-setup label,
+.flow-picker label {
+  font-weight: 600;
+}
+
+.library-setup input,
+.library-setup textarea,
+.flow-picker input,
+.flow-picker select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+}
+
+.library-setup textarea {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  resize: vertical;
+}
+
+/* Help text is ALWAYS VISIBLE, never a hover tooltip: a template's tooltip is
+   the documentation for that setting, and hover reaches neither a keyboard
+   nor a touch user. */
+.help {
+  margin: 0 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.4rem;
+}
+
+.switch label {
+  font-weight: 400;
+}
+
+.problems {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--warn);
+}
+
+/* An alert is bordered as well as coloured — the same rule the cards follow:
+   colour is never the only carrier. */
+.failure {
+  border: 1px solid var(--bad);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.6rem 0 0;
+}
+
+.failure p {
+  margin: 0.35rem 0 0;
+}
+
+/* The daemon's refusals are multi-sentence and are shown whole, wrapped
+   rather than truncated: an elided message is a lost diagnosis. */
+.verbatim {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pause-reason {
+  margin: 0.5rem 0 0;
+  color: var(--warn);
+}
+
+.flow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.flow-list label {
+  font-weight: 400;
+}
+
+.template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.6rem;
+}
+
+.parameter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.6rem;
+}
+
+.parameter input,
+.parameter select {
+  align-self: flex-start;
+  min-width: 14rem;
+}
+
+.template-form > button {
+  align-self: flex-start;
+  margin-top: 0.6rem;
+}
