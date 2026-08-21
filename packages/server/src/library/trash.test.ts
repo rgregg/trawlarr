@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
 import type { LibraryRecord } from '../db/library-repo.js';
 import { purgeTrash, trashRetentionDaysForFlow, DEFAULT_TRASH_RETENTION_DAYS } from './trash.js';
+import { parsePluginId } from '../plugins/plugin-id.js';
 import { resolveTrashDir } from './paths.js';
 
 /**
@@ -224,6 +225,27 @@ describe('trashRetentionDaysForFlow', () => {
     expect(trashRetentionDaysForFlow({ nodes: [replaceNode('r', 'soon')], edges: [] })).toBe(
       DEFAULT_TRASH_RETENTION_DAYS,
     );
+  });
+
+  it('is unmoved by an INSTALLED plugin, which can never be the Replace node', () => {
+    // The reserved namespace, load-bearing here: a source may not be called
+    // `trawlarr`, so the closest an installed plugin can come to the Replace
+    // node's id is `<some source>:replaceOriginal`. Its retention input must
+    // not be read as this flow's promise about how long an original is kept —
+    // it is a different plugin that writes no trash at all.
+    expect(parsePluginId('trawlarr:replaceOriginal')).toBeNull();
+    const flow: FlowDefinition = {
+      nodes: [
+        {
+          id: 'installed',
+          pluginId: 'tdarr:replaceOriginal',
+          pluginVersion: '1.0.0',
+          inputs: { trashRetentionDays: '0' },
+        },
+      ],
+      edges: [],
+    };
+    expect(trashRetentionDaysForFlow(flow)).toBe(DEFAULT_TRASH_RETENTION_DAYS);
   });
 
   it('reads the default from the node definition rather than a second copy of it', () => {

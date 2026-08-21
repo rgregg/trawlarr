@@ -3,6 +3,7 @@ import { checkAllLibraries } from '../../daemon/library-health.js';
 import { createFlowRepo, type FlowRecord } from '../../db/flow-repo.js';
 import { createLibraryRepo } from '../../db/library-repo.js';
 import { createNodeCapabilityResolver } from '../../flow/node-capabilities.js';
+import { createPluginRegistry } from '../../plugins/registry.js';
 import { dryRunFlow, DryRunInputError } from '../../flow/dry-run.js';
 import { buildFromTemplate, FLOW_TEMPLATES, UnknownTemplateError } from '../../flow/templates.js';
 import {
@@ -199,13 +200,18 @@ export const flowRoutes: Route[] = [
     method: 'POST',
     path: '/flows/validate',
     handler: ({ body, ctx }) => {
-      void ctx;
       const definition = requireDefinition(body);
       // 200 with `ok: false` — NOT an error status. The caller asked a
       // question ("would you run this?"), and got the answer; nothing was
       // stored either way. A 4xx here would make an editor's live validation
       // indistinguishable from a broken request.
-      const problems = validateFlowDefinition(definition, createNodeCapabilityResolver());
+      // The same resolver `createFlowRepo` stores through, registry and all:
+      // an editor asking "would you run this?" about a flow naming an
+      // installed plugin must get the answer the save would give.
+      const problems = validateFlowDefinition(
+        definition,
+        createNodeCapabilityResolver({ registry: createPluginRegistry(ctx.db) }),
+      );
       return {
         ok: problems.length === 0,
         problems: problems.map((problem) => ({ code: problem.code, message: problem.message })),

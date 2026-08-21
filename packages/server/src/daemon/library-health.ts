@@ -9,6 +9,7 @@ import { createPluginLoader } from '@trawlarr/engine';
 import type { Db } from '../db/connection.js';
 import { createFlowRepo, type FlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
+import { createPluginRegistry, type PluginRegistry } from '../plugins/registry.js';
 import type { EventBus } from './events.js';
 
 /**
@@ -36,9 +37,16 @@ export interface LibraryHealthResult {
 }
 
 /**
- * Resolves a node's plugin the same two ways the executor and the flow-repo
- * validator do (first-party table, then the plugin id as a path through the
- * loader), while also remembering which plugin ids it could not resolve.
+ * Resolves a node's plugin the same three ways the executor and the flow-repo
+ * validator do (first-party table, then the registry of INSTALLED plugins,
+ * then the plugin id as a path through the loader), while also remembering
+ * which plugin ids it could not resolve.
+ *
+ * The registry branch is not an optimisation, it is the whole point of
+ * installing a plugin: without it, a flow that names `tdarr:something` this
+ * host has installed resolves to nothing, lands in `unresolved`, and this
+ * function PAUSES THE LIBRARY with "this host cannot resolve it" — the exact
+ * opposite of what installing the plugin was for.
  *
  * `validateFlowDefinition` itself treats an unresolvable plugin as unknown
  * rather than wrong — a community plugin may simply not be installed on this
@@ -50,7 +58,9 @@ export interface LibraryHealthResult {
  * reported on its own rather than inferred from validation's silence. Hence
  * this resolver is also asked, directly, which ids it could not resolve.
  */
-const createResolver = (): {
+const createResolver = (
+  registry: PluginRegistry,
+): {
   resolve: FlowNodeCapabilityResolver;
   unresolvedPluginIds: () => string[];
 } => {
@@ -71,8 +81,13 @@ const createResolver = (): {
       const details = firstParty.module.details();
       return capabilitiesFrom(details.outputs, details.isStartPlugin);
     }
+    // An id the registry knows is loaded from the path it names. A plugin
+    // whose row exists but whose FILE has gone (a source directory deleted
+    // out from under an installed row) still lands in `unresolved`, which is
+    // the same answer as never having installed it — one reason, one wording.
+    const installed = registry.resolveAbsPath(node.pluginId);
     try {
-      const loaded = loader.load(node.pluginId);
+      const loaded = loader.load(installed ?? node.pluginId);
       return capabilitiesFrom(loaded.details.outputs, loaded.details.isStartPlugin);
     } catch {
       unresolved.add(node.pluginId);
@@ -101,8 +116,9 @@ const createResolver = (): {
 const flowInvalidReason = (input: {
   library: LibraryRecord;
   flowRepo: FlowRepo;
+  registry: PluginRegistry;
 }): string | null => {
-  const { library, flowRepo } = input;
+  const { library, flowRepo, registry } = input;
 
   if (library.flowId === null) {
     return `${PAUSE_PREFIX_FLOW}no flow attached. Run "trawlarr library set-flow".`;
@@ -117,7 +133,7 @@ const flowInvalidReason = (input: {
     );
   }
 
-  const { resolve, unresolvedPluginIds } = createResolver();
+  const { resolve, unresolvedPluginIds } = createResolver(registry);
   const problems = validateFlowDefinition(flow.definition as FlowDefinition, resolve);
   if (problems.length > 0) {
     return `${PAUSE_PREFIX_FLOW}${problems.map((problem) => problem.message).join(' ')}`;
@@ -168,7 +184,7 @@ export const checkLibraryHealth = (input: {
   const library = libraryRepo.getById(libraryId);
   if (library === null) throw new Error(`checkLibraryHealth: unknown library "${libraryId}".`);
 
-  const reason = flowInvalidReason({ library, flowRepo });
+  const reason = flowInvalidReason({ library, flowRepo, registry: createPluginRegistry(db) });
   const ok = reason === null;
 
   const operatorOwns =

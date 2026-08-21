@@ -427,7 +427,13 @@ export const runPayload = async (input: {
             },
           };
         }
-        return loader.load(node.pluginId);
+        // An installed plugin is named by its id; the daemon resolved it to a
+        // path when it built this payload, because this process never opens
+        // the database. An id that is not in the map is still tried as a
+        // path, which is how a community plugin is named without a source and
+        // must keep working — and how an id that is no longer installed fails
+        // here, naming the plugin, exactly as an unknown path always has.
+        return loader.load(payload.pluginPaths[node.pluginId] ?? node.pluginId);
       };
 
       // Carries a node's mutations to the file object (container, file_size,

@@ -6,6 +6,7 @@ import {
   type FlowNodeCapabilityResolver,
 } from '@trawlarr/core';
 import { createNodeCapabilityResolver } from '../flow/node-capabilities.js';
+import { createPluginRegistry } from '../plugins/registry.js';
 import type { Db } from './connection.js';
 
 export interface FlowRecord {
@@ -83,8 +84,13 @@ export const createFlowRepo = (
   db: Db,
   options?: { resolveNodeCapabilities?: FlowNodeCapabilityResolver },
 ): FlowRepo => {
+  // Registry-aware by default: a flow naming an INSTALLED plugin must
+  // validate against that plugin's real declaration, not be rejected because
+  // the id is neither first-party nor a path. `createFlowRepo` already holds
+  // `db`, so every existing caller gets this without changing.
   const resolveNodeCapabilities =
-    options?.resolveNodeCapabilities ?? createNodeCapabilityResolver();
+    options?.resolveNodeCapabilities ??
+    createNodeCapabilityResolver({ registry: createPluginRegistry(db) });
   const selectById = db.prepare(`SELECT * FROM flow WHERE id = ?`);
   const selectByName = db.prepare(`SELECT * FROM flow WHERE name = ?`);
   const selectAll = db.prepare(`SELECT * FROM flow ORDER BY name`);

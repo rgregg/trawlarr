@@ -75,6 +75,8 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   ffmpegPath: 'ffmpeg',
   ffprobePath: 'ffprobe',
   logPath: null,
+  // Only first-party plugins here: nothing installed to resolve.
+  pluginPaths: {},
 });
 
 const payloadForFixture = (name: 'two-node-flow'): JobPayload => {
@@ -242,7 +244,82 @@ const flowEndingIn = (pluginPath: string): FlowDefinition => ({
   edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'last' }],
 });
 
+/** A plugin that reports which id it was reached by, through its step trace. */
+const passThroughPluginPath = (): string =>
+  writePlugin(`
+const details = () => ({
+  name: 'Installed Pass Through',
+  description: 'x',
+  style: { borderColor: '#000000' },
+  tags: 'test',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+
+const plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: args.inputFileObj._id },
+  variables: args.variables,
+});
+
+module.exports = { details, plugin };
+`);
+
 describe('runPayload', () => {
+  it('loads an INSTALLED plugin from the path the payload carries, holding no database', async () => {
+    // The worker's own resolution, and the reason `pluginPaths` exists: this
+    // process cannot look `tdarr:passThrough` up, so the daemon told it.
+    const absPath = passThroughPluginPath();
+    const payload = payloadFor(flowEndingIn('tdarr:passThrough'));
+    const report = await runPayload({
+      payload: { ...payload, pluginPaths: { 'tdarr:passThrough': absPath } },
+      ports: quietPorts(),
+    });
+
+    expect(report.failed).toBe(false);
+    expect(report.error).toBeNull();
+    // The step is recorded under the ID a flow author wrote, not the path —
+    // the id is the flow's identity and what a job trace must show.
+    expect(report.steps.map((step) => step.pluginId)).toEqual([
+      'trawlarr:start',
+      'tdarr:passThrough',
+    ]);
+    expect(report.steps.at(-1)?.outputNumber).toBe(1);
+  });
+
+  it('fails, naming the plugin, when the id it is asked for is not in the map', async () => {
+    // The control for the test above — without it, a `loadPlugin` that
+    // ignored the map entirely would still look like it worked. And it is
+    // the consistent answer to "no longer installed": the daemon left the id
+    // out because it could not resolve it, so the run fails naming the id
+    // rather than silently skipping the node.
+    const report = await runPayload({
+      payload: { ...payloadFor(flowEndingIn('tdarr:passThrough')), pluginPaths: {} },
+      ports: quietPorts(),
+    });
+
+    expect(report.failed).toBe(true);
+    expect(report.error).toContain('tdarr:passThrough');
+  });
+
+  it('still loads a plugin named by an absolute path, with an empty map', async () => {
+    // A community plugin with no source at all: the path form must keep
+    // working, so an id absent from the map is tried as a path rather than
+    // rejected out of hand.
+    const report = await runPayload({
+      payload: { ...payloadFor(flowEndingIn(passThroughPluginPath())), pluginPaths: {} },
+      ports: quietPorts(),
+    });
+
+    expect(report.failed).toBe(false);
+    expect(report.steps).toHaveLength(2);
+  });
+
   it('runs a flow and reports steps without touching a database', async () => {
     const steps: StepRecord[] = [];
 

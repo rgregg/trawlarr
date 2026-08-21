@@ -6,7 +6,19 @@ import type { LibraryRecord } from '../db/library-repo.js';
 import { canonicalPath, pathContains } from '../fs/path-contains.js';
 import { RESERVED_DIR_NAME } from './paths.js';
 
-/** The plugin id `Replace Original File` is registered under. */
+/**
+ * The plugin id `Replace Original File` is registered under.
+ *
+ * Deliberately NOT resolved through `PluginRegistry`, unlike the four other
+ * places that resolve a plugin id. This is a FIRST-PARTY id, and the
+ * `trawlarr:` namespace is reserved twice over — `assertValidSourceSlug`
+ * refuses it at install time and `parsePluginId` returns null for it at read
+ * time — so no installed plugin can ever answer to this id, and asking the
+ * registry could only ever return null. Nor can an installed plugin write
+ * trawlarr's trash: only the host's own Replace Original File runner moves a
+ * file there, so a flow full of community nodes and no Replace node holds no
+ * originals to sweep and correctly gets the default retention.
+ */
 const REPLACE_ORIGINAL_PLUGIN_ID = 'trawlarr:replaceOriginal';
 
 /**

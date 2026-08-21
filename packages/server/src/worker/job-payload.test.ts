@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
-import type { ProbeData } from '@trawlarr/plugin-api';
+import type { PluginDetails, ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
+import { createPluginRepo } from '../plugins/plugin-repo.js';
 import { buildJobPayload } from './job-payload.js';
 
 const NOW = 1_700_000_000_000;
@@ -23,6 +24,21 @@ const FLOW: FlowDefinition = {
   ],
   edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'check' }],
 };
+
+/** Enough of a `details()` for a row; nothing loads this fixture's file. */
+const INSTALLED_DETAILS = {
+  name: 'Installed',
+  description: '',
+  style: { borderColor: '#fff' },
+  tags: '',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+} as unknown as PluginDetails;
 
 const PROBE: ProbeData = {
   streams: [
@@ -107,6 +123,61 @@ describe('buildJobPayload', () => {
     expect(payload.ffprobePath).toBe('ffprobe');
     // The whole point: it must survive the IPC boundary.
     expect(JSON.parse(JSON.stringify(payload))).toEqual(payload);
+  });
+
+  it('carries the paths of the installed plugins THIS flow names, and no others', () => {
+    // The worker never opens the database, so this map is its only way to
+    // turn `tdarr:x` into a file. Only referenced ids ride along: shipping
+    // the whole table would grow this object without bound, per job.
+    const seeded = seedLibraryWithProbedFile();
+    const repo = createPluginRepo(db);
+    repo.addSource({ id: 'tdarr', url: '/srv/p', kind: 'local' });
+    repo.replaceSourcePlugins('tdarr', [
+      {
+        pluginName: 'used',
+        relPath: 'a/used/1.0.0/index.js',
+        absPath: '/srv/p/a/used/1.0.0/index.js',
+        version: '1.0.0',
+        details: INSTALLED_DETAILS,
+      },
+      {
+        pluginName: 'unused',
+        relPath: 'a/unused/1.0.0/index.js',
+        absPath: '/srv/p/a/unused/1.0.0/index.js',
+        version: '1.0.0',
+        details: INSTALLED_DETAILS,
+      },
+    ]);
+    const flow = createFlowRepo(db).create({
+      name: 'installed',
+      definition: {
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'n', pluginId: 'tdarr:used', pluginVersion: '1.0.0', inputs: {} },
+          // Referenced but NOT installed: absent from the map, never null and
+          // never guessed — the worker then tries it as a path and fails
+          // naming the plugin, the same answer every other call site gives.
+          { id: 'gone', pluginId: 'tdarr:removed', pluginVersion: '1.0.0', inputs: {} },
+        ],
+        edges: [],
+      },
+      nowMs: NOW,
+    });
+    createLibraryRepo(db).setFlow(seeded.libraryId, flow.id);
+
+    const payload = buildJobPayload({
+      db,
+      claimed: { fileId: seeded.fileId, libraryId: seeded.libraryId, path: '/lib/movie.mkv' },
+      jobId: 'job-1',
+      workerClass: 'transcode',
+      hardwareType: 'cpu',
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+    });
+
+    expect(payload.pluginPaths).toEqual({ 'tdarr:used': '/srv/p/a/used/1.0.0/index.js' });
+    // Plain strings, so it crosses the IPC boundary unchanged.
+    expect(JSON.parse(JSON.stringify(payload)).pluginPaths).toEqual(payload.pluginPaths);
   });
 
   it('names what is missing rather than throwing something anonymous', () => {

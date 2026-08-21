@@ -1,23 +1,8 @@
 import { classifySideEffects, createPluginLoader } from '@trawlarr/engine';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 import type { Db } from '../../db/connection.js';
+import { createPluginRepo } from '../../plugins/plugin-repo.js';
 import { ApiError, notImplemented, type Route } from '../router.js';
-
-/**
- * The `plugin` table's shape. Nothing writes it yet — installing community
- * plugins from a source arrives with the plugin browser — but it is read
- * here so that the day it IS written, this endpoint reports those plugins
- * without a second implementation appearing somewhere else.
- */
-interface PluginRow {
-  id: string;
-  source_id: string | null;
-  rel_path: string;
-  abs_path: string;
-  version: string;
-  details_json: string;
-  enabled: number;
-}
 
 const SOURCES_NOT_IMPLEMENTED =
   `Plugin sources are not implemented in this build; this endpoint arrives with the plugin ` +
@@ -51,27 +36,32 @@ const firstPartyResources = () =>
     };
   });
 
-const installedResources = (db: Db) => {
-  const rows = db.prepare(`SELECT * FROM plugin ORDER BY id`).all() as PluginRow[];
-  return rows.map((row) => ({
-    id: row.id,
-    name: (JSON.parse(row.details_json) as { name?: string }).name ?? row.rel_path,
-    description: (JSON.parse(row.details_json) as { description?: string }).description ?? '',
-    tags: '',
-    version: row.version,
-    source: 'installed' as const,
-    sourceId: row.source_id,
-    absPath: row.abs_path,
-    enabled: row.enabled === 1,
-    isStartPlugin:
-      (JSON.parse(row.details_json) as { isStartPlugin?: boolean }).isStartPlugin === true,
-    // Anything trawlarr did not write may spawn subprocesses or write files
-    // directly, so `unknown` is the honest answer and is what makes a dry
-    // run stop at it rather than pretend.
-    sideEffects: 'unknown' as const,
-    details: JSON.parse(row.details_json) as unknown,
-  }));
-};
+/**
+ * The installed plugins, read through `PluginRepo` rather than a second copy
+ * of its SQL. One reader means one answer: a plugin that is no longer
+ * installed disappears from here at exactly the moment it stops resolving
+ * for flow validation, library health and the worker.
+ */
+const installedResources = (db: Db) =>
+  createPluginRepo(db)
+    .listPlugins()
+    .map((row) => ({
+      id: row.id,
+      name: row.details.name ?? row.relPath,
+      description: row.details.description ?? '',
+      tags: row.details.tags ?? '',
+      version: row.version,
+      source: 'installed' as const,
+      sourceId: row.sourceId,
+      absPath: row.absPath,
+      enabled: row.enabled,
+      isStartPlugin: row.details.isStartPlugin === true,
+      // Anything trawlarr did not write may spawn subprocesses or write files
+      // directly, so `unknown` is the honest answer and is what makes a dry
+      // run stop at it rather than pretend.
+      sideEffects: 'unknown' as const,
+      details: row.details as unknown,
+    }));
 
 export const pluginRoutes: Route[] = [
   {
@@ -140,8 +130,9 @@ export const pluginRoutes: Route[] = [
           404,
           'plugin-not-found',
           `No plugin "${id}" is installed here, and it is not a path this host can load. ` +
-            `First-party ids look like "trawlarr:execute"; a community plugin is named by its ` +
-            `absolute path until plugin sources ship.`,
+            `First-party ids look like "trawlarr:execute"; an installed one looks like ` +
+            `"tdarr:ffmpegCommandSetContainer" and needs its source added and synced; a ` +
+            `community plugin with no source is named by its absolute path.`,
         );
       }
     },

@@ -7,6 +7,16 @@ export * from './db/plugin-document-repo.js';
 export * from './db/flow-repo.js';
 export * from './db/job-repo.js';
 export * from './db/settings-repo.js';
+// The installed-plugin surface, exported for the same reason the repositories
+// above are: it is now consumed OUTSIDE this package (the CLI's plugin
+// commands, and any caller that needs to resolve an installed id), and an
+// inconsistent barrel is how a later caller ends up deep-importing a dist
+// path. `plugins/registry.js` is the seam every resolution site goes through.
+export * from './plugins/plugin-id.js';
+export * from './plugins/plugin-repo.js';
+export * from './plugins/registry.js';
+export * from './plugins/fetch-source.js';
+export * from './plugins/sync-source.js';
 export * from './fs/partial-hash.js';
 export * from './fs/path-contains.js';
 export * from './fs/walk.js';

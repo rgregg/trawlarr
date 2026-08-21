@@ -1,9 +1,14 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
+import { createPluginLoader } from '@trawlarr/engine';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
+import { createPluginRepo } from '../plugins/plugin-repo.js';
 import { createEventBus, type TrawlarrEvent } from './events.js';
 import {
   PAUSE_PREFIX_FLOW,
@@ -25,6 +30,54 @@ const flowUsing = (pluginId: string): FlowDefinition => ({
   nodes: [{ id: 'n1', pluginId, pluginVersion: '1.0.0', inputs: {} }],
   edges: [],
 });
+
+/**
+ * A real, loadable CommonJS flow plugin — the fixture the installed cases
+ * need, because the resolver they exercise proves itself by LOADING the file
+ * the registry names and reading its `details()`.
+ */
+const FIXTURE_PLUGIN = `
+exports.details = () => ({
+  name: 'Fixture Plugin',
+  description: 'x',
+  style: { borderColor: '#fff' },
+  tags: '',
+  isStartPlugin: true,
+  pType: 'start',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: args.inputFileObj._id },
+  variables: args.variables,
+});
+`;
+
+/** Writes the fixture to disk and installs it as `fx:myPlugin`. Returns its id. */
+const installFixturePlugin = (): { pluginId: string; absPath: string; root: string } => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-hp-'));
+  const dir = join(root, 'p', 'myPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  const absPath = join(dir, 'index.js');
+  writeFileSync(absPath, FIXTURE_PLUGIN, 'utf8');
+
+  const repo = createPluginRepo(db);
+  repo.addSource({ id: 'fx', url: root, kind: 'local' });
+  repo.replaceSourcePlugins('fx', [
+    {
+      pluginName: 'myPlugin',
+      relPath: join('p', 'myPlugin', '1.0.0', 'index.js'),
+      absPath,
+      version: '1.0.0',
+      details: createPluginLoader().load(absPath).details,
+    },
+  ]);
+  return { pluginId: 'fx:myPlugin', absPath, root };
+};
 
 let db: Db;
 
@@ -83,6 +136,61 @@ describe('checkLibraryHealth', () => {
     const library = createLibraryRepo(db).getById(libraryId)!;
     expect(library.enabled).toBe(false);
     expect(library.pausedReason?.startsWith(PAUSE_PREFIX_FLOW)).toBe(true);
+  });
+
+  it('does not pause a library whose flow uses an INSTALLED plugin', () => {
+    // THE PAIR MATTERS: the sibling test above asserts an UNRESOLVABLE plugin
+    // DOES pause the library. A resolver that resolves everything passes this
+    // one and fails that; a resolver that resolves nothing does the reverse.
+    // Neither test alone can tell a working resolver from a broken one.
+    const bus = createEventBus();
+    const { pluginId, root } = installFixturePlugin();
+    const { libraryId } = seedLibraryWithFlowUsing(pluginId);
+
+    const result = checkLibraryHealth({ db, libraryId, bus });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeNull();
+    const library = createLibraryRepo(db).getById(libraryId)!;
+    expect(library.enabled).toBe(true);
+    expect(library.pausedReason).toBeNull();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('pauses a library again once the plugin its flow uses is uninstalled', () => {
+    // The consistent answer to "referenced but no longer installed": the same
+    // unresolvable-plugin reason, naming the id, that a never-installed
+    // plugin gets. Self-clearing health means no human has to notice.
+    const bus = createEventBus();
+    const { pluginId, root } = installFixturePlugin();
+    const { libraryId } = seedLibraryWithFlowUsing(pluginId);
+    expect(checkLibraryHealth({ db, libraryId, bus }).ok).toBe(true);
+
+    createPluginRepo(db).removeSource('fx');
+    const result = checkLibraryHealth({ db, libraryId, bus });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain(pluginId);
+    expect(result.reason).toContain('cannot');
+    expect(createLibraryRepo(db).getById(libraryId)!.enabled).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('pauses a library whose installed plugin row outlived its file on disk', () => {
+    // A row can outlive its files (a source directory deleted from under it).
+    // The registry resolves the id, the LOADER then fails, and the answer is
+    // the same one wording as never having installed it — not a crash, and
+    // not a false green.
+    const bus = createEventBus();
+    const { pluginId, root } = installFixturePlugin();
+    const { libraryId } = seedLibraryWithFlowUsing(pluginId);
+    rmSync(root, { recursive: true, force: true });
+
+    const result = checkLibraryHealth({ db, libraryId, bus });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain(pluginId);
+    expect(createLibraryRepo(db).getById(libraryId)!.enabled).toBe(false);
   });
 
   it('resumes a library once its flow becomes valid again', () => {

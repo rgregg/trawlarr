@@ -16,7 +16,9 @@ import { createLibraryRepo } from '../db/library-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
+import { createPluginRepo } from '../plugins/plugin-repo.js';
 import { createApiContext, createApiServer } from './server.js';
+import { createPluginLoader } from '@trawlarr/engine';
 
 const NOW = 1_700_000_000_000;
 const API_KEY = 'the-fixed-test-api-key-000000';
@@ -808,6 +810,49 @@ describe('dry run', () => {
   });
 });
 
+/**
+ * A real, loadable CommonJS flow plugin, installed as `fx:myPlugin`. Real
+ * because `/flows/validate` resolves an installed id by LOADING the file the
+ * registry names and reading its declared outputs.
+ */
+const FIXTURE_PLUGIN = `
+exports.details = () => ({
+  name: 'Fixture Plugin',
+  description: 'a fixture',
+  style: { borderColor: '#fff' },
+  tags: 'fixture',
+  isStartPlugin: true,
+  pType: 'start',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => ({ outputNumber: 1, outputFileObj: args.inputFileObj, variables: args.variables });
+`;
+
+const installFixturePlugin = async (): Promise<string> => {
+  const root = await mkdtemp(join(tmpdir(), 'trawlarr-api-plugin-'));
+  const dir = join(root, 'p', 'myPlugin', '1.0.0');
+  await mkdir(dir, { recursive: true });
+  const absPath = join(dir, 'index.js');
+  await writeFile(absPath, FIXTURE_PLUGIN, 'utf8');
+
+  const repo = createPluginRepo(db);
+  repo.addSource({ id: 'fx', url: root, kind: 'local' });
+  repo.replaceSourcePlugins('fx', [
+    {
+      pluginName: 'myPlugin',
+      relPath: join('p', 'myPlugin', '1.0.0', 'index.js'),
+      absPath,
+      version: '1.0.0',
+      details: createPluginLoader().load(absPath).details,
+    },
+  ]);
+  return 'fx:myPlugin';
+};
+
 describe('plugins', () => {
   it('lists the installed first-party plugins with what a dry run can promise about each', async () => {
     const response = await api('GET', '/plugins');
@@ -829,6 +874,54 @@ describe('plugins', () => {
     expect(found.body.isStartPlugin).toBe(true);
     expect(missing.status).toBe(404);
     expect(missing.body.error.code).toBe('plugin-not-found');
+  });
+
+  it('lists an INSTALLED plugin beside the first-party ones, and stops listing it once uninstalled', async () => {
+    const pluginId = await installFixturePlugin();
+
+    const listed = await api('GET', '/plugins');
+    const installed = listed.body.find((plugin: { id: string }) => plugin.id === pluginId);
+    expect(installed).toBeDefined();
+    expect(installed.source).toBe('installed');
+    expect(installed.name).toBe('Fixture Plugin');
+    // Nothing trawlarr wrote: a dry run must stop at it rather than promise.
+    expect(installed.sideEffects).toBe('unknown');
+
+    const one = await api('GET', `/plugins/${pluginId}`);
+    expect(one.status).toBe(200);
+    expect(one.body.isStartPlugin).toBe(true);
+
+    // The consistent answer to "no longer installed", asked of this call
+    // site: it is gone from the list and 404s by id — never a stale row
+    // pointing at a path.
+    createPluginRepo(db).removeSource('fx');
+    const afterRemoval = await api('GET', '/plugins');
+    expect(afterRemoval.body.some((plugin: { id: string }) => plugin.id === pluginId)).toBe(false);
+    expect((await api('GET', `/plugins/${pluginId}`)).status).toBe(404);
+  });
+
+  it('validates a flow that names an installed plugin, and stops once it is uninstalled', async () => {
+    const pluginId = await installFixturePlugin();
+
+    const valid = await api('POST', '/flows/validate', { definition: flowUsing(pluginId) });
+    expect(valid.status).toBe(200);
+    expect(valid.body.ok).toBe(true);
+    expect(valid.body.problems).toEqual([]);
+
+    // An output the plugin does NOT declare is still rejected — proof the
+    // resolver read the plugin's real details() rather than waving it
+    // through as "unknown".
+    const badOutput = await api('POST', '/flows/validate', {
+      definition: {
+        nodes: [
+          { id: 'n1', pluginId, pluginVersion: '1.0.0', inputs: {} },
+          { id: 'n2', pluginId, pluginVersion: '1.0.0', inputs: {} },
+        ],
+        edges: [{ fromNodeId: 'n1', toNodeId: 'n2', outputNumber: 7 }],
+      },
+    });
+    expect(badOutput.body.ok).toBe(false);
+    expect(JSON.stringify(badOutput.body.problems)).toContain('7');
   });
 
   it('returns 501, not 404, for a plugin-source route', async () => {

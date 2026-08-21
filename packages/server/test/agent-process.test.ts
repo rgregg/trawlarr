@@ -233,6 +233,8 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   ffmpegPath: 'ffmpeg',
   ffprobePath: 'ffprobe',
   logPath: null,
+  // Only first-party plugins here: nothing installed to resolve.
+  pluginPaths: {},
 });
 
 /** The daemon side of the document store: a plain map, in THIS process. */

@@ -4,6 +4,7 @@ import type { Db } from '../db/connection.js';
 import { createMediaFileRepo, type ClaimedFile } from '../db/media-file-repo.js';
 import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
+import { createPluginRegistry } from '../plugins/registry.js';
 import { jobLogPath } from '../job-log/job-log-store.js';
 
 /**
@@ -59,6 +60,22 @@ export interface JobPayload {
    * row at all).
    */
   logPath: string | null;
+  /**
+   * Installed plugin id -> absolute path, for exactly the ids this flow names.
+   *
+   * The worker is a forked process that never opens the database (P2b
+   * decision 1), so it cannot look this up; and shipping the whole plugin
+   * table across the IPC boundary on every job would grow without bound for
+   * no benefit. Plain strings only: the payload must survive JSON
+   * round-tripping unchanged.
+   *
+   * An id the daemon could not resolve is simply ABSENT rather than mapped to
+   * null — the worker then tries it as a path, which is how a community
+   * plugin named by path (no source at all) keeps working, and how a plugin
+   * that is no longer installed fails with the same "cannot load" error it
+   * has always produced.
+   */
+  pluginPaths: Record<string, string>;
 }
 
 export interface BuildJobPayloadInput {
@@ -148,5 +165,10 @@ export const buildJobPayload = (input: BuildJobPayloadInput): JobPayload => {
       input.dataDir == null ? null : jobLogPath({ dataDir: input.dataDir, jobId: input.jobId }),
     ffmpegPath: input.ffmpegPath,
     ffprobePath: input.ffprobePath,
+    // Only the ids this flow actually names: resolution happens HERE, once,
+    // on the side of the fork that has the database.
+    pluginPaths: createPluginRegistry(input.db).resolveMany(
+      flow.definition.nodes.map((node) => node.pluginId),
+    ),
   };
 };
