@@ -93,7 +93,7 @@ Two of his Unmanic-side safety settings were checked specifically, because a lan
 | `packages/server/src/db/flow-repo.ts` | Pass the registry-backed resolver through. |
 | `packages/server/src/worker/job-payload.ts` | `JobPayload` gains `pluginPaths: Record<string, string>`. |
 | `packages/server/src/worker/run-payload.ts` | `loadPlugin` consults `payload.pluginPaths` before treating the id as a path. |
-| `packages/server/src/daemon/daemon.ts` | Construct the registry once and hand it to the payload builder and the capability resolver. |
+| `packages/server/src/daemon/library-health.ts` | Resolve installed plugins, so using one does not pause the library. |
 | `packages/server/src/cli.ts` | `trawlarr plugin` command group. |
 | `packages/server/src/flow/templates.ts` | `requiredPlugins` on `FlowTemplate`, and his pipeline as a new template. |
 | `packages/server/src/api/routes/plugins.ts` | **Task 8 only.** The five 501s become real handlers. |
@@ -124,7 +124,7 @@ Create `packages/engine/test/compat/parity-plugins.test.ts`. The probe below is 
 ```ts
 import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { AddressInfo } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand, compileFfmpegArgs, emptyFfmpegCommand } from '@trawlarr/core';
@@ -1082,11 +1082,14 @@ In the same file, inside `createVerifyOutputRunner`'s `plugin` body, before the 
           command.streams.length === 0
             ? null
             : command.streams.filter((stream) => stream.removed !== true).length;
-        const requireAudioIfOriginalHadAudio = args.inputs.requireAudioIfOriginalHadAudio !== false
-          && String(args.inputs.requireAudioIfOriginalHadAudio ?? 'true') !== 'false';
+        // A node input arrives as the STRING 'false' from a stored flow and as
+        // the boolean false from a test. Reading only one of those makes the
+        // switch look wired while doing nothing, so both are normalised here.
+        const requireAudioIfOriginalHadAudio =
+          String(args.inputs.requireAudioIfOriginalHadAudio ?? 'true') !== 'false';
 ```
 
-and pass both into the `verifyOutput({ ... })` call. Note the double read: node inputs arrive as the string `'false'` from a stored flow and as the boolean `false` from a test, and treating only one of them as off would make the switch look wired while doing nothing.
+and pass both into the `verifyOutput({ ... })` call.
 
 - [ ] **Step 5: Declare the input on the node**
 
@@ -1867,10 +1870,11 @@ Every candidate is then **loaded** and must expose a callable `plugin` and a `de
 - Create: `packages/server/src/plugins/sync-source.test.ts`
 
 **Interfaces:**
-- Consumes: `materialiseSource`, `PluginSourceError` from `./fetch-source.js`; `createPluginRepo`, `DiscoveredPlugin`, `PluginRepo` from `./plugin-repo.js`; `createPluginLoader` from `@trawlarr/engine`; `pluginPath`/`corpusAvailable` from the compat corpus helper **only in tests**.
+- Consumes: `materialiseSource` from `./fetch-source.js`; `DiscoveredPlugin`, `PluginRepo` from `./plugin-repo.js`; `createPluginLoader` from `@trawlarr/engine` (already exported — `packages/server/src/api/routes/plugins.ts` imports it today). Tests additionally use `CORPUS_DIR`/`corpusAvailable` from the compat corpus helper.
 - Produces:
   - `interface SyncReport { sourceId: string; installed: number; skipped: { relPath: string; reason: string }[] }`
-  - `discoverFlowPlugins(root: string): { pluginName: string; version: string; relPath: string; absPath: string }[]`
+  - `interface DiscoveredCandidate { pluginName: string; version: string; relPath: string; absPath: string }`
+  - `discoverFlowPlugins(root: string): DiscoveredCandidate[]`
   - `syncSource(input: { repo: PluginRepo; sourceId: string; cacheDir: string; nowMs: () => number; fetchFn?: typeof fetch }): Promise<SyncReport>`
 
 - [ ] **Step 1: Write the failing discovery tests**
@@ -2214,13 +2218,11 @@ Expected: PASS, 9 tests.
 Append to the same file — this proves discovery works on the tree it will actually meet:
 
 ```ts
-import { corpusAvailable, pluginPath } from '../../../engine/test/compat/corpus.js';
-
-const corpusRoot = () => join(pluginPath(''), '..', '..', '..');
+import { CORPUS_DIR, corpusAvailable } from '../../../engine/test/compat/corpus.js';
 
 describe.runIf(corpusAvailable())('against the real Tdarr corpus', () => {
   it('discovers the four plugins the parity pipeline needs', () => {
-    const found = new Set(discoverFlowPlugins(corpusRoot()).map((p) => p.pluginName));
+    const found = new Set(discoverFlowPlugins(CORPUS_DIR).map((p) => p.pluginName));
     expect(found.has('ffmpegCommandSetContainer')).toBe(true);
     expect(found.has('ffmpegCommandEnsureAudioStream')).toBe(true);
     expect(found.has('ffmpegCommandRemoveStreamByProperty')).toBe(true);
@@ -2228,13 +2230,13 @@ describe.runIf(corpusAvailable())('against the real Tdarr corpus', () => {
   });
 
   it('does not discover classic plugins', () => {
-    const found = discoverFlowPlugins(corpusRoot()).map((p) => p.pluginName);
+    const found = discoverFlowPlugins(CORPUS_DIR).map((p) => p.pluginName);
     expect(found.some((name) => name.startsWith('Tdarr_Plugin_'))).toBe(false);
   });
 });
 ```
 
-If importing across package test directories is awkward under the typecheck config, inline the two constants instead — `join(process.cwd(), 'cache', 'tdarr-plugins')` and an `existsSync` on `FlowPlugins/CommunityFlowPlugins` — rather than weakening the assertion or dropping the case.
+`CORPUS_DIR` is `join(process.cwd(), 'cache', 'tdarr-plugins')`. If importing across package test directories is awkward under `tsconfig.typecheck.json`, inline that expression and an `existsSync` check on `FlowPlugins/CommunityFlowPlugins` rather than weakening the assertion or dropping the case.
 
 - [ ] **Step 6: Run the gate and commit**
 
@@ -2244,3 +2246,1334 @@ pnpm build && pnpm lint && pnpm test && pnpm audit:licenses
 git add packages/server/src/plugins/sync-source.ts packages/server/src/plugins/sync-source.test.ts
 git commit -m "feat(server): discover, validate and install flow plugins from a source"
 ```
+
+---
+
+## Task 7: Resolve an installed id everywhere it is asked — validation, health, and the database-less worker
+
+Installing a plugin is worthless until a flow can name it. Four places resolve a plugin id, and they must agree, because a disagreement produces a flow that validates and then cannot run — or, worse, a library that pauses itself:
+
+1. `createNodeCapabilityResolver` — what flow validation reads.
+2. `library-health.ts`'s own `createResolver()` — which **pauses a library** whose flow names an unresolvable plugin. Miss this one and installing a plugin, then using it, pauses the library with "this host cannot resolve it".
+3. `buildJobPayload` — the daemon, which has the database.
+4. `run-payload.ts`'s `loadPlugin` — the **forked worker, which never opens the database** (P2b decision 1). It therefore cannot look anything up and must be told, which is why the payload carries a map.
+
+`JobPayload` must survive `JSON.parse(JSON.stringify(payload))` unchanged, so the map is a plain `Record<string, string>` and nothing else.
+
+Only the ids the flow actually names go into the payload. Shipping the whole table would put a growing, mostly-irrelevant object through an IPC boundary on every job.
+
+**Files:**
+- Create: `packages/server/src/plugins/registry.ts`
+- Create: `packages/server/src/plugins/registry.test.ts`
+- Modify: `packages/server/src/flow/node-capabilities.ts`
+- Modify: `packages/server/src/db/flow-repo.ts`
+- Modify: `packages/server/src/daemon/library-health.ts`
+- Modify: `packages/server/src/worker/job-payload.ts`
+- Modify: `packages/server/src/worker/run-payload.ts`
+- Create: `packages/server/test/plugin-install-end-to-end.test.ts`
+
+**Interfaces:**
+- Consumes: `createPluginRepo`, `parsePluginId` from `../plugins/*`; `Db` from `../db/connection.js`.
+- Produces:
+  - `interface PluginRegistry { resolveAbsPath(pluginId: string): string | null; resolveMany(ids: readonly string[]): Record<string, string> }`
+  - `createPluginRegistry(db: Db): PluginRegistry`
+  - `createNodeCapabilityResolver(options?: { loader?: PluginLoader; registry?: PluginRegistry })` — the parameter is added, the existing shape is unchanged.
+  - `JobPayload.pluginPaths: Record<string, string>`
+
+- [ ] **Step 1: Write the failing registry test**
+
+Create `packages/server/src/plugins/registry.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { createPluginRegistry } from './registry.js';
+import { createPluginRepo } from './plugin-repo.js';
+import { openDatabase } from '../db/connection.js';
+import { migrate } from '../db/migrate.js';
+import type { PluginDetails } from '@trawlarr/plugin-api';
+
+const details = (): PluginDetails =>
+  ({
+    name: 'x',
+    description: '',
+    style: { borderColor: '#fff' },
+    tags: '',
+    isStartPlugin: false,
+    pType: '',
+    sidebarPosition: 1,
+    icon: '',
+    inputs: [],
+    outputs: [{ number: 1, tooltip: 'ok' }],
+    requiresVersion: '1.0.0',
+  }) as PluginDetails;
+
+const seeded = () => {
+  const db = openDatabase({ file: ':memory:' });
+  migrate(db);
+  const repo = createPluginRepo(db);
+  repo.addSource({ id: 'tdarr', url: '/srv/p', kind: 'local' });
+  repo.replaceSourcePlugins('tdarr', [
+    {
+      pluginName: 'ffmpegCommandSetContainer',
+      relPath: 'a/ffmpegCommandSetContainer/1.0.0/index.js',
+      absPath: '/srv/p/a/ffmpegCommandSetContainer/1.0.0/index.js',
+      version: '1.0.0',
+      details: details(),
+    },
+  ]);
+  return db;
+};
+
+describe('the plugin registry', () => {
+  it('resolves an installed id to its absolute path', () => {
+    expect(
+      createPluginRegistry(seeded()).resolveAbsPath('tdarr:ffmpegCommandSetContainer'),
+    ).toBe('/srv/p/a/ffmpegCommandSetContainer/1.0.0/index.js');
+  });
+
+  it('answers null for a first-party id, leaving it to the first-party table', () => {
+    expect(createPluginRegistry(seeded()).resolveAbsPath('trawlarr:execute')).toBeNull();
+  });
+
+  it('answers null for an absolute path, leaving it to the loader', () => {
+    expect(createPluginRegistry(seeded()).resolveAbsPath('/media/p/index.js')).toBeNull();
+  });
+
+  it('resolveMany returns only the ids it knows', () => {
+    expect(
+      createPluginRegistry(seeded()).resolveMany([
+        'tdarr:ffmpegCommandSetContainer',
+        'tdarr:nope',
+        'trawlarr:start',
+      ]),
+    ).toEqual({
+      'tdarr:ffmpegCommandSetContainer': '/srv/p/a/ffmpegCommandSetContainer/1.0.0/index.js',
+    });
+  });
+
+  it('sees a plugin installed after it was constructed', () => {
+    // No caching: a sync must take effect on the very next validation, or a
+    // user who just installed a plugin is told it does not exist.
+    const db = seeded();
+    const registry = createPluginRegistry(db);
+    createPluginRepo(db).replaceSourcePlugins('tdarr', [
+      {
+        pluginName: 'newOne',
+        relPath: 'a/newOne/1.0.0/index.js',
+        absPath: '/srv/p/a/newOne/1.0.0/index.js',
+        version: '1.0.0',
+        details: details(),
+      },
+    ]);
+    expect(registry.resolveAbsPath('tdarr:newOne')).toBe('/srv/p/a/newOne/1.0.0/index.js');
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails, then write the registry**
+
+Run: `npx vitest run packages/server/src/plugins/registry.test.ts` — FAIL, cannot resolve `./registry.js`.
+
+Create `packages/server/src/plugins/registry.ts`:
+
+```ts
+import type { Db } from '../db/connection.js';
+import { createPluginRepo } from './plugin-repo.js';
+import { parsePluginId } from './plugin-id.js';
+
+/**
+ * The single answer to "what file is this plugin id?".
+ *
+ * Deliberately uncached and deliberately tiny. Uncached because a sync must
+ * take effect on the next validation — a cache here means "I just installed
+ * it and trawlarr says it does not exist". Tiny because it is the seam handed
+ * to the flow validator and the payload builder, neither of which should need
+ * a database handle to be tested.
+ */
+export interface PluginRegistry {
+  resolveAbsPath(pluginId: string): string | null;
+  resolveMany(ids: readonly string[]): Record<string, string>;
+}
+
+export const createPluginRegistry = (db: Db): PluginRegistry => {
+  const repo = createPluginRepo(db);
+  return {
+    resolveAbsPath: (pluginId) => {
+      // `parsePluginId` rejects first-party ids and absolute paths, so those
+      // never reach the database and keep their existing resolution.
+      if (parsePluginId(pluginId) === null) return null;
+      return repo.resolveAbsPaths([pluginId])[pluginId] ?? null;
+    },
+    resolveMany: (ids) => repo.resolveAbsPaths(ids),
+  };
+};
+```
+
+Run again: PASS, 5 tests.
+
+- [ ] **Step 3: Teach the capability resolver about the registry**
+
+In `packages/server/src/flow/node-capabilities.ts`, add `registry?: PluginRegistry` to the options and insert one branch between the first-party lookup and the path fallback:
+
+```ts
+    const installed = options?.registry?.resolveAbsPath(node.pluginId) ?? null;
+    if (installed !== null) {
+      try {
+        const loaded = loader.load(installed);
+        return capabilitiesFrom(loaded.details.outputs, loaded.details.isStartPlugin);
+      } catch {
+        return null;
+      }
+    }
+```
+
+In `packages/server/src/db/flow-repo.ts`, make the default resolver registry-aware. `createFlowRepo` already has `db`, so no caller changes:
+
+```ts
+  const resolveNodeCapabilities =
+    options?.resolveNodeCapabilities ??
+    createNodeCapabilityResolver({ registry: createPluginRegistry(db) });
+```
+
+- [ ] **Step 4: Teach library health about it, or installing a plugin pauses the library**
+
+In `packages/server/src/daemon/library-health.ts`, `createResolver()` must take the registry and pass it through to `createNodeCapabilityResolver`. `checkLibraryHealth` and `checkAllLibraries` both receive `db`, so thread `createPluginRegistry(db)` down to it. Without this, a flow that uses an installed plugin reports `flow-invalid: flow "X" uses plugin(s) "tdarr:..." which this host cannot resolve` and the library is **paused** — the exact opposite of what installing the plugin was for.
+
+Add a test to `packages/server/src/daemon/library-health.test.ts` alongside the existing unresolvable-plugin case. Reuse whatever that file already uses to seed a library and a flow; only the plugin-row seeding below is new.
+
+```ts
+const FIXTURE_PLUGIN = `
+exports.details = () => ({
+  name: 'Fixture Plugin',
+  description: 'x',
+  style: { borderColor: '#fff' },
+  tags: '',
+  isStartPlugin: true,
+  pType: 'start',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: args.inputFileObj._id },
+  variables: args.variables,
+});
+`;
+
+const installFixturePlugin = (db: Db): string => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'trawlarr-hp-')), 'p', 'myPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  const absPath = join(dir, 'index.js');
+  writeFileSync(absPath, FIXTURE_PLUGIN, 'utf8');
+
+  const repo = createPluginRepo(db);
+  repo.addSource({ id: 'fx', url: join(dir, '..', '..', '..'), kind: 'local' });
+  repo.replaceSourcePlugins('fx', [
+    {
+      pluginName: 'myPlugin',
+      relPath: 'p/myPlugin/1.0.0/index.js',
+      absPath,
+      version: '1.0.0',
+      details: createPluginLoader().load(absPath).details,
+    },
+  ]);
+  return 'fx:myPlugin';
+};
+
+it('does not pause a library whose flow uses an INSTALLED plugin', () => {
+  const db = openTestDb();
+  const pluginId = installFixturePlugin(db);
+  const flow = createFlowRepo(db).create({
+    name: 'Installed',
+    definition: {
+      nodes: [{ id: 'a', pluginId, pluginVersion: '1.0.0', inputs: {} }],
+      edges: [],
+    },
+  });
+  const library = seedLibrary(db, { flowId: flow.id });
+
+  const result = checkLibraryHealth({ db, bus, libraryId: library.id });
+
+  // The pair matters: the sibling test asserts an UNRESOLVABLE plugin does
+  // pause the library. A resolver that resolves everything passes this one
+  // and fails that; a resolver that resolves nothing does the reverse.
+  // Neither test alone can tell a working resolver from a broken one.
+  expect(result.paused).toBe(false);
+  expect(result.reason).toBeNull();
+});
+```
+
+Adjust `seedLibrary`, `bus` and the `checkLibraryHealth` result field names to match what that file already does — read it first. If the existing unresolvable-plugin test asserts on a `pausedReason` string instead, mirror it exactly.
+
+- [ ] **Step 5: Carry the map into the payload, and read it in the worker**
+
+In `packages/server/src/worker/job-payload.ts`, add to `JobPayload`:
+
+```ts
+  /**
+   * Installed plugin id -> absolute path, for exactly the ids this flow names.
+   *
+   * The worker is a forked process that never opens the database, so it
+   * cannot look this up; and shipping the whole plugin table across the IPC
+   * boundary on every job would grow without bound for no benefit. Plain
+   * strings only: the payload must survive JSON round-tripping unchanged.
+   */
+  pluginPaths: Record<string, string>;
+```
+
+and populate it in `buildJobPayload`, which already holds `input.db`:
+
+```ts
+    pluginPaths: createPluginRegistry(input.db).resolveMany(
+      flow.definition.nodes.map((node) => node.pluginId),
+    ),
+```
+
+In `packages/server/src/worker/run-payload.ts`, inside `loadPlugin`, replace the final `return loader.load(node.pluginId);` with:
+
+```ts
+        // An installed plugin is named by its id; the daemon resolved it to a
+        // path when it built this payload. An id that is not in the map is
+        // still tried as a path, which is how a community plugin is named
+        // without a source and must keep working.
+        return loader.load(payload.pluginPaths[node.pluginId] ?? node.pluginId);
+```
+
+Every construction of a `JobPayload` in tests will now fail to type-check. Add `pluginPaths: {}` to each — that is the correct value for a test that uses only first-party plugins. **`packages/server/src/worker/run-job.test.ts` must stay byte-for-byte unmodified**; if it constructs a payload literal and now fails, that is a signal the field should be optional-with-default rather than required — make it `pluginPaths?: Record<string, string>` and read it as `payload.pluginPaths?.[node.pluginId] ?? node.pluginId`, and note the choice in the commit message.
+
+- [ ] **Step 6: Write the end-to-end proof**
+
+Create `packages/server/test/plugin-install-end-to-end.test.ts`. This is the test that says the whole phase works: sync a local source, build a flow naming an installed plugin, run it against a real file, and assert the file on disk changed.
+
+```ts
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { toolAvailableSync } from '../../../test-support/tool-availability.js';
+import { corpusAvailable, CORPUS_DIR } from '../../engine/test/compat/corpus.js';
+
+const execFileAsync = promisify(execFile);
+const available = toolAvailableSync('ffmpeg') && toolAvailableSync('ffprobe') && corpusAvailable();
+
+describe.runIf(available)('installing a community plugin and running it', () => {
+  it('remuxes a real file through a flow that names an installed plugin', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'trawlarr-install-'));
+    const libraryDir = join(dataDir, 'library');
+    mkdirSync(libraryDir, { recursive: true });
+    const mediaPath = join(libraryDir, 'Sample.mkv');
+    await execFileAsync('ffmpeg', [
+      '-hide_banner', '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=10',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac',
+      mediaPath,
+    ]);
+
+    const cli = (args: string[]) =>
+      execFileAsync('node', [join(process.cwd(), 'packages/server/dist/cli.js'), ...args], {
+        maxBuffer: 10 * 1024 * 1024,
+      });
+
+    // The corpus IS a local plugin source — no network needed, and it is the
+    // same tree the compat suites run against.
+    await cli(['--data-dir', dataDir, 'plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR]);
+    const { stdout: syncOut } = await cli(['--data-dir', dataDir, 'plugin', 'source', 'sync', '--name', 'tdarr']);
+    expect(syncOut).toMatch(/tdarr/);
+
+    const { stdout: listOut } = await cli(['--data-dir', dataDir, 'plugin', 'list']);
+    expect(listOut).toContain('tdarr:ffmpegCommandSetContainer');
+
+    const flowPath = join(dataDir, 'flow.json');
+    writeFileSync(
+      flowPath,
+      JSON.stringify({
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'container',
+            pluginId: 'tdarr:ffmpegCommandSetContainer',
+            pluginVersion: '1.0.0',
+            inputs: { container: 'mp4', forceConform: 'true' },
+          },
+          { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'verify',
+            pluginId: 'trawlarr:verifyOutput',
+            pluginVersion: '1.0.0',
+            inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+          },
+          {
+            id: 'replace',
+            pluginId: 'trawlarr:replaceOriginal',
+            pluginVersion: '1.0.0',
+            inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+          },
+        ],
+        edges: [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
+          { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'container' },
+          { fromNodeId: 'container', outputNumber: 1, toNodeId: 'execute' },
+          { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
+          { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+        ],
+      }),
+      'utf8',
+    );
+
+    await cli(['--data-dir', dataDir, 'library', 'add', '--name', 'Movies', '--root', libraryDir]);
+    await cli(['--data-dir', dataDir, 'flow', 'add', '--name', 'Remux', '--file', flowPath]);
+    await cli(['--data-dir', dataDir, 'library', 'set-flow', '--library', 'Movies', '--flow', 'Remux']);
+    await cli(['--data-dir', dataDir, 'scan', '--library', 'Movies']);
+    await cli(['--data-dir', dataDir, 'run', '--library', 'Movies', '--max', '1']);
+
+    // The observable outcome: the library file is now an mp4, at the stem the
+    // user's file had. Not a log line, not an exit code.
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=format_name', '-of', 'csv=p=0',
+      join(libraryDir, 'Sample.mp4'),
+    ]);
+    expect(stdout).toContain('mp4');
+  }, 300_000);
+});
+```
+
+- [ ] **Step 7: Run everything and commit**
+
+```bash
+tsc --build --force
+pnpm build && pnpm lint && pnpm test && pnpm audit:licenses
+git diff --stat -- packages/server/src/worker/run-job.test.ts   # must print nothing
+git add packages/server/src/plugins/registry.ts packages/server/src/plugins/registry.test.ts \
+        packages/server/src/flow/node-capabilities.ts packages/server/src/db/flow-repo.ts \
+        packages/server/src/daemon/library-health.ts packages/server/src/daemon/library-health.test.ts \
+        packages/server/src/worker/job-payload.ts packages/server/src/worker/run-payload.ts \
+        packages/server/test/plugin-install-end-to-end.test.ts
+git commit -m "feat(server): resolve installed plugin ids in validation, health and the worker"
+```
+
+Note: this task's end-to-end test depends on the CLI commands built in Task 8. Write the test in Task 7, watch it fail for the right reason (`unknown command: plugin`), and complete it at the end of Task 8 — or reorder the two if you prefer a green suite at every commit. If you leave it red across one commit, say so in that commit's message.
+
+---
+
+## Task 8: The `trawlarr plugin` command group
+
+The CLI is the only interface this phase can safely finish, since the API surface belongs to another agent this week. It is also the interface the migration guide will tell the owner to use.
+
+**Files:**
+- Modify: `packages/server/src/cli.ts`
+- Modify: `packages/server/src/cli.test.ts`
+
+**Interfaces:**
+- Consumes: `createPluginRepo`, `syncSource`, `assertValidSourceSlug`, `PluginSourceError` from `../plugins/*`; the existing `CliError`, argument parsing and daemon-lock-file routing already in `cli.ts`.
+- Produces: no exports; six commands.
+
+Commands, matching the shapes `library` and `flow` already use:
+
+| Command | Flags | Behaviour |
+| --- | --- | --- |
+| `plugin source add` | `--name`, and one of `--url` (https tarball) or `--path` (local directory) | Validates the slug, stores the row, prints the id and kind. |
+| `plugin source list` | — | Name, kind, url, last sync, installed count. |
+| `plugin source remove` | `--name` | Removes the source and its plugins. |
+| `plugin source sync` | `--name`, or `--all` | Runs `syncSource`; prints installed count and every skipped plugin with its reason. |
+| `plugin list` | `--source` (optional) | First-party and installed plugins, id then display name. |
+| `plugin show` | `--id` | The plugin's `details()`: inputs with defaults, outputs with tooltips. |
+
+- [ ] **Step 1: Write the failing CLI tests**
+
+Add to `packages/server/src/cli.test.ts`. That file drives the CLI **in process** via `main(argv)`, which returns the exit code, and reads output through the `stdout()` / `stderr()` spy helpers already defined at the top of the file. `newDataDir()` is its temp-directory helper. Match those; do not introduce a subprocess runner.
+
+```ts
+/** Writes <tmp>/p/myPlugin/1.0.0/index.js — the layout `discoverFlowPlugins` looks for. */
+const writeFixturePluginTree = (): string => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-plugins-'));
+  const dir = join(root, 'p', 'myPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'index.js'),
+    `
+exports.details = () => ({
+  name: 'Fixture Plugin',
+  description: 'x',
+  style: { borderColor: '#fff' },
+  tags: '',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => ({
+  outputNumber: 1,
+  outputFileObj: { _id: args.inputFileObj._id },
+  variables: args.variables,
+});
+`,
+    'utf8',
+  );
+  return root;
+};
+
+describe('plugin source', () => {
+  it('adds a local source and lists it', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    expect(
+      await main(['plugin', 'source', 'add', '--name', 'fx', '--path', tree, '--data-dir', dataDir]),
+    ).toBe(0);
+    expect(await main(['plugin', 'source', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('fx');
+    expect(stdout()).toContain(tree);
+  });
+
+  it('refuses a source named trawlarr, by name', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main([
+        'plugin', 'source', 'add', '--name', 'trawlarr', '--path', '/tmp', '--data-dir', dataDir,
+      ]),
+    ).not.toBe(0);
+    expect(stderr()).toMatch(/reserved/i);
+  });
+
+  it('refuses both --url and --path together rather than picking one', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main([
+        'plugin', 'source', 'add', '--name', 'fx',
+        '--url', 'https://example.test/x.tar.gz', '--path', '/tmp',
+        '--data-dir', dataDir,
+      ]),
+    ).not.toBe(0);
+    expect(stderr()).toMatch(/one of/i);
+  });
+
+  it('refuses neither --url nor --path', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main(['plugin', 'source', 'add', '--name', 'fx', '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toMatch(/one of/i);
+  });
+
+  it('syncs a local source, and the installed plugin appears beside the first-party ones', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', tree, '--data-dir', dataDir]);
+    expect(await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir])).toBe(0);
+    expect(await main(['plugin', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(stdout()).toContain('fx:myPlugin');
+    expect(stdout()).toContain('trawlarr:execute');
+  });
+
+  it('names the source that does not exist rather than failing anonymously', async () => {
+    const dataDir = newDataDir();
+    expect(
+      await main(['plugin', 'source', 'sync', '--name', 'nope', '--data-dir', dataDir]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('nope');
+  });
+
+  it('removing a source removes its plugins', async () => {
+    const dataDir = newDataDir();
+    const tree = writeFixturePluginTree();
+    await main(['plugin', 'source', 'add', '--name', 'fx', '--path', tree, '--data-dir', dataDir]);
+    await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
+    expect(await main(['plugin', 'source', 'remove', '--name', 'fx', '--data-dir', dataDir])).toBe(0);
+    await main(['plugin', 'list', '--data-dir', dataDir]);
+    expect(stdout()).not.toContain('fx:myPlugin');
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `tsc --build --force && npx vitest run packages/server/src/cli.test.ts`
+Expected: FAIL with the CLI's own unknown-command error naming `plugin`.
+
+- [ ] **Step 3: Implement the command group**
+
+In `packages/server/src/cli.ts`, add the dispatch alongside the existing `library` / `flow` / `trash` ones (near line 1538) and write the group in their style:
+
+```ts
+  if (cmd === 'plugin') {
+    const [sub, ...pluginRest] = rest;
+    if (sub === 'source') return cmdPluginSource(pluginRest);
+    if (sub === 'list') return cmdPluginList(pluginRest);
+    if (sub === 'show') return cmdPluginShow(pluginRest);
+    throw new CliError(
+      `plugin: unknown subcommand "${sub ?? ''}". Expected one of: source, list, show.`,
+    );
+  }
+```
+
+and, mirroring how `cmdFlowAdd` parses and validates:
+
+```ts
+const cmdPluginSourceAdd = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      name: { type: 'string' },
+      url: { type: 'string' },
+      path: { type: 'string' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
+    },
+  });
+
+  if (values.name === undefined) throw new CliError('plugin source add: --name is required.');
+
+  const hasUrl = values.url !== undefined && values.url !== '';
+  const hasPath = values.path !== undefined && values.path !== '';
+  if (hasUrl === hasPath) {
+    // Both, or neither. Refused rather than resolved by precedence: an
+    // ignored flag silently gives the user the OTHER one's behaviour, which
+    // is a source pointing somewhere they did not ask for.
+    throw new CliError(
+      `plugin source add: exactly one of --url (an https .tar.gz, for example ` +
+        `https://codeload.github.com/HaveAGitGat/Tdarr_Plugins/tar.gz/master) or --path (a ` +
+        `directory already on this machine) is required.`,
+    );
+  }
+
+  const db = await openDb(values['data-dir']!);
+  const repo = createPluginRepo(db);
+  const source = repo.addSource({
+    id: values.name,
+    url: hasUrl ? values.url! : values.path!,
+    // There is exactly one sensible kind per flag, so the user never types one.
+    kind: hasUrl ? 'tarball' : 'local',
+  });
+  console.log(
+    `Added plugin source "${source.id}" (${source.kind}): ${source.url}. ` +
+      `Run "trawlarr plugin source sync --name ${source.id}" to install its plugins.`,
+  );
+  return 0;
+};
+
+const cmdPluginSourceSync = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      name: { type: 'string' },
+      all: { type: 'boolean', default: false },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
+    },
+  });
+  if (values.name === undefined && values.all !== true) {
+    throw new CliError('plugin source sync: --name <source> or --all is required.');
+  }
+
+  const dataDir = resolve(values['data-dir']!);
+  const db = await openDb(dataDir);
+  const repo = createPluginRepo(db);
+
+  const targets =
+    values.all === true
+      ? repo.listSources().filter((source) => source.enabled)
+      : [
+          repo.getSource(values.name!) ??
+            (() => {
+              throw new CliError(
+                `plugin source sync: no plugin source "${values.name!}". ` +
+                  `Known: ${repo.listSources().map((s) => s.id).join(', ') || '(none)'}.`,
+              );
+            })(),
+        ];
+
+  for (const target of targets) {
+    const report = await syncSource({
+      repo,
+      sourceId: target.id,
+      // A tarball source's extracted tree IS the installed plugin, so it lives
+      // permanently under the data directory, not in a temp dir a reboot clears.
+      cacheDir: join(dataDir, 'plugins'),
+      nowMs: () => Date.now(),
+    });
+    console.log(`Synced "${target.id}": ${report.installed} plugin(s) installed.`);
+    for (const skip of report.skipped) {
+      // Printed individually: a source where half the plugins failed to load
+      // must not look like a source where they never existed.
+      console.log(`  skipped ${skip.relPath}: ${skip.reason}`);
+    }
+  }
+  return 0;
+};
+```
+
+`cmdPluginSourceList`, `cmdPluginSourceRemove`, `cmdPluginList` and `cmdPluginShow` follow the same shape: parse, open, read, print one line per row. Requirements that are not obvious from the table:
+
+- **`--url` and `--path` are alternatives, and passing both is an error**, not a precedence rule. Mirror the wording `flow add` uses for `--file`/`--template`: an ignored flag silently gives the user the other one's behaviour.
+- **`--path` implies `kind: 'local'`; `--url` implies `kind: 'tarball'`.** The user never types a kind — there is exactly one sensible kind per flag, and asking would be a question with only one answer.
+- **The sync cache directory is `<data-dir>/plugins`.** A tarball source's extracted tree lives there permanently, because it *is* the installed plugin (see Task 6's note on the asymmetric cleanup).
+- **`plugin source sync` prints every skipped plugin and why.** A source where half the plugins failed to load must not look like a source where they did not exist.
+- **`plugin` commands route through the daemon when one holds the lock**, exactly as `library` and `flow` do — a sync writes the database, and the daemon is the sole writer. Follow whatever the existing commands do; do not open the database behind a live daemon. If the API routes are not landed yet (Task 9), these commands must fail with a named message saying the daemon owns the database and to stop it or wait for the routes, rather than corrupting anything.
+
+- [ ] **Step 4: Run the tests, then complete Task 7's end-to-end test**
+
+Run: `tsc --build --force && npx vitest run packages/server/src/cli.test.ts packages/server/test/plugin-install-end-to-end.test.ts`
+Expected: PASS. The end-to-end test from Task 7 should now go green; if it does not, the failure is real and is the point of the test.
+
+- [ ] **Step 5: Run the gate and commit**
+
+```bash
+tsc --build --force
+pnpm build && pnpm lint && pnpm test && pnpm audit:licenses
+git add packages/server/src/cli.ts packages/server/src/cli.test.ts
+git commit -m "feat(cli): trawlarr plugin source add/list/remove/sync and plugin list/show"
+```
+
+---
+
+## Task 9: The five 501s become real handlers
+
+**This is the one task that edits `packages/server/src/api`.** It edits exactly one file, `packages/server/src/api/routes/plugins.ts`, and every module it calls is already tested by Task 4–7. Before starting, check whether the web-UI agent is currently editing that file; if so, land Task 10 first and come back, or hand this task to whoever owns the file that week. Nothing else in this plan depends on it.
+
+**Files:**
+- Modify: `packages/server/src/api/routes/plugins.ts`
+- Modify: `packages/server/src/api/api.test.ts`
+
+**Interfaces:**
+- Consumes: `createPluginRepo` from `../../plugins/plugin-repo.js`; `syncSource` from `../../plugins/sync-source.js`; `PluginSourceError` from `../../plugins/fetch-source.js`; `PluginIdError` from `../../plugins/plugin-id.js`; the existing `ApiError`, `Route`, and `ctx.db`.
+- Produces: five working endpoints.
+
+| Route | Body / params | Response |
+| --- | --- | --- |
+| `GET /plugins/sources` | — | `PluginSourceRow[]`, each with `installedCount`. |
+| `POST /plugins/sources` | `{ id, url?, path?, }` | 201 with the created row. 400 (`invalid-source`) for a bad slug or both/neither of url and path; 409 (`source-exists`) for a duplicate url. |
+| `PUT /plugins/sources/:id` | `{ enabled }` | The updated row. 404 if unknown. |
+| `DELETE /plugins/sources/:id` | — | 204. 404 if unknown. |
+| `POST /plugins/sources/:id/sync` | — | The `SyncReport`. 404 if unknown; 400 (`source-unreachable`) wrapping a `PluginSourceError`, with its message passed through — those messages are written for a human and are the whole diagnostic. |
+
+Also: `installedResources(db)` currently parses `details_json` three times per row and derives the name from `rel_path`. Replace it with `createPluginRepo(ctx.db).listPlugins()`, which parses once and returns typed rows, and delete the local `PluginRow` interface — a second definition of the plugin table's shape is exactly the drift this phase exists to remove.
+
+- [ ] **Step 1: Write the failing API tests**
+
+Add to `packages/server/src/api/api.test.ts`, using the `api(method, path, body?)` helper already in that file. That file also already defines `THIRD_PARTY_PLUGIN_CODE`, a loadable flow-plugin module body — reuse it rather than writing a second fixture:
+
+```ts
+/** <tmp>/p/myPlugin/1.0.0/index.js — the layout `discoverFlowPlugins` looks for. */
+const writeFixtureTree = (): string => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-api-plugins-'));
+  const dir = join(root, 'p', 'myPlugin', '1.0.0');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'index.js'), THIRD_PARTY_PLUGIN_CODE, 'utf8');
+  return root;
+};
+
+describe('plugin sources', () => {
+  let fixtureTree = '';
+  beforeEach(() => {
+    fixtureTree = writeFixtureTree();
+  });
+
+  it('lists no sources on a fresh install, rather than 501', async () => {
+    const res = await api('GET', '/plugins/sources');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('creates a local source and reports it', async () => {
+    const created = await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ id: 'fx', kind: 'local', enabled: true });
+  });
+
+  it('refuses a duplicate url with 409, naming the source that already has it', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    const again = await api('POST', '/plugins/sources', { id: 'fx2', path: fixtureTree });
+    expect(again.status).toBe(409);
+    expect(String(again.body.message)).toContain('fx');
+  });
+
+  it('refuses the reserved namespace with 400', async () => {
+    const res = await api('POST', '/plugins/sources', { id: 'trawlarr', path: fixtureTree });
+    expect(res.status).toBe(400);
+  });
+
+  it('syncs and then lists the installed plugin through GET /plugins', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    const sync = await api('POST', '/plugins/sources/fx/sync');
+    expect(sync.status).toBe(200);
+    expect(sync.body.installed).toBe(1);
+
+    const plugins = await api('GET', '/plugins');
+    const ids = (plugins.body as { id: string }[]).map((p) => p.id);
+    expect(ids).toContain('fx:myPlugin');
+    expect(ids).toContain('trawlarr:execute');
+  });
+
+  it('reports a sync of an unknown source as 404, not 500', async () => {
+    const res = await api('POST', '/plugins/sources/nope/sync');
+    expect(res.status).toBe(404);
+  });
+
+  it('deleting a source removes its plugins from GET /plugins', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    await api('POST', '/plugins/sources/fx/sync');
+    expect((await api('DELETE', '/plugins/sources/fx')).status).toBe(204);
+    const ids = ((await api('GET', '/plugins')).body as { id: string }[]).map((p) => p.id);
+    expect(ids).not.toContain('fx:myPlugin');
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `tsc --build --force && npx vitest run packages/server/src/api/api.test.ts`
+Expected: FAIL with 501 on the first case.
+
+- [ ] **Step 3: Implement the handlers**
+
+Replace each `notImplemented(SOURCES_NOT_IMPLEMENTED)` with a handler delegating to `createPluginRepo(ctx.db)` and `syncSource`. Delete `SOURCES_NOT_IMPLEMENTED`. Keep `GET /plugins/:id`'s path fallback exactly as it is — naming a plugin by absolute path must keep working, and Task 7 preserved it for the same reason.
+
+The two that carry the error mapping, in full; the other three are plain reads and deletes:
+
+```ts
+  {
+    method: 'POST',
+    path: '/plugins/sources',
+    handler: ({ body, ctx }) => {
+      const input = body as { id?: string; url?: string; path?: string };
+      const hasUrl = typeof input.url === 'string' && input.url !== '';
+      const hasPath = typeof input.path === 'string' && input.path !== '';
+      if (typeof input.id !== 'string' || hasUrl === hasPath) {
+        throw new ApiError(
+          400,
+          'invalid-source',
+          `A plugin source needs an "id" and exactly one of "url" (an https .tar.gz) or ` +
+            `"path" (an absolute directory on the server).`,
+        );
+      }
+      try {
+        return {
+          status: 201,
+          body: createPluginRepo(ctx.db).addSource({
+            id: input.id,
+            url: hasUrl ? input.url! : input.path!,
+            kind: hasUrl ? 'tarball' : 'local',
+          }),
+        };
+      } catch (error) {
+        // A reserved or malformed slug is the client's mistake (400); a url
+        // that is already registered is a conflict (409). Collapsing both to
+        // 500 would tell a UI author nothing about which one to fix.
+        if (error instanceof PluginIdError) {
+          throw new ApiError(400, 'invalid-source', error.message);
+        }
+        if (error instanceof Error && /already exists/i.test(error.message)) {
+          throw new ApiError(409, 'source-exists', error.message);
+        }
+        throw error;
+      }
+    },
+  },
+
+  {
+    method: 'POST',
+    path: '/plugins/sources/:id/sync',
+    handler: async ({ params, ctx }) => {
+      const repo = createPluginRepo(ctx.db);
+      const id = params.id!;
+      if (repo.getSource(id) === null) {
+        throw new ApiError(404, 'source-not-found', `No plugin source "${id}".`);
+      }
+      if (ctx.dataDir == null) {
+        throw new ApiError(
+          400,
+          'no-data-directory',
+          `This host has no data directory, so there is nowhere to install plugins into.`,
+        );
+      }
+      try {
+        return await syncSource({
+          repo,
+          sourceId: id,
+          cacheDir: join(ctx.dataDir, 'plugins'),
+          nowMs: ctx.nowMs,
+        });
+      } catch (error) {
+        if (error instanceof PluginSourceError) {
+          // These messages are written for a human and are the whole
+          // diagnostic — pass them through rather than replacing them.
+          throw new ApiError(400, 'source-unreachable', error.message);
+        }
+        throw error;
+      }
+    },
+  },
+```
+
+Adjust `ctx.dataDir` / `ctx.nowMs` to whatever the router context actually exposes — read `packages/server/src/api/router.ts` first. If the context carries no data directory, thread one in from wherever the server is constructed rather than reading `process.cwd()`.
+
+The sync handler needs a cache directory; take it from the same place the rest of the API learns the data directory (`ctx`), and if `ctx` has no data directory, answer 400 with a named message rather than writing into the process's cwd.
+
+- [ ] **Step 4: Run, gate, commit**
+
+```bash
+tsc --build --force
+pnpm build && pnpm lint && pnpm test && pnpm audit:licenses
+git add packages/server/src/api/routes/plugins.ts packages/server/src/api/api.test.ts
+git commit -m "feat(api): implement plugin sources — list, create, enable, delete, sync"
+```
+
+---
+
+## Task 10: His pipeline as a validated template, and the documentation that was wrong
+
+The last task turns everything above into something the owner runs. It also corrects the migration guide, whose "Not yet" rows are now false in a way that would send him away from a capability he has.
+
+**One finding belongs in the template and nowhere else:** his Movies and Shows libraries differ only in where "Ensure 2ch AAC Audio" sits relative to "Transcode". That ordering difference is an **Unmanic artifact** — Unmanic runs a separate ffmpeg pass per plugin, so plugin order is encode order. In trawlarr every command-building node contributes to **one** ffmpeg invocation that is compiled once by `compileFfmpegArgs`, so the audio node and the encoder node touch different streams and their order does not change the argv. **Both libraries therefore use one template.** Say so in the migration guide, because "why did my two pipelines become one?" is otherwise an unanswered question.
+
+**Files:**
+- Modify: `packages/server/src/flow/templates.ts`
+- Modify: `packages/server/src/flow/templates.test.ts`
+- Create: `docs/flows/conform-mkv-hevc-nvenc.json`
+- Modify: `docs/migrating-from-unmanic.md`
+- Modify: `docs/engineering-notes/p2-prerequisites.md`
+
+**Interfaces:**
+- Consumes: `FlowTemplate`, `FlowTemplateParameter`, `buildFromTemplate`, `FLOW_TEMPLATES` from `./templates.js`.
+- Produces: `FlowTemplate` gains `requiredPlugins: string[]`; a new template `conform-library`.
+
+- [ ] **Step 1: Write the failing template tests**
+
+Add to `packages/server/src/flow/templates.test.ts`:
+
+```ts
+describe('the conform-library template', () => {
+  const build = (values: Record<string, string> = {}) =>
+    buildFromTemplate({ templateId: 'conform-library', values });
+
+  it('declares the community plugins it needs, so a fresh install is told to sync', () => {
+    const template = FLOW_TEMPLATES.find((t) => t.id === 'conform-library')!;
+    expect(template.requiredPlugins).toEqual([
+      'ffmpegCommandSetContainer',
+      'ffmpegCommandCustomArguments',
+      'ffmpegCommandEnsureAudioStream',
+      'ffmpegCommandRemoveStreamByProperty',
+    ]);
+  });
+
+  it('carries his exact encoder settings into the node inputs', () => {
+    const flow = build({ encoder: 'hevc_nvenc', quality: '23' });
+    const encoder = flow.nodes.find((n) => n.id === 'encoder')!;
+    expect(encoder.inputs).toMatchObject({ encoder: 'hevc_nvenc', quality: '23' });
+  });
+
+  it('carries -max_muxing_queue_size 2048 as a custom argument, with no preset by default', () => {
+    const flow = build();
+    const custom = flow.nodes.find((n) => n.id === 'muxqueue')!;
+    // No preset by default: preset names are encoder-specific (nvenc takes
+    // p1..p7, libx265 takes ultrafast..placebo), so a default that suits one
+    // encoder is an invalid argument for the other and fails every job.
+    expect(custom.inputs.outputArguments).toBe('-max_muxing_queue_size 2048');
+  });
+
+  it('appends a preset only when one was asked for', () => {
+    const flow = build({ preset: 'p4' });
+    const custom = flow.nodes.find((n) => n.id === 'muxqueue')!;
+    expect(custom.inputs.outputArguments).toBe('-max_muxing_queue_size 2048 -preset p4');
+  });
+
+  it('defaults the destination container to mkv', () => {
+    expect(build().nodes.find((n) => n.id === 'container')!.inputs.container).toBe('mkv');
+  });
+
+  it('keeps English audio and never removes an untagged track', () => {
+    const remove = build().nodes.find((n) => n.id === 'language')!;
+    expect(remove.inputs).toMatchObject({
+      codecType: 'audio',
+      propertyToCheck: 'tags.language',
+      valuesToRemove: 'eng',
+      condition: 'not_includes',
+    });
+    // keep_undefined needs no input: the plugin never judges a stream whose
+    // property is absent. Pinned in packages/engine/test/compat.
+  });
+
+  it('leaves the already-target-codec output of the check node routed onward, not dead-ended', () => {
+    // Unlike transcode-hevc, a converged-codec file may still need a remux,
+    // an audio track or a language filter — so output 1 rejoins the chain
+    // rather than ending the flow.
+    const flow = build();
+    const fromCheck = flow.edges.filter((e) => e.fromNodeId === 'check');
+    expect(fromCheck.map((e) => e.outputNumber).sort()).toEqual([1, 2]);
+  });
+
+  it('validates', () => {
+    const problems = validateFlowDefinition(build(), () => null);
+    expect(problems).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails, then write the template**
+
+Run: `tsc --build --force && npx vitest run packages/server/src/flow/templates.test.ts` — FAIL, unknown template.
+
+Add `requiredPlugins: string[]` to the `FlowTemplate` interface (`transcodeHevc` gets `requiredPlugins: []`), then add the new template:
+
+```ts
+const conformParameters: FlowTemplateParameter[] = [
+  {
+    name: 'pluginSource',
+    label: 'Plugin source name',
+    type: 'string',
+    defaultValue: 'tdarr',
+    tooltip:
+      'The name you gave the plugin source with "trawlarr plugin source add". It prefixes ' +
+      'every community plugin id this template uses, because you choose your own source name.',
+  },
+  {
+    name: 'container',
+    label: 'Destination container',
+    type: 'string',
+    defaultValue: 'mkv',
+    options: ['mkv', 'mp4'],
+    tooltip:
+      'Files already in this container are not remuxed — the node compares against the ' +
+      'file extension, so a converged library costs nothing here.',
+  },
+  {
+    name: 'targetCodec',
+    label: 'Target video codec',
+    type: 'string',
+    defaultValue: 'hevc',
+    options: ['hevc', 'h264', 'av1'],
+    tooltip:
+      'A file whose video already uses this codec skips the encoder — but NOT the rest of ' +
+      'the flow, because it may still need a remux, an audio track or a language filter.',
+  },
+  {
+    name: 'encoder',
+    label: 'Encoder',
+    type: 'string',
+    defaultValue: 'hevc_nvenc',
+    options: ['hevc_nvenc', 'libx265', 'libx264', 'h264_nvenc', 'hevc_qsv', 'hevc_vaapi'],
+    tooltip:
+      'A hardware encoder requires that hardware to be declared on this node AND present in ' +
+      'the ffmpeg build. Trawlarr never falls back to software: a wrong declaration produces ' +
+      'failing jobs, three attempts per file.',
+  },
+  {
+    name: 'quality',
+    label: 'Quality',
+    type: 'string',
+    defaultValue: '23',
+    tooltip:
+      'Lower is better quality and larger files. The flag this becomes (-crf, -cq, -qp, ' +
+      '-global_quality) depends on the encoder and is chosen for you.',
+  },
+  {
+    name: 'audioLanguage',
+    label: 'Audio language to guarantee',
+    type: 'string',
+    defaultValue: 'eng',
+    tooltip:
+      'A stereo AAC track in this language is ADDED if the file does not already have one. ' +
+      'Note "added", not "converted" — the original track is kept beside it.',
+  },
+  {
+    name: 'keepLanguages',
+    label: 'Audio languages to keep',
+    type: 'string',
+    defaultValue: 'eng',
+    tooltip:
+      'Comma-separated. Audio in any other language is removed. A track with NO language ' +
+      'tag is always kept — the plugin never judges a stream whose language is missing, ' +
+      'which is what stops a badly-tagged rip losing all of its audio.',
+  },
+  {
+    name: 'preset',
+    label: 'Encoder preset',
+    type: 'string',
+    defaultValue: '',
+    tooltip:
+      'Optional, and encoder-specific: NVENC takes p1-p7 (Unmanic\'s "preset 4" is p4), ' +
+      'libx264/libx265 take ultrafast through placebo. Left empty by default because a ' +
+      'preset name valid for one encoder is an invalid argument for the other, and ffmpeg ' +
+      'fails outright rather than ignoring it.',
+  },
+  {
+    name: 'maxMuxingQueueSize',
+    label: 'Max muxing queue size',
+    type: 'string',
+    defaultValue: '2048',
+    tooltip:
+      'Raises ffmpeg\'s muxing queue. Needed for files that would otherwise fail with ' +
+      '"Too many packets buffered for output stream".',
+  },
+  {
+    name: 'trashRetentionDays',
+    label: 'Keep replaced originals for (days)',
+    type: 'string',
+    defaultValue: '14',
+    tooltip:
+      'Replaced originals move to <library root>/.trawlarr/trash and are purged after this ' +
+      'many days. This is what every mistake is recoverable from; shorten it deliberately.',
+  },
+];
+
+const conformLibrary: FlowTemplate = {
+  id: 'conform-library',
+  name: 'Remux, transcode, and conform audio and languages',
+  description:
+    'The full parity stack: remux to one container, transcode video that is not already the ' +
+    'target codec, guarantee a stereo AAC track, drop audio in unwanted languages, verify, ' +
+    'and replace the original. Requires community plugins — sync a plugin source first.',
+  parameters: conformParameters,
+  requiredPlugins: [
+    'ffmpegCommandSetContainer',
+    'ffmpegCommandCustomArguments',
+    'ffmpegCommandEnsureAudioStream',
+    'ffmpegCommandRemoveStreamByProperty',
+  ],
+  build: (values) => {
+    const value = (name: string): string => {
+      const given = values[name];
+      const parameter = conformParameters.find((candidate) => candidate.name === name)!;
+      // An empty string is a MISSING value, not a chosen one: it arrives from
+      // an untouched form field and from `--set quality=`, and passing it
+      // through would put "" where a node expects a codec.
+      return given === undefined || given === '' ? parameter.defaultValue : given;
+    };
+    const community = (pluginName: string): string => `${value('pluginSource')}:${pluginName}`;
+
+    return {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: PLUGIN_VERSION, inputs: {} },
+        { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: PLUGIN_VERSION, inputs: {} },
+        {
+          id: 'container',
+          pluginId: community('ffmpegCommandSetContainer'),
+          pluginVersion: PLUGIN_VERSION,
+          // forceConform removes streams the target container cannot carry.
+          // Right for mkv->mp4, wrong as a default: for a library already in
+          // the target container it can only take things away.
+          inputs: { container: value('container'), forceConform: 'false' },
+        },
+        {
+          id: 'check',
+          pluginId: 'trawlarr:checkVideoCodec',
+          pluginVersion: PLUGIN_VERSION,
+          inputs: { codec: value('targetCodec') },
+        },
+        {
+          id: 'encoder',
+          pluginId: 'trawlarr:setVideoEncoder',
+          pluginVersion: PLUGIN_VERSION,
+          inputs: { encoder: value('encoder'), quality: value('quality') },
+        },
+        {
+          id: 'muxqueue',
+          pluginId: community('ffmpegCommandCustomArguments'),
+          pluginVersion: PLUGIN_VERSION,
+          inputs: {
+            inputArguments: '',
+            // The preset is appended here rather than set on Set Video
+            // Encoder, which has no preset input. It reaches the encoder as a
+            // global output option, which is safe because the video is the
+            // only stream being encoded — a copied audio stream ignores it.
+            outputArguments: [
+              `-max_muxing_queue_size ${value('maxMuxingQueueSize')}`,
+              value('preset') === '' ? '' : `-preset ${value('preset')}`,
+            ]
+              .filter((part) => part !== '')
+              .join(' '),
+          },
+        },
+        {
+          id: 'audio',
+          pluginId: community('ffmpegCommandEnsureAudioStream'),
+          pluginVersion: PLUGIN_VERSION,
+          inputs: { audioEncoder: 'aac', language: value('audioLanguage'), channels: '2' },
+        },
+        {
+          id: 'language',
+          pluginId: community('ffmpegCommandRemoveStreamByProperty'),
+          pluginVersion: PLUGIN_VERSION,
+          inputs: {
+            codecType: 'audio',
+            propertyToCheck: 'tags.language',
+            valuesToRemove: value('keepLanguages'),
+            condition: 'not_includes',
+          },
+        },
+        { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: PLUGIN_VERSION, inputs: {} },
+        {
+          id: 'verify',
+          pluginId: 'trawlarr:verifyOutput',
+          pluginVersion: PLUGIN_VERSION,
+          inputs: {
+            durationToleranceSeconds: '1',
+            minSizeRatio: '0.05',
+            requireAudioIfOriginalHadAudio: 'true',
+          },
+        },
+        {
+          id: 'replace',
+          pluginId: 'trawlarr:replaceOriginal',
+          pluginVersion: PLUGIN_VERSION,
+          inputs: {
+            trashRetentionDays: value('trashRetentionDays'),
+            allowCrossDevice: 'true',
+          },
+        },
+      ],
+      edges: [
+        { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
+        { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'container' },
+        { fromNodeId: 'container', outputNumber: 1, toNodeId: 'check' },
+        // Output 1 is "already the target codec". Unlike transcode-hevc it is
+        // NOT dead-ended: such a file may still need a remux, a stereo track
+        // or a language filter. It rejoins after the encoder, which is the
+        // only node it skips. Two edges INTO one node is legal; two edges out
+        // of one OUTPUT is not.
+        { fromNodeId: 'check', outputNumber: 1, toNodeId: 'muxqueue' },
+        { fromNodeId: 'check', outputNumber: 2, toNodeId: 'encoder' },
+        { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'muxqueue' },
+        { fromNodeId: 'muxqueue', outputNumber: 1, toNodeId: 'audio' },
+        { fromNodeId: 'audio', outputNumber: 1, toNodeId: 'language' },
+        { fromNodeId: 'language', outputNumber: 1, toNodeId: 'execute' },
+        { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
+        { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+      ],
+    };
+  },
+};
+
+export const FLOW_TEMPLATES: readonly FlowTemplate[] = [transcodeHevc, conformLibrary];
+```
+
+The graph, and the reasoning for the shape:
+
+```
+start -> begin -> container -> check
+check output 2 (codec differs)  -> encoder -> muxqueue
+check output 1 (already target) -> muxqueue
+muxqueue -> audio -> language -> execute -> verify -> replace
+```
+
+Both branches rejoin at `muxqueue`. Two edges INTO one node is allowed; only two edges OUT of one output is not. `Check Video Codec`'s "already this codec" output is **not** dead-ended here, unlike `transcode-hevc`: a file that is already HEVC may still need a remux, a stereo track or a language filter, and dead-ending it would leave those undone for ever. The only node it skips is the encoder.
+
+Nodes and plugin ids — community ids are written as `<sourceSlug>:<pluginName>` with the slug supplied as a template parameter (`pluginSource`, default `tdarr`), because the user chooses their own source name:
+
+| Node id | Plugin | Inputs from parameters |
+| --- | --- | --- |
+| `start` | `trawlarr:start` | — |
+| `begin` | `trawlarr:beginCommand` | — |
+| `container` | `<src>:ffmpegCommandSetContainer` | `container` (default `mkv`), `forceConform` (default `false`) |
+| `check` | `trawlarr:checkVideoCodec` | `codec` = `targetCodec` (default `hevc`) |
+| `encoder` | `trawlarr:setVideoEncoder` | `encoder` (default `hevc_nvenc`), `quality` (default `23`) |
+| `muxqueue` | `<src>:ffmpegCommandCustomArguments` | `inputArguments` `''`, `outputArguments` `-max_muxing_queue_size 2048`, plus `-preset <preset>` when `preset` is set |
+| `audio` | `<src>:ffmpegCommandEnsureAudioStream` | `audioEncoder` `aac`, `language` `eng`, `channels` `2` |
+| `language` | `<src>:ffmpegCommandRemoveStreamByProperty` | `codecType` `audio`, `propertyToCheck` `tags.language`, `valuesToRemove` = `keepLanguages` (default `eng`), `condition` `not_includes` |
+| `execute` | `trawlarr:execute` | — |
+| `verify` | `trawlarr:verifyOutput` | `durationToleranceSeconds` `1`, `minSizeRatio` `0.05`, `requireAudioIfOriginalHadAudio` `true` |
+| `replace` | `trawlarr:replaceOriginal` | `trashRetentionDays` (default `14`), `allowCrossDevice` `true` |
+
+Two things the implementer must not "simplify":
+
+- **`forceConform` defaults to `false`.** It removes streams the target container cannot carry, which is right for mkv→mp4 and wrong as a default: for a user whose container is already mkv it can only take things away.
+- **`muxqueue` is on the common path, after the branches rejoin.** `Custom Arguments` pushes to `overallOuputArguments`, and `deriveShouldProcess` treats a non-empty `overallOuputArguments` as work to be done — so putting it anywhere that a converged file passes through makes **every file** run ffmpeg for ever. Here that is intentional and harmless because the flow always transcodes or remuxes something by the time it reaches Execute; if you move it, re-check that claim.
+
+- [ ] **Step 3: Make `flow add --template` refuse when required plugins are missing**
+
+In `packages/server/src/cli.ts`'s `flow add`, after resolving the template, check every `requiredPlugins` entry against `createPluginRepo(db).listPlugins()` (prefixed with the chosen `pluginSource`) and refuse by name:
+
+```
+Error: flow add: template "conform-library" needs plugin(s) "tdarr:ffmpegCommandSetContainer",
+"tdarr:ffmpegCommandEnsureAudioStream" which are not installed. Add and sync a plugin source
+first:
+  trawlarr plugin source add --name tdarr --url https://codeload.github.com/HaveAGitGat/Tdarr_Plugins/tar.gz/master
+  trawlarr plugin source sync --name tdarr
+(exit 1)
+```
+
+Storing the flow anyway would be worse than refusing: validation treats an unresolvable plugin as *unknown, not wrong*, so it would be accepted, attached, and then fail on the first file with an error naming a file.
+
+Add a CLI test asserting exit code 1 and that the message names both the missing plugin and the two commands.
+
+- [ ] **Step 4: Check the built flow into `docs/flows/`, drift-tested**
+
+Write `docs/flows/conform-mkv-hevc-nvenc.json` as the output of `buildFromTemplate({ templateId: 'conform-library', values: { encoder: 'hevc_nvenc', quality: '23' } })`, and add the drift test alongside whatever guards the existing two:
+
+```ts
+it('docs/flows/conform-mkv-hevc-nvenc.json matches what the template builds', () => {
+  const path = join(process.cwd(), 'docs/flows/conform-mkv-hevc-nvenc.json');
+  // Assert the path EXISTS rather than gating on it: gating on existsSync
+  // makes a renamed fixture skip silently, which makes a drift alarm green.
+  expect(existsSync(path)).toBe(true);
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(
+    buildFromTemplate({
+      templateId: 'conform-library',
+      values: { encoder: 'hevc_nvenc', quality: '23' },
+    }),
+  );
+});
+```
+
+- [ ] **Step 5: Correct the migration guide**
+
+In `docs/migrating-from-unmanic.md` §4, replace the five wrong rows. The current table says "Not yet" for capabilities that exist today:
+
+| Unmanic step | Trawlarr today | Verdict |
+| --- | --- | --- |
+| Remux to a different container | `Set Container` (community plugin) | **Supported** |
+| Transcode or normalise audio | `Ensure Audio Stream`, `Normalize Audio` (community) | **Supported** |
+| Strip tracks by language, drop commentary | `Remove Stream By Property` (community) | **Supported** |
+| Notify a webhook / Discord / Telegram / Plex | `Send Web Request`, `Apprise`, `Notify Radarr or Sonarr` (community) | **Supported** |
+| Rename, move or copy the result | `Move To Directory`, `Rename File`, `Copy To Directory` (community) | **Supported** |
+| Extract or burn in subtitles | — | **Not yet.** No community flow plugin covers it. |
+
+Also add, as a new subsection under §4:
+
+- **Installing plugins**: the two `trawlarr plugin source` commands, the fact that a source is a git/HTTP tarball URL or a local directory and that **there is no central service to register with**, and that plugins land in `<data-dir>/plugins`.
+- **The Plex recipe**, concretely: a `Send Web Request` node with method `get` and URL `http://<plex>:32400/library/sections/<id>/refresh?X-Plex-Token=<token>`, with `output2OnNetworkError` **on** — because a Plex that is down must not invalidate a transcode that already succeeded.
+- **Why Movies and Shows become one flow** (the single-ffmpeg-invocation point above).
+- **Where his `preset 4` went**: `trawlarr:setVideoEncoder` has no preset input, so the template appends one as a custom argument. For NVENC that is `--set preset=p4`. Say plainly that the mapping from Unmanic's numeric preset to NVENC's `p1`-`p7` is a judgement, not a documented equivalence, so he can check it against a single file before running the library.
+- **The `Ensure Audio Stream` semantic difference**: Unmanic's `ensure_2ch_aac_audio` *converts*; the Tdarr plugin *adds* a track alongside the original. To end up with only the stereo track, follow it with `Remove Stream By Property`.
+
+- [ ] **Step 6: Record this phase in the engineering notes**
+
+Append a `## P2d — plugin distribution` section to `docs/engineering-notes/p2-prerequisites.md` covering, at minimum:
+
+- **`Verify Output` compared against the original's stream count**, which made every stream-removing community plugin unusable in any flow that replaces its original — four plugins, one of them in the owner's pipeline, each failing three attempts per file and landing in `failed`. Record that the fix removed an accidental fail-safe and that the audio gate deliberately replaces it, and *why the gate is in the host rather than on a node*.
+- **`keep_undefined` needed no work**: `Remove Stream By Property` already skips any stream whose property reads `undefined`. Record it so nobody re-derives it or "adds" it.
+- **Spec §7 is now divergent, by the owner's call**: it anticipated 10–15 first-party plugins including "set audio codec, remux container, webhook notify". The rule is now that a capability with an existing Tdarr community plugin is **not** reimplemented first-party; a duplicate fragments the ecosystem the project exists to run. Put this under "Still inaccurate in the spec — owner's call".
+- **No `git` in the runtime image**, which is why sources are HTTPS tarballs and local directories rather than clones. If a future phase wants `git` sources, it must add the binary to the Dockerfile first.
+- **The tarball source's extraction is the installed plugin**, so `syncSource`'s cleanup is asymmetric by kind, and `<data-dir>/plugins` must be backed up or re-synced — it is not scratch.
+- **`packages/server/src/api/routes/flows.ts`'s standalone validate endpoint still constructs a registry-less resolver**, so it under-validates a flow naming an installed plugin. Harmless (unknown is treated as neutral) but should be threaded through when that file is next free.
+
+- [ ] **Step 7: Run the full gate and commit**
+
+```bash
+tsc --build --force
+pnpm build && pnpm lint && pnpm test && pnpm audit:licenses
+git add packages/server/src/flow/templates.ts packages/server/src/flow/templates.test.ts \
+        packages/server/src/cli.ts packages/server/src/cli.test.ts \
+        docs/flows/conform-mkv-hevc-nvenc.json docs/migrating-from-unmanic.md \
+        docs/engineering-notes/p2-prerequisites.md
+git commit -m "feat(server): conform-library flow template, and correct the migration guide"
+```
+
+---
+
+## Appendix: decisions taken, and what was deliberately not built
+
+**No first-party node is added by this phase.** Every capability previously scoped as one already exists as a Tdarr community flow plugin; the audit is in "What was verified" above. Building duplicates would fragment the ecosystem the project's premise depends on.
+
+**No Plex node, and no general webhook node.** `tools/webRequest` already sends an arbitrary method, URL, headers and body through `args.deps.axios`, which trawlarr injects as real axios; a Plex partial scan is one HTTP GET, so it is already expressible, and Task 1 asserts exactly that request shape against a real server. A Plex-specific node would be a worse version of a plugin that exists, and Tdarr itself ships no Plex flow node. What *is* worth building later, and is not built here, is a **daemon-side, per-library, debounced** library refresh: a flow node fires once per file, so a library-wide conversion sends thousands of refreshes at a media server. That is not a flow node at all, it needs settings and API surface that belong to the web-UI agent this week, and the WebSocket already carries the job events a script can act on today.
+
+**`fail_safe` became a host gate, not a node input.** It is the one genuinely missing behaviour, and putting it in `Verify Output` protects against every plugin rather than one.
+
+**Recommended cuts if this phase must be shortened.** In order: Task 9 (the API routes) — the CLI reaches everything and the routes collide with another agent's file; then the `tarball` source kind, leaving `local` only, which still lets the owner point at a checkout he controls and removes the fetch, the archive guard and their tests. Do **not** cut Task 3: without it his language filter fails every file it touches. Do not cut Task 2: this repository has already shipped a data-loss bug that only a real-ffmpeg assertion could see.
