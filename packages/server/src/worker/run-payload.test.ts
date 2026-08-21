@@ -8,6 +8,7 @@ import type { ProbeData } from '@trawlarr/plugin-api';
 import type { DocumentPort, StepRecord } from '@trawlarr/engine';
 import type { JobPayload } from './job-payload.js';
 import { runPayload, type RunPayloadPorts } from './run-payload.js';
+import { corpusAvailable, pluginPath } from '../../../engine/test/compat/corpus.js';
 
 // NOTE: nothing in this file opens, imports or constructs a database. That is
 // the property under test, not an accident of the fixtures — see the
@@ -512,5 +513,46 @@ describe('runPayload opens no database', () => {
     expect(local).toContain('db/media-file-repo.ts');
     expect(local).toContain('db/job-repo.ts');
     expect(local.filter((file) => file.startsWith('db/')).length).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * The upstream plugins that declare `outputs: []` — terminal nodes, which
+ * trawlarr used to refuse to install at all. Loaded from the real corpus by
+ * path, exactly as a flow refers to them, because the point of these two
+ * tests is what UPSTREAM'S OWN CODE does when a flow reaches it.
+ */
+describe.runIf(corpusAvailable())('a flow that reaches a terminal community plugin', () => {
+  it('does NOT report success when it reaches failFlow, whose whole purpose is to fail', async () => {
+    const report = await runPayload({
+      payload: payloadFor(flowEndingIn(pluginPath('tools/failFlow/1.0.0/index.js'))),
+      ports: quietPorts(),
+    });
+
+    // The trap installing this plugin opens: it declares no outputs, so
+    // "the flow stopped here" is the ONLY thing that can happen at it, and
+    // "the flow stopped" is otherwise how a converged run ends. A file that
+    // reached Fail Flow must never be recorded as good — the same class of
+    // bug as an ffmpeg failure stored as success.
+    expect(report.success).toBe(false);
+    expect(report.failed).toBe(true);
+    expect(report.stopReason).toBe('plugin-error');
+    expect(report.steps.at(-1)?.pluginName).toBe('Fail Flow');
+    expect(report.steps.at(-1)?.outputNumber).toBeNull();
+    expect(report.steps.at(-1)?.error).toContain('Forcing flow to fail');
+  });
+
+  it('runs goToFlow, the other zero-output plugin, and ends the flow there', async () => {
+    const report = await runPayload({
+      payload: payloadFor(flowEndingIn(pluginPath('tools/goToFlow/2.0.0/index.js'))),
+      ports: quietPorts(),
+    });
+
+    // It loads and runs at all, which is the fix; and being terminal, the
+    // flow ends at it. Unlike failFlow it reports no failure of its own, so
+    // this is an ordinary end of run.
+    expect(report.steps.at(-1)?.pluginName).toBe('Go To Flow');
+    expect(report.stopReason).toBe('end-of-flow');
+    expect(report.success).toBe(true);
   });
 });

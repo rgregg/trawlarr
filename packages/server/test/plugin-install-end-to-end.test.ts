@@ -8,7 +8,9 @@ import { openDatabase, type Db } from '../src/db/connection.js';
 import { migrate } from '../src/db/migrate.js';
 import { createLibraryRepo } from '../src/db/library-repo.js';
 import { createMediaFileRepo } from '../src/db/media-file-repo.js';
+import { isKnownGood } from '@trawlarr/core';
 import { createPluginRepo } from '../src/plugins/plugin-repo.js';
+import { discoverFlowPlugins } from '../src/plugins/sync-source.js';
 import { checkAllLibraries } from '../src/daemon/library-health.js';
 import { createEventBus } from '../src/daemon/events.js';
 import { ffmpegAvailableSync } from '../../../test-support/tool-availability.js';
@@ -110,6 +112,30 @@ const remuxFlow = {
   ],
 };
 
+/**
+ * A flow whose only step after Start is upstream's Fail Flow — the plugin
+ * that declares `outputs: []` and throws on purpose. Valid as written: no
+ * edge leaves the terminal node, which is the only thing flow validation
+ * forbids about one.
+ */
+const failFlowFlow = {
+  nodes: [
+    { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+    { id: 'bail', pluginId: 'tdarr:failFlow', pluginVersion: '1.0.0', inputs: {} },
+  ],
+  edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'bail' }],
+};
+
+/** A 1s test file, enough for the scanner and ffprobe to have something real. */
+const makeSample = async (path: string): Promise<void> => {
+  await execFileAsync('ffmpeg', [
+    '-hide_banner', '-y',
+    '-f', 'lavfi', '-i', 'testsrc=duration=1:size=160x120:rate=10',
+    '-c:v', 'libx264', '-preset', 'ultrafast',
+    path,
+  ]); // prettier-ignore
+};
+
 describe.runIf(available)('installing a community plugin and running it', () => {
   beforeAll(() => {
     assertBuiltCliIsFresh();
@@ -204,6 +230,81 @@ describe.runIf(available)('installing a community plugin and running it', () => 
       const health = checkAllLibraries({ db, bus: createEventBus() });
       expect(health.map((entry) => entry.reason)).toEqual([null]);
       expect(createLibraryRepo(db).getById(library.id)!.enabled).toBe(true);
+    } finally {
+      db.close();
+    }
+  }, 300_000);
+
+  it('installs every plugin the real corpus ships, rejecting none for declaring no outputs', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-corpus-sync-'));
+    const libraryDir = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryDir, { recursive: true });
+
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'sync', '--name', 'tdarr', '--data-dir', dataDir]);
+
+    const db = openStateDb(dataDir);
+    try {
+      const repo = createPluginRepo(db);
+      // Rows in the database, not the CLI's summary line. Every candidate
+      // discovery found is installed: before the fix this was 89 rows with
+      // failFlow and goToFlow thrown away as "details() declares no outputs".
+      const installed = repo.listPlugins('tdarr');
+      expect(installed.length).toBe(discoverFlowPlugins(CORPUS_DIR).length);
+      expect(repo.getPlugin('tdarr:failFlow')).not.toBeNull();
+      expect(repo.getPlugin('tdarr:goToFlow')).not.toBeNull();
+      // And they are installed AS terminal nodes: the empty declaration is
+      // what flow validation reads to forbid an edge leaving them.
+      expect(repo.getPlugin('tdarr:failFlow')!.details.outputs).toEqual([]);
+      expect(repo.getPlugin('tdarr:goToFlow')!.details.outputs).toEqual([]);
+    } finally {
+      db.close();
+    }
+  }, 300_000);
+
+  it('records a file whose flow reaches Fail Flow as NOT converged', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-failflow-e2e-'));
+    const libraryDir = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryDir, { recursive: true });
+    await makeSample(join(libraryDir, 'Sample.mkv'));
+
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'sync', '--name', 'tdarr', '--data-dir', dataDir]);
+
+    // The flow only stores because failFlow installed: an unresolvable
+    // plugin id would still store, but `tdarr:failFlow` resolving is what
+    // makes this a test of the terminal node rather than of a missing one.
+    const flowPath = join(workDir, 'flow.json');
+    writeFileSync(flowPath, JSON.stringify(failFlowFlow), 'utf8');
+    await runCli(['flow', 'add', '--name', 'Bail', '--file', flowPath, '--data-dir', dataDir]);
+    await runCli(['library', 'set-flow', '--library', 'Movies', '--flow', 'Bail', '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--library', 'Movies', '--data-dir', dataDir]);
+
+    const db = openStateDb(dataDir);
+    try {
+      const library = createLibraryRepo(db).getByName('Movies')!;
+      const mediaFiles = createMediaFileRepo(db);
+      const counts = mediaFiles.countsByState(library.id);
+
+      // THE PROPERTY: reaching a node that exists to fail is a failure. A
+      // terminal node ends the flow, and "the flow ended" is otherwise how a
+      // converged run finishes — which is exactly how an ffmpeg failure once
+      // got stored as success.
+      expect(counts.good).toBe(0);
+      expect(counts.held).toBe(1);
+
+      const row = mediaFiles.listByLibrary({ libraryId: library.id })[0]!;
+      const ledger = mediaFiles.getLedger(row.id)!;
+      expect(ledger.state).toBe('held');
+      expect(ledger.attemptCount).toBe(1);
+      // Nothing was ever stamped good, so no signature can match later.
+      expect(ledger.signature).toBeNull();
+      expect(isKnownGood(ledger, 'any-signature')).toBe(false);
     } finally {
       db.close();
     }

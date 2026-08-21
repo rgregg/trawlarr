@@ -24,11 +24,20 @@ export interface FlowNodeCapabilities {
  */
 export type FlowNodeCapabilityResolver = (node: FlowNode) => FlowNodeCapabilities | null;
 
+/**
+ * True when this node's plugin declares no outputs at all — a TERMINAL node,
+ * such as upstream's failFlow. Nothing continues past it, so it is legal in a
+ * flow and illegal to route an edge out of.
+ */
+export const isTerminalNode = (capabilities: FlowNodeCapabilities): boolean =>
+  capabilities.outputNumbers.length === 0;
+
 export type FlowValidationCode =
   | 'malformed'
   | 'duplicate-node-id'
   | 'edge-unknown-node'
   | 'edge-undeclared-output'
+  | 'edge-from-terminal-node'
   | 'ambiguous-edge'
   | 'no-nodes'
   | 'no-start-node'
@@ -135,6 +144,11 @@ const structuralProblems = (flow: FlowDefinition): FlowValidationProblem[] => {
  *    seasonally-used branches in a flow on purpose. `flowDefinitionHash`
  *    already hashes unreachable branches deliberately, so an unreachable node
  *    costs a re-evaluation, never a wrong result.
+ *  - **A node that declares no outputs at all.** That is a TERMINAL node —
+ *    upstream's failFlow and goToFlow are the real examples — and it is the
+ *    accurate description of a step nothing continues past, not a defect. It
+ *    is legal in a flow; what is rejected is an EDGE LEAVING it, reported as
+ *    `edge-from-terminal-node` rather than as an undeclared output.
  *  - **A node whose plugin cannot be resolved here.** See
  *    `FlowNodeCapabilityResolver`. Its output numbers are unchecked, and it
  *    suppresses `no-start-node` entirely, because an unresolvable plugin may
@@ -269,6 +283,27 @@ export const validateFlowDefinition = (
     const capabilities = capabilitiesByNodeId.get(from.id);
     if (capabilities === null || capabilities === undefined) continue; // Unresolvable: not our call.
     if (capabilities.outputNumbers.includes(edge.outputNumber)) continue;
+    // A node whose `details()` declares NO outputs is not a broken node, it
+    // is a TERMINAL one: failFlow, goToFlow and anything else that ends a
+    // run declare `outputs: []` because nothing routes out of them. The rule
+    // is unchanged — no edge may leave it — but "declares only output(s) "
+    // with an empty list read as a defect in the plugin and left the author
+    // with nothing to act on. Say what the node is instead.
+    if (isTerminalNode(capabilities)) {
+      problems.push({
+        code: 'edge-from-terminal-node',
+        nodeId: from.id,
+        edge,
+        message:
+          `The edge from "${from.id}" output ${edge.outputNumber} to "${edge.toNodeId}" leaves ` +
+          `a node that ends the flow: "${from.pluginId}" declares no outputs at all, which is ` +
+          `how a plugin says nothing continues past it. Delete this edge and move ` +
+          `"${edge.toNodeId}" and everything after it onto a route that can actually be ` +
+          `taken — as written that branch is dead, and every file reaching "${from.id}" stops ` +
+          `there regardless.`,
+      });
+      continue;
+    }
     problems.push({
       code: 'edge-undeclared-output',
       nodeId: from.id,

@@ -181,10 +181,13 @@ describe('sync', () => {
     expect(repo.listPlugins()).toEqual([]);
   });
 
-  it('skips a plugin whose details() declares no outputs, which no flow could route', async () => {
+  it('installs a plugin whose details() declares no outputs, because that means terminal', async () => {
+    // `outputs: []` is how a plugin says nothing continues past it. Upstream
+    // ships three (failFlow, goToFlow x2) and they are correct as written, so
+    // rejecting them was trawlarr being wrong about the contract.
     const noOutputs = GOOD_PLUGIN.replace("outputs: [{ number: 1, tooltip: 'ok' }]", 'outputs: []');
     const root = tree({
-      'p/deadEnd/1.0.0/index.js': noOutputs,
+      'p/terminal/1.0.0/index.js': noOutputs,
       'p/routable/1.0.0/index.js': GOOD_PLUGIN,
     });
     const repo = createPluginRepo(openTestDb());
@@ -197,10 +200,36 @@ describe('sync', () => {
       nowMs: () => 1,
     });
 
-    expect(report.skipped).toEqual([
-      { relPath: 'p/deadEnd/1.0.0/index.js', reason: 'details() declares no outputs' },
-    ]);
-    expect(repo.listPlugins().map((p) => p.id)).toEqual(['fixtures:routable']);
+    expect(report.skipped).toEqual([]);
+    expect(report.installed).toBe(2);
+    // The row is real and carries the empty declaration through, which is
+    // what flow validation reads to know the node is terminal.
+    expect(repo.listPlugins().map((p) => p.id)).toEqual(['fixtures:routable', 'fixtures:terminal']);
+    expect(repo.getPlugin('fixtures:terminal')!.details.outputs).toEqual([]);
+  });
+
+  it('still skips a plugin whose details() has no outputs ARRAY at all', async () => {
+    // The distinction the fix rests on: zero outputs is a declaration, a
+    // MISSING outputs array is a malformed details() the loader refuses.
+    const root = tree({
+      'p/malformed/1.0.0/index.js': GOOD_PLUGIN.replace(
+        "outputs: [{ number: 1, tooltip: 'ok' }],",
+        '',
+      ),
+    });
+    const repo = createPluginRepo(openTestDb());
+    repo.addSource({ id: 'fixtures', url: root, kind: 'local' });
+
+    const report = await syncSource({
+      repo,
+      sourceId: 'fixtures',
+      cacheDir: cache(),
+      nowMs: () => 1,
+    });
+
+    expect(report.installed).toBe(0);
+    expect(report.skipped[0]!.reason).toMatch(/outputs array/);
+    expect(repo.listPlugins()).toEqual([]);
   });
 
   it('a second sync removes a plugin that disappeared upstream', async () => {
@@ -336,5 +365,28 @@ describe.runIf(corpusAvailable())('against the real Tdarr corpus', () => {
   it('does not discover classic plugins', () => {
     const found = discoverFlowPlugins(CORPUS_DIR).map((p) => p.pluginName);
     expect(found.some((name) => name.startsWith('Tdarr_Plugin_'))).toBe(false);
+  });
+
+  it('installs every discovered corpus plugin, skipping none, including the terminal ones', async () => {
+    const repo = createPluginRepo(openTestDb());
+    repo.addSource({ id: 'tdarr', url: CORPUS_DIR, kind: 'local' });
+
+    const report = await syncSource({
+      repo,
+      sourceId: 'tdarr',
+      cacheDir: cache(),
+      nowMs: () => 1,
+    });
+
+    // Counted against discovery itself rather than a hardcoded number, so
+    // this keeps meaning "nothing upstream ships is rejected" as the corpus
+    // moves. The absolute count is pinned by the CLI end-to-end suite.
+    expect(report.skipped).toEqual([]);
+    expect(report.installed).toBe(discoverFlowPlugins(CORPUS_DIR).length);
+
+    // The two the host used to throw away, by row, with the declaration that
+    // used to be the reason for throwing them away.
+    expect(repo.getPlugin('tdarr:failFlow')!.details.outputs).toEqual([]);
+    expect(repo.getPlugin('tdarr:goToFlow')!.details.outputs).toEqual([]);
   });
 });

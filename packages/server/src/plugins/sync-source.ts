@@ -174,14 +174,22 @@ export const syncSource = async (input: {
         // Only the module body and `details()` run, and only for files the
         // archive checks in `fetch-source` already accepted.
         // The loader itself refuses a module that does not export both
-        // `details()` and `plugin()` as functions, so that check is not
-        // repeated here; what it does NOT judge is whether the plugin is
-        // usable in a flow, which is the next line.
+        // `details()` and `plugin()` as functions, and refuses `details()`
+        // that does not return an `outputs` ARRAY, so neither check is
+        // repeated here.
+        //
+        // What is deliberately NOT checked is how many outputs that array
+        // has. Zero is a legal, meaningful declaration: it says the node is
+        // TERMINAL — nothing routes out of it. Upstream ships three such
+        // plugins (failFlow, which fails the run on purpose, and two
+        // versions of goToFlow), and for them `outputs: []` is the accurate
+        // description of the node, not a defect in it. Rejecting them here
+        // made trawlarr wrong about the contract and silently dropped
+        // working community plugins from every sync of the real corpus.
+        // Flow validation still refuses to let an EDGE leave a terminal
+        // node — see `edge-from-terminal-node` in `flow-validate` — which is
+        // where "nothing routes out of it" belongs.
         const loaded = loader.load(candidate.absPath);
-        if (!Array.isArray(loaded.details.outputs) || loaded.details.outputs.length === 0) {
-          skipped.push({ relPath: candidate.relPath, reason: 'details() declares no outputs' });
-          continue;
-        }
         installed.push({
           pluginName: candidate.pluginName,
           relPath: candidate.relPath,

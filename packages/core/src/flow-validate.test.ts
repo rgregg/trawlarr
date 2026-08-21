@@ -18,6 +18,9 @@ const CAPABILITIES: Record<string, { outputNumbers: number[]; isStartPlugin: boo
   checkVideoCodec: { outputNumbers: [1, 2], isStartPlugin: false },
   execute: { outputNumbers: [1, 2], isStartPlugin: false },
   replace: { outputNumbers: [1, 2], isStartPlugin: false },
+  // The shape upstream's failFlow and goToFlow declare: `outputs: []`. Not a
+  // broken plugin — a TERMINAL node, which nothing continues past.
+  failFlow: { outputNumbers: [], isStartPlugin: false },
 };
 
 const resolve: FlowNodeCapabilityResolver = (node) => CAPABILITIES[node.pluginId] ?? null;
@@ -98,6 +101,44 @@ describe('validateFlowDefinition', () => {
     expect(problems.map((problem) => problem.code)).toEqual(['edge-undeclared-output']);
     expect(problems[0]!.message).toContain('output 3');
     expect(problems[0]!.message).toContain('1, 2');
+  });
+
+  it('accepts a terminal node that declares no outputs, as long as nothing routes out of it', () => {
+    // The corpus really ships these (failFlow, goToFlow). Treating "no
+    // outputs" as invalid is what dropped them from every sync.
+    const problems = validateFlowDefinition(
+      flow({
+        nodes: [node('start', 'start'), node('check', 'checkVideoCodec'), node('bail', 'failFlow')],
+        edges: [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'check' },
+          { fromNodeId: 'check', outputNumber: 2, toNodeId: 'bail' },
+        ],
+      }),
+      resolve,
+    );
+    expect(problems).toEqual([]);
+  });
+
+  it('rejects an edge LEAVING a terminal node, and says the node ends the flow', () => {
+    const problems = validateFlowDefinition(
+      flow({
+        nodes: [node('start', 'start'), node('bail', 'failFlow'), node('enc', 'execute')],
+        edges: [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'bail' },
+          { fromNodeId: 'bail', outputNumber: 1, toNodeId: 'enc' },
+        ],
+      }),
+      resolve,
+    );
+
+    // Still rejected — the rule that no edge may leave an undeclared output
+    // is unchanged. What changed is the diagnosis: "declares only output(s) "
+    // with an empty list blamed the plugin for a flow-authoring mistake.
+    expect(problems.map((problem) => problem.code)).toEqual(['edge-from-terminal-node']);
+    expect(problems[0]!.nodeId).toBe('bail');
+    expect(problems[0]!.edge).toEqual({ fromNodeId: 'bail', outputNumber: 1, toNodeId: 'enc' });
+    expect(problems[0]!.message).toContain('ends the flow');
+    expect(problems[0]!.message).toContain('declares no outputs');
   });
 
   it('rejects two edges leaving the same output, which array order alone would resolve', () => {
