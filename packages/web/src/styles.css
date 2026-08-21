@@ -447,3 +447,121 @@ main {
   align-self: flex-start;
   margin-top: 0.6rem;
 }
+
+/* --- activity ----------------------------------------------------------- */
+
+.activity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 26rem);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 70rem) {
+  .activity {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.activity h2 {
+  font-size: 1.1rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.job-list button {
+  display: flex;
+  gap: 0.75rem;
+  width: 100%;
+  text-align: left;
+  background: var(--panel);
+}
+
+.job-list button[aria-current='true'] {
+  border-color: var(--ink);
+}
+
+/* Running and finished differ in EDGE WEIGHT as well as hue, so the two
+   groups are still distinguishable without colour. */
+.job.running button {
+  border-left: 4px solid var(--busy);
+}
+
+.job.finished button {
+  border-left: 1px solid var(--line);
+}
+
+.job-file {
+  overflow-wrap: anywhere;
+}
+
+.job-progress {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The bar REPEATS what the text beside it already says; it is never the only
+   statement of progress. */
+.bar {
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  margin-top: 0.2rem;
+}
+
+.bar-fill {
+  height: 100%;
+  background: var(--busy);
+  border-radius: 2px;
+}
+
+.job-detail {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+}
+
+.job-detail h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.job-detail h4 {
+  margin: 1rem 0 0.3rem;
+  font-size: 0.95rem;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.step-plugin {
+  overflow-wrap: anywhere;
+}
+
+.job-log {
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.5rem;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

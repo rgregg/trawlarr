@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ApiClient } from './api/client.js';
+import { Activity } from './screens/Activity.js';
 import { Libraries } from './screens/Libraries.js';
 import { Overview } from './screens/Overview.js';
 import { KeyGate } from './shell/KeyGate.js';
@@ -70,14 +71,7 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
           <Overview client={props.client} live={live} onOverall={setOverall} />
         )}
         {screen === 'libraries' && <Libraries client={props.client} live={live} />}
-        {screen === 'activity' && (
-          // An honest placeholder beats a blank panel: this screen lands in
-          // the task that follows, and saying so is more useful than an empty
-          // list that reads as a broken fetch.
-          <p>
-            Activity is not built yet. Everything it will show is already available over the API.
-          </p>
-        )}
+        {screen === 'activity' && <Activity client={props.client} live={live} />}
       </main>
     </div>
   );

@@ -582,6 +582,23 @@ describe.runIf(available)('daemon end-to-end: a library converges with nobody dr
         expect(maxInFlight).toBeLessThanOrEqual(2);
         expect(maxInFlight).toBe(2);
 
+        // THE FRAME SHAPES A UI DEPENDS ON, pinned against a real daemon.
+        // `packages/web/src/api/events.ts` hand-copies this union — it must,
+        // because importing @trawlarr/server would drag better-sqlite3 and
+        // node:child_process into a browser bundle's type graph — so nothing
+        // but this check stops the two drifting. The key list is EXHAUSTIVE
+        // on purpose: a field added here and not there renders as `undefined`
+        // in the UI with no error anywhere, and a field removed here leaves
+        // the copy describing something that no longer arrives.
+        const kinds = new Set(events.map((frame) => frame.type));
+        expect([...kinds]).toEqual(
+          expect.arrayContaining(['job.started', 'job.progress', 'job.finished']),
+        );
+        const start = events.find((frame) => frame.type === 'job.started')!;
+        expect(Object.keys(start).sort()).toEqual(
+          ['fileId', 'jobId', 'libraryId', 'path', 'pid', 'type', 'workerId'].sort(),
+        );
+
         // =============================================================
         // 2. THE SECOND PASS DOES NOTHING. This is what distinguishes
         //    "converged" from "did the work again and got the same
