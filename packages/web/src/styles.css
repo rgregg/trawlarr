@@ -1,0 +1,309 @@
+/*
+ * A small hand-rolled sheet. Requirements, not polish:
+ *
+ * - Every control has a visible label and a visible focus ring. Keyboard
+ *   users must be able to see where they are; `outline: none` appears
+ *   nowhere in this file.
+ * - COLOUR IS NEVER THE ONLY CARRIER OF STATUS. Every badge renders its
+ *   status as text, and the border weight differs as well as the hue, so the
+ *   screen still reads on a monochrome display or to a colour-blind operator.
+ * - Loading and error states are rendered honestly rather than as an empty
+ *   list, so a fresh install never looks like a broken one.
+ *
+ * No CSS framework and no web font: nothing here is worth a dependency or a
+ * request to a third-party origin from a page that holds an API key.
+ */
+
+:root {
+  --bg: #14161a;
+  --panel: #1c1f26;
+  --ink: #e8eaed;
+  --muted: #9aa2ad;
+  --line: #2c313a;
+  --good: #4ea172;
+  --warn: #c9a227;
+  --bad: #cc6155;
+  --busy: #4a86c8;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font:
+    15px/1.5 system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+code {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  background: var(--panel);
+  padding: 0 0.25em;
+  border-radius: 3px;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.35em 0.8em;
+  cursor: pointer;
+}
+
+button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* One rule, applied to everything focusable, so nothing can lose it. */
+:focus-visible {
+  outline: 2px solid #7fb2e5;
+  outline-offset: 2px;
+}
+
+[role='alert'],
+.problem {
+  color: var(--bad);
+}
+
+/* --- the key gate ------------------------------------------------------ */
+
+.key-gate {
+  max-width: 34rem;
+  margin: 4rem auto;
+  padding: 1.5rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.key-gate h1 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+.key-gate label {
+  font-weight: 600;
+}
+
+.key-gate input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+}
+
+.key-gate p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.key-gate button {
+  align-self: flex-start;
+}
+
+.key-honesty summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.key-honesty p {
+  margin: 0.6rem 0 0;
+}
+
+/* --- the shell --------------------------------------------------------- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.app-header .product {
+  font-weight: 700;
+}
+
+.app-header .overall {
+  color: var(--muted);
+}
+
+.app-header button {
+  margin-left: auto;
+}
+
+/* Connection state is TEXT ("Live" / "Reconnecting…"); the colour only
+   reinforces what the words already say. */
+.link-up {
+  color: var(--good);
+}
+
+.link-down {
+  color: var(--warn);
+}
+
+.app-nav {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.app-nav button[aria-current='page'] {
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+main {
+  padding: 0 1rem 2rem;
+}
+
+/* --- overview ---------------------------------------------------------- */
+
+.overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 18rem);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 60rem) {
+  .overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.library-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+}
+
+.card h3 {
+  margin: 0 0 0.2rem;
+}
+
+.card .headline {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.card .badge {
+  margin: 0.4rem 0 0;
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.55em;
+}
+
+.card .detail {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+}
+
+.card dl {
+  margin: 0.6rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.9rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.card dl div {
+  display: flex;
+  gap: 0.3em;
+}
+
+.card dt,
+.card dd {
+  margin: 0;
+}
+
+.status-converged {
+  border-left-color: var(--good);
+}
+
+.status-working {
+  border-left-color: var(--busy);
+}
+
+.status-attention {
+  border-left-color: var(--bad);
+}
+
+/* A paused library is the one a solid, unmissable edge is FOR: with no jobs
+   and no errors it otherwise looks identical to a finished one. */
+.status-paused {
+  border-left-color: var(--warn);
+}
+
+.status-idle {
+  border-left-color: var(--line);
+}
+
+.workers {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+}
+
+.workers h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.worker-target {
+  margin: 0;
+  color: var(--muted);
+}
+
+.worker-list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.worker-class {
+  color: var(--muted);
+}
+
+.worker-file {
+  overflow-wrap: anywhere;
+}
+
+.worker-percent {
+  font-variant-numeric: tabular-nums;
+}
+
+.worker-stage {
+  color: var(--muted);
+}
