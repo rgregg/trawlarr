@@ -114,6 +114,23 @@ survive, be copied rather than encoded, and keep its dimensions — this is the 
 cover-art data-loss bug, so the failure mode of an over-broad rule is destroying artwork in every file
 it touches, which is far worse than the bug being fixed.
 
+## A GPU transcode is CPU-bound until decode is offloaded too
+
+Measured on a real 8.4 TB library, converting 1080p/4K episodes with `hevc_nvenc`: load average
+**19.56 on 6 vCPU**, CPU 92.9% user with 1.4% idle, ffmpeg processes at 200% and 136% — while the **GPU
+encoder sat at 16-31%**. NFS read throughput was 269 MB/s, so I/O was never the constraint. Trawlarr
+emits the encoder but no `-hwaccel`, so only the encode runs on the card and the decode saturates the
+CPU.
+
+The consequence that makes this worth recording: **raising workers made it slower.** One worker managed
++3 files per five minutes; three managed +2, because the extra processes contended for the same
+saturated CPU while the GPU stayed idle. Concurrency is only a lever on the resource that is actually
+scarce, and a benchmark on a local SSD with a faked probe cannot tell you which that is — this needed
+real media on real hardware.
+
+Anyone reaching for "add more workers" when a transcode is slow should check which of encoder, decoder
+and I/O is saturated first. The answer here was none of the obvious ones.
+
 ## An allow-list is not a rule
 
 "A terminal output the flow author did not route is not success" was implemented as a hard-coded list of
