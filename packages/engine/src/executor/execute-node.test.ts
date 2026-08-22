@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { PluginDetails, PluginInputArgs } from '@trawlarr/plugin-api';
+import type { PluginDetails, PluginInputArgs, ProbeStream } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand } from '@trawlarr/core';
 import { createExecuteRunner } from './execute-node.js';
 import type { LoadedPlugin } from '../host/loader.js';
@@ -68,6 +68,39 @@ const degenerateCommand = (inputPath: string) => {
           height: 0,
           disposition: { attached_pic: 1 },
         },
+      ],
+    },
+    container: 'mkv',
+    inputPath,
+  });
+  command.streams[0]!.outputArgs.push('-c:{outputIndex}', 'libx265');
+  command.streams[0]!.forceEncoding = true;
+  command.shouldProcess = true;
+  return command;
+};
+
+/**
+ * The other real-world shape: video, audio, an identified subtitle, and a
+ * subtitle ffprobe described in full without naming a codec — the `-c:3 copy`
+ * that made ffmpeg refuse the whole output.
+ */
+const codeclessCommand = (inputPath: string) => {
+  const command = beginFfmpegCommand({
+    probe: {
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'h264', width: 1280, height: 720 },
+        { index: 1, codec_type: 'audio', codec_name: 'aac' },
+        {
+          index: 2,
+          codec_type: 'subtitle',
+          codec_name: 'subrip',
+          codec_tag_string: '[0][0][0][0]',
+        },
+        {
+          index: 3,
+          codec_type: 'subtitle',
+          codec_tag_string: '[0][0][0][0]',
+        } as unknown as ProbeStream,
       ],
     },
     container: 'mkv',
@@ -248,6 +281,33 @@ describe('createExecuteRunner', () => {
     const log = logs.join('\n');
     expect(log).toContain('Dropped input stream 9 (mjpeg)');
     expect(log).toContain('dimensions 0x0');
+  });
+
+  it('leaves a codec-less stream out of the argv and names the codec in the log', async () => {
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const logs: string[] = [];
+    const module = runnerFor({
+      workDir,
+      runFfmpegFn: ffmpeg.run,
+      log: (text) => logs.push(text),
+    })(executePlugin())!;
+
+    const args = argsFor({ inputPath, encodes: true });
+    args.variables.ffmpegCommand = codeclessCommand(inputPath);
+    const out = await module.plugin(args);
+
+    // The argv ffmpeg was actually handed: the stream it could not have
+    // written is absent, and the identified subtitle is copied at its
+    // renumbered output position.
+    const argv = ffmpeg.calls[0]!.args;
+    expect(argv.filter((_, i) => argv[i - 1] === '-map')).toEqual(['0:0', '0:1', '0:2']);
+    expect(argv).not.toContain('0:3');
+    expect(out.outputNumber).toBe(1);
+
+    const log = logs.join('\n');
+    expect(log).toContain('Dropped input stream 3');
+    expect(log).toContain('no codec');
   });
 
   it('routes to the failure output and keeps the input when ffmpeg fails', async () => {

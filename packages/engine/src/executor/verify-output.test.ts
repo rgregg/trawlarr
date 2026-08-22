@@ -59,7 +59,7 @@ const argsFor = (input: {
    * it: `init` cleared, `streams` intact. Omitted means a flow with no Begin
    * Command, which describes no intent at all.
    */
-  commandStreams?: { removed?: boolean; width?: number; height?: number }[];
+  commandStreams?: { removed?: boolean; width?: number; height?: number; codec_name?: string }[];
   inputs?: Record<string, unknown>;
 }): PluginInputArgs =>
   ({
@@ -723,6 +723,41 @@ describe('createVerifyOutputRunner', () => {
       }),
     );
     expect(lost.outputNumber).toBe(2);
+  });
+
+  it('does not count a codec-less stream as one the flow intended either', async () => {
+    // The codec half of the same rule. One of the five streams is described
+    // by ffprobe with no codec_name, so the compiler drops it and ffmpeg
+    // writes four. Both sides must read one rule, or the host's protection
+    // is reported to the operator as data loss and the file is held.
+    const probes = {
+      '/work/movie.mkv': probeOf({ streams: 4, durationSeconds: 3600 }),
+      '/library/movie.mkv': probeOf({ streams: 5, durationSeconds: 3600 }),
+    };
+    const sizes = { '/work/movie.mkv': 7 * GIGABYTE, '/library/movie.mkv': 8 * GIGABYTE };
+    const module = runnerFor({ probes, sizes })(verifyPlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, {}, {}, { codec_name: 'none' }, {}],
+      }),
+    );
+    expect(out.outputNumber).toBe(1);
+
+    // Falsifiable in the same way: an identified stream in that slot is five
+    // intended streams, and a four-stream output is then a lost one.
+    const lostCodec = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, {}, {}, { codec_name: 'subrip' }, {}],
+      }),
+    );
+    expect(lostCodec.outputNumber).toBe(2);
   });
 
   it('refuses a silent output by default, and only stands down when told to', async () => {

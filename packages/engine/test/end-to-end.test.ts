@@ -32,6 +32,7 @@ let mediaPath: string;
 let convergedPath: string;
 let coverFirstPath: string;
 let degenerateCoverPath: string;
+let codeclessStreamPath: string;
 let mpeg4Path: string;
 
 // Generate tiny samples rather than committing binary fixtures.
@@ -179,6 +180,75 @@ const makeDegenerateCoverArtSample = async (input: {
   writeFileSync(input.path, patched);
 };
 
+/**
+ * A file shaped like the other 15 that broke the same real library: real
+ * video, real audio, a genuine cover-art poster, and a stream ffprobe cannot
+ * identify AT ALL — `codec_type: subtitle` with no `codec_name` key.
+ *
+ * Manufactured the way the real ones are broken, because no muxer will write
+ * one directly: mux a real SubRip track, then rewrite its Matroska `CodecID`
+ * string from `S_TEXT/UTF8` to a same-length name no decoder claims. The
+ * element length is unchanged, so the container stays valid and every other
+ * stream is untouched; ffmpeg resolves the track to `AV_CODEC_ID_NONE` and
+ * ffprobe then omits `codec_name` from an otherwise complete description.
+ *
+ * The caller asserts what ffprobe says about the result, so if this technique
+ * ever stops producing a codec-less stream the test fails loudly rather than
+ * passing over a fixture that no longer contains the bug.
+ */
+const makeCodeclessStreamSample = async (input: {
+  path: string;
+  posterPath: string;
+  subtitlePath: string;
+}) => {
+  await execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=c=green:s=120x160:d=0.04:r=25',
+    '-frames:v',
+    '1',
+    input.posterPath,
+  ]);
+  writeFileSync(input.subtitlePath, '1\n00:00:00,000 --> 00:00:01,000\nhello\n\n');
+  await execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-i',
+    mediaPath,
+    '-i',
+    input.posterPath,
+    '-i',
+    input.subtitlePath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0',
+    '-map',
+    '1:v:0',
+    '-map',
+    '2:s:0',
+    '-c',
+    'copy',
+    '-c:s',
+    'srt',
+    input.path,
+  ]);
+
+  const file = readFileSync(input.path);
+  // Required to be unique: a stray match in frame data would rewrite the
+  // wrong bytes and quietly produce a fixture that is not the one described.
+  const marker = Buffer.from('S_TEXT/UTF8', 'ascii');
+  const at = file.indexOf(marker);
+  expect(at).toBeGreaterThan(-1);
+  expect(file.indexOf(marker, at + 1)).toBe(-1);
+  const patched = Buffer.from(file);
+  patched.write('S_TEXT/ZZZ9', at, 'ascii');
+  writeFileSync(input.path, patched);
+};
+
 /** The subset of an ffprobe stream these tests read back off a real file. */
 interface ProbedStream {
   index: number;
@@ -266,6 +336,13 @@ beforeAll(async () => {
     path: degenerateCoverPath,
     posterPath: join(sourceDir, 'poster.jpg'),
     degeneratePath: join(sourceDir, 'degenerate.jpg'),
+  });
+
+  codeclessStreamPath = join(sourceDir, 'codecless-stream.mkv');
+  await makeCodeclessStreamSample({
+    path: codeclessStreamPath,
+    posterPath: join(sourceDir, 'codecless-poster.jpg'),
+    subtitlePath: join(sourceDir, 'codecless.srt'),
   });
 }, 120_000);
 
@@ -675,6 +752,130 @@ describe.runIf(available)('compiled argv, as real ffmpeg reads it', () => {
       posterOut,
     ]);
     expect(readFileSync(posterOut).equals(readFileSync(join(sourceDir, 'poster.jpg')))).toBe(true);
+  }, 180_000);
+
+  /**
+   * The codec-less-stream bug, end to end on a real file.
+   *
+   * Same shape as the test above, one field over: instead of a stream whose
+   * dimensions no container can write, a stream whose CODEC ffprobe cannot
+   * name at all. Trawlarr mapped it `-c:3 copy` and ffmpeg refused the whole
+   * output — "Could not write header ... Function not implemented" — so 15
+   * files of this shape went terminally `failed` on a real library.
+   *
+   * Asserted on the produced file rather than on log text: the codec-less
+   * stream is gone, and every real stream — including the genuine poster,
+   * byte-for-byte — came through.
+   */
+  it('drops a stream ffprobe reports no codec for while every real stream survives', async () => {
+    const sourceStreams = await streamsOf(codeclessStreamPath);
+    // The fixture really contains the bug: three identified streams and one
+    // ffprobe describes without naming a codec. `codec_name` is not merely
+    // empty — the key is absent, which is the shape the boundary turns on.
+    expect(sourceStreams.map((stream) => stream.codec_name)).toEqual([
+      'h264',
+      'aac',
+      'mjpeg',
+      undefined,
+    ]);
+    expect(sourceStreams[3]!.codec_type).toBe('subtitle');
+    expect('codec_name' in sourceStreams[3]!).toBe(false);
+    // And ffprobe DID describe it: the witness the rule reads is present, so
+    // this is a positive report of "no codec", not a truncated probe.
+    expect(sourceStreams[3]!.codec_tag_string).toBeDefined();
+
+    const probe: ProbeData = {
+      // Same documented compromise as the tests above: Matroska drops the
+      // attached_pic disposition on muxing, so it is injected here to describe
+      // the file as a probe of real cover-art media would. The CODEC fields —
+      // the thing under test — are the file's own.
+      streams: sourceStreams.map((stream) =>
+        stream.codec_name === 'mjpeg'
+          ? { ...stream, disposition: { ...stream.disposition, attached_pic: 1 } }
+          : stream,
+      ),
+    };
+
+    const command = beginFfmpegCommand({
+      probe,
+      container: 'mkv',
+      inputPath: codeclessStreamPath,
+    });
+    const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin({
+      inputFileObj: { _id: codeclessStreamPath, container: 'mkv', ffProbeData: probe },
+      variables: { ffmpegCommand: command, flowFailed: false, user: {} },
+      inputs: { encoder: 'libx265', quality: '30' },
+      jobLog: () => {},
+    } as unknown as PluginInputArgs);
+
+    const dropped: { index: number; codecName: string; reason: string }[] = [];
+    const producedPath = join(workDir, 'codecless-encoded.mkv');
+    const argv = compileFfmpegArgs({
+      command: out.variables.ffmpegCommand,
+      outputPath: producedPath,
+      onDroppedStream: (entry) => dropped.push(entry),
+    });
+
+    // Exactly one stream dropped, and the reason names the CODEC — the job log
+    // has to say why, and "dimensions" would be the wrong explanation here.
+    expect(dropped).toEqual([
+      { index: 3, codecName: 'unknown', reason: expect.stringContaining('no codec') },
+    ]);
+    expect(argv).not.toContain('0:3');
+
+    // The bug is real on THIS file, not a hypothesis: the same command with
+    // the codec-less stream mapped back in — which is what mapping every input
+    // stream produced — fails before a frame is written.
+    const withCodecless = [
+      ...argv.slice(0, -1),
+      '-map',
+      '0:3',
+      `-c:${String(argv.filter((_, i) => argv[i - 1] === '-map').length)}`,
+      'copy',
+      join(workDir, 'codecless-all-streams.mkv'),
+    ];
+    const failure = await execFileAsync('ffmpeg', ['-hide_banner', '-y', ...withCodecless]).then(
+      () => null,
+      (error: { code?: number; stderr?: string }) => error,
+    );
+    expect(failure).not.toBeNull();
+    expect(failure!.code).not.toBe(0);
+    expect(failure!.stderr).toContain('Function not implemented');
+
+    // And the command we actually build runs.
+    await execFileAsync('ffmpeg', ['-hide_banner', '-y', ...argv]);
+
+    // The load-bearing assertions, made on the OUTPUT FILE: the codec-less
+    // stream is gone, the video was encoded, the audio is untouched, and the
+    // genuine poster survived at its exact dimensions. Dropping more than the
+    // one broken stream would destroy real content in every file this touches.
+    const producedStreams = await streamsOf(producedPath);
+    expect(
+      producedStreams.map((stream) => [stream.codec_name, stream.width, stream.height]),
+    ).toEqual([
+      ['hevc', 320, 240],
+      ['aac', undefined, undefined],
+      ['mjpeg', 120, 160],
+    ]);
+
+    // The poster is byte-for-byte the frame that went in, not a re-encode.
+    const posterOut2 = join(workDir, 'codecless-poster-out.jpg');
+    await execFileAsync('ffmpeg', [
+      '-hide_banner',
+      '-y',
+      '-i',
+      producedPath,
+      '-map',
+      '0:2',
+      '-c',
+      'copy',
+      '-f',
+      'mjpeg',
+      posterOut2,
+    ]);
+    expect(
+      readFileSync(posterOut2).equals(readFileSync(join(sourceDir, 'codecless-poster.jpg'))),
+    ).toBe(true);
   }, 180_000);
 
   /**

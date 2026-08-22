@@ -578,7 +578,98 @@ describe('unmappable streams', () => {
       inputPath: '/in.mkv',
     });
     expect(() => compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toThrow(
-      /dimensions no container can write/,
+      /no remaining stream can be written.*dimensions 0x0/,
+    );
+  });
+});
+
+/**
+ * The second real-world shape, one field over from the dimensionless one: a
+ * stream ffprobe describes in full and reports NO codec for. Trawlarr mapped
+ * it `-c:N copy`, and ffmpeg cannot copy a codec it does not know —
+ * "Could not write header for output file #0 (incorrect codec parameters ?):
+ * Function not implemented" — so the file went terminally `failed`.
+ *
+ * The probe below is the real shape of such a stream: ffprobe emits no
+ * `codec_name` key at all, while every other field of its stream description
+ * is present.
+ */
+describe('codec-less streams', () => {
+  const codeclessProbe: ProbeData = {
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', width: 1280, height: 720 },
+      { index: 1, codec_type: 'audio', codec_name: 'aac' },
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip', codec_tag_string: '[0][0][0][0]' },
+      // No codec_name key whatsoever, exactly as ffprobe writes it.
+      {
+        index: 3,
+        codec_type: 'subtitle',
+        codec_tag_string: '[0][0][0][0]',
+      } as unknown as ProbeStream,
+    ],
+  };
+
+  const codeclessCommand = () =>
+    beginFfmpegCommand({ probe: codeclessProbe, container: 'mkv', inputPath: '/in.mkv' });
+
+  it('drops the codec-less stream and keeps every identified one', () => {
+    const cmd = codeclessCommand();
+    cmd.streams[0]!.outputArgs.push('-c:{outputIndex}', 'libx265');
+
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+
+    expect(args).toEqual([
+      '-i',
+      '/in.mkv',
+      '-map',
+      '0:0',
+      '-c:0',
+      'libx265',
+      '-map',
+      '0:1',
+      '-c:1',
+      'copy',
+      '-map',
+      '0:2',
+      '-c:2',
+      'copy',
+      '/out.mkv',
+    ]);
+    // The stream ffmpeg could not have written is not mapped at all — this is
+    // the `-c:3 copy` that produced "Function not implemented".
+    expect(args).not.toContain('0:3');
+    expect(args).not.toContain('-c:3');
+  });
+
+  it('reports the drop with a reason naming the codec, not the dimensions', () => {
+    const dropped: DroppedStream[] = [];
+    compileFfmpegArgs({
+      command: codeclessCommand(),
+      outputPath: '/out.mkv',
+      onDroppedStream: (entry) => dropped.push(entry),
+    });
+    expect(dropped).toEqual([
+      { index: 3, codecName: 'unknown', reason: expect.stringContaining('no codec') },
+    ]);
+    expect(dropped[0]!.reason).not.toContain('dimensions');
+  });
+
+  it('names the reason when every remaining stream is codec-less', () => {
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          {
+            index: 0,
+            codec_type: 'subtitle',
+            codec_tag_string: '[0][0][0][0]',
+          } as unknown as ProbeStream,
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(() => compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toThrow(
+      /no remaining stream can be written.*no codec/,
     );
   });
 });
@@ -611,6 +702,60 @@ describe('unmappableStreamReason', () => {
     expect(
       reason({ width: '120' as unknown as number, height: '160' as unknown as number }),
     ).toBeNull();
+  });
+
+  /**
+   * The codec half of the boundary, which is where the damage would be done
+   * if it were drawn one step wider. "ffprobe positively reports no codec" is
+   * unmappable; "this object does not happen to carry a codec_name" is not.
+   */
+  describe('the codec boundary', () => {
+    it('rejects a stream ffprobe described in full and gave no codec_name', () => {
+      // The observed case: every other field of the ffprobe stream object is
+      // present, and codec_name is simply not among them. ffprobe writes
+      // codec_name for every codec it can name and omits it only for
+      // AV_CODEC_ID_NONE, so its absence HERE is a statement about the stream.
+      const stream = {
+        index: 3,
+        codec_type: 'subtitle',
+        codec_tag_string: '[0][0][0][0]',
+        codec_tag: '0x0000',
+      } as unknown as ProbeStream;
+      expect(unmappableStreamReason(stream)).toContain('no codec');
+      expect(unmappableStreamReason(stream)).toContain('absent');
+    });
+
+    it('rejects a declared codec_name that names no codec', () => {
+      // Declared, so we are entitled to judge it — the same discipline the
+      // dimension half applies to a declared width.
+      expect(reason({ codec_name: null as unknown as string })).toContain('no codec');
+      expect(reason({ codec_name: '' })).toContain('no codec');
+      expect(reason({ codec_name: 'none' })).toContain('no codec');
+      // ffprobe prints the literal string for AV_CODEC_ID_NONE when optional
+      // fields are shown; same fact, same answer.
+      expect(reason({ codec_name: 'unknown' })).toContain('no codec');
+      expect(reason({ codec_name: 'UNKNOWN' })).toContain('no codec');
+    });
+
+    it('never judges a stream that merely lacks a codec_name', () => {
+      // THE line. A synthetic probe — one a plugin built, a test wrote, or a
+      // partial read produced — carries no ffprobe stream description around
+      // it, so its missing codec_name is a fact about the probe rather than
+      // about the stream. Judging it would let an incomplete probe silently
+      // delete a library file's main video track, which is worse than the
+      // loud ffmpeg error it would prevent.
+      const bare = { index: 0, codec_type: 'video', width: 1920, height: 1080 };
+      expect(unmappableStreamReason(bare as unknown as ProbeStream)).toBeNull();
+      expect(
+        unmappableStreamReason({ index: 1, codec_type: 'audio' } as unknown as ProbeStream),
+      ).toBeNull();
+      // And a stream with a real codec is never touched by this half, however
+      // completely ffprobe described it.
+      expect(
+        reason({ codec_name: 'h264', codec_tag_string: 'avc1', width: 1920, height: 1080 }),
+      ).toBeNull();
+      expect(reason({ codec_name: 'subrip', codec_tag_string: '[0][0][0][0]' })).toBeNull();
+    });
   });
 
   it('never judges a stream that declares no dimensions at all', () => {

@@ -9,15 +9,85 @@ export interface DroppedStream {
   reason: string;
 }
 
-const declaresDimension = (value: unknown): boolean => value !== undefined && value !== null;
+/**
+ * Did the probe say anything at all about this field? Shared by both halves of
+ * the rule below, which turn on the same distinction: a value the probe
+ * DECLARED may be judged, a value it never mentioned may not.
+ */
+const isDeclared = (value: unknown): boolean => value !== undefined && value !== null;
 
 const isUsableDimension = (value: unknown): boolean => {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0;
 };
 
-const describeDimension = (value: unknown): string =>
-  declaresDimension(value) ? String(value) : 'unset';
+const describeDimension = (value: unknown): string => (isDeclared(value) ? String(value) : 'unset');
+
+/**
+ * Fields ffprobe writes for EVERY stream it describes, whatever it made of the
+ * codec — including the streams it could not identify at all, where they are
+ * the only trace left that a codec slot was considered and came back empty.
+ *
+ * This is the witness that separates "the probe positively reports no codec"
+ * from "this stream never came from a full probe": a `ProbeStream` a test, a
+ * plugin or a partial read constructed by hand carries neither.
+ */
+const PROBE_DESCRIBED_FIELDS = ['codec_tag_string', 'codec_tag'] as const;
+
+/** Did a real, complete ffprobe stream description produce this stream? */
+const isProbeDescribed = (stream: ProbeStream): boolean =>
+  PROBE_DESCRIBED_FIELDS.some((field) => isDeclared(stream[field]));
+
+/**
+ * `codec_name` values that assert the ABSENCE of a codec instead of naming
+ * one. ffprobe omits the field entirely when the codec id is `NONE`, but
+ * prints the literal `unknown` for the same fact when optional fields are
+ * shown, and other producers of probe JSON spell it `none` or empty. All four
+ * are the same statement, so they get the same answer.
+ */
+const NO_CODEC_NAMES = new Set(['', 'none', 'unknown']);
+
+const describeCodec = (value: unknown): string => {
+  if (value === undefined) return 'absent';
+  if (value === null) return 'null';
+  return `"${String(value)}"`;
+};
+
+/**
+ * Does the probe positively report that this stream has no codec?
+ *
+ * Three forms of one fact, and the boundary between them and mere silence is
+ * the whole point:
+ *
+ * - `codec_name` is present and NULL. A key written with an empty value is a
+ *   statement, not an omission: something described this stream and had no
+ *   codec to put there.
+ * - `codec_name` is present and names no codec: `""`, `"none"`, or the
+ *   literal `"unknown"` ffprobe prints for `AV_CODEC_ID_NONE` when optional
+ *   fields are shown. Declared means we are entitled to judge it, exactly as
+ *   the dimension half judges a declared width.
+ * - `codec_name` is ABSENT **and** the stream is otherwise a complete ffprobe
+ *   description. This is the observed shape: ffprobe's JSON writer omits the
+ *   key entirely for `AV_CODEC_ID_NONE` and emits it for every codec it can
+ *   name, so absence *inside a full ffprobe stream object* is a fact about
+ *   the stream. `codec_tag_string` / `codec_tag` are written unconditionally
+ *   beside `codec_name`, on every stream of every container (verified on
+ *   mkv, mp4 and avi, across video, audio, subtitle and attachment streams),
+ *   so their presence is the witness that ffprobe really did look.
+ *
+ * A stream whose `codec_name` is merely `undefined`, with no ffprobe stream
+ * description around it, is KEPT. That is the synthetic case — the object a
+ * plugin or a test built, or a probe read only in part — and judging it would
+ * let an incomplete probe silently delete a library file's main video track,
+ * far worse than the loud ffmpeg error it would prevent. The rule is "the
+ * probe says there is no codec", never "the probe did not say".
+ */
+const reportsNoCodec = (stream: ProbeStream): boolean => {
+  const value = stream.codec_name as unknown;
+  if (value === null) return true;
+  if (value === undefined) return isProbeDescribed(stream);
+  return NO_CODEC_NAMES.has(String(value).trim().toLowerCase());
+};
 
 /**
  * Why this stream cannot be written to any container, or `null` if it can.
@@ -52,11 +122,28 @@ const describeDimension = (value: unknown): string =>
  *   main video track silently. A loud ffmpeg error beats deleting video.
  *
  * A valid poster — `1251x1595 mjpeg` — has two positive dimensions and is
- * therefore never a candidate, at any size. Nothing here inspects codec,
- * disposition or size, so no real cover art can match.
+ * therefore never a candidate, at any size. Nothing in the dimension half
+ * inspects codec, disposition or size, so no real cover art can match.
+ *
+ * The SECOND, later cause has the same shape one field over. Real libraries
+ * also contain streams ffprobe cannot identify at all — an mkv subtitle track
+ * whose CodecID no decoder claims probes as `subtitle` with no `codec_name`
+ * whatsoever. Trawlarr maps it (`-c:3 copy`), and ffmpeg cannot copy a stream
+ * whose codec it does not know: `Subtitle codec 0 is not supported` /
+ * `Could not write header for output file #0 (incorrect codec parameters ?):
+ * Function not implemented`. Same terminal `failed`, same invisible cause.
+ * See {@link reportsNoCodec} for where that boundary is drawn — declared-and-
+ * degenerate, or absent from a stream ffprobe otherwise described in full,
+ * but never merely absent.
  */
 export const unmappableStreamReason = (stream: ProbeStream): string | null => {
-  if (!declaresDimension(stream.width) && !declaresDimension(stream.height)) return null;
+  if (reportsNoCodec(stream)) {
+    return (
+      `ffprobe reports no codec for it (codec_name ${describeCodec(stream.codec_name)}), ` +
+      'so no muxer knows what it would be writing'
+    );
+  }
+  if (!isDeclared(stream.width) && !isDeclared(stream.height)) return null;
   if (isUsableDimension(stream.width) && isUsableDimension(stream.height)) return null;
   return (
     `it reports dimensions ${describeDimension(stream.width)}x` +
@@ -239,8 +326,12 @@ export const compileFfmpegArgs = (input: {
       surviving.length === 0
         ? 'No streams mapped for new file: every stream was removed, so the output would ' +
             'contain nothing. Check which streams the flow is removing.'
-        : 'No streams mapped for new file: every remaining stream reports dimensions no ' +
-            'container can write, so the output would contain nothing.',
+        : 'No streams mapped for new file: no remaining stream can be written to any ' +
+            'container, so the output would contain nothing — ' +
+            surviving
+              .map((stream) => unmappableStreamReason(stream))
+              .filter((reason): reason is string => reason !== null)
+              .join('; '),
     );
   }
 
