@@ -45,6 +45,22 @@ export type TrawlarrEvent =
   | { type: 'job.finished'; jobId: string; fileId: string; state: FileState; outcome: string }
   | { type: 'scan.progress'; libraryId: string; seen: number }
   | { type: 'scan.finished'; libraryId: string; summary: ScanSummary }
+  /**
+   * A plugin source sync, which the API accepts with a 202 and runs inside
+   * the daemon. Three types rather than one with a flag: a UI shows a
+   * spinner, a count and a refusal in three different places, and a failure
+   * that arrives as a "finished" frame with a field set is the frame that
+   * gets rendered as a success.
+   */
+  | { type: 'plugin.sync.started'; sourceId: string; runId: number }
+  | {
+      type: 'plugin.sync.finished';
+      sourceId: string;
+      runId: number;
+      installed: number;
+      skipped: number;
+    }
+  | { type: 'plugin.sync.failed'; sourceId: string; runId: number; code: string; message: string }
   | { type: 'library.paused'; libraryId: string; reason: string }
   | { type: 'library.resumed'; libraryId: string }
   | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number };

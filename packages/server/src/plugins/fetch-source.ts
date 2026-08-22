@@ -6,10 +6,41 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { canonicalPath, pathContains } from '../fs/path-contains.js';
 import type { PluginSourceKind } from './plugin-repo.js';
 
+/**
+ * WHY a source could not be materialised, as a stable machine-readable value.
+ *
+ * The messages below are written for a human and are the whole diagnostic,
+ * but a caller across HTTP also has to BRANCH: a url that is not https is the
+ * operator's typo (fix the url), an unreachable host is transient (retry), and
+ * an archive this refuses to unpack is a decision about the source itself
+ * (do not add it back). Collapsing those into one status and one string is
+ * exactly the "every failure is a 500" outcome this API is meant to avoid.
+ */
+export type PluginSourceErrorCode =
+  /** The url, or a redirect hop, was not https. */
+  | 'insecure-url'
+  /** Nothing answered, it answered non-2xx, or the redirect chain was unusable. */
+  | 'unreachable'
+  /** Something answered, but it was a document or was not a gzip stream. */
+  | 'not-an-archive'
+  /** A gzipped tar whose index this build of tar describes in a shape trawlarr cannot check. */
+  | 'archive-unreadable'
+  /** The archive would escape the directory it is unpacked into, or holds links/devices. */
+  | 'archive-refused'
+  /** The download, or the content it declares, is past the bounds a plugin source gets. */
+  | 'too-large'
+  /** A local source path that is not there. */
+  | 'path-not-found'
+  /** A local source path that is relative, or is not a directory. */
+  | 'path-invalid';
+
 export class PluginSourceError extends Error {
-  constructor(message: string) {
+  readonly code: PluginSourceErrorCode;
+
+  constructor(code: PluginSourceErrorCode, message: string) {
     super(message);
     this.name = 'PluginSourceError';
+    this.code = code;
   }
 }
 
@@ -85,6 +116,7 @@ const runTar = (tarball: string, args: string[]): string => {
     });
   } catch (cause) {
     throw new PluginSourceError(
+      'archive-unreadable',
       `Could not read plugin source archive "${tarball}" as a gzipped tar: ` +
         `${(cause as Error).message}`,
     );
@@ -115,6 +147,7 @@ export const readArchiveIndex = (input: {
 }): ArchiveMember[] => {
   if (input.names.length !== input.verbose.length) {
     throw new PluginSourceError(
+      'archive-unreadable',
       `Refusing this plugin source: its archive lists ${input.names.length} members by name but ` +
         `${input.verbose.length} in detail, so the names being checked are not the names that ` +
         `would be written.`,
@@ -126,6 +159,7 @@ export const readArchiveIndex = (input: {
     const match = TAR_VERBOSE_LINE.exec(line);
     if (match === null) {
       throw new PluginSourceError(
+        'archive-unreadable',
         `Refusing this plugin source: its archive contains a member this build of tar describes ` +
           `as "${line}", which trawlarr cannot check the type and size of.`,
       );
@@ -174,6 +208,7 @@ const assertSafeArchive = (input: {
 
   if (members.length > input.limits.maxMembers) {
     throw new PluginSourceError(
+      'archive-refused',
       `Refusing this plugin source: its archive holds ${members.length} members, more than the ` +
         `${input.limits.maxMembers} a plugin repository is allowed to unpack.`,
     );
@@ -188,6 +223,7 @@ const assertSafeArchive = (input: {
   for (const member of members) {
     if (member.type !== '-' && member.type !== 'd') {
       throw new PluginSourceError(
+        'archive-refused',
         `Refusing this plugin source: its archive contains "${member.name}", which is ` +
           `${TYPE_NAMES[member.type] ?? `of type "${member.type}"`} rather than a file or a ` +
           `directory. A link inside an archive can point anywhere on this host, and a later ` +
@@ -201,6 +237,7 @@ const assertSafeArchive = (input: {
     // comparison here is the class of bug that once destroyed a user's file.
     if (!pathContains(root, resolve(root, member.name))) {
       throw new PluginSourceError(
+        'archive-refused',
         `Refusing this plugin source: its archive contains "${member.name}", which would be ` +
           `written outside the directory it is unpacked into. That is not a layout any plugin ` +
           `repository needs, so the archive is rejected rather than sanitised.`,
@@ -210,6 +247,7 @@ const assertSafeArchive = (input: {
     const depth = member.name.split('/').filter((part) => part !== '' && part !== '.').length;
     if (depth > input.limits.maxPathDepth) {
       throw new PluginSourceError(
+        'archive-refused',
         `Refusing this plugin source: its archive contains a path ${depth} directories deep, ` +
           `past the limit of ${input.limits.maxPathDepth}. Nothing legitimate nests that far, ` +
           `and some filesystems and backup tools cannot then delete what was written.`,
@@ -219,6 +257,7 @@ const assertSafeArchive = (input: {
     totalBytes += member.sizeBytes;
     if (totalBytes > input.limits.maxExtractedBytes) {
       throw new PluginSourceError(
+        'archive-refused',
         `Refusing this plugin source: its archive declares more than ` +
           `${input.limits.maxExtractedBytes} bytes of content, which a small download expanding ` +
           `to fill the disk looks exactly like.`,
@@ -227,9 +266,16 @@ const assertSafeArchive = (input: {
   }
 };
 
-const assertHttpsUrl = (url: string, context: string): void => {
+/**
+ * Every hop of a tarball source must be https, and this is the ONE place that
+ * rule lives — exported so the API can hold a url to it at the moment the
+ * source is ADDED, rather than accepting it and failing at the first sync
+ * with the same sentence hours later.
+ */
+export const assertHttpsUrl = (url: string, context = ''): void => {
   if (!url.startsWith('https://')) {
     throw new PluginSourceError(
+      'insecure-url',
       `Plugin source url "${url}"${context} is not https. Plugin code is executed by trawlarr ` +
         `as the service user, so it is only ever fetched over a channel that authenticates the ` +
         `server it came from.`,
@@ -249,6 +295,7 @@ const assertArchiveContentType = (url: string, contentType: string | null): void
     essence.startsWith('text/') || essence === 'application/json' || essence === 'application/xml';
   if (isDocument) {
     throw new PluginSourceError(
+      'not-an-archive',
       `Plugin source "${url}" answered with content-type "${essence}", which is a document ` +
         `rather than an archive. A proxy, a captive portal or a moved repository serves a page ` +
         `with a 200 status, and unpacking that as a tarball is not something to attempt.`,
@@ -272,6 +319,7 @@ const streamToFile = async (input: {
   const declared = Number(input.response.headers.get('content-length') ?? Number.NaN);
   if (Number.isFinite(declared) && declared > input.maxBytes) {
     throw new PluginSourceError(
+      'too-large',
       `Refusing plugin source "${input.url}": it announces ${declared} bytes, past the ` +
         `${input.maxBytes}-byte limit for a plugin source archive.`,
     );
@@ -281,7 +329,10 @@ const streamToFile = async (input: {
   try {
     const body = input.response.body;
     if (body === null) {
-      throw new PluginSourceError(`Plugin source "${input.url}" returned an empty reply.`);
+      throw new PluginSourceError(
+        'unreachable',
+        `Plugin source "${input.url}" returned an empty reply.`,
+      );
     }
     const reader = body.getReader();
     let received = 0;
@@ -294,6 +345,7 @@ const streamToFile = async (input: {
         // does not keep a socket and a pipe alive behind a rejected sync.
         await reader.cancel();
         throw new PluginSourceError(
+          'too-large',
           `Refusing plugin source "${input.url}": it sent more than ${input.maxBytes} bytes, ` +
             `which is past the limit for a plugin source archive.`,
         );
@@ -317,6 +369,7 @@ const assertGzip = (url: string, tarball: string): void => {
   }
   if (read < 2 || header[0] !== 0x1f || header[1] !== 0x8b) {
     throw new PluginSourceError(
+      'not-an-archive',
       `Plugin source "${url}" did not return a gzipped archive. Check the url — a tarball ` +
         `source wants a .tar.gz, such as a codeload.github.com tar.gz link.`,
     );
@@ -337,11 +390,27 @@ const fetchArchive = async (input: {
   let current = input.url;
   for (let hop = 0; ; hop += 1) {
     assertHttpsUrl(current, hop === 0 ? '' : ` (redirected to from "${input.url}")`);
-    const response = await input.fetchFn(current, { redirect: 'manual' });
+    let response: Response;
+    try {
+      response = await input.fetchFn(current, { redirect: 'manual' });
+    } catch (cause) {
+      // `fetch` rejects with an opaque "fetch failed" whose real reason —
+      // refused connection, DNS, expired certificate — is only in its cause.
+      // Left unwrapped it reaches the caller as an unclassified failure, and
+      // "the host is down" and "the archive is hostile" become the same
+      // answer, which is exactly what this API must not do.
+      const detail = cause instanceof Error ? (cause.cause ?? cause) : cause;
+      throw new PluginSourceError(
+        'unreachable',
+        `Could not fetch plugin source "${input.url}"${current === input.url ? '' : ` (redirected to "${current}")`}: ` +
+          `${detail instanceof Error ? detail.message : String(detail)}`,
+      );
+    }
 
     if (!REDIRECT_STATUS.has(response.status)) {
       if (!response.ok) {
         throw new PluginSourceError(
+          'unreachable',
           `Could not fetch plugin source "${input.url}": HTTP ${response.status}.`,
         );
       }
@@ -350,6 +419,7 @@ const fetchArchive = async (input: {
 
     if (hop >= input.limits.maxRedirects) {
       throw new PluginSourceError(
+        'unreachable',
         `Could not fetch plugin source "${input.url}": it redirects more than ` +
           `${input.limits.maxRedirects} times, which is a loop rather than a move.`,
       );
@@ -357,6 +427,7 @@ const fetchArchive = async (input: {
     const location = response.headers.get('location');
     if (location === null) {
       throw new PluginSourceError(
+        'unreachable',
         `Could not fetch plugin source "${input.url}": HTTP ${response.status} with no location ` +
           `to redirect to.`,
       );
@@ -365,10 +436,46 @@ const fetchArchive = async (input: {
       current = new URL(location, current).toString();
     } catch {
       throw new PluginSourceError(
+        'unreachable',
         `Could not fetch plugin source "${input.url}": it redirects to "${location}", which is ` +
           `not a url.`,
       );
     }
+  }
+};
+
+/**
+ * What a LOCAL source's path has to be, in the one place both callers use.
+ *
+ * Exported for the same reason `assertHttpsUrl` is: the API checks it when a
+ * source is added, so an operator who mistyped a bind mount is told at the
+ * moment they typed it instead of at the first sync.
+ */
+export const assertLocalSourcePath = (path: string): void => {
+  // Rejected rather than resolved, for the same reason a relative
+  // `stagingDir` is rejected at library creation: there is no defensible
+  // base. The service's cwd is meaningless to the user, and `path.resolve`
+  // is defined against it, so resolving early stores the wrong answer.
+  if (!isAbsolute(path)) {
+    throw new PluginSourceError(
+      'path-invalid',
+      `Plugin source path "${path}" is relative. Give an absolute path — the service's ` +
+        `working directory is not something you can predict, so a relative path would point ` +
+        `somewhere different depending on how trawlarr was started.`,
+    );
+  }
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    throw new PluginSourceError('path-not-found', `Plugin source path "${path}" does not exist.`);
+  }
+  if (!stats.isDirectory()) {
+    throw new PluginSourceError(
+      'path-invalid',
+      `Plugin source path "${path}" is not a directory. A local source is the ROOT of a ` +
+        `plugin tree, not a single plugin file.`,
+    );
   }
 };
 
@@ -382,29 +489,7 @@ export const materialiseSource = async (input: {
   limits?: Partial<SourceLimits>;
 }): Promise<MaterialisedSource> => {
   if (input.kind === 'local') {
-    // Rejected rather than resolved, for the same reason a relative
-    // `stagingDir` is rejected at library creation: there is no defensible
-    // base. The service's cwd is meaningless to the user, and `path.resolve`
-    // is defined against it, so resolving early stores the wrong answer.
-    if (!isAbsolute(input.url)) {
-      throw new PluginSourceError(
-        `Plugin source path "${input.url}" is relative. Give an absolute path — the service's ` +
-          `working directory is not something you can predict, so a relative path would point ` +
-          `somewhere different depending on how trawlarr was started.`,
-      );
-    }
-    let stats;
-    try {
-      stats = statSync(input.url);
-    } catch {
-      throw new PluginSourceError(`Plugin source path "${input.url}" does not exist.`);
-    }
-    if (!stats.isDirectory()) {
-      throw new PluginSourceError(
-        `Plugin source path "${input.url}" is not a directory. A local source is the ROOT of a ` +
-          `plugin tree, not a single plugin file.`,
-      );
-    }
+    assertLocalSourcePath(input.url);
     // No cleanup: this is the user's own directory, not something we made.
     return { dir: input.url, cleanup: () => {} };
   }

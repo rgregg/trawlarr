@@ -448,8 +448,9 @@ exports.plugin = (args) => ({
 describe('cli routing: plugin', () => {
   it('lists plugins through the daemon rather than opening the database', async () => {
     const { dataDir } = seed();
-    // Installed BEFORE the daemon starts, which is the only way to install
-    // anything in this build — see the source commands below.
+    // Installed before the daemon starts here only because this test is
+    // about `plugin list`'s transport; the source commands below install
+    // through a running daemon.
     await main(['plugin', 'source', 'add', '--name', 'fx', '--path', writePluginTree(), '--data-dir', dataDir]); // prettier-ignore
     await main(['plugin', 'source', 'sync', '--name', 'fx', '--data-dir', dataDir]);
 
@@ -480,29 +481,67 @@ describe('cli routing: plugin', () => {
     expect(stdout()).toContain('Outputs (');
   });
 
-  it('refuses every plugin-source command while a daemon owns the directory, saying why', async () => {
+  it('installs a plugin source THROUGH the daemon, never opening the database behind it', async () => {
+    const { dataDir } = seed();
+    const daemon = await startDaemonFor(dataDir);
+    const recorder = await recordApiCalls(daemon.port);
+    recorders.push(recorder);
+    routeThroughRecorder(dataDir, recorder.port);
+    const tree = writePluginTree();
+
+    expect(await main(['plugin', 'source', 'add', '--name', 'fx2', '--path', tree, '--data-dir', dataDir])).toBe(0); // prettier-ignore
+    expect(await main(['plugin', 'source', 'list', '--data-dir', dataDir])).toBe(0);
+    expect(await main(['plugin', 'source', 'sync', '--all', '--data-dir', dataDir])).toBe(0);
+    expect(await main(['plugin', 'source', 'remove', '--name', 'fx2', '--data-dir', dataDir])).toBe(0); // prettier-ignore
+
+    // The proof of transport, for the four commands that used to refuse
+    // outright: every one of them was an HTTP request to the daemon that
+    // owns the directory. No assertion on their output could tell this from
+    // the CLI opening the database behind the daemon's back.
+    const calls = recorder.calls.map((call) => `${call.method} ${call.path}`);
+    expect(calls).toContain('POST /api/v1/plugins/sources');
+    expect(calls).toContain('GET /api/v1/plugins/sources');
+    expect(calls).toContain('POST /api/v1/plugins/sources/fx2/sync');
+    expect(calls).toContain('DELETE /api/v1/plugins/sources/fx2');
+    // A 202'd sync is read back rather than assumed: the CLI polled the run.
+    expect(calls.filter((call) => call === 'GET /api/v1/plugins/sources/fx2').length).toBeGreaterThan(0); // prettier-ignore
+  });
+
+  it('reports what the daemon installed, and leaves no rows behind after the remove', async () => {
     const { dataDir } = seed();
     await startDaemonFor(dataDir);
     const tree = writePluginTree();
 
-    for (const argv of [
-      ['plugin', 'source', 'add', '--name', 'fx2', '--path', tree],
-      ['plugin', 'source', 'list'],
-      ['plugin', 'source', 'sync', '--all'],
-      ['plugin', 'source', 'remove', '--name', 'fx2'],
-    ]) {
-      errorSpy.mockClear();
-      expect(await main([...argv, '--data-dir', dataDir])).toBe(1);
-      // Named, not obscure: the pid that owns the directory, and the fact
-      // that the API has no route to forward this to yet.
-      expect(stderr()).toContain(String(process.pid));
-      expect(stderr()).toContain('/api/v1/plugins/sources answers 501');
-      expect(stderr()).toContain('Stop the daemon');
-    }
+    await main(['plugin', 'source', 'add', '--name', 'fx2', '--path', tree, '--data-dir', dataDir]);
+    logSpy.mockClear();
+    expect(await main(['plugin', 'source', 'sync', '--name', 'fx2', '--data-dir', dataDir])).toBe(
+      0,
+    );
+    expect(stdout()).toContain('1 plugin(s) installed');
 
-    // And it really did not write: no source row appeared behind the daemon.
+    // The row the DAEMON wrote, read from the file it owns — the whole point
+    // of the change is that this row exists without the daemon being stopped.
     const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
-    expect(db.prepare('SELECT COUNT(*) AS n FROM plugin_source').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT id FROM plugin_source').all()).toEqual([{ id: 'fx2' }]);
+    expect(db.prepare('SELECT id FROM plugin').all()).toEqual([{ id: 'fx2:myPlugin' }]);
     db.close();
+
+    logSpy.mockClear();
+    expect(await main(['plugin', 'source', 'remove', '--name', 'fx2', '--data-dir', dataDir])).toBe(0); // prettier-ignore
+    expect(stdout()).toContain('fx2:myPlugin');
+
+    const after = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    expect(after.prepare('SELECT COUNT(*) AS n FROM plugin_source').get()).toEqual({ n: 0 });
+    expect(after.prepare('SELECT COUNT(*) AS n FROM plugin').get()).toEqual({ n: 0 });
+    after.close();
+  });
+
+  it('names the source the daemon does not know, rather than failing anonymously', async () => {
+    const { dataDir } = seed();
+    await startDaemonFor(dataDir);
+
+    expect(await main(['plugin', 'source', 'sync', '--name', 'ghost', '--data-dir', dataDir])).toBe(1); // prettier-ignore
+    // The daemon's own 404 message, passed through verbatim.
+    expect(stderr()).toContain('No plugin source "ghost"');
   });
 });

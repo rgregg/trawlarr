@@ -1,9 +1,11 @@
 import { mkdtemp, mkdir, symlink, writeFile, readdir } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
@@ -17,8 +19,21 @@ import { createJobRepo } from '../db/job-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { createPluginRepo } from '../plugins/plugin-repo.js';
+import {
+  createPluginSyncCoordinator,
+  type PluginSyncCoordinator,
+} from '../plugins/sync-coordinator.js';
 import { createApiContext, createApiServer } from './server.js';
 import { createPluginLoader } from '@trawlarr/engine';
+
+/**
+ * A data directory for the context these suites build.
+ *
+ * Real, because the plugin-source routes install into `<dataDir>/plugins` and
+ * a test that pointed them at a path that does not exist would be proving
+ * something about a failure rather than about the routes.
+ */
+const API_TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'trawlarr-api-data-'));
 
 const NOW = 1_700_000_000_000;
 const API_KEY = 'the-fixed-test-api-key-000000';
@@ -235,6 +250,7 @@ beforeEach(async () => {
     scans,
     nowMs: () => NOW,
     version: '0.0.0-test',
+    dataDir: API_TEST_DATA_DIR,
     // A seam, so this suite never depends on what is installed on the
     // machine running it.
     checkBinary: async (path) => await Promise.resolve(path.includes('ffmpeg')),
@@ -249,6 +265,34 @@ afterEach(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   db.close();
 });
+
+/**
+ * Replace the running server with one whose context carries `over`.
+ *
+ * The seams a context takes — a fake supervisor, a stubbed network for the
+ * plugin syncer — are chosen when the context is BUILT, so a test that needs
+ * a different one restarts the server rather than reaching into a live
+ * handler. Everything else about the daemon stays real, including the socket.
+ */
+const restartServerWith = async (over: { pluginSyncs?: PluginSyncCoordinator }): Promise<void> => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  server = createApiServer(
+    createApiContext({
+      db,
+      settings,
+      bus: createEventBus(),
+      supervisor,
+      scans,
+      dataDir: API_TEST_DATA_DIR,
+      nowMs: () => NOW,
+      version: '0.0.0-test',
+      ...over,
+    }),
+    { onError: () => {} },
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+};
 
 describe('over a real socket', () => {
   it('serves health with no key, and refuses everything else without one', async () => {
@@ -927,12 +971,334 @@ describe('plugins', () => {
     expect(badOutput.body.ok).toBe(false);
     expect(JSON.stringify(badOutput.body.problems)).toContain('7');
   });
+});
 
-  it('returns 501, not 404, for a plugin-source route', async () => {
-    const response = await api('POST', '/plugins/sources', {});
+describe('plugin sources', () => {
+  /** <tmp>/p/myPlugin/1.0.0/index.js — the layout `discoverFlowPlugins` looks for. */
+  const writeFixtureTree = (): string => {
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-api-plugins-'));
+    const dir = join(root, 'p', 'myPlugin', '1.0.0');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'index.js'), THIRD_PARTY_PLUGIN_CODE, 'utf8');
+    return root;
+  };
 
-    expect(response.status).toBe(501);
-    expect(response.body.error.code).toBe('not-implemented');
+  /**
+   * Wait for the run this test started, and only that run.
+   *
+   * The sync route answers 202 and the work continues inside the daemon, so
+   * every assertion about a sync is an assertion about state read back
+   * afterwards. Matching on the run id is what makes that sound: "not
+   * running" is also true of a sync that has not begun.
+   */
+  const awaitSync = async (sourceId: string, runId: number): Promise<ResponseBody> => {
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      const source = await api('GET', `/plugins/sources/${sourceId}`);
+      if (source.body.sync.runId === runId && source.body.sync.running === false) {
+        return source.body.sync;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`sync run ${String(runId)} of "${sourceId}" never finished`);
+  };
+
+  const syncAndWait = async (sourceId: string): Promise<ResponseBody> => {
+    const started = await api('POST', `/plugins/sources/${sourceId}/sync`);
+    expect(started.status).toBe(202);
+    return await awaitSync(sourceId, started.body.runId as number);
+  };
+
+  let fixtureTree = '';
+  beforeEach(() => {
+    fixtureTree = writeFixtureTree();
+  });
+
+  it('lists no sources on a fresh install, rather than 501', async () => {
+    const response = await api('GET', '/plugins/sources');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([]);
+  });
+
+  it('creates a local source, writes the row, and names what installing costs', async () => {
+    const created = await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      id: 'fx',
+      kind: 'local',
+      url: fixtureTree,
+      enabled: true,
+      installedCount: 0,
+    });
+    // The trust decision is this request, and the caller — including the UI
+    // built on this API — is told so in the same words the CLI prints.
+    expect(String(created.body.trust)).toContain("runs its author's code");
+    expect(String(created.body.trust)).toContain('the same user trawlarr runs as');
+    // The row, not the sentence.
+    expect(createPluginRepo(db).listSources()).toEqual([
+      { id: 'fx', url: fixtureTree, kind: 'local', enabled: true, lastSyncedAtMs: null },
+    ]);
+  });
+
+  it('refuses a second source with the same name, keeping the first', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    const again = await api('POST', '/plugins/sources', { id: 'fx', path: writeFixtureTree() });
+
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('source-exists');
+    expect(createPluginRepo(db).getSource('fx')!.url).toBe(fixtureTree);
+  });
+
+  it('refuses a duplicate url with 409, naming the source that already has it', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    const again = await api('POST', '/plugins/sources', { id: 'fx2', path: fixtureTree });
+
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('source-exists');
+    expect(String(again.body.error.message)).toContain('fx');
+    expect(createPluginRepo(db).listSources()).toHaveLength(1);
+  });
+
+  it('refuses the reserved namespace with its own code, storing nothing', async () => {
+    const response = await api('POST', '/plugins/sources', { id: 'trawlarr', path: fixtureTree });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('invalid-source-id');
+    expect(String(response.body.error.message)).toMatch(/reserved/i);
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+  });
+
+  it('refuses a malformed slug separately from a reserved one', async () => {
+    const response = await api('POST', '/plugins/sources', { id: 'Not A Slug', path: fixtureTree });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('invalid-source-id');
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+  });
+
+  it('refuses an http url as insecure, distinctly from a url that is not a url', async () => {
+    const insecure = await api('POST', '/plugins/sources', {
+      id: 'fx',
+      url: 'http://example.test/x.tar.gz',
+    });
+    const nonsense = await api('POST', '/plugins/sources', { id: 'fx', url: 'not a url at all' });
+
+    expect(insecure.status).toBe(400);
+    expect(insecure.body.error.code).toBe('source-insecure-url');
+    expect(nonsense.status).toBe(400);
+    expect(nonsense.body.error.code).toBe('invalid-source-url');
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+  });
+
+  it('refuses a local path that is not there, rather than storing a source of nothing', async () => {
+    const missing = join(tmpdir(), 'trawlarr-api-no-such-tree-x9');
+    const response = await api('POST', '/plugins/sources', { id: 'fx', path: missing });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('source-path-not-found');
+    expect(String(response.body.error.message)).toContain(missing);
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+  });
+
+  it('refuses both url and path, and neither, rather than picking one', async () => {
+    const both = await api('POST', '/plugins/sources', {
+      id: 'fx',
+      url: 'https://example.test/x.tar.gz',
+      path: fixtureTree,
+    });
+    const neither = await api('POST', '/plugins/sources', { id: 'fx' });
+
+    expect(both.status).toBe(400);
+    expect(both.body.error.code).toBe('invalid-source');
+    expect(neither.status).toBe(400);
+    expect(neither.body.error.code).toBe('invalid-source');
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+  });
+
+  it('accepts a sync with 202 and installs the plugin without holding the request', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+
+    const started = await api('POST', '/plugins/sources/fx/sync');
+    expect(started.status).toBe(202);
+    expect(started.body).toMatchObject({ accepted: true, sourceId: 'fx' });
+    expect(String(started.body.note)).toContain('plugin.sync.finished');
+    // The daemon is still answering while the sync it accepted proceeds —
+    // which is the whole reason this is a 202.
+    expect((await api('GET', '/plugins/sources')).status).toBe(200);
+
+    const sync = await awaitSync('fx', started.body.runId as number);
+    expect(sync.error).toBeNull();
+    expect(sync.report).toMatchObject({ installed: 1, skipped: [] });
+
+    // The row is what makes the plugin resolvable everywhere else.
+    expect(
+      createPluginRepo(db)
+        .listPlugins()
+        .map((plugin) => plugin.id),
+    ).toEqual(['fx:myPlugin']);
+    expect(createPluginRepo(db).getSource('fx')!.lastSyncedAtMs).not.toBeNull();
+
+    const ids = ((await api('GET', '/plugins')).body as { id: string }[]).map((p) => p.id);
+    expect(ids).toContain('fx:myPlugin');
+    expect(ids).toContain('trawlarr:execute');
+    expect((await api('GET', '/plugins/sources/fx')).body.installedCount).toBe(1);
+  });
+
+  it('pushes the sync onto the event stream, so a client need not poll', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    await syncAndWait('fx');
+
+    expect(events.filter((event) => event.type === 'plugin.sync.started')).toMatchObject([
+      { sourceId: 'fx', runId: 1 },
+    ]);
+    expect(events.filter((event) => event.type === 'plugin.sync.finished')).toMatchObject([
+      { sourceId: 'fx', runId: 1, installed: 1, skipped: 0 },
+    ]);
+  });
+
+  it('reports a sync of an unknown source as 404, not 500', async () => {
+    const response = await api('POST', '/plugins/sources/nope/sync');
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('source-not-found');
+  });
+
+  it('refuses a second sync of the same source while one is in flight', async () => {
+    // The first sync is held at the NETWORK, which is the only seam faked
+    // here: the coordinator, the syncer and the routes are all the real
+    // ones, so what this constrains is really the one-run-per-source rule.
+    let releaseFetch = (): void => {};
+    const held = new Promise<never>((_resolve, reject) => {
+      releaseFetch = () => reject(new Error('released'));
+    });
+    await restartServerWith({
+      pluginSyncs: createPluginSyncCoordinator({
+        db,
+        bus: createEventBus(),
+        dataDir: API_TEST_DATA_DIR,
+        nowMs: () => NOW,
+        fetchFn: (async () => await held) as unknown as typeof fetch,
+      }),
+    });
+    await api('POST', '/plugins/sources', { id: 'fx', url: 'https://example.test/x.tar.gz' });
+
+    const first = await api('POST', '/plugins/sources/fx/sync');
+    const second = await api('POST', '/plugins/sources/fx/sync');
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(409);
+    expect(second.body.error.code).toBe('sync-in-progress');
+    expect(second.body.error.message).toContain(String(first.body.runId));
+    // A refused second request must not have started a second run.
+    expect((await api('GET', '/plugins/sources/fx')).body.sync.runId).toBe(first.body.runId);
+
+    releaseFetch();
+    await awaitSync('fx', first.body.runId as number);
+  });
+
+  it('records an unreachable host as a failed run, not as an installed source', async () => {
+    // A port nothing is listening on: bound, read for its number, then closed.
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    const deadPort = (probe.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+    await api('POST', '/plugins/sources', {
+      id: 'fx',
+      url: `https://127.0.0.1:${String(deadPort)}/plugins.tar.gz`,
+    });
+    const sync = await syncAndWait('fx');
+
+    expect(sync.report).toBeNull();
+    expect(sync.error.code).toBe('source-unreachable');
+    expect(createPluginRepo(db).listPlugins()).toEqual([]);
+    expect(createPluginRepo(db).getSource('fx')!.lastSyncedAtMs).toBeNull();
+  });
+
+  it('refuses a hostile archive through the route, installing nothing', async () => {
+    // The archive checks live in `fetch-source` and are not repeated here;
+    // what this proves is that the ROUTE goes through them. Only the network
+    // is faked — the same seam `fetch-source`'s own suite uses — so the https
+    // rule, the member checks and the size bounds all really run.
+    const payload = mkdtempSync(join(tmpdir(), 'trawlarr-api-evil-'));
+    writeFileSync(join(payload, 'escaped.js'), 'pwned', 'utf8');
+    const tarball = join(payload, 'evil.tar.gz');
+    execFileSync('tar', ['-czf', tarball, '-C', payload, '--transform', 's|^|../|', 'escaped.js']);
+
+    await restartServerWith({
+      pluginSyncs: createPluginSyncCoordinator({
+        db,
+        bus: createEventBus(),
+        dataDir: API_TEST_DATA_DIR,
+        nowMs: () => NOW,
+        fetchFn: (async () =>
+          new Response(readFileSync(tarball), { status: 200 })) as unknown as typeof fetch,
+      }),
+    });
+
+    await api('POST', '/plugins/sources', { id: 'fx', url: 'https://example.test/evil.tar.gz' });
+    const sync = await syncAndWait('fx');
+
+    expect(sync.error.code).toBe('source-archive-refused');
+    expect(String(sync.error.message)).toMatch(/outside/i);
+    expect(createPluginRepo(db).listPlugins()).toEqual([]);
+  });
+
+  it('disables a source through PUT, and refuses a body without "enabled"', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+
+    const disabled = await api('PUT', '/plugins/sources/fx', { enabled: false });
+    expect(disabled.status).toBe(200);
+    expect(disabled.body.enabled).toBe(false);
+    expect(createPluginRepo(db).getSource('fx')!.enabled).toBe(false);
+
+    const empty = await api('PUT', '/plugins/sources/fx', {});
+    expect(empty.status).toBe(400);
+    expect(empty.body.error.code).toBe('invalid-body');
+    expect(createPluginRepo(db).getSource('fx')!.enabled).toBe(false);
+
+    const unknown = await api('PUT', '/plugins/sources/ghost', { enabled: true });
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error.code).toBe('source-not-found');
+  });
+
+  it('deleting a source removes its plugins from GET /plugins', async () => {
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    await syncAndWait('fx');
+    expect(createPluginRepo(db).listPlugins()).toHaveLength(1);
+
+    expect((await api('DELETE', '/plugins/sources/fx')).status).toBe(204);
+
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+    expect(createPluginRepo(db).listPlugins()).toEqual([]);
+    const ids = ((await api('GET', '/plugins')).body as { id: string }[]).map((p) => p.id);
+    expect(ids).not.toContain('fx:myPlugin');
+    expect((await api('DELETE', '/plugins/sources/fx')).status).toBe(404);
+  });
+
+  it('refuses every source request without an api key, and writes nothing', async () => {
+    const anonymous = { apiKey: null };
+    const list = await api('GET', '/plugins/sources', undefined, anonymous);
+    const create = await api(
+      'POST',
+      '/plugins/sources',
+      { id: 'fx', path: fixtureTree },
+      anonymous,
+    );
+
+    expect(list.status).toBe(401);
+    expect(create.status).toBe(401);
+    expect(create.body.error.code).toBe('unauthorized');
+    expect(createPluginRepo(db).listSources()).toEqual([]);
+
+    // And the same for the one that would run third-party code: an
+    // unauthorised sync must not start a run at all.
+    await api('POST', '/plugins/sources', { id: 'fx', path: fixtureTree });
+    const sync = await api('POST', '/plugins/sources/fx/sync', undefined, anonymous);
+    expect(sync.status).toBe(401);
+    expect((await api('GET', '/plugins/sources/fx')).body.sync.runId).toBeNull();
+    expect(createPluginRepo(db).listPlugins()).toEqual([]);
   });
 });
 
@@ -975,6 +1341,7 @@ describe('jobs', () => {
         scans,
         nowMs: () => NOW,
         version: '0.0.0-test',
+        dataDir: API_TEST_DATA_DIR,
       }),
       { onError: () => {} },
     );
@@ -1127,6 +1494,7 @@ describe('system', () => {
         scans,
         nowMs: () => NOW,
         version: '0.0.0-test',
+        dataDir: API_TEST_DATA_DIR,
         hardwareFindings: [
           { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
         ],
@@ -1189,6 +1557,7 @@ describe('system', () => {
         scans,
         nowMs: () => NOW,
         version: '0.0.0-test',
+        dataDir: API_TEST_DATA_DIR,
         envApplications: [
           {
             name: 'NUMBER_OF_WORKERS',
@@ -1344,6 +1713,7 @@ describe('the web bundle, on the daemon’s own port', () => {
       scans,
       nowMs: () => NOW,
       version: '0.0.0-test',
+      dataDir: API_TEST_DATA_DIR,
     });
     webServer = createApiServer(ctx, { onError: () => {}, webRoot });
     await new Promise<void>((resolve) => webServer.listen(0, '127.0.0.1', resolve));

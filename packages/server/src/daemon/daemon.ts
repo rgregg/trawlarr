@@ -288,6 +288,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     bus,
     supervisor,
     scans,
+    dataDir,
     nowMs,
     version: DAEMON_VERSION,
     envApplications,
@@ -507,6 +508,13 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
           resolveClose();
         });
       });
+
+      // A plugin sync is mid-flight only if a request started one; it writes
+      // rows at the very end, so closing the database under it would fail
+      // that write and leave the source's installed set describing an
+      // extraction that has just been pruned. It is bounded work — no
+      // subprocess to cancel — so it is waited for rather than interrupted.
+      await ctx.pluginSyncs.idle();
 
       if (lock !== null) await lock.release();
       db.close();

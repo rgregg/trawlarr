@@ -29,6 +29,7 @@ import { ApiRequestError, createCliClient, type CliClient } from './cli-client.j
 import { createPluginRepo, PluginRepoError, type PluginRepo } from './plugins/plugin-repo.js';
 import { assertValidSourceSlug, PluginIdError } from './plugins/plugin-id.js';
 import { syncSource } from './plugins/sync-source.js';
+import { PLUGIN_TRUST_CONSEQUENCE } from './plugins/trust.js';
 
 /** Raised by a command handler to report a clean, diagnosable failure — never a raw stack trace. */
 class CliError extends Error {}
@@ -1590,37 +1591,77 @@ interface PluginResource {
 }
 
 /**
- * What every command that installs code says out loud.
+ * A plugin source as `GET /plugins/sources` reports it — the row, what it has
+ * installed, and where its last sync got to.
  *
- * Adding a source is the TRUST decision; syncing is where it takes effect,
- * because loading a plugin to validate it runs its module body — as the
- * trawlarr user, with this service's access to the library. That is a
- * consequence, so it is named rather than left in the documentation.
+ * The commands below render THIS shape whether they read it from the daemon
+ * or built it from the local database, so the two paths cannot drift into
+ * printing different things about the same source.
  */
-const TRUST_CONSEQUENCE =
-  `Installing a plugin runs its author's code on this machine as the same user trawlarr runs ` +
-  `as: syncing loads each plugin to validate it, and a flow that names one runs the rest of it ` +
-  `with this service's access to your media. Add sources you would trust with your library.`;
+interface PluginSourceResource {
+  id: string;
+  url: string;
+  kind: 'tarball' | 'local';
+  enabled: boolean;
+  lastSyncedAtMs: number | null;
+  installedCount: number;
+  sync: {
+    runId: number | null;
+    running: boolean;
+    report: { installed: number; skipped: { relPath: string; reason: string }[] } | null;
+    error: { code: string; message: string } | null;
+  };
+}
+
+/** How often a `plugin source sync` against a live daemon asks whether its run has finished. */
+const SYNC_POLL_INTERVAL_MS = 500;
 
 /**
- * The refusal a plugin-source command gets behind a live daemon.
+ * How long that polling goes on before it calls itself a hang.
  *
- * Specific about WHY it cannot be forwarded: the daemon's
- * `/plugins/sources*` routes answer 501 in this build, so there is no
- * request to make on the user's behalf, and opening the database behind the
- * only writer is the thing that destroys data. `plugin list` and
- * `plugin show` are named because they DO work, so the user is not left
- * thinking the whole command group is unavailable.
+ * Generous on purpose — a first sync of Tdarr's repository fetches and
+ * validates ninety-one plugins — and it is not a performance expectation:
+ * its only job is to turn a daemon that has silently stopped answering into
+ * a sentence saying what was being waited for.
  */
-const pluginSourcesNeedTheDatabase = (record: DaemonRecord, what: string): CliError =>
-  new CliError(
-    `${what} while the trawlarr daemon (pid ${String(record.pid)}) owns this data directory. ` +
-      `It holds the database open as the sole writer, and this build's API has no plugin-source ` +
-      `routes yet — /api/v1/plugins/sources answers 501 — so there is nothing to ask it to do ` +
-      `instead, and a second process writing plugin rows there would race it. Stop the daemon ` +
-      `(Ctrl-C, or "systemctl stop trawlarr"), run this again, and start it back up. ` +
-      `"trawlarr plugin list" and "trawlarr plugin show" work against a running daemon.`,
-  );
+const SYNC_WAIT_DEADLINE_MS = 60 * 60 * 1000;
+
+const delay = async (ms: number): Promise<void> => {
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, ms));
+};
+
+/**
+ * Wait for the run this invocation started, and nothing else.
+ *
+ * `POST /plugins/sources/:id/sync` answers 202 — the daemon does the work,
+ * because it is the only process allowed to write — so the result has to be
+ * read back afterwards. Matching on the RUN ID rather than on "is it running"
+ * is what makes that correct: a sync that finished before the first poll and
+ * a sync that has not started yet both read as "not running", and without the
+ * id this would report the previous run's outcome for the new one.
+ */
+const awaitSyncRun = async (
+  client: CliClient,
+  sourceId: string,
+  runId: number,
+  nowMs: () => number = () => Date.now(),
+): Promise<PluginSourceResource['sync']> => {
+  const deadline = nowMs() + SYNC_WAIT_DEADLINE_MS;
+  for (;;) {
+    const source = await client.get<PluginSourceResource>(
+      `/plugins/sources/${encodeURIComponent(sourceId)}`,
+    );
+    if (source.sync.runId === runId && !source.sync.running) return source.sync;
+    if (nowMs() > deadline) {
+      throw new CliError(
+        `plugin source sync: the daemon accepted the sync of "${sourceId}" (run ` +
+          `${String(runId)}) but has not reported it finished. Ask it directly with ` +
+          `GET /api/v1/plugins/sources/${sourceId}.`,
+      );
+    }
+    await delay(SYNC_POLL_INTERVAL_MS);
+  }
+};
 
 /** The one `--data-dir` option every plugin command shares. */
 const dataDirOption = {
@@ -1699,24 +1740,35 @@ const cmdPluginSourceAdd = async (argv: string[]): Promise<number> => {
     );
   }
 
-  const record = await resolveDaemon(values['data-dir']!);
-  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot add a plugin source');
+  // There is exactly one sensible kind per flag, so the user never types one.
+  const kind = hasUrl ? ('tarball' as const) : ('local' as const);
+  const url = hasUrl ? values.url! : resolve(values.path!);
 
-  const repo = await openPluginRepo(values['data-dir']!);
-  const source = asPluginCliError('plugin source add', () =>
-    repo.addSource({
-      id: values.name!,
-      url: hasUrl ? values.url! : resolve(values.path!),
-      // There is exactly one sensible kind per flag, so the user never types one.
-      kind: hasUrl ? 'tarball' : 'local',
-    }),
-  );
+  const record = await resolveDaemon(values['data-dir']!);
+  let source: { id: string; kind: string; url: string };
+  if (record !== null) {
+    // The daemon owns the database, so IT writes the row — the same rule
+    // `library add` and `flow add` follow. Nothing here opens the file.
+    try {
+      source = await createCliClient(record).post<PluginSourceResource>('/plugins/sources', {
+        id: values.name!,
+        ...(hasUrl ? { url } : { path: url }),
+      });
+    } catch (error) {
+      return asCliError(error, 'plugin source add');
+    }
+  } else {
+    const repo = await openPluginRepo(values['data-dir']!);
+    source = asPluginCliError('plugin source add', () =>
+      repo.addSource({ id: values.name!, url, kind }),
+    );
+  }
 
   console.log(
     `Added plugin source "${source.id}" (${source.kind}): ${source.url}. Nothing is installed ` +
       `yet — run "trawlarr plugin source sync --name ${source.id}" to install its plugins.`,
   );
-  console.log(`  ${TRUST_CONSEQUENCE}`);
+  console.log(`  ${PLUGIN_TRUST_CONSEQUENCE}`);
   return 0;
 };
 
@@ -1724,10 +1776,23 @@ const cmdPluginSourceList = async (argv: string[]): Promise<number> => {
   const { values } = parseArgs({ args: argv, options: { ...dataDirOption } });
 
   const record = await resolveDaemon(values['data-dir']!);
-  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot list plugin sources');
-
-  const repo = await openPluginRepo(values['data-dir']!);
-  const sources = repo.listSources();
+  let sources: PluginSourceResource[];
+  if (record !== null) {
+    try {
+      sources = await createCliClient(record).get<PluginSourceResource[]>('/plugins/sources');
+    } catch (error) {
+      return asCliError(error, 'plugin source list');
+    }
+  } else {
+    const repo = await openPluginRepo(values['data-dir']!);
+    sources = repo.listSources().map((source) => ({
+      ...source,
+      installedCount: repo.listPlugins(source.id).length,
+      // No daemon means no sync has ever run in this process; the row's
+      // `lastSyncedAtMs` is what says whether one ever ran at all.
+      sync: { runId: null, running: false, report: null, error: null },
+    }));
+  }
   if (sources.length === 0) {
     console.log(
       'No plugin sources. Add one with "trawlarr plugin source add --name <name> --url ' +
@@ -1738,7 +1803,7 @@ const cmdPluginSourceList = async (argv: string[]): Promise<number> => {
   }
 
   for (const source of sources) {
-    const installed = repo.listPlugins(source.id).length;
+    const installed = source.installedCount;
     // "never" rather than a blank column: a source that has never synced is
     // the reason its plugins are missing, and that is the answer.
     const synced =
@@ -1759,22 +1824,40 @@ const cmdPluginSourceRemove = async (argv: string[]): Promise<number> => {
   if (values.name === undefined) throw new CliError('plugin source remove: --name is required.');
 
   const record = await resolveDaemon(values['data-dir']!);
-  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot remove a plugin source');
-
-  const repo = await openPluginRepo(values['data-dir']!);
-  const source = repo.getSource(values.name);
-  if (source === null) throw unknownPluginSource('plugin source remove', repo, values.name);
-
-  const plugins = repo.listPlugins(source.id);
-  repo.removeSource(source.id);
+  let sourceId: string;
+  let pluginIds: string[];
+  if (record !== null) {
+    const client = createCliClient(record);
+    try {
+      // Read the plugins BEFORE the delete: the cascade takes them with the
+      // source, and the sentence below names one of them.
+      const source = await client.get<PluginSourceResource>(
+        `/plugins/sources/${encodeURIComponent(values.name)}`,
+      );
+      pluginIds = (await client.get<PluginResource[]>('/plugins'))
+        .filter((plugin) => plugin.sourceId === source.id)
+        .map((plugin) => plugin.id);
+      await client.delete(`/plugins/sources/${encodeURIComponent(source.id)}`);
+      sourceId = source.id;
+    } catch (error) {
+      return asCliError(error, 'plugin source remove');
+    }
+  } else {
+    const repo = await openPluginRepo(values['data-dir']!);
+    const source = repo.getSource(values.name);
+    if (source === null) throw unknownPluginSource('plugin source remove', repo, values.name);
+    pluginIds = repo.listPlugins(source.id).map((plugin) => plugin.id);
+    repo.removeSource(source.id);
+    sourceId = source.id;
+  }
 
   console.log(
-    `Removed plugin source "${source.id}" and the ${String(plugins.length)} plugin(s) it ` +
+    `Removed plugin source "${sourceId}" and the ${String(pluginIds.length)} plugin(s) it ` +
       `installed.`,
   );
-  if (plugins.length > 0) {
+  if (pluginIds.length > 0) {
     console.log(
-      `  A flow that still names one of them (for example ${plugins[0]!.id}) now names a plugin ` +
+      `  A flow that still names one of them (for example ${pluginIds[0]!}) now names a plugin ` +
         `this host cannot resolve: the API answers 404 for it, and every library whose flow uses ` +
         `it pauses naming that id — exactly as it would have if the plugin had never been ` +
         `installed. Adding the source back and syncing it clears the pause on its own.`,
@@ -1792,8 +1875,73 @@ const cmdPluginSourceSync = async (argv: string[]): Promise<number> => {
     throw new CliError('plugin source sync: --name <source> or --all is required.');
   }
 
+  const printReport = (
+    target: { id: string; kind: string },
+    report: { installed: number; skipped: { relPath: string; reason: string }[] },
+  ): void => {
+    console.log(
+      `Synced "${target.id}" (${target.kind}): ${String(report.installed)} plugin(s) installed, ` +
+        `${String(report.skipped.length)} skipped.`,
+    );
+    for (const skip of report.skipped) {
+      // Printed individually: a source where half the plugins failed to load
+      // must not look like a source where they never existed.
+      console.log(`  skipped ${skip.relPath}: ${skip.reason}`);
+    }
+  };
+
   const record = await resolveDaemon(values['data-dir']!);
-  if (record !== null) throw pluginSourcesNeedTheDatabase(record, 'Cannot sync a plugin source');
+
+  if (record !== null) {
+    // The daemon does the syncing — it is the only writer, and it is the
+    // process whose plugin directory the extraction lands in. This asks, then
+    // waits for the run it started: `POST .../sync` answers 202 because a
+    // sync of a real repository takes minutes.
+    const client = createCliClient(record);
+    let targets: PluginSourceResource[];
+    try {
+      targets =
+        values.all === true
+          ? (await client.get<PluginSourceResource[]>('/plugins/sources')).filter(
+              (source) => source.enabled,
+            )
+          : [
+              await client.get<PluginSourceResource>(
+                `/plugins/sources/${encodeURIComponent(values.name!)}`,
+              ),
+            ];
+    } catch (error) {
+      return asCliError(error, 'plugin source sync');
+    }
+
+    if (targets.length === 0) {
+      console.log('No enabled plugin sources to sync. Add one with "trawlarr plugin source add".');
+      return 0;
+    }
+
+    console.log(PLUGIN_TRUST_CONSEQUENCE);
+    for (const target of targets) {
+      let outcome: PluginSourceResource['sync'];
+      try {
+        const started = await client.post<{ runId: number }>(
+          `/plugins/sources/${encodeURIComponent(target.id)}/sync`,
+        );
+        outcome = await awaitSyncRun(client, target.id, started.runId);
+      } catch (error) {
+        return asCliError(error, 'plugin source sync');
+      }
+      if (outcome.error !== null) {
+        // The daemon's own wording, verbatim: it was composed for this
+        // reader, and a second one here would drift from it.
+        throw new CliError(
+          `plugin source sync: "${target.id}" failed (${outcome.error.code}): ` +
+            `${outcome.error.message}`,
+        );
+      }
+      printReport(target, outcome.report ?? { installed: 0, skipped: [] });
+    }
+    return 0;
+  }
 
   const dataDir = resolve(values['data-dir']!);
   const repo = await openPluginRepo(dataDir);
@@ -1808,25 +1956,19 @@ const cmdPluginSourceSync = async (argv: string[]): Promise<number> => {
     return 0;
   }
 
-  console.log(TRUST_CONSEQUENCE);
+  console.log(PLUGIN_TRUST_CONSEQUENCE);
   for (const target of targets) {
-    const report = await syncSource({
-      repo,
-      sourceId: target.id,
-      // A tarball source's extracted tree IS the installed plugin, so it lives
-      // permanently under the data directory, not in a temp dir a reboot clears.
-      cacheDir: join(dataDir, 'plugins'),
-      nowMs: () => Date.now(),
-    });
-    console.log(
-      `Synced "${target.id}" (${target.kind}): ${String(report.installed)} plugin(s) installed, ` +
-        `${String(report.skipped.length)} skipped.`,
+    printReport(
+      target,
+      await syncSource({
+        repo,
+        sourceId: target.id,
+        // A tarball source's extracted tree IS the installed plugin, so it lives
+        // permanently under the data directory, not in a temp dir a reboot clears.
+        cacheDir: join(dataDir, 'plugins'),
+        nowMs: () => Date.now(),
+      }),
     );
-    for (const skip of report.skipped) {
-      // Printed individually: a source where half the plugins failed to load
-      // must not look like a source where they never existed.
-      console.log(`  skipped ${skip.relPath}: ${skip.reason}`);
-    }
   }
   return 0;
 };

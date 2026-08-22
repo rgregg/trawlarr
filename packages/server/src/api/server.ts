@@ -2,6 +2,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Db } from '../db/connection.js';
 import type { EventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
+import {
+  createPluginSyncCoordinator,
+  type PluginSyncCoordinator,
+} from '../plugins/sync-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
 import { SCHEMA_VERSION } from '../db/migrate.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
@@ -264,6 +268,8 @@ export interface CreateApiContextInput {
   bus: EventBus;
   supervisor: Supervisor;
   scans: ScanCoordinator;
+  /** The data directory this daemon owns; plugin sources are installed under it. */
+  dataDir: string;
   nowMs?: () => number;
   version: string;
   checkBinary?: (path: string) => Promise<boolean>;
@@ -275,6 +281,8 @@ export interface CreateApiContextInput {
    * claimed to be wrong.
    */
   hardwareFindings?: HardwareFinding[];
+  /** Seam for tests; production always gets the real coordinator built here. */
+  pluginSyncs?: PluginSyncCoordinator;
 }
 
 /**
@@ -293,6 +301,15 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     bus: input.bus,
     supervisor: input.supervisor,
     scans: input.scans,
+    pluginSyncs:
+      input.pluginSyncs ??
+      createPluginSyncCoordinator({
+        db: input.db,
+        bus: input.bus,
+        dataDir: input.dataDir,
+        nowMs,
+      }),
+    dataDir: input.dataDir,
     nowMs,
     version: input.version,
     schemaVersion: SCHEMA_VERSION,

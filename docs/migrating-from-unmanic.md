@@ -589,6 +589,15 @@ as a parameter (`--set pluginSource=…`), defaulting to `tdarr`.
 Installing a plugin runs its author's code as the user trawlarr runs as. Add
 sources you would trust with your library.
 
+**The daemon does not have to be stopped for any of this.** While one owns the
+data directory, these commands talk to it over its API and it does the work —
+the same rule every other command follows, because the daemon is the only
+writer. A sync is accepted immediately and runs inside the daemon (it fetches,
+unpacks and loads every plugin to validate it, which takes minutes on a real
+repository); the command waits for that run and prints what it installed and
+what it skipped. The daemon keeps serving throughout, so installing a plugin
+costs no downtime — in Docker, no container restart.
+
 ### 4.2 The full parity stack: the `conform-library` template
 
 This is your Unmanic pipeline, in one command:

@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -22,6 +25,9 @@ import {
   type PushSocket,
   type WsChannel,
 } from './ws.js';
+
+/** A real data directory for the context, as `createApiContext` requires. */
+const API_TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'trawlarr-ws-data-'));
 
 const NOW = 1_700_000_000_000;
 const API_KEY = 'the-fixed-test-api-key-000000';
@@ -233,6 +239,7 @@ beforeEach(async () => {
     scans: fakeScans(),
     nowMs: () => NOW,
     version: '0.0.0-test',
+    dataDir: API_TEST_DATA_DIR,
   });
 
   server = createApiServer(ctx, { onError: () => {} });

@@ -17,6 +17,8 @@ export * from './plugins/plugin-repo.js';
 export * from './plugins/registry.js';
 export * from './plugins/fetch-source.js';
 export * from './plugins/sync-source.js';
+export * from './plugins/sync-coordinator.js';
+export * from './plugins/trust.js';
 export * from './fs/partial-hash.js';
 export * from './fs/path-contains.js';
 export * from './fs/walk.js';

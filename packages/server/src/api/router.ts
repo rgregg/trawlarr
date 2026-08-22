@@ -2,6 +2,7 @@ import type { Db } from '../db/connection.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
+import type { PluginSyncCoordinator } from '../plugins/sync-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
@@ -21,6 +22,20 @@ export interface ApiContext {
   bus: EventBus;
   supervisor: Supervisor;
   scans: ScanCoordinator;
+  /**
+   * Plugin-source syncs, which run HERE rather than in the CLI: the daemon is
+   * the only permitted writer, and a sync fetches, unpacks and validates
+   * third-party code for minutes. The routes hand work to this and answer
+   * 202; nothing in an HTTP handler ever awaits a sync.
+   */
+  pluginSyncs: PluginSyncCoordinator;
+  /**
+   * The data directory this daemon owns. Handed in for the same reason
+   * everything else here is: a handler that read it from an environment
+   * variable or `process.cwd()` would write plugin trees somewhere no test
+   * could see and no operator chose.
+   */
+  dataDir: string;
   nowMs: () => number;
   version: string;
   schemaVersion: number;

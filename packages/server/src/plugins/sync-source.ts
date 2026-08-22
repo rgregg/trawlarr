@@ -131,6 +131,17 @@ export const syncSource = async (input: {
   cacheDir: string;
   nowMs: () => number;
   fetchFn?: typeof fetch;
+  /**
+   * Awaited between candidate plugins.
+   *
+   * Loading a plugin is synchronous — it runs the module body — and a real
+   * source is ninety of them, so a sync inside the DAEMON would otherwise
+   * hold the event loop for the whole validation pass and stall the API, the
+   * websocket and the supervisor tick behind it. The daemon passes a
+   * `setImmediate` turn here; the CLI, which has nothing else to serve,
+   * passes nothing and keeps the tight loop.
+   */
+  yieldFn?: () => Promise<void>;
 }): Promise<SyncReport> => {
   const source = input.repo.getSource(input.sourceId);
   if (source === null) {
@@ -159,6 +170,7 @@ export const syncSource = async (input: {
     const skipped: { relPath: string; reason: string }[] = [];
 
     for (const candidate of discoverFlowPlugins(materialised.dir)) {
+      if (input.yieldFn !== undefined) await input.yieldFn();
       try {
         // Loading is the validation. It runs the module body, which is what
         // `details()` costs, and it is the same thing the executor will do —
