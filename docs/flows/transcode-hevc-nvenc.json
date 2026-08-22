@@ -26,7 +26,8 @@
       "pluginVersion": "1.0.0",
       "inputs": {
         "encoder": "hevc_nvenc",
-        "quality": "24"
+        "quality": "24",
+        "hardwareDecoding": "true"
       }
     },
     {

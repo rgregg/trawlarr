@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
-import { beginFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
+import { applyHardwareDecoding, beginFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import { toolAvailableSync } from '../../../test-support/tool-availability.js';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 
@@ -31,6 +32,7 @@ let mediaPath: string;
 let convergedPath: string;
 let coverFirstPath: string;
 let degenerateCoverPath: string;
+let mpeg4Path: string;
 
 // Generate tiny samples rather than committing binary fixtures.
 const makeSample = (path: string, videoCodec: string) =>
@@ -253,6 +255,11 @@ beforeAll(async () => {
 
   coverFirstPath = join(sourceDir, 'cover-first.mkv');
   await makeCoverFirstSample(coverFirstPath, join(sourceDir, 'cover.png'));
+
+  // A codec family the owner's library really contains alongside h264/hevc,
+  // and one no GPU decoder is guaranteed to accept.
+  mpeg4Path = join(sourceDir, 'sample-mpeg4.mkv');
+  await makeSample(mpeg4Path, 'mpeg4');
 
   degenerateCoverPath = join(sourceDir, 'degenerate-cover.mkv');
   await makeDegenerateCoverArtSample({
@@ -669,4 +676,136 @@ describe.runIf(available)('compiled argv, as real ffmpeg reads it', () => {
     ]);
     expect(readFileSync(posterOut).equals(readFileSync(join(sourceDir, 'poster.jpg')))).toBe(true);
   }, 180_000);
+
+  /**
+   * HARDWARE DECODING, at the only level that settles anything: what real
+   * ffmpeg does with the argv we build.
+   *
+   * This machine has no NVIDIA GPU, so an NVENC decode cannot be PROVEN here
+   * and is not claimed. What is proven here is everything that is
+   * encoder-agnostic: that the flag lands where ffmpeg reads it as an input
+   * option, that a declaration this machine cannot satisfy fails loudly and
+   * writes nothing, that a decode preamble does not disturb stream mapping or
+   * cover art, and that a hardware decode ffmpeg cannot perform falls back to
+   * software rather than corrupting the output.
+   */
+  describe('hardware decoding', () => {
+    const commandFor = async (input: { path: string; container: string }) => {
+      const probe: ProbeData = { streams: await streamsOf(input.path) };
+      const command = beginFfmpegCommand({
+        probe,
+        container: input.container,
+        inputPath: input.path,
+      });
+      const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin({
+        inputFileObj: { _id: input.path, container: input.container, ffProbeData: probe },
+        variables: { ffmpegCommand: command, flowFailed: false, user: {} },
+        // Software encoder ON PURPOSE: it isolates the DECODE flag as the only
+        // difference between the two runs below. With hevc_nvenc a failure
+        // here would prove nothing — the encoder is missing too.
+        inputs: { encoder: 'libx265', quality: '30' },
+        jobLog: () => {},
+      } as unknown as PluginInputArgs);
+      return out.variables.ffmpegCommand;
+    };
+
+    const runFfmpeg = (argv: string[]) =>
+      execFileAsync('ffmpeg', ['-hide_banner', '-y', ...argv]).then(
+        () => null,
+        (error: { code?: number; stderr?: string }) => error,
+      );
+
+    it('adds only a leading preamble, and a decoder this machine lacks fails without writing a file', async () => {
+      const plainPath = join(workDir, 'hwdec-plain.mkv');
+      const plain = compileFfmpegArgs({
+        command: await commandFor({ path: mediaPath, container: 'mkv' }),
+        outputPath: plainPath,
+      });
+
+      const withHwPath = join(workDir, 'hwdec-cuda.mkv');
+      const hwCommand = await commandFor({ path: mediaPath, container: 'mkv' });
+      applyHardwareDecoding(hwCommand, { hwaccel: 'cuda' });
+      const withHw = compileFfmpegArgs({ command: hwCommand, outputPath: withHwPath });
+
+      // The whole difference, stated as an equality: two arguments at the
+      // front, nothing else moved, nothing else added. That is what makes
+      // the CPU path unchanged rather than merely "still working".
+      expect(withHw).toEqual(['-hwaccel', 'cuda', ...plain.slice(0, -1), withHwPath]);
+
+      // The plain command really works on this machine...
+      expect(await runFfmpeg(plain)).toBeNull();
+      expect(await videoCodecOf(plainPath)).toBe('hevc');
+
+      // ...and the same command with a decoder this machine has not got
+      // fails, names the device as the reason, and leaves no output behind.
+      // A false hardware declaration must be diagnosable, never mysterious,
+      // and must never produce a half-written file for Replace to promote.
+      const failure = await runFfmpeg(withHw);
+      expect(failure).not.toBeNull();
+      expect(failure!.code).not.toBe(0);
+      expect(failure!.stderr).toMatch(/device|cuda/i);
+      expect(existsSync(withHwPath)).toBe(false);
+    }, 180_000);
+
+    it('leaves cover art and audio untouched when a decode preamble is present', async () => {
+      const sourceStreams = await streamsOf(coverFirstPath);
+      const probe: ProbeData = {
+        streams: sourceStreams.map((stream, position) =>
+          position === 0
+            ? { ...stream, disposition: { ...stream.disposition, attached_pic: 1 } }
+            : stream,
+        ),
+      };
+      const command = beginFfmpegCommand({
+        probe,
+        container: 'mkv',
+        inputPath: coverFirstPath,
+      });
+      const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin({
+        inputFileObj: { _id: coverFirstPath, container: 'mkv', ffProbeData: probe },
+        variables: { ffmpegCommand: command, flowFailed: false, user: {} },
+        inputs: { encoder: 'libx265', quality: '30' },
+        jobLog: () => {},
+      } as unknown as PluginInputArgs);
+      // `auto` is the one hwaccel every machine can satisfy — ffmpeg tries
+      // what is there and decodes in software when nothing is. It exercises
+      // the same preamble the GPU values produce, on hardware that exists.
+      applyHardwareDecoding(out.variables.ffmpegCommand, { hwaccel: 'auto' });
+
+      const producedPath = join(workDir, 'hwdec-cover-first.mkv');
+      const argv = compileFfmpegArgs({
+        command: out.variables.ffmpegCommand,
+        outputPath: producedPath,
+      });
+      expect(argv.slice(0, 2)).toEqual(['-hwaccel', 'auto']);
+      expect(await runFfmpeg(argv)).toBeNull();
+
+      // What ffmpeg produced: the video encoded, the poster and the audio
+      // passed through. A decode preamble must not change which streams are
+      // written or how — this is the cover-art data-loss failure mode, and
+      // an input-side option is exactly the kind of change that could
+      // reintroduce it by shifting stream numbering.
+      const producedStreams = await streamsOf(producedPath);
+      expect(producedStreams.map((stream) => stream.codec_name)).toEqual(['mjpeg', 'hevc', 'aac']);
+      expect(argv.filter(isTypeSpecifierCodecFlag)).toEqual([]);
+    }, 180_000);
+
+    it('falls back to software for a codec the accelerator cannot decode, producing a correct file', async () => {
+      // mpeg4 — with vc1 and rawvideo, one of the codecs in the owner's
+      // library that no GPU decoder is guaranteed to accept. Asked to decode
+      // with acceleration, ffmpeg must still produce a correct output rather
+      // than a corrupt one.
+      expect(await videoCodecOf(mpeg4Path)).toBe('mpeg4');
+      const command = await commandFor({ path: mpeg4Path, container: 'mkv' });
+      applyHardwareDecoding(command, { hwaccel: 'auto' });
+      const producedPath = join(workDir, 'hwdec-mpeg4.mkv');
+      const argv = compileFfmpegArgs({ command, outputPath: producedPath });
+      expect(argv.slice(0, 2)).toEqual(['-hwaccel', 'auto']);
+
+      expect(await runFfmpeg(argv)).toBeNull();
+      expect(await videoCodecOf(producedPath)).toBe('hevc');
+      expect(await audioCodecOf(producedPath)).toBe('aac');
+      expect(statSync(producedPath).size).toBeGreaterThan(0);
+    }, 180_000);
+  });
 });

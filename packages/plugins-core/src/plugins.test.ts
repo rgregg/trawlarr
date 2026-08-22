@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PluginInputArgs } from '@trawlarr/plugin-api';
-import { emptyFfmpegCommand } from '@trawlarr/core';
+import { HardwareDecodeConflictError, compileFfmpegArgs, emptyFfmpegCommand } from '@trawlarr/core';
 import { FIRST_PARTY_PLUGINS } from './index.js';
 
 const argsFor = (over: Partial<PluginInputArgs> = {}): PluginInputArgs =>
@@ -106,6 +106,147 @@ describe('trawlarr:setVideoEncoder', () => {
         argsFor({ inputs: { encoder: 'libx265', quality: '24' } }),
       ),
     ).rejects.toThrow(/Begin Command/i);
+  });
+
+  /**
+   * Hardware DECODING: the -hwaccel flag that goes ahead of -i.
+   *
+   * Asserted on the compiled argv rather than on the plugin's own bookkeeping,
+   * because the only thing that matters is what ffmpeg is handed: -hwaccel is
+   * an input option and is meaningless (or misread) anywhere after -i.
+   */
+  describe('hardware decoding', () => {
+    const argvFor = async (inputs: Record<string, string>): Promise<string[]> => {
+      const begun = await FIRST_PARTY_PLUGINS['trawlarr:beginCommand']!.module.plugin(argsFor());
+      const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
+        argsFor({ variables: begun.variables, inputs }),
+      );
+      return compileFfmpegArgs({
+        command: out.variables.ffmpegCommand,
+        outputPath: '/out.mkv',
+      });
+    };
+
+    it('emits nothing for a software encoder, even when hardware decoding is asked for', async () => {
+      // The CPU path must be BYTE-IDENTICAL to the one that predates this
+      // feature: same argv, in the same order, not merely "no -hwaccel".
+      const withDecode = await argvFor({
+        encoder: 'libx265',
+        quality: '24',
+        hardwareDecoding: 'true',
+      });
+      const withoutDecode = await argvFor({ encoder: 'libx265', quality: '24' });
+      expect(withDecode).toEqual(withoutDecode);
+      expect(withDecode).not.toContain('-hwaccel');
+    });
+
+    it('emits nothing for a GPU encoder until the operator asks: it is never inferred', async () => {
+      const argv = await argvFor({ encoder: 'hevc_nvenc', quality: '23' });
+      expect(argv).not.toContain('-hwaccel');
+      expect(argv).toEqual(
+        await argvFor({ encoder: 'hevc_nvenc', quality: '23', hardwareDecoding: 'false' }),
+      );
+    });
+
+    it('puts -hwaccel cuda ahead of the input for an NVENC encode', async () => {
+      const argv = await argvFor({
+        encoder: 'hevc_nvenc',
+        quality: '23',
+        hardwareDecoding: 'true',
+      });
+      expect(argv.slice(0, 4)).toEqual(['-hwaccel', 'cuda', '-i', '/media/movie.mkv']);
+      // The rule that cost this project a library's cover art still holds:
+      // codecs are addressed by resolved output index, never by type.
+      expect(argv).toContain('-c:0');
+      expect(argv).not.toContain('-c:v');
+      // Decoding on the device does not imply keeping frames there.
+      expect(argv).not.toContain('-hwaccel_output_format');
+    });
+
+    it('adds -hwaccel_output_format only when the flow asks to keep frames on the device', async () => {
+      const argv = await argvFor({
+        encoder: 'hevc_nvenc',
+        quality: '23',
+        hardwareDecoding: 'true',
+        hardwareDecodingKeepFramesOnDevice: 'true',
+      });
+      expect(argv.slice(0, 6)).toEqual([
+        '-hwaccel',
+        'cuda',
+        '-hwaccel_output_format',
+        'cuda',
+        '-i',
+        '/media/movie.mkv',
+      ]);
+    });
+
+    it("uses each encoder family's own decode API", async () => {
+      const hwaccelIn = (argv: string[]): string | undefined => argv[argv.indexOf('-hwaccel') + 1];
+      expect(
+        hwaccelIn(await argvFor({ encoder: 'hevc_qsv', quality: '23', hardwareDecoding: 'true' })),
+      ).toBe('qsv');
+      expect(
+        hwaccelIn(
+          await argvFor({ encoder: 'hevc_vaapi', quality: '23', hardwareDecoding: 'true' }),
+        ),
+      ).toBe('vaapi');
+    });
+
+    it('emits no flag for AMF, which ffmpeg cannot decode with', async () => {
+      const argv = await argvFor({ encoder: 'hevc_amf', quality: '23', hardwareDecoding: 'true' });
+      expect(argv).not.toContain('-hwaccel');
+      // The encode itself is still configured; only the decode is refused.
+      expect(argv).toContain('hevc_amf');
+    });
+
+    it('emits one flag for a file with two video streams, not one per stream', async () => {
+      const begun = await FIRST_PARTY_PLUGINS['trawlarr:beginCommand']!.module.plugin(
+        argsFor({
+          inputFileObj: {
+            _id: '/media/two-video.mkv',
+            container: 'mkv',
+            video_codec_name: 'h264',
+            ffProbeData: {
+              format: { duration: '60' },
+              streams: [
+                { index: 0, codec_type: 'video', codec_name: 'h264', width: 320, height: 240 },
+                { index: 1, codec_type: 'video', codec_name: 'h264', width: 320, height: 240 },
+                { index: 2, codec_type: 'audio', codec_name: 'eac3' },
+              ],
+            },
+          },
+        } as unknown as Partial<PluginInputArgs>),
+      );
+      const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
+        argsFor({
+          variables: begun.variables,
+          inputs: { encoder: 'hevc_nvenc', quality: '23', hardwareDecoding: 'true' },
+        }),
+      );
+      const argv = compileFfmpegArgs({
+        command: out.variables.ffmpegCommand,
+        outputPath: '/out.mkv',
+      });
+      expect(argv.filter((arg) => arg === '-hwaccel')).toHaveLength(1);
+    });
+
+    it('refuses a flow whose two encoder nodes want different decoders', async () => {
+      const begun = await FIRST_PARTY_PLUGINS['trawlarr:beginCommand']!.module.plugin(argsFor());
+      const first = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
+        argsFor({
+          variables: begun.variables,
+          inputs: { encoder: 'hevc_nvenc', quality: '23', hardwareDecoding: 'true' },
+        }),
+      );
+      await expect(
+        FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
+          argsFor({
+            variables: first.variables,
+            inputs: { encoder: 'hevc_qsv', quality: '23', hardwareDecoding: 'true' },
+          }),
+        ),
+      ).rejects.toThrow(HardwareDecodeConflictError);
+    });
   });
 
   describe('quality flag per encoder', () => {

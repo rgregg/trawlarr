@@ -35,7 +35,8 @@
       "pluginVersion": "1.0.0",
       "inputs": {
         "encoder": "libx265",
-        "quality": "23"
+        "quality": "23",
+        "hardwareDecoding": "false"
       }
     },
     {

@@ -69,11 +69,32 @@ describe('FLOW_TEMPLATES', () => {
       },
     });
     const encoder = definition.nodes.find((node) => node.id === 'encoder')!;
-    expect(encoder.inputs).toEqual({ encoder: 'hevc_nvenc', quality: '22' });
+    // Hardware DECODING is off unless it was asked for, even when the encoder
+    // is a GPU one: the operator declares hardware, trawlarr never infers it,
+    // and a node that decodes on a device the machine has not got fails every
+    // file rather than falling back.
+    expect(encoder.inputs).toEqual({
+      encoder: 'hevc_nvenc',
+      quality: '22',
+      hardwareDecoding: 'false',
+    });
     const check = definition.nodes.find((node) => node.id === 'check')!;
     expect(check.inputs).toEqual({ codec: 'hevc' });
     const replace = definition.nodes.find((node) => node.id === 'replace')!;
     expect(replace.inputs).toEqual({ trashRetentionDays: '7', allowCrossDevice: 'true' });
+  });
+
+  it('passes hardware decoding through to the encoder node only when it is asked for', () => {
+    const inputsFor = (hardwareDecoding: string): Record<string, unknown> =>
+      buildFromTemplate({
+        templateId: 'transcode-hevc',
+        values: { encoder: 'hevc_nvenc', hardwareDecoding },
+      }).nodes.find((node) => node.id === 'encoder')!.inputs;
+
+    expect(inputsFor('true').hardwareDecoding).toBe('true');
+    // The default is the one that matters: an existing library that upgrades
+    // into this must keep emitting exactly the command it emitted yesterday.
+    expect(inputsFor('').hardwareDecoding).toBe('false');
   });
 
   it('routes an already-converged file to nothing, and a mismatched one to the transcode', () => {
@@ -100,6 +121,7 @@ describe('FLOW_TEMPLATES', () => {
     expect(definition.nodes.find((node) => node.id === 'encoder')!.inputs).toEqual({
       encoder: 'libx265',
       quality: '24',
+      hardwareDecoding: 'false',
     });
   });
 
@@ -112,11 +134,12 @@ describe('FLOW_TEMPLATES', () => {
   it('treats an empty value as absent rather than as a chosen one', () => {
     const definition = buildFromTemplate({
       templateId: 'transcode-hevc',
-      values: { encoder: '', quality: '', targetCodec: '' },
+      values: { encoder: '', quality: '', targetCodec: '', hardwareDecoding: '' },
     });
     expect(definition.nodes.find((node) => node.id === 'encoder')!.inputs).toEqual({
       encoder: 'libx265',
       quality: '24',
+      hardwareDecoding: 'false',
     });
     expect(definition.nodes.find((node) => node.id === 'check')!.inputs).toEqual({ codec: 'hevc' });
   });
@@ -146,7 +169,8 @@ describe('the flow files shipped in docs/flows', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(
       buildFromTemplate({
         templateId: 'conform-library',
-        values: { encoder: 'hevc_nvenc', quality: '23' },
+        // The NVENC file is the one that ships with hardware decoding on.
+        values: { encoder: 'hevc_nvenc', quality: '23', hardwareDecoding: 'true' },
       }),
     );
   });

@@ -667,6 +667,7 @@ describe('flows', () => {
       'targetCodec',
       'encoder',
       'quality',
+      'hardwareDecoding',
       'trashRetentionDays',
     ]);
   });
@@ -684,7 +685,10 @@ describe('flows', () => {
     const stored = await api('GET', `/flows/${response.body.id}`);
     expect(
       stored.body.definition.nodes.find((n: ResponseBody) => n.id === 'encoder').inputs,
-    ).toEqual({ encoder: 'hevc_nvenc', quality: '22' });
+      // Hardware decoding is written out explicitly as 'false' rather than
+      // omitted: what the node will do is then visible in the stored flow
+      // instead of depending on a default the operator cannot see.
+    ).toEqual({ encoder: 'hevc_nvenc', quality: '22', hardwareDecoding: 'false' });
     expect(stored.body.definitionHash).toBe(response.body.definitionHash);
   });
 

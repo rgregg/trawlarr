@@ -314,6 +314,7 @@ describe('cli: flow add', () => {
     expect(stored.definition.nodes.find((node) => node.id === 'encoder')!.inputs).toEqual({
       encoder: 'hevc_nvenc',
       quality: '22',
+      hardwareDecoding: 'false',
     });
     // Output 1 of the codec check is "already hevc" and must stay a dead end.
     expect(stored.definition.edges.filter((edge) => edge.fromNodeId === 'check')).toEqual([
@@ -432,6 +433,7 @@ describe('cli: flow add', () => {
     expect(stored.definition.nodes.find((node) => node.id === 'encoder')!.inputs).toEqual({
       encoder: 'libx265',
       quality: '23',
+      hardwareDecoding: 'false',
     });
     expect(stored.definition.nodes.find((node) => node.id === 'muxqueue')!.inputs).toEqual({
       inputArguments: '',

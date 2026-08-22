@@ -71,6 +71,19 @@ const transcodeParameters: FlowTemplateParameter[] = [
       'you.',
   },
   {
+    name: 'hardwareDecoding',
+    label: 'Decode on the same hardware as the encoder',
+    type: 'string',
+    defaultValue: 'false',
+    options: ['false', 'true'],
+    tooltip:
+      'Adds an -hwaccel flag ahead of the input so the GPU decodes as well as encodes. With a ' +
+      'hardware encoder and this off, every frame is still decoded on the CPU, which is what ' +
+      'saturates a small host while the GPU idles. It does nothing for a software encoder, and ' +
+      'a machine that has not really got the declared hardware fails every file rather than ' +
+      'falling back.',
+  },
+  {
     name: 'trashRetentionDays',
     label: 'Keep replaced originals for (days)',
     type: 'string',
@@ -130,7 +143,11 @@ const transcodeHevc: FlowTemplate = {
           id: 'encoder',
           pluginId: 'trawlarr:setVideoEncoder',
           pluginVersion: PLUGIN_VERSION,
-          inputs: { encoder: value('encoder'), quality: value('quality') },
+          inputs: {
+            encoder: value('encoder'),
+            quality: value('quality'),
+            hardwareDecoding: value('hardwareDecoding'),
+          },
         },
         { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: PLUGIN_VERSION, inputs: {} },
         {
@@ -201,6 +218,19 @@ const conformParameters: FlowTemplateParameter[] = [
       'A hardware encoder requires that hardware to be declared on this node AND present in ' +
       'the ffmpeg build. Trawlarr never falls back to software: a wrong declaration produces ' +
       'failing jobs, three attempts per file.',
+  },
+  {
+    name: 'hardwareDecoding',
+    label: 'Decode on the same hardware as the encoder',
+    type: 'string',
+    defaultValue: 'false',
+    options: ['false', 'true'],
+    tooltip:
+      'Adds an -hwaccel flag ahead of the input so the GPU decodes as well as encodes. With a ' +
+      'hardware encoder and this off, every frame is still decoded on the CPU, which is what ' +
+      'saturates a small host while the GPU idles. It does nothing for a software encoder, and ' +
+      'a machine that has not really got the declared hardware fails every file rather than ' +
+      'falling back.',
   },
   {
     name: 'quality',
@@ -341,7 +371,11 @@ const conformLibrary: FlowTemplate = {
           id: 'encoder',
           pluginId: 'trawlarr:setVideoEncoder',
           pluginVersion: PLUGIN_VERSION,
-          inputs: { encoder: value('encoder'), quality: value('quality') },
+          inputs: {
+            encoder: value('encoder'),
+            quality: value('quality'),
+            hardwareDecoding: value('hardwareDecoding'),
+          },
         },
         {
           id: 'muxqueue',
@@ -473,11 +507,18 @@ export const SHIPPED_FLOW_FILES: readonly {
   {
     path: 'docs/flows/transcode-hevc-nvenc.json',
     templateId: 'transcode-hevc',
+    // Hardware decoding is ON in the NVENC files and only in those: a file
+    // whose name says NVENC is chosen by an operator who has declared that
+    // card, and without it the GPU encodes while the CPU decodes every frame
+    // — measured at 92.9% user CPU with the encoder at 16-31% on a real
+    // library. It is written out in plain text in the flow, so it is a
+    // choice the operator can see and remove, not an inference.
     values: {
       targetCodec: 'hevc',
       encoder: 'hevc_nvenc',
       quality: '24',
       trashRetentionDays: '14',
+      hardwareDecoding: 'true',
     },
   },
   // The owner's Unmanic pipeline, in both the form this repository can prove
@@ -493,7 +534,7 @@ export const SHIPPED_FLOW_FILES: readonly {
   {
     path: 'docs/flows/conform-mkv-hevc-nvenc.json',
     templateId: 'conform-library',
-    values: { encoder: 'hevc_nvenc', quality: '23' },
+    values: { encoder: 'hevc_nvenc', quality: '23', hardwareDecoding: 'true' },
   },
 ];
 

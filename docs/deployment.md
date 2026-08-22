@@ -380,6 +380,56 @@ Raising `NUMBER_OF_WORKERS` above the cap is fine and often right: the extra
 workers do the CPU-side work (probing, verification, files whose flow routes
 to `libx265`) while the GPU-bound ones wait for a slot.
 
+### Hardware decoding — the half of the job that is still on the CPU
+
+Choosing `hevc_nvenc` moves the **encode** to the GPU. The **decode** stays on
+the CPU unless you ask for it, because decode flags are input options
+(`-hwaccel`) and trawlarr never adds one you did not choose.
+
+On a 6-vCPU host converting 1080p/4K episodes with `hevc_nvenc` this is what
+being decode-bound looks like: load average 19.6, 92.9% user CPU, 1.4% idle,
+the NVENC encoder at 16-31%, and NFS reads at 269 MB/s — nowhere near the
+disk. Raising `NUMBER_OF_WORKERS` from 1 to 3 made it *slower*: three ffmpeg
+processes contended for a CPU that was already the bottleneck while the GPU
+idled.
+
+Turn it on with the **Decode on the same hardware** switch on the `Set Video
+Encoder` node, or `hardwareDecoding=true` when building from a template:
+
+```bash
+trawlarr flow add --name "Movies HEVC" --template transcode-hevc \
+  --set encoder=hevc_nvenc --set hardwareDecoding=true
+```
+
+The shipped `docs/flows/*-nvenc.json` files already have it on; the `*-cpu.json`
+files do not, and a software encoder ignores the setting entirely.
+
+What it emits, ahead of `-i`, chosen from the ENCODER (never from the machine):
+
+| Encoder family | Flag |
+| --- | --- |
+| `*_nvenc` | `-hwaccel cuda` |
+| `*_qsv` | `-hwaccel qsv` |
+| `*_vaapi` | `-hwaccel vaapi` |
+| `*_videotoolbox` | `-hwaccel videotoolbox` |
+| `*_amf` | none — AMF is encode-only in ffmpeg |
+| `libx26x`, `libsvtav1`, … | none |
+
+Two things worth knowing before you turn it on:
+
+- **A declaration that is wrong now fails at the decode instead of the
+  encode.** `-hwaccel cuda` on a host with no usable NVIDIA device stops with
+  `No device available for decoder: device type cuda needed for codec h264`
+  and writes no output file. That is deliberate: trawlarr does not fall back
+  to software behind your back, because a silent fallback is how a library
+  spends a week transcoding on the CPU while you believe it is on the GPU.
+- **Keep decoded frames on the device** is a second, separate switch
+  (`-hwaccel_output_format`). It is faster again because frames never travel
+  back over PCIe, but then every CPU-side filter — crop, scale, HDR-to-SDR,
+  subtitle burn-in — and any encoder expecting system memory fails on a frame
+  it cannot read. Leave it off unless your flow does nothing to the video but
+  encode it.
+
 ## 7. Users and permissions
 
 `PUID`/`PGID` must match the owner of your media. The entrypoint renumbers the
