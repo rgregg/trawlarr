@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { ProbeData } from '@trawlarr/plugin-api';
+import type { ProbeData, ProbeStream } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand } from './ffmpeg-command.js';
 import {
   compileFfmpegArgs,
   outputStreamIndex,
   outputStreamTypeIndex,
   shouldCopyStream,
+  unmappableStreamReason,
+  type DroppedStream,
 } from './ffmpeg-compile.js';
 
 const probe: ProbeData = {
@@ -430,5 +432,195 @@ describe('output index helpers', () => {
   it('numbers type indices per codec_type', () => {
     const s = streams();
     expect(s.map((stream) => outputStreamTypeIndex(s, stream))).toEqual([0, 0, 1]);
+  });
+});
+
+/**
+ * Real libraries carry degenerate cover-art streams — an mjpeg "video" stream
+ * probing as 0x0, left behind by some taggers — alongside genuine posters. No
+ * muxer will write a video track with no dimensions, so mapping one fails the
+ * whole encode before a frame is written and the file can never be processed.
+ *
+ * The shape here is the one observed in the owner's library: real video, real
+ * cover art at 1251x1595, one degenerate 0x0 stream, more real cover art
+ * after it.
+ */
+describe('unmappable streams', () => {
+  const realWorldProbe: ProbeData = {
+    streams: [
+      { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+      { index: 1, codec_type: 'audio', codec_name: 'eac3' },
+      {
+        index: 7,
+        codec_type: 'video',
+        codec_name: 'mjpeg',
+        width: 1251,
+        height: 1595,
+        disposition: { attached_pic: 1 },
+      },
+      {
+        index: 9,
+        codec_type: 'video',
+        codec_name: 'mjpeg',
+        width: 0,
+        height: 0,
+        disposition: { attached_pic: 1 },
+      },
+      {
+        index: 10,
+        codec_type: 'video',
+        codec_name: 'mjpeg',
+        width: 640,
+        height: 360,
+        disposition: { attached_pic: 1 },
+      },
+    ],
+  };
+
+  const realWorldCommand = () =>
+    beginFfmpegCommand({ probe: realWorldProbe, container: 'mkv', inputPath: '/in.mkv' });
+
+  it('drops the dimensionless stream and keeps every real cover-art stream', () => {
+    const cmd = realWorldCommand();
+    cmd.streams[0]!.outputArgs.push('-c:{outputIndex}', 'libx265');
+
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+
+    // The degenerate stream is not mapped...
+    expect(args).not.toContain('0:9');
+    // ...and both posters are, at their input indices.
+    expect(args.filter((_, i) => args[i - 1] === '-map')).toEqual(['0:0', '0:1', '0:7', '0:10']);
+    // Each surviving poster is COPIED, never encoded, and addressed by its
+    // OUTPUT position — which renumbering after the drop makes 2 and 3, not
+    // the input indices 7 and 10.
+    expect(args).toEqual([
+      '-i',
+      '/in.mkv',
+      '-map',
+      '0:0',
+      '-c:0',
+      'libx265',
+      '-map',
+      '0:1',
+      '-c:1',
+      'copy',
+      '-map',
+      '0:7',
+      '-c:2',
+      'copy',
+      '-map',
+      '0:10',
+      '-c:3',
+      'copy',
+      '/out.mkv',
+    ]);
+  });
+
+  it('reports every dropped stream by input index, codec and reason', () => {
+    const dropped: DroppedStream[] = [];
+    compileFfmpegArgs({
+      command: realWorldCommand(),
+      outputPath: '/out.mkv',
+      onDroppedStream: (entry) => dropped.push(entry),
+    });
+    expect(dropped).toEqual([
+      { index: 9, codecName: 'mjpeg', reason: expect.stringContaining('dimensions 0x0') },
+    ]);
+  });
+
+  it('reports nothing when every stream is mappable', () => {
+    const dropped: DroppedStream[] = [];
+    const cmd = realWorldCommand();
+    cmd.streams[3]!.width = 8;
+    cmd.streams[3]!.height = 8;
+    const args = compileFfmpegArgs({
+      command: cmd,
+      outputPath: '/out.mkv',
+      onDroppedStream: (entry) => dropped.push(entry),
+    });
+    expect(dropped).toEqual([]);
+    expect(args).toContain('0:9');
+  });
+
+  it('does not report a stream a plugin already removed', () => {
+    const dropped: DroppedStream[] = [];
+    const cmd = realWorldCommand();
+    cmd.streams[3]!.removed = true;
+    compileFfmpegArgs({
+      command: cmd,
+      outputPath: '/out.mkv',
+      onDroppedStream: (entry) => dropped.push(entry),
+    });
+    expect(dropped).toEqual([]);
+  });
+
+  it('drops a stream the flow explicitly asked to encode: no encoder can write it either', () => {
+    const cmd = realWorldCommand();
+    cmd.streams[3]!.forceEncoding = true;
+    cmd.streams[3]!.outputArgs.push('-c:{outputIndex}', 'mjpeg');
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    expect(args).not.toContain('0:9');
+    expect(args).not.toContain('mjpeg');
+  });
+
+  it('drops the input arguments of a dropped stream too', () => {
+    const cmd = realWorldCommand();
+    cmd.streams[3]!.inputArgs.push('-hwaccel', 'cuda');
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).not.toContain('-hwaccel');
+  });
+
+  it('names the reason when nothing mappable is left', () => {
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [{ index: 0, codec_type: 'video', codec_name: 'mjpeg', width: 0, height: 0 }],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
+    expect(() => compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toThrow(
+      /dimensions no container can write/,
+    );
+  });
+});
+
+/**
+ * The boundary itself, stated case by case. Widening it destroys artwork —
+ * a poster is only ever a video stream with positive dimensions — and
+ * narrowing it lets the mux failure back in.
+ */
+describe('unmappableStreamReason', () => {
+  const reason = (stream: Partial<ProbeStream>): string | null =>
+    unmappableStreamReason({ codec_name: 'mjpeg', codec_type: 'video', ...stream } as ProbeStream);
+
+  it('rejects a stream that declares dimensions which are not both positive', () => {
+    expect(reason({ width: 0, height: 0 })).toContain('0x0');
+    expect(reason({ width: 1251, height: 0 })).toContain('1251x0');
+    expect(reason({ width: 0, height: 1595 })).toContain('0x1595');
+    expect(reason({ width: -1, height: 100 })).not.toBeNull();
+    // A declared-but-unusable value: present, so we are entitled to judge it.
+    expect(reason({ width: 'n/a' as unknown as number, height: 100 })).not.toBeNull();
+    // One dimension declared and the other absent is equally unwritable.
+    expect(reason({ width: 100 })).toContain('100xunset');
+  });
+
+  it('accepts every real cover-art stream, at any size', () => {
+    expect(reason({ width: 1251, height: 1595 })).toBeNull();
+    expect(reason({ width: 640, height: 360 })).toBeNull();
+    expect(reason({ width: 1, height: 1 })).toBeNull();
+    // ffprobe values arriving as strings are still dimensions.
+    expect(
+      reason({ width: '120' as unknown as number, height: '160' as unknown as number }),
+    ).toBeNull();
+  });
+
+  it('never judges a stream that declares no dimensions at all', () => {
+    // Audio, subtitles, data and real attachments (fonts) carry no width or
+    // height, and neither do the synthetic probes tests and plugins build.
+    // Absence is a fact about the PROBE, not the stream: judging it would let
+    // a partial probe silently delete a library file's main video track,
+    // which is far worse than the loud ffmpeg error it would prevent.
+    expect(reason({ codec_type: 'audio', codec_name: 'eac3' })).toBeNull();
+    expect(reason({ codec_type: 'attachment', codec_name: 'ttf' })).toBeNull();
+    expect(reason({ codec_type: 'video', codec_name: 'h264' })).toBeNull();
   });
 });

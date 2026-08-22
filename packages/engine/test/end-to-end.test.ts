@@ -1,6 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -23,6 +30,7 @@ let sourceDir: string;
 let mediaPath: string;
 let convergedPath: string;
 let coverFirstPath: string;
+let degenerateCoverPath: string;
 
 // Generate tiny samples rather than committing binary fixtures.
 const makeSample = (path: string, videoCodec: string) =>
@@ -88,6 +96,85 @@ const makeCoverFirstSample = async (path: string, stillPath: string) => {
     'attached_pic',
     path,
   ]);
+};
+
+/**
+ * A file shaped like the ones that broke a real 5.5 TB library: real video,
+ * real audio, a genuine cover-art poster, and a DEGENERATE cover-art stream
+ * that probes as 0x0.
+ *
+ * The degenerate stream is manufactured the way the real ones are broken,
+ * because no muxer will write one directly: mux a real still, then set the
+ * track's Matroska `PixelWidth` (0xB0) and `PixelHeight` (0xBA) elements to
+ * zero and destroy the JPEG payload, so the decoder cannot recover the
+ * dimensions from the frame either — which is exactly what real files with
+ * `[mjpeg] bits NNN is invalid` do. The EBML element lengths are preserved,
+ * so the container stays valid and every other stream is untouched.
+ *
+ * The caller asserts what ffprobe says about the result, so if this technique
+ * ever stops producing a 0x0 stream the test fails loudly rather than passing
+ * over a fixture that no longer contains the bug.
+ */
+const makeDegenerateCoverArtSample = async (input: {
+  path: string;
+  posterPath: string;
+  degeneratePath: string;
+}) => {
+  const still = (path: string, size: string, colour: string) =>
+    execFileAsync('ffmpeg', [
+      '-hide_banner',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      `color=c=${colour}:s=${size}:d=0.04:r=25`,
+      '-frames:v',
+      '1',
+      path,
+    ]);
+
+  await still(input.posterPath, '120x160', 'red');
+  await still(input.degeneratePath, '64x64', 'blue');
+  await execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-i',
+    mediaPath,
+    '-i',
+    input.posterPath,
+    '-i',
+    input.degeneratePath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0',
+    '-map',
+    '1:v:0',
+    '-map',
+    '2:v:0',
+    '-c',
+    'copy',
+    input.path,
+  ]);
+
+  const file = readFileSync(input.path);
+  // 64 = 0x40, written as a one-byte EBML unsigned int: `B0 81 40`. Searched
+  // only in the header region, where the Tracks element lives, and required
+  // to be unique — a stray match in frame data would corrupt the wrong bytes.
+  const header = file.subarray(0, 4096);
+  const patched = Buffer.from(file);
+  for (const element of [0xb0, 0xba]) {
+    const pattern = Buffer.from([element, 0x81, 0x40]);
+    const at = header.indexOf(pattern);
+    expect(at).toBeGreaterThan(-1);
+    expect(header.indexOf(pattern, at + 1)).toBe(-1);
+    patched[at + 2] = 0x00;
+  }
+  const frame = readFileSync(input.degeneratePath);
+  const frameAt = patched.indexOf(frame);
+  expect(frameAt).toBeGreaterThan(-1);
+  patched.fill(0x00, frameAt + 2, frameAt + frame.length);
+  writeFileSync(input.path, patched);
 };
 
 /** The subset of an ffprobe stream these tests read back off a real file. */
@@ -166,6 +253,13 @@ beforeAll(async () => {
 
   coverFirstPath = join(sourceDir, 'cover-first.mkv');
   await makeCoverFirstSample(coverFirstPath, join(sourceDir, 'cover.png'));
+
+  degenerateCoverPath = join(sourceDir, 'degenerate-cover.mkv');
+  await makeDegenerateCoverArtSample({
+    path: degenerateCoverPath,
+    posterPath: join(sourceDir, 'poster.jpg'),
+    degeneratePath: join(sourceDir, 'degenerate.jpg'),
+  });
 }, 120_000);
 
 const flowPath = () => {
@@ -462,4 +556,117 @@ describe.runIf(available)('compiled argv, as real ffmpeg reads it', () => {
     // codecs by output index is the only form that cannot collide.
     expect(argv.filter(isTypeSpecifierCodecFlag)).toEqual([]);
   }, 120_000);
+
+  /**
+   * The dimensionless-cover-art bug, end to end on a real file.
+   *
+   * Argument-level tests can only say which strings we emit; this says what
+   * ffmpeg DOES with them, which is the level the previous cover-art data-loss
+   * bug hid at. It asserts both directions on the produced file: the
+   * degenerate stream is gone, and the genuine poster came through with its
+   * codec and its exact dimensions intact.
+   */
+  it('drops a dimensionless cover-art stream while the real poster survives untouched', async () => {
+    const sourceStreams = await streamsOf(degenerateCoverPath);
+    // The fixture really contains the bug: a valid 120x160 poster and a
+    // degenerate stream ffprobe reports as 0x0, in one real file.
+    expect(sourceStreams.map((stream) => [stream.codec_name, stream.width, stream.height])).toEqual(
+      [
+        ['h264', 320, 240],
+        ['aac', undefined, undefined],
+        ['mjpeg', 120, 160],
+        ['mjpeg', 0, 0],
+      ],
+    );
+
+    const probe: ProbeData = {
+      // Same documented compromise as the test above: Matroska drops the
+      // attached_pic disposition on muxing, so it is injected here to
+      // describe the file as a probe of real cover-art media would. The
+      // DIMENSIONS — the thing under test — are the file's own.
+      streams: sourceStreams.map((stream) =>
+        stream.codec_name === 'mjpeg'
+          ? { ...stream, disposition: { ...stream.disposition, attached_pic: 1 } }
+          : stream,
+      ),
+    };
+
+    const command = beginFfmpegCommand({
+      probe,
+      container: 'mkv',
+      inputPath: degenerateCoverPath,
+    });
+    const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin({
+      inputFileObj: { _id: degenerateCoverPath, container: 'mkv', ffProbeData: probe },
+      variables: { ffmpegCommand: command, flowFailed: false, user: {} },
+      inputs: { encoder: 'libx265', quality: '30' },
+      jobLog: () => {},
+    } as unknown as PluginInputArgs);
+
+    const dropped: { index: number; codecName: string; reason: string }[] = [];
+    const producedPath = join(workDir, 'degenerate-cover-encoded.mkv');
+    const argv = compileFfmpegArgs({
+      command: out.variables.ffmpegCommand,
+      outputPath: producedPath,
+      onDroppedStream: (entry) => dropped.push(entry),
+    });
+
+    // Exactly one stream dropped, named so the job log can say which.
+    expect(dropped).toEqual([
+      { index: 3, codecName: 'mjpeg', reason: expect.stringContaining('dimensions 0x0') },
+    ]);
+
+    // The bug is real on THIS file, not a hypothesis: the same command with
+    // the degenerate stream mapped back in — which is what mapping every
+    // input stream produced — fails to mux at all.
+    const withDegenerate = [
+      ...argv.slice(0, -1),
+      '-map',
+      '0:3',
+      `-c:${String(argv.filter((_, i) => argv[i - 1] === '-map').length)}`,
+      'copy',
+      join(workDir, 'degenerate-cover-all-streams.mkv'),
+    ];
+    const failure = await execFileAsync('ffmpeg', ['-hide_banner', '-y', ...withDegenerate]).then(
+      () => null,
+      (error: { code?: number; stderr?: string }) => error,
+    );
+    expect(failure).not.toBeNull();
+    expect(failure!.code).not.toBe(0);
+    expect(failure!.stderr).toContain('dimensions not set');
+
+    // And the command we actually build runs.
+    await execFileAsync('ffmpeg', ['-hide_banner', '-y', ...argv]);
+
+    // The load-bearing assertions, made on the OUTPUT FILE: the degenerate
+    // stream is gone, the video was encoded, and the genuine poster survived
+    // with its codec and its exact dimensions — copied, not re-encoded to
+    // some other size or codec. Dropping cover art instead of the broken
+    // stream would destroy artwork in every file this touches, which is
+    // worse than the bug being fixed.
+    const producedStreams = await streamsOf(producedPath);
+    expect(
+      producedStreams.map((stream) => [stream.codec_name, stream.width, stream.height]),
+    ).toEqual([
+      ['hevc', 320, 240],
+      ['aac', undefined, undefined],
+      ['mjpeg', 120, 160],
+    ]);
+    // The poster is byte-for-byte the frame that went in, not a re-encode.
+    const posterOut = join(workDir, 'poster-out.jpg');
+    await execFileAsync('ffmpeg', [
+      '-hide_banner',
+      '-y',
+      '-i',
+      producedPath,
+      '-map',
+      '0:2',
+      '-c',
+      'copy',
+      '-f',
+      'mjpeg',
+      posterOut,
+    ]);
+    expect(readFileSync(posterOut).equals(readFileSync(join(sourceDir, 'poster.jpg')))).toBe(true);
+  }, 180_000);
 });

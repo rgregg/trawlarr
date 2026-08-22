@@ -1,4 +1,5 @@
 import type { PluginModule, ProbeData } from '@trawlarr/plugin-api';
+import { mappableStreams } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 
 export interface VerifyReport {
@@ -224,7 +225,12 @@ export const createVerifyOutputRunner =
         const intendedStreamCount =
           commandStreams.length === 0
             ? null
-            : commandStreams.filter((stream) => stream.removed !== true).length;
+            : // Not just `removed !== true`: the compiler also drops streams no
+              // muxer can write (dimensionless cover art). Counting those as
+              // intended would make every such file fail verification for
+              // "fewer streams than this flow described" — holding a file
+              // because the host protected it. Both sides read one rule.
+              mappableStreams(commandStreams).length;
         // A node input arrives as the STRING 'false' from a stored flow and as
         // the boolean false from a test. Reading only one of those makes the
         // switch look wired while doing nothing, so both are normalised here,

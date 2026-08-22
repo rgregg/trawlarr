@@ -59,7 +59,7 @@ const argsFor = (input: {
    * it: `init` cleared, `streams` intact. Omitted means a flow with no Begin
    * Command, which describes no intent at all.
    */
-  commandStreams?: { removed?: boolean }[];
+  commandStreams?: { removed?: boolean; width?: number; height?: number }[];
   inputs?: Record<string, unknown>;
 }): PluginInputArgs =>
   ({
@@ -686,6 +686,43 @@ describe('createVerifyOutputRunner', () => {
       }),
     );
     expect(unexplained.outputNumber).toBe(2);
+  });
+
+  it('does not count a stream the compiler could never map as one the flow intended', async () => {
+    // The other half of the dimensionless-cover-art fix. The command carries
+    // five streams, none of them `removed`, but one reports 0x0 — so the
+    // compiler drops it and ffmpeg writes four. Counting the degenerate
+    // stream as intended would fail verification for "fewer streams than this
+    // flow described" and hold the file: the host's own protection reported
+    // as data loss. Both sides read the same rule.
+    const probes = {
+      '/work/movie.mkv': probeOf({ streams: 4, durationSeconds: 3600 }),
+      '/library/movie.mkv': probeOf({ streams: 5, durationSeconds: 3600 }),
+    };
+    const sizes = { '/work/movie.mkv': 7 * GIGABYTE, '/library/movie.mkv': 8 * GIGABYTE };
+    const module = runnerFor({ probes, sizes })(verifyPlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, {}, {}, { width: 0, height: 0 }, {}],
+      }),
+    );
+    expect(out.outputNumber).toBe(1);
+
+    // Still falsifiable: a real poster in that slot means five intended
+    // streams, and the same four-stream output is a lost one.
+    const lost = await module.plugin(
+      argsFor({
+        outputPath: '/work/movie.mkv',
+        originalPath: '/library/movie.mkv',
+        jobLog: () => {},
+        commandStreams: [{}, {}, {}, { width: 1251, height: 1595 }, {}],
+      }),
+    );
+    expect(lost.outputNumber).toBe(2);
   });
 
   it('refuses a silent output by default, and only stands down when told to', async () => {

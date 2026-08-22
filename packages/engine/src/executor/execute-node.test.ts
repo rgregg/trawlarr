@@ -42,6 +42,44 @@ const executePlugin = (): LoadedPlugin =>
   }) as unknown as LoadedPlugin;
 
 /**
+ * The real-world shape from the owner's library: video, audio, a genuine
+ * 1251x1595 cover-art stream, and a degenerate 0x0 one that no muxer will
+ * write.
+ */
+const degenerateCommand = (inputPath: string) => {
+  const command = beginFfmpegCommand({
+    probe: {
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+        { index: 1, codec_type: 'audio', codec_name: 'eac3' },
+        {
+          index: 7,
+          codec_type: 'video',
+          codec_name: 'mjpeg',
+          width: 1251,
+          height: 1595,
+          disposition: { attached_pic: 1 },
+        },
+        {
+          index: 9,
+          codec_type: 'video',
+          codec_name: 'mjpeg',
+          width: 0,
+          height: 0,
+          disposition: { attached_pic: 1 },
+        },
+      ],
+    },
+    container: 'mkv',
+    inputPath,
+  });
+  command.streams[0]!.outputArgs.push('-c:{outputIndex}', 'libx265');
+  command.streams[0]!.forceEncoding = true;
+  command.shouldProcess = true;
+  return command;
+};
+
+/**
  * A command over one video and one audio stream. `encodes` decides whether any
  * work was asked for: with it false nothing has been touched, which is exactly
  * the "nothing to do" shape the runner must recognise.
@@ -181,6 +219,35 @@ describe('createExecuteRunner', () => {
     expect(logs.join('\n')).toMatch(/nothing to do/i);
     // Nor did it create the output file it would have written.
     expect(existsSync(join(workDir, 'source.mkv'))).toBe(false);
+  });
+
+  it('leaves an unmappable stream out of the argv and says so where the operator can see it', async () => {
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const logs: string[] = [];
+    const module = runnerFor({
+      workDir,
+      runFfmpegFn: ffmpeg.run,
+      log: (text) => logs.push(text),
+    })(executePlugin())!;
+
+    const args = argsFor({ inputPath, encodes: true });
+    args.variables.ffmpegCommand = degenerateCommand(inputPath);
+    const out = await module.plugin(args);
+
+    // The argv ffmpeg was actually handed: the 0x0 stream is absent and the
+    // real poster is mapped and copied at its renumbered output position.
+    const argv = ffmpeg.calls[0]!.args;
+    expect(argv.filter((_, i) => argv[i - 1] === '-map')).toEqual(['0:0', '0:1', '0:7']);
+    expect(argv.slice(argv.indexOf('0:7'))).toEqual(['0:7', '-c:2', 'copy', expect.any(String)]);
+    expect(out.outputNumber).toBe(1);
+
+    // Reported, not silent. This `log` seam is `args.jobLog`, which runFlow
+    // also captures into the step's own log_excerpt, so a user whose file
+    // lost a stream can find out from either the job log or the step trace.
+    const log = logs.join('\n');
+    expect(log).toContain('Dropped input stream 9 (mjpeg)');
+    expect(log).toContain('dimensions 0x0');
   });
 
   it('routes to the failure output and keeps the input when ffmpeg fails', async () => {

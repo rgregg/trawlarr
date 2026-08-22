@@ -1,5 +1,83 @@
-import type { FfmpegCommand, FfmpegCommandStream } from '@trawlarr/plugin-api';
+import type { FfmpegCommand, FfmpegCommandStream, ProbeStream } from '@trawlarr/plugin-api';
 import { assertCommandInitialised } from './ffmpeg-command.js';
+
+/** A stream the host refused to map, and the reason, for the job log. */
+export interface DroppedStream {
+  /** The stream's ffprobe input index, or its array position if it has none. */
+  index: number;
+  codecName: string;
+  reason: string;
+}
+
+const declaresDimension = (value: unknown): boolean => value !== undefined && value !== null;
+
+const isUsableDimension = (value: unknown): boolean => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0;
+};
+
+const describeDimension = (value: unknown): string =>
+  declaresDimension(value) ? String(value) : 'unset';
+
+/**
+ * Why this stream cannot be written to any container, or `null` if it can.
+ *
+ * Real libraries contain degenerate cover-art streams: an `mjpeg` "video"
+ * stream carrying `width=0, height=0` — a placeholder some taggers leave
+ * behind, alongside `[mjpeg] bits 230 is invalid`, i.e. genuinely malformed.
+ * Every muxer refuses a video track with no dimensions (`[matroska] dimensions
+ * not set` / `Could not write header for output file #0`), so mapping one
+ * fails the whole encode before a frame is written — the file can never be
+ * processed, three attempts later it is terminally `failed`, and the operator
+ * sees only ffmpeg's message. This is not encoder-specific: the same file
+ * succeeds under both `hevc_nvenc` and `libx265` once the degenerate stream is
+ * left out.
+ *
+ * The boundary, chosen deliberately narrow because the failure mode of getting
+ * it wrong is destroying artwork rather than failing loudly:
+ *
+ * - Only streams that **declare** a dimension are considered at all. Audio,
+ *   subtitle, data and real attachments (fonts) carry no `width`/`height` and
+ *   are never candidates, without this having to guess which `codec_type`
+ *   ffmpeg will treat as video — which matters here because trawlarr
+ *   reclassifies cover art to `attachment` while ffmpeg still muxes it as
+ *   video.
+ * - Among those, both dimensions must resolve to a finite number greater than
+ *   zero. Zero (the observed case), negative, and non-numeric all describe a
+ *   track no container can hold; a stream that declares one dimension and not
+ *   the other is equally unwritable.
+ * - A stream that declares NEITHER dimension is kept, even if it is typed
+ *   `video`. Absence is a fact about the probe, not about the stream: a
+ *   partial, synthetic or plugin-constructed command would otherwise lose its
+ *   main video track silently. A loud ffmpeg error beats deleting video.
+ *
+ * A valid poster — `1251x1595 mjpeg` — has two positive dimensions and is
+ * therefore never a candidate, at any size. Nothing here inspects codec,
+ * disposition or size, so no real cover art can match.
+ */
+export const unmappableStreamReason = (stream: ProbeStream): string | null => {
+  if (!declaresDimension(stream.width) && !declaresDimension(stream.height)) return null;
+  if (isUsableDimension(stream.width) && isUsableDimension(stream.height)) return null;
+  return (
+    `it reports dimensions ${describeDimension(stream.width)}x` +
+    `${describeDimension(stream.height)}, which no container can write`
+  );
+};
+
+/** True for a stream ffmpeg could never mux; see {@link unmappableStreamReason}. */
+export const isUnmappableStream = (stream: ProbeStream): boolean =>
+  unmappableStreamReason(stream) !== null;
+
+/**
+ * The streams that will actually be written: those no plugin removed, minus
+ * those no muxer could accept.
+ *
+ * Shared with `verifyOutput`, which counts the streams the flow intended to
+ * write and holds the file if the output has fewer — it has to apply the same
+ * rule, or every dropped stream would look like a lost one.
+ */
+export const mappableStreams = (streams: readonly FfmpegCommandStream[]): FfmpegCommandStream[] =>
+  streams.filter((stream) => stream.removed !== true && !isUnmappableStream(stream));
 
 const mapArgsOf = (stream: FfmpegCommandStream, position: number): string[] => {
   if (stream.mapArgs.length > 0) return stream.mapArgs;
@@ -117,6 +195,12 @@ export const shouldCopyStream = (outputArgs: readonly string[]): boolean => {
 export const compileFfmpegArgs = (input: {
   command: FfmpegCommand;
   outputPath: string;
+  /**
+   * Called once per stream the host refused to map. Dropping a stream is
+   * never silent: the Execute node forwards this to the job log, which
+   * `runFlow` also captures into that step's `log_excerpt`.
+   */
+  onDroppedStream?: (dropped: DroppedStream) => void;
 }): string[] => {
   const { command, outputPath } = input;
 
@@ -132,18 +216,37 @@ export const compileFfmpegArgs = (input: {
   // apply its own default stream selection to a file the flow believes it has
   // described completely. Refusing is the same answer as for "every stream was
   // removed" — nothing was mapped — so it gets the same message.
-  const kept = command.streams.filter((stream) => stream.removed !== true);
+  // The host gate: a stream no muxer can write is dropped here, in the one
+  // place every flow passes through, rather than in a plugin a flow would have
+  // to remember to include. A node protects only the flow that declares it; a
+  // gate in the compiler protects every flow, including community ones, and
+  // cannot be undone by a plugin that maps streams back in.
+  const surviving = command.streams.filter((stream) => stream.removed !== true);
+  const kept = surviving.filter((stream) => !isUnmappableStream(stream));
+
+  surviving.forEach((stream, position) => {
+    const reason = unmappableStreamReason(stream);
+    if (reason === null) return;
+    input.onDroppedStream?.({
+      index: typeof stream.index === 'number' ? stream.index : position,
+      codecName: String(stream.codec_name ?? 'unknown'),
+      reason,
+    });
+  });
+
   if (kept.length === 0) {
     throw new Error(
-      'No streams mapped for new file: every stream was removed, so the output would ' +
-        'contain nothing. Check which streams the flow is removing.',
+      surviving.length === 0
+        ? 'No streams mapped for new file: every stream was removed, so the output would ' +
+            'contain nothing. Check which streams the flow is removing.'
+        : 'No streams mapped for new file: every remaining stream reports dimensions no ' +
+            'container can write, so the output would contain nothing.',
     );
   }
 
   const args: string[] = [...command.overallInputArguments];
 
-  for (const stream of command.streams) {
-    if (stream.removed === true) continue;
+  for (const stream of kept) {
     args.push(...stream.inputArgs);
   }
 

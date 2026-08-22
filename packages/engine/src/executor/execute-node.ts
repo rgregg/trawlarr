@@ -50,7 +50,20 @@ export const createExecuteRunner =
           container: command.container,
           outputPathFor: input.outputPathFor,
         });
-        const ffmpegArgs = compileFfmpegArgs({ command, outputPath: scratchOutputPath });
+        const ffmpegArgs = compileFfmpegArgs({
+          command,
+          outputPath: scratchOutputPath,
+          // Never silent: a file that came out with one fewer stream must say
+          // so somewhere the operator can find it. This log seam is wired to
+          // `args.jobLog`, which `runFlow` also captures into this step's
+          // `log_excerpt`, so the drop appears in both the job log and the
+          // step trace.
+          onDroppedStream: (dropped) =>
+            input.log?.(
+              `Dropped input stream ${String(dropped.index)} (${dropped.codecName}) from the ` +
+                `output: ${dropped.reason}. Every other stream is mapped unchanged.`,
+            ),
+        });
 
         input.log?.(`Running: ${input.ffmpegPath} ${ffmpegArgs.join(' ')}`);
 
