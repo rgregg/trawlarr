@@ -85,10 +85,10 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
  * cannot escape" failure the 401 handling exists to prevent.
  */
 export const App = (): JSX.Element => {
-  const { apiKey, client, setKey, signOut } = useApi();
+  const { apiKey, client, urlKeyProblem, setKey, signOut } = useApi();
 
   return (
-    <KeyGate apiKey={apiKey} onKey={setKey}>
+    <KeyGate apiKey={apiKey} onKey={setKey} initialProblem={urlKeyProblem}>
       {apiKey !== null && client !== null && (
         <Shell apiKey={apiKey} client={client} signOut={signOut} />
       )}

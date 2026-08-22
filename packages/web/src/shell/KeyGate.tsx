@@ -23,17 +23,25 @@ export const KeyGate = (props: {
   apiKey: string | null;
   onKey: (key: string) => void;
   children: ReactNode;
+  /**
+   * Set when a `?apiKey=` on the URL was checked (by `useApi`, via
+   * `bootstrapFromUrl`) and rejected. Shown until the operator submits the
+   * form, at which point the submission's own result — success or failure —
+   * replaces it, same as any other `problem`.
+   */
+  initialProblem?: string | null;
 }): JSX.Element => {
   const [value, setValue] = useState('');
-  const [problem, setProblem] = useState<string | null>(null);
+  const [submittedProblem, setSubmittedProblem] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const problem = submittedProblem ?? props.initialProblem ?? null;
 
   if (props.apiKey !== null) return <>{props.children}</>;
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setChecking(true);
-    setProblem(null);
+    setSubmittedProblem(null);
     try {
       // Verified BEFORE it is stored: a stored key that does not work turns
       // every screen into an error and the fix (clear localStorage) is not
@@ -41,7 +49,7 @@ export const KeyGate = (props: {
       await createApiClient({ apiKey: value }).get('/system/version');
       props.onKey(value);
     } catch {
-      setProblem('That key was not accepted.');
+      setSubmittedProblem('That key was not accepted.');
     } finally {
       setChecking(false);
     }
@@ -88,6 +96,14 @@ export const KeyGate = (props: {
           this origin can take it. The key does not expire and is not scoped, so a disclosure is a
           disclosure of full API access until you rotate it. On a shared or unattended machine, use{' '}
           <strong>Sign out</strong>.
+        </p>
+        <p>
+          A link with the key already in it (<code>?apiKey=…</code>) is the same credential in a
+          weaker container. This page removes it from the address bar the moment it is used, but
+          before that it can land in browser history, in a bookmark that syncs to another device, in
+          a screen share, or in a proxy&rsquo;s access log — anywhere a URL is visible, the key is
+          too. Prefer pasting the key by hand; keep a link like that as private as the key itself,
+          and rotate the key if one leaks.
         </p>
       </details>
     </form>
