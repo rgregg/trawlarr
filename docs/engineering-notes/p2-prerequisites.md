@@ -76,6 +76,24 @@ replacement copies, a guard can refuse after staging, a run can die mid-swap), a
 being a record of what is on disk. Putting the identity update in "the same transaction as the
 observation" closes nothing — the swap is a filesystem operation no sqlite transaction contains.
 
+## A container restart does not change a setting that is already written
+
+Environment variables **seed** settings once and never override, so that a value changed in the UI
+survives a restart. The cost is the mirror image, and it bit during the first live deployment: a
+container was started with `NUMBER_OF_WORKERS=0` for a deliberately read-only trial, which seeded
+`schedule.baseCounts.transcode = 0`. The container was then recreated with `NUMBER_OF_WORKERS=1` — and
+that was correctly ignored, so 563 files sat queued with zero running and no error anywhere.
+
+`GET /system/settings` diagnosed it in one line — `NUMBER_OF_WORKERS: ignored-already-set,
+matchesEnv=false, live=0` — which is exactly why that provenance reporting was built rather than just
+seeding silently. Without it this is an opaque hang, and the operator's compose file says one thing
+while the daemon does another.
+
+The deployment guide should say plainly that changing an env var and restarting will **not** change a
+setting the daemon has already stored, and point at `GET /system/settings` (or the Settings screen) as
+the way to see which variables were applied, which were ignored, and where the live value has drifted
+from the file.
+
 ## An allow-list is not a rule
 
 "A terminal output the flow author did not route is not success" was implemented as a hard-coded list of
