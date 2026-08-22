@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PluginDetails, PluginInputArgs, ProbeStream } from '@trawlarr/plugin-api';
-import { beginFfmpegCommand } from '@trawlarr/core';
+import { beginFfmpegCommand, deriveShouldProcess } from '@trawlarr/core';
 import { createExecuteRunner } from './execute-node.js';
 import type { LoadedPlugin } from '../host/loader.js';
 import type { FfmpegRunResult, RunFfmpegInput } from '../ffmpeg/run.js';
@@ -117,14 +117,14 @@ const codeclessCommand = (inputPath: string) => {
  * work was asked for: with it false nothing has been touched, which is exactly
  * the "nothing to do" shape the runner must recognise.
  */
+const SOURCE_STREAMS: ProbeStream[] = [
+  { index: 0, codec_type: 'video', codec_name: 'h264' },
+  { index: 1, codec_type: 'audio', codec_name: 'aac' },
+];
+
 const commandFor = (input: { inputPath: string; encodes: boolean }) => {
   const command = beginFfmpegCommand({
-    probe: {
-      streams: [
-        { index: 0, codec_type: 'video', codec_name: 'h264' },
-        { index: 1, codec_type: 'audio', codec_name: 'aac' },
-      ],
-    },
+    probe: { streams: SOURCE_STREAMS.map((stream) => ({ ...stream })) },
     container: 'mkv',
     inputPath: input.inputPath,
   });
@@ -136,13 +136,21 @@ const commandFor = (input: { inputPath: string; encodes: boolean }) => {
   return command;
 };
 
-const argsFor = (input: { inputPath: string; encodes: boolean }): PluginInputArgs =>
-  ({
-    inputFileObj: {
-      _id: input.inputPath,
-      container: 'mkv',
-      ffProbeData: { format: { duration: '2' }, streams: [] },
+const argsFor = (input: { inputPath: string; encodes: boolean }): PluginInputArgs => {
+  // The no-op gate compares the command against the ORIGINAL library file's
+  // own probe and container, so a fixture missing either would exercise the
+  // "cannot verify, therefore run" branch instead of the one under test.
+  const fileObject = {
+    _id: input.inputPath,
+    container: 'mkv',
+    ffProbeData: {
+      format: { duration: '2' },
+      streams: SOURCE_STREAMS.map((stream) => ({ ...stream })),
     },
+  };
+  return {
+    inputFileObj: fileObject,
+    originalLibraryFile: fileObject,
     variables: {
       ffmpegCommand: commandFor(input),
       flowFailed: false,
@@ -151,7 +159,8 @@ const argsFor = (input: { inputPath: string; encodes: boolean }): PluginInputArg
     inputs: {},
     jobLog: () => {},
     updateWorker: () => {},
-  }) as unknown as PluginInputArgs;
+  } as unknown as PluginInputArgs;
+};
 
 /** Somewhere to put an input file and, separately, the work directory. */
 const workspace = () => {
@@ -249,9 +258,127 @@ describe('createExecuteRunner', () => {
     expect(out.outputNumber).toBe(1);
     expect(out.outputFileObj._id).toBe(inputPath);
     expect(out.variables.ffmpegCommand.init).toBe(false);
-    expect(logs.join('\n')).toMatch(/nothing to do/i);
+    expect(logs.join('\n')).toMatch(/skipping ffmpeg/i);
     // Nor did it create the output file it would have written.
     expect(existsSync(join(workDir, 'source.mkv'))).toBe(false);
+  });
+
+  it('skips a command that declares work but would change nothing about the file', async () => {
+    // The 8.4 TB incident in miniature: a `Set Container` to the container the
+    // file already has, plus a filter that matched nothing, leaves a command
+    // that SAYS it needs processing (`deriveShouldProcess` is true) and
+    // compiles to a byte-for-byte remux of 4,000 already-correct files.
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const logs: string[] = [];
+    const module = runnerFor({
+      workDir,
+      runFfmpegFn: ffmpeg.run,
+      log: (text) => logs.push(text),
+    })(executePlugin())!;
+
+    const args = argsFor({ inputPath, encodes: false });
+    args.variables.ffmpegCommand.shouldProcess = true;
+    expect(deriveShouldProcess(args.variables.ffmpegCommand)).toBe(true);
+
+    const out = await module.plugin(args);
+
+    expect(ffmpeg.calls).toEqual([]);
+    expect(out.outputNumber).toBe(1);
+    expect(out.outputFileObj._id).toBe(inputPath);
+    expect(existsSync(join(workDir, 'source.mkv'))).toBe(false);
+    // The operator has to be able to tell this skip from the "no plugin asked
+    // for anything" one, because only this one means a node in their flow is
+    // asking for work it does not do.
+    expect(logs.join('\n')).toContain('set shouldProcess');
+  });
+
+  it('runs a container change even though every stream is copied', async () => {
+    // The dangerous direction: `deriveShouldProcess` never looks at the
+    // container, so this command reads as "no work" to it while the output is
+    // a different file. Skipping here would mark an unconverted file
+    // converged and stamp its signature, permanently.
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const module = runnerFor({ workDir, runFfmpegFn: ffmpeg.run })(executePlugin())!;
+
+    const args = argsFor({ inputPath, encodes: false });
+    args.variables.ffmpegCommand.container = 'mp4';
+    expect(deriveShouldProcess(args.variables.ffmpegCommand)).toBe(false);
+
+    const out = await module.plugin(args);
+
+    expect(ffmpeg.calls).toHaveLength(1);
+    // Every stream still copied — the change is the container alone.
+    expect(ffmpeg.calls[0]!.args).toContain('-c');
+    expect(ffmpeg.calls[0]!.args.at(-1)).toMatch(/\.mp4$/);
+    expect(out.outputFileObj._id).toBe(join(workDir, 'source.mp4'));
+  });
+
+  it('runs when a stream was added, even though the added stream is only copied', async () => {
+    // `Ensure Audio Stream` adding a redundant stereo downmix: the shape that
+    // rewrote a whole library. The added track carries no encode of its own
+    // here, so only the stream SET distinguishes the output from the input.
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const module = runnerFor({ workDir, runFfmpegFn: ffmpeg.run })(executePlugin())!;
+
+    const args = argsFor({ inputPath, encodes: false });
+    const command = args.variables.ffmpegCommand;
+    command.streams.push({ ...command.streams[1]! });
+
+    await module.plugin(args);
+
+    expect(ffmpeg.calls).toHaveLength(1);
+    const argv = ffmpeg.calls[0]!.args;
+    expect(argv.filter((_, i) => argv[i - 1] === '-map')).toEqual(['0:0', '0:1', '0:1']);
+  });
+
+  it('runs when the host itself would drop a stream the file still has', async () => {
+    // Nothing in the FLOW changed, but the compiler's unmappable-stream rule
+    // would leave the degenerate cover art out — so the output really is a
+    // different file, and the file really is worth rewriting.
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const module = runnerFor({ workDir, runFfmpegFn: ffmpeg.run })(executePlugin())!;
+
+    const streams: ProbeStream[] = [
+      ...SOURCE_STREAMS,
+      { index: 2, codec_type: 'video', codec_name: 'mjpeg', width: 0, height: 0 },
+    ];
+    const args = argsFor({ inputPath, encodes: false });
+    args.originalLibraryFile.ffProbeData.streams = streams;
+    args.variables.ffmpegCommand = beginFfmpegCommand({
+      probe: { streams },
+      container: 'mkv',
+      inputPath,
+    });
+
+    await module.plugin(args);
+
+    expect(ffmpeg.calls).toHaveLength(1);
+    const argv = ffmpeg.calls[0]!.args;
+    expect(argv.filter((_, i) => argv[i - 1] === '-map')).toEqual(['0:0', '0:1']);
+  });
+
+  it('refuses to skip when it is not reading the original library file', async () => {
+    // A second Begin/Execute pair runs against a path an earlier Execute
+    // produced, while the file object's probe still describes the file the job
+    // started with. Comparing the two could only produce a confident wrong
+    // answer, so this branch runs.
+    const { root, inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const module = runnerFor({ workDir, runFfmpegFn: ffmpeg.run })(executePlugin())!;
+
+    const args = argsFor({ inputPath, encodes: false });
+    const producedPath = join(root, 'earlier-output.mkv');
+    writeFileSync(producedPath, 'produced by an earlier Execute', 'utf8');
+    args.inputFileObj = { ...args.inputFileObj, _id: producedPath };
+    args.variables.ffmpegCommand.inputFiles = [producedPath];
+
+    await module.plugin(args);
+
+    expect(ffmpeg.calls).toHaveLength(1);
   });
 
   it('leaves an unmappable stream out of the argv and says so where the operator can see it', async () => {

@@ -7,6 +7,7 @@ export * from './signature.js';
 export * from './ledger.js';
 export * from './ffmpeg-command.js';
 export * from './ffmpeg-compile.js';
+export * from './ffmpeg-noop.js';
 export * from './hardware-decode.js';
 export * from './worker-class.js';
 export * from './schedule.js';

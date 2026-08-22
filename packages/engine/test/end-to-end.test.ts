@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +17,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
 import { applyHardwareDecoding, beginFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import { toolAvailableSync } from '../../../test-support/tool-availability.js';
+import { writePluginFile } from './fixtures/make-plugin.js';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 
 const execFileAsync = promisify(execFile);
@@ -280,6 +283,20 @@ const audioCodecOf = async (path: string): Promise<string> => {
     'a:0',
     '-show_entries',
     'stream=codec_name',
+    '-of',
+    'csv=p=0',
+    path,
+  ]);
+  return stdout.trim();
+};
+
+/** The muxer ffprobe says wrote the file — `matroska,webm`, `mov,mp4,...`. */
+const formatOf = async (path: string): Promise<string> => {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'quiet',
+    '-show_entries',
+    'format=format_name',
     '-of',
     'csv=p=0',
     path,
@@ -1009,4 +1026,208 @@ describe.runIf(available)('compiled argv, as real ffmpeg reads it', () => {
       expect(statSync(producedPath).size).toBeGreaterThan(0);
     }, 180_000);
   });
+});
+
+/**
+ * The no-op gate, driven through the real CLI against real ffmpeg.
+ *
+ * The shape being reproduced is the one that cost a real 8.4 TB library
+ * ~6.5 TB of pointless rewriting: a conform flow whose command-building nodes
+ * DECLARE work (`shouldProcess`) on files that are already in the target
+ * state, so every one of them reached Execute and was remuxed to say exactly
+ * what it already said, with the original pushed into a 14-day trash.
+ *
+ * Both directions are asserted on observable state — the files on disk, their
+ * bytes, and what ffprobe says about them — because the dangerous failure is
+ * skipping a file that WOULD have changed, and only a real ffmpeg run can
+ * settle what "would have changed" means. Never on elapsed time, and never on
+ * log text as a stand-in for behaviour.
+ */
+describe.runIf(available)('the no-op gate, against real ffmpeg', () => {
+  /** A community-shaped plugin whose body is the only thing that varies. */
+  const conformPluginPath = (body: string): string =>
+    writePluginFile(`
+const details = () => ({
+  name: 'Conform',
+  description: 'fixture',
+  style: { borderColor: '#000000' },
+  tags: 'ffmpeg',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '2.11.01',
+});
+
+const plugin = (args) => {
+  const command = args.variables.ffmpegCommand;
+  ${body}
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: args.inputFileObj._id },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`);
+
+  /** start → Begin Command → the fixture plugin → Execute. */
+  const conformFlowPath = (input: { dir: string; name: string; pluginPath: string }): string => {
+    const path = join(input.dir, `${input.name}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'conform', pluginId: input.pluginPath, pluginVersion: '1.0.0', inputs: {} },
+          { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+        ],
+        edges: [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
+          { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'conform' },
+          { fromNodeId: 'conform', outputNumber: 1, toNodeId: 'execute' },
+        ],
+      }),
+      'utf8',
+    );
+    return path;
+  };
+
+  const sha256 = (path: string): string =>
+    createHash('sha256').update(readFileSync(path)).digest('hex');
+
+  /**
+   * One whole run: a private source copy, a private work directory, the flow,
+   * and everything observable about the file afterwards.
+   */
+  const runConform = async (input: { name: string; body: string; container?: string }) => {
+    const dir = mkdtempSync(join(tmpdir(), `trawlarr-noop-${input.name}-`));
+    const sourcePath = join(dir, `${input.name}.mkv`);
+    copyFileSync(mediaPath, sourcePath);
+    const runWorkDir = join(dir, 'work');
+    mkdirSync(runWorkDir, { recursive: true });
+
+    const before = sha256(sourcePath);
+    const { stdout } = await runCli([
+      '--flow',
+      conformFlowPath({ dir, name: input.name, pluginPath: conformPluginPath(input.body) }),
+      '--file',
+      sourcePath,
+      '--work-dir',
+      runWorkDir,
+    ]);
+
+    const producedPath = join(runWorkDir, `${input.name}.${input.container ?? 'mkv'}`);
+    return {
+      stdout,
+      sourcePath,
+      producedPath,
+      /** Did Execute actually write the file it would have written? */
+      produced: existsSync(producedPath),
+      /** Did the run touch the file it read? */
+      sourceUnchanged: sha256(sourcePath) === before,
+      resultPath: /Result path: (.+)/.exec(stdout)?.[1]?.trim(),
+    };
+  };
+
+  it('skips a file a declaring flow would have rewritten, leaving it byte-identical', async () => {
+    // `Set Container` to the container the file already has, plus the
+    // `shouldProcess` every such node sets. `deriveShouldProcess` says yes;
+    // the compiled command is an identity remux; the file must be left alone.
+    const run = await runConform({
+      name: 'already-conformed',
+      body: `command.container = 'mkv'; command.shouldProcess = true;`,
+    });
+
+    // The observable outcome: ffmpeg wrote nothing, the input is byte-for-byte
+    // what it was, and the flow carried the ORIGINAL path forward — so a
+    // Replace node downstream finds nothing to replace and the file is marked
+    // converged rather than rewritten.
+    expect(run.produced).toBe(false);
+    expect(run.sourceUnchanged).toBe(true);
+    expect(run.resultPath).toBe(run.sourcePath);
+    expect(run.stdout).toContain('Stopped: end-of-flow');
+    // Why, where an operator can see it: this text is the job log and the
+    // step's log_excerpt, and it is the only record of a decision not to act.
+    expect(run.stdout).toContain('Skipping ffmpeg');
+    expect(run.stdout).toContain('set shouldProcess');
+  }, 180_000);
+
+  it('does not skip a container change, and really produces the new container', async () => {
+    // Every stream copied; the container is the whole difference. A gate that
+    // reasoned only about streams would skip this and mark an unconverted
+    // file converged — the dangerous direction.
+    const run = await runConform({
+      name: 'container-change',
+      body: `command.container = 'mp4'; command.shouldProcess = true;`,
+      container: 'mp4',
+    });
+
+    expect(run.produced).toBe(true);
+    expect(run.resultPath).toBe(run.producedPath);
+    expect(await formatOf(run.producedPath)).toContain('mp4');
+    // A remux, not a re-encode: the codecs came through untouched.
+    expect(await videoCodecOf(run.producedPath)).toBe('h264');
+    expect(await audioCodecOf(run.producedPath)).toBe('aac');
+  }, 180_000);
+
+  it('does not skip an added stream, even though the added stream is only copied', async () => {
+    // `Ensure Audio Stream` adding a redundant track: the likely trigger of
+    // the real incident, and a genuine change, so it must run.
+    const run = await runConform({
+      name: 'added-stream',
+      body: `command.streams.push(Object.assign({}, command.streams[1]));`,
+    });
+
+    expect(run.produced).toBe(true);
+    const streams = await streamsOf(run.producedPath);
+    expect(streams).toHaveLength((await streamsOf(run.sourcePath)).length + 1);
+    expect(streams.filter((stream) => stream.codec_type === 'audio')).toHaveLength(2);
+  }, 180_000);
+
+  it('does not skip a dropped stream', async () => {
+    const run = await runConform({
+      name: 'dropped-stream',
+      body: `command.streams[1].removed = true;`,
+    });
+
+    expect(run.produced).toBe(true);
+    const streams = await streamsOf(run.producedPath);
+    expect(streams).toHaveLength((await streamsOf(run.sourcePath)).length - 1);
+    expect(streams.some((stream) => stream.codec_type === 'audio')).toBe(false);
+  }, 180_000);
+
+  it('does not skip a codec change asked for without shouldProcess', async () => {
+    // The divergence `deriveShouldProcess` exists for — several upstream
+    // plugins configure an encode and never set the flag — must survive the
+    // gate: outputArgs alone are a change.
+    const run = await runConform({
+      name: 'codec-change',
+      body: `command.streams[0].outputArgs.push('-c:{outputIndex}', 'libx265');
+  command.streams[0].forceEncoding = true;`,
+    });
+
+    expect(run.produced).toBe(true);
+    expect(await videoCodecOf(run.sourcePath)).toBe('h264');
+    expect(await videoCodecOf(run.producedPath)).toBe('hevc');
+    expect(await audioCodecOf(run.producedPath)).toBe('aac');
+  }, 180_000);
+
+  it('does not skip a metadata-only change, which survives a stream copy', async () => {
+    const run = await runConform({
+      name: 'metadata-change',
+      body: `command.streams[1].outputArgs.push('-metadata:s:{outputIndex}', 'language=deu');`,
+    });
+
+    expect(run.produced).toBe(true);
+    const streams = await streamsOf(run.producedPath);
+    const audio = streams.find((stream) => stream.codec_type === 'audio');
+    expect((audio?.tags as Record<string, string> | undefined)?.language).toBe('deu');
+    // Still a copy: nothing was re-encoded to change a label.
+    expect(await audioCodecOf(run.producedPath)).toBe('aac');
+  }, 180_000);
 });

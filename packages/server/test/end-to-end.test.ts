@@ -649,3 +649,187 @@ describe.runIf(available && corpusAvailable)(
     }, 600_000);
   },
 );
+
+/**
+ * The no-op gate at LEDGER altitude: the whole loop, the real database, real
+ * ffmpeg, and a flow whose command-building node declares work it does not do.
+ *
+ * This is the incident that motivated the gate, reduced to one file: on a real
+ * 8.4 TB library a conform flow rewrote ~4,000 files that were already in the
+ * target state, at 1,453 MB of original pushed into a 14-day trash per file.
+ * Every part of that flow was behaving correctly on its own; the missing piece
+ * was anything asking whether the command would produce a different file.
+ *
+ * Asserted on bytes, on the trash directory, and on rows — never on timing.
+ */
+describe.runIf(available)('a flow that declares work it does not do', () => {
+  beforeAll(() => {
+    assertBuiltCliIsFresh();
+  });
+
+  /**
+   * A community-shaped node that sets `shouldProcess` and changes nothing —
+   * the shape of a `Set Container` to the container the file already has, or a
+   * filter that matched no stream. Written to disk and referred to BY PATH,
+   * exactly as a user's flow refers to a community plugin.
+   */
+  const declaringPluginPath = (dir: string): string => {
+    const path = join(dir, 'declaring-plugin.js');
+    writeFileSync(
+      path,
+      `
+const details = () => ({
+  name: 'Declares Work',
+  description: 'fixture',
+  style: { borderColor: '#000000' },
+  tags: 'ffmpeg',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: 'faQuestion',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'out 1' }],
+  requiresVersion: '2.11.01',
+});
+
+const plugin = (args) => {
+  args.variables.ffmpegCommand.shouldProcess = true;
+  return {
+    outputNumber: 1,
+    outputFileObj: { _id: args.inputFileObj._id },
+    variables: args.variables,
+  };
+};
+
+module.exports = { details, plugin };
+`,
+      'utf8',
+    );
+    return path;
+  };
+
+  it('leaves the library file byte-identical, converges it, and says why in the step trace', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-noop-ledger-'));
+    const libraryRoot = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryRoot, { recursive: true });
+    const mediaPath = join(libraryRoot, 'movie.mkv');
+    await makeMultiAudioSample(mediaPath);
+    const md5Before = md5Of(mediaPath);
+    const sizeBefore = statSync(mediaPath).size;
+
+    const flowPath = join(workDir, 'flow.json');
+    writeFileSync(
+      flowPath,
+      JSON.stringify({
+        nodes: [
+          { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+          { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'declare',
+            pluginId: declaringPluginPath(workDir),
+            pluginVersion: '1.0.0',
+            inputs: {},
+          },
+          { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+          {
+            id: 'verify',
+            pluginId: 'trawlarr:verifyOutput',
+            pluginVersion: '1.0.0',
+            inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+          },
+          {
+            id: 'replace',
+            pluginId: 'trawlarr:replaceOriginal',
+            pluginVersion: '1.0.0',
+            inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+          },
+        ],
+        edges: [
+          { fromNodeId: 'start', outputNumber: 1, toNodeId: 'begin' },
+          { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'declare' },
+          { fromNodeId: 'declare', outputNumber: 1, toNodeId: 'execute' },
+          { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
+          { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+        ],
+      }),
+      'utf8',
+    );
+
+    await runCli([
+      'library',
+      'add',
+      '--name',
+      'Movies',
+      '--root',
+      libraryRoot,
+      '--data-dir',
+      dataDir,
+    ]);
+    await runCli(['flow', 'add', '--name', 'Conform', '--file', flowPath, '--data-dir', dataDir]);
+    await runCli([
+      'library',
+      'set-flow',
+      '--library',
+      'Movies',
+      '--flow',
+      'Conform',
+      '--data-dir',
+      dataDir,
+    ]);
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--data-dir', dataDir]);
+
+    // Byte for byte the file it was. No remux, no new inode, nothing pushed
+    // into trash to sit out a 14-day retention.
+    expect(md5Of(mediaPath)).toBe(md5Before);
+    const trashDir = join(libraryRoot, '.trawlarr', 'trash');
+    expect(existsSync(trashDir) ? readdirSync(trashDir) : []).toEqual([]);
+
+    const db = openStateDb(dataDir);
+    const library = createLibraryRepo(db).getByName('Movies');
+    const counts = createMediaFileRepo(db).countsByState(library!.id);
+    // Converged, not merely skipped: the point of the gate is that an
+    // already-correct file settles, rather than being rewritten or re-queued.
+    expect(counts.good).toBe(1);
+    expect(counts.held + counts.failed + counts.queued).toBe(0);
+
+    // How the ledger tells this file from a transcoded one: the row's identity
+    // and size are exactly what the scan recorded — no replacement was ever
+    // registered against it — while a transcoded file's content_key, size and
+    // probe are all rewritten by the same run (the removal suite above asserts
+    // that side).
+    const row = db.prepare('SELECT size_bytes, content_key FROM media_file').get() as {
+      size_bytes: number;
+      content_key: string;
+    };
+    expect(row.size_bytes).toBe(sizeBefore);
+    const scanned = createMediaFileRepo(db).getById(
+      (db.prepare('SELECT id FROM media_file').get() as { id: string }).id,
+    );
+    expect(scanned!.content_key).toBe(row.content_key);
+
+    // And WHY, in the one place an operator looks after the fact: the Execute
+    // step's own persisted log excerpt. `job_step` has no outcome column of
+    // its own, so this is where a decision not to act is recorded — the same
+    // convention a failing step's error already uses.
+    const step = db
+      .prepare(
+        `SELECT output_number, log_excerpt FROM job_step WHERE plugin_id = 'trawlarr:execute'`,
+      )
+      .get() as { output_number: number; log_excerpt: string };
+    expect(step.output_number).toBe(1);
+    expect(step.log_excerpt).toContain('Skipping ffmpeg');
+    expect(step.log_excerpt).toContain('set shouldProcess');
+    db.close();
+
+    // Converged means it stays converged: a second scan re-queues nothing, so
+    // the skip is a settled answer rather than a file quietly going round again.
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    const after = openStateDb(dataDir);
+    const libraryAgain = createLibraryRepo(after).getByName('Movies');
+    expect(createMediaFileRepo(after).countsByState(libraryAgain!.id).queued).toBe(0);
+    expect(md5Of(mediaPath)).toBe(md5Before);
+    after.close();
+  }, 600_000);
+});

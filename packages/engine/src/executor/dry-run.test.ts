@@ -46,7 +46,7 @@ const beginAndEncode: PluginModule = {
   details: () => details(),
   plugin: (args) => {
     const command = beginFfmpegCommand({
-      probe: { streams: [{ codec_type: 'video', codec_name: 'h264' }] },
+      probe: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
       container: 'mkv',
       inputPath: args.inputFileObj._id,
     });
@@ -64,7 +64,7 @@ const beginOnly: PluginModule = {
   details: () => details(),
   plugin: (args) => {
     const command = beginFfmpegCommand({
-      probe: { streams: [{ codec_type: 'video', codec_name: 'h264' }] },
+      probe: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
       container: 'mkv',
       inputPath: args.inputFileObj._id,
     });
@@ -88,9 +88,22 @@ const flow = (nodes: FlowNode[], edges: FlowDefinition['edges']): FlowDefinition
   edges,
 });
 
+/**
+ * The original library file the dry run's no-op gate compares commands
+ * against. Its probe is the one `beginOnly`/`beginAndEncode` seed from, so a
+ * command nobody touched really is an identity remux of THIS file — which is
+ * the whole thing the gate is deciding.
+ */
+const originalLibraryFile = {
+  _id: '/in.mkv',
+  container: 'mkv',
+  ffProbeData: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
+};
+
 const buildArgs = (invocation: { currentPath: string; variables: unknown }) =>
   ({
     inputFileObj: { _id: invocation.currentPath },
+    originalLibraryFile,
     variables: invocation.variables,
     inputs: {},
     jobLog: () => {},

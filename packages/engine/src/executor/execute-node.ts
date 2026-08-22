@@ -1,9 +1,10 @@
 import { rename, unlink } from 'node:fs/promises';
 import type { PluginModule } from '@trawlarr/plugin-api';
-import { closeFfmpegCommand, compileFfmpegArgs, deriveShouldProcess } from '@trawlarr/core';
+import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import { runFfmpeg, type RunFfmpegFn } from '../ffmpeg/run.js';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
+import { decideNoopGate } from './noop-gate.js';
 
 /**
  * The engine owns execution: the Execute node's declared behaviour is replaced
@@ -29,10 +30,16 @@ export const createExecuteRunner =
       plugin: async (args) => {
         const command = args.variables.ffmpegCommand;
 
-        if (!deriveShouldProcess(command)) {
-          input.log?.(
-            'Nothing to do: no stream changes and no overall arguments. Skipping ffmpeg.',
-          );
+        // The no-op gate. See `decideNoopGate` for where it lives and why, and
+        // for why it — not `deriveShouldProcess` — is what decides a skip.
+        // The reason is logged in BOTH directions: a skip that cannot be
+        // explained after the fact is indistinguishable from a bug, and the
+        // run branch's reason is what tells an operator which node made the
+        // 4,000th identical file worth rewriting.
+        const gate = decideNoopGate(args);
+        input.log?.(gate.reason);
+
+        if (gate.skip) {
           return {
             outputNumber: 1,
             outputFileObj: { _id: args.inputFileObj._id },

@@ -1,7 +1,8 @@
 import type { PluginModule } from '@trawlarr/plugin-api';
-import { closeFfmpegCommand, compileFfmpegArgs, deriveShouldProcess } from '@trawlarr/core';
+import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
+import { decideNoopGate } from './noop-gate.js';
 import { runFlow, type FlowRunResult, type RunFlowOptions } from './run-flow.js';
 import { classifySideEffects } from './vouchable.js';
 
@@ -54,10 +55,14 @@ export const runDryFlow = async (
   const inertStandIn = (plugin: LoadedPlugin): PluginModule => ({
     details: () => plugin.details,
     plugin: (args) => {
+      // The SAME gate the real Execute applies, for the same reason the
+      // encode target is resolved through the same helper: a dry run that
+      // reported a command the real run would skip would be describing work
+      // that is never going to happen.
       if (
         plugin.id === 'trawlarr:execute' &&
         args.variables.ffmpegCommand.init &&
-        deriveShouldProcess(args.variables.ffmpegCommand)
+        !decideNoopGate(args).skip
       ) {
         // Report the exact command the real Execute would run — same
         // resolver, same scratch write target — so a dry run can never
