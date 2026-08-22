@@ -94,6 +94,26 @@ setting the daemon has already stored, and point at `GET /system/settings` (or t
 the way to see which variables were applied, which were ignored, and where the live value has drifted
 from the file.
 
+## Real media carries streams that cannot be muxed
+
+Found on the first run against a real 5.5 TB library. Some mkv files carry cover-art `mjpeg` streams
+with **zero dimensions** (`width=0, height=0`) — degenerate placeholders, often alongside perfectly
+valid posters. Trawlarr maps every input stream, and matroska refuses to write a dimensionless video
+stream, so the mux fails before a frame is encoded: `dimensions not set` → `Could not write header`.
+Proven not encoder-specific: the same file for one second under both `hevc_nvenc` and `libx265`, with
+the degenerate stream unmapped, succeeded under each.
+
+The consequence is worse than a failed job: the file burns its three attempts and goes terminal
+`failed`, so it can **never** be processed. In that library the three unconverged files out of 563 were
+unconverged for exactly this reason — every pipeline that maps all streams chokes on them, and the
+incumbent tool had not converted them in two weeks either. A file that defeats every tool tends to look
+like a rare curiosity until you notice it is the entire remainder.
+
+The fix must drop *only* genuinely unusable streams. A `1251x1595` mjpeg poster in the same file has to
+survive, be copied rather than encoded, and keep its dimensions — this is the same area as the proven
+cover-art data-loss bug, so the failure mode of an over-broad rule is destroying artwork in every file
+it touches, which is far worse than the bug being fixed.
+
 ## An allow-list is not a rule
 
 "A terminal output the flow author did not route is not success" was implemented as a hard-coded list of
