@@ -19,6 +19,19 @@ export const AGENT_MODULE_URL: URL = new URL('./agent.js', import.meta.url);
 const DEFAULT_CANCEL_GRACE_MS = 30_000;
 
 /**
+ * How long an EXITED worker's IPC channel is given to finish delivering
+ * whatever it already wrote, before the run is declared unreported.
+ *
+ * A hang detector, not an expectation about speed. The channel of a process
+ * that has exited reaches EOF as soon as the parent's event loop reads it,
+ * which is the very next poll — so this timer firing at all means something
+ * else is holding the write end of that pipe open (a grandchild that
+ * inherited the descriptor), and waiting for ever would strand the worker
+ * slot. Nothing asserts on it; see `drainThenSettle`.
+ */
+const DEFAULT_REPORT_DRAIN_MS = 30_000;
+
+/**
  * How long the worker's group gets to die of SIGTERM before SIGKILL.
  *
  * Short on purpose: by the time this timer is armed the worker has already
@@ -100,6 +113,11 @@ export interface AgentHandleDeps {
   cancelGraceMs?: number;
   /** How long the worker's group gets to die of SIGTERM before SIGKILL. */
   killGraceMs?: number;
+  /**
+   * How long an exited worker's IPC channel is given to drain before its run
+   * is declared unreported. See {@link DEFAULT_REPORT_DRAIN_MS}.
+   */
+  reportDrainMs?: number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -144,6 +162,7 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
   const clearTimer = input.clearTimer ?? ((handle: unknown) => clearTimeout(handle as never));
   const cancelGraceMs = input.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
   const killGraceMs = input.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+  const reportDrainMs = input.reportDrainMs ?? DEFAULT_REPORT_DRAIN_MS;
   const child = (input.forkFn ?? forkAgent)(fileURLToPath(AGENT_MODULE_URL));
 
   let ready = false;
@@ -155,6 +174,10 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     | null = null;
   let started = false;
   let graceTimer: unknown = null;
+  /** See `drainThenSettle`: an exit is not evidence until the channel is drained. */
+  let channelDrained = child.connected !== true;
+  let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  let drainTimer: unknown = null;
   /** The pid the agent reported for itself, used when the fork's own is unknown. */
   let reportedPid: number | undefined;
 
@@ -177,6 +200,14 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     outcome: { ok: true; report: JobReport } | { ok: false; error: AgentFailure },
   ) => {
     if (settle === null) return; // already settled — a run ends exactly once
+    // A report that arrived after the exit ends the wait for the channel:
+    // leaving the drain timer armed would hold a live handle (and, in
+    // production, the daemon's event loop) open for its whole duration on
+    // every worker that finished normally.
+    if (drainTimer !== null) {
+      clearTimer(drainTimer);
+      drainTimer = null;
+    }
     const done = settle;
     settle = null;
     done(outcome);
@@ -346,6 +377,54 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
       { reported: false, cancelled, exitCode, signal },
     );
 
+  /**
+   * WHY AN EXIT IS NOT YET EVIDENCE THAT NOTHING WAS REPORTED.
+   *
+   * `'exit'` and the IPC channel are two different handles, and the event
+   * loop is free to service them in either order. The agent's `sendAndExit`
+   * waits for `process.send`'s completion callback before leaving, so by the
+   * time the child is gone its report is WRITTEN — but written into a pipe
+   * the daemon has not necessarily read yet. Settling on `'exit'` therefore
+   * declares the child vanished while its `done` is still in flight; the
+   * message arrives a moment later and `finish` drops it, because the run
+   * has already ended.
+   *
+   * The damage is not cosmetic, and it is not confined to one job's
+   * bookkeeping. A run that replaced the file and reported it is recorded as
+   * a failed attempt: the row is backed off and keeps the PRE-transcode
+   * identity, while the file on disk carries the post-transcode one. Nothing
+   * is `running` any more and no row claims those bytes, so the next scan
+   * cannot recognise the file — the in-flight-output guard has nothing to
+   * match and `observeFile`'s identity is perfectly current — and it opens a
+   * SECOND row for a file that is already tracked. Then both are worked: the
+   * ghost converges on its own, and when the backoff expires the original
+   * row re-runs the flow against its stale probe and transcodes an
+   * already-transcoded file a second time, pushing the good result into
+   * trash. That is the ghost row `observeFile` closed one route to, reached
+   * by a different one: not a stale observation, a DISCARDED report.
+   *
+   * The fix is to wait for the channel itself. `'disconnect'` is emitted
+   * when the parent reads EOF on the IPC pipe, and every whole message
+   * already in that pipe is emitted before it — so once `'disconnect'` has
+   * fired, "no report arrived" is a fact rather than a guess. The timer is
+   * only a hang detector for a descriptor a grandchild inherited, and a
+   * child that never had a channel at all (a fork that failed, a test's
+   * double) is drained by definition.
+   */
+  const drainThenSettle = (): void => {
+    if (exitInfo === null || !channelDrained) return;
+    if (drainTimer !== null) {
+      clearTimer(drainTimer);
+      drainTimer = null;
+    }
+    finish({ ok: false, error: vanished(exitInfo.code, exitInfo.signal) });
+  };
+
+  child.on('disconnect', () => {
+    channelDrained = true;
+    drainThenSettle();
+  });
+
   child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
     gone = true;
     disarmGrace();
@@ -360,7 +439,18 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     if (cancelled) killGroup('SIGKILL');
     forgetGroup();
     resolveExited(code ?? null);
-    finish({ ok: false, error: vanished(code, signal) });
+    exitInfo = { code, signal };
+    // Nothing is waiting on a report — the run already ended, or this worker
+    // was never given one — so there is nothing to drain the channel for.
+    if (settle === null) return;
+    if (!channelDrained && drainTimer === null) {
+      drainTimer = setTimer(() => {
+        drainTimer = null;
+        channelDrained = true;
+        drainThenSettle();
+      }, reportDrainMs);
+    }
+    drainThenSettle();
   });
 
   child.on('error', (error: Error) => {

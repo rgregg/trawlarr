@@ -337,7 +337,7 @@ describe('createAgentHandle', () => {
     await Promise.resolve();
 
     expect(child.sent).toHaveLength(before);
-    child.emit('exit', 0, null);
+    child.die(0, null);
     await expect(running).rejects.toBeInstanceOf(AgentFailure);
   });
 
@@ -347,7 +347,7 @@ describe('createAgentHandle', () => {
 
     const running = handle.run(payload);
     child.emit('message', { type: 'ready', pid: 4242 });
-    child.emit('exit', 1, null);
+    child.die(1, null);
 
     await expect(running).rejects.toBeInstanceOf(AgentFailure);
     const failure = await failureOf(running);
@@ -357,6 +357,64 @@ describe('createAgentHandle', () => {
     expect(failure.reported).toBe(false);
     expect(failure.cancelled).toBe(false);
     expect(failure.exitCode).toBe(1);
+  });
+
+  /**
+   * An exit is not evidence that nothing was reported.
+   *
+   * `'exit'` and the IPC channel are different handles, and the event loop
+   * may service them in either order: the agent waits for `process.send`'s
+   * completion callback before leaving, so its report is WRITTEN, but into a
+   * pipe the daemon has not necessarily read. Settling on the exit alone
+   * discards the report of a run that fully succeeded — and since that run
+   * has already replaced the file on disk, the row is then backed off
+   * holding the pre-transcode identity, which is what lets the next scan
+   * open a second row for it (see `test/report-lost-at-exit.test.ts` for
+   * that consequence, driven end to end with a real fork).
+   *
+   * The interleaving is forced rather than raced: `die()` would model an
+   * exit whose channel closed with it, which is the SAFE order and the one
+   * that passes against the defect.
+   */
+  it('honours a report that was still in the channel when the exit was observed', async () => {
+    const child = fakeChild();
+    const timers = fakeTimers();
+    const handle = createAgentHandle(depsFor(child, {}, timers));
+
+    const running = handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+
+    child.emit('exit', 0, null);
+    // Nothing has yet said the channel is empty, so nothing may conclude the
+    // child reported nothing.
+    expect(await settled(running)).toBe(false);
+
+    child.emit('message', { type: 'done', report });
+    child.emit('disconnect');
+
+    await expect(running).resolves.toBe(report);
+    // The drain deadline is disarmed by the settle: a finished worker must
+    // not leave a live handle behind on every job the daemon runs.
+    expect(timers.pending.size).toBe(0);
+  });
+
+  it('stops waiting for a channel that never closes, rather than stranding the worker', async () => {
+    const child = fakeChild();
+    const timers = fakeTimers();
+    const handle = createAgentHandle(depsFor(child, {}, timers));
+
+    const running = handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('exit', 0, null);
+    expect(await settled(running)).toBe(false);
+
+    // A descriptor a grandchild inherited can hold the write end open after
+    // the worker itself is gone. The deadline is a hang detector, not an
+    // expectation about speed: the run still ends, as an unreported one.
+    timers.advance(30_000);
+    const failure = await failureOf(running);
+    expect(failure.reported).toBe(false);
+    expect(failure.exitCode).toBe(0);
   });
 
   it('rejects with a REPORTED AgentFailure when the agent says it failed', async () => {
@@ -466,7 +524,7 @@ describe('createAgentHandle', () => {
     const running = handle.run(payload);
     child.emit('message', { type: 'ready', pid: 4242 });
     child.emit('message', { type: 'done', report });
-    child.emit('exit', 0, null);
+    child.die(0, null);
 
     await expect(running).resolves.toEqual(report);
     await expect(handle.exited).resolves.toBe(0);
@@ -478,7 +536,7 @@ describe('createAgentHandle', () => {
 
     const running = handle.run(payload);
     child.emit('message', { type: 'ready', pid: 4242 });
-    child.emit('exit', null, 'SIGKILL');
+    child.die(null, 'SIGKILL');
     child.emit('message', { type: 'done', report });
 
     await expect(running).rejects.toBeInstanceOf(AgentFailure);
@@ -488,7 +546,7 @@ describe('createAgentHandle', () => {
     const child = fakeChild();
     const handle = createAgentHandle(depsFor(child));
 
-    child.emit('exit', 0, null);
+    child.die(0, null);
     await expect(handle.run(payload)).rejects.toBeInstanceOf(AgentFailure);
   });
 
@@ -539,7 +597,7 @@ describe('createAgentHandle', () => {
       [-4242, 'SIGKILL'],
     ]);
 
-    child.emit('exit', null, 'SIGKILL');
+    child.die(null, 'SIGKILL');
     const failure = await failureOf(running);
     expect(failure.cancelled).toBe(true);
     expect(failure.reported).toBe(false);
@@ -556,7 +614,7 @@ describe('createAgentHandle', () => {
     void handle.run(payload).catch(() => {});
     child.emit('message', { type: 'ready', pid: 4242 });
     handle.cancel();
-    child.emit('exit', 0, null);
+    child.die(0, null);
     timers.advance(600_000);
 
     // No TIMER survives the exit — nothing is signalled minutes later, at a
@@ -576,7 +634,7 @@ describe('createAgentHandle', () => {
     child.emit('message', { type: 'ready', pid: 4242 });
 
     expect(child.sent.filter((message) => message.type === 'job')).toEqual([]);
-    child.emit('exit', 0, null);
+    child.die(0, null);
     const failure = await failureOf(running);
     expect(failure.cancelled).toBe(true);
   });
@@ -598,12 +656,12 @@ describe('createAgentHandle', () => {
   it('resolves `exited` with the code, and with null for a signalled child', async () => {
     const one = fakeChild();
     const first = createAgentHandle(depsFor(one));
-    one.emit('exit', 3, null);
+    one.die(3, null);
     await expect(first.exited).resolves.toBe(3);
 
     const two = fakeChild();
     const second = createAgentHandle(depsFor(two));
-    two.emit('exit', null, 'SIGKILL');
+    two.die(null, 'SIGKILL');
     await expect(second.exited).resolves.toBeNull();
   });
 });

@@ -29,11 +29,17 @@ export const fakeChild = (
   on: (event: string, fn: (...args: unknown[]) => void) => void;
   kill: () => boolean;
   emit: (event: string, ...args: unknown[]) => void;
+  die: (code: number | null, signal: string | null) => void;
   sent: DaemonToAgent[];
 } => {
   const toAgent: DaemonToAgent[] = [];
   const listeners: Record<string, ((...args: unknown[]) => void)[]> = {};
-  return {
+  const emit = (event: string, ...args: unknown[]): void => {
+    listeners[event]?.forEach((fn) => {
+      fn(...args);
+    });
+  };
+  const self = {
     pid,
     connected: true,
     send: (message: DaemonToAgent) => {
@@ -44,13 +50,31 @@ export const fakeChild = (
       (listeners[event] ??= []).push(fn);
     },
     kill: () => true,
-    emit: (event: string, ...args: unknown[]) => {
-      listeners[event]?.forEach((fn) => {
-        fn(...args);
-      });
+    emit,
+    /**
+     * The child DIES: it exits, and — because the write end of its IPC
+     * channel died with it — the channel reaches EOF too.
+     *
+     * Both, in that order, because a fake that emits only `'exit'` describes
+     * a process that has gone away while its channel somehow stays open,
+     * which is not a state a real fork can be in. The daemon deliberately
+     * treats "the child exited" and "nothing more can arrive from it" as
+     * different facts (see `drainThenSettle`), so a double that conflates
+     * them would make every lifecycle test agree with whichever of the two
+     * the code happened to read.
+     *
+     * A test that wants the DANGEROUS interleaving — a report already in the
+     * pipe when the exit is observed — drives `emit` by hand instead, in the
+     * order the kernel can genuinely produce.
+     */
+    die: (code: number | null, signal: string | null): void => {
+      self.connected = false;
+      emit('exit', code, signal);
+      emit('disconnect');
     },
     sent: toAgent,
   };
+  return self;
 };
 
 export type FakeChild = ReturnType<typeof fakeChild>;
