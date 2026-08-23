@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildIdentityCandidate } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
@@ -79,6 +81,22 @@ const runningJob = (input: {
     createJobRepo(db).heartbeat({ jobId, nowMs: input.heartbeatAtMs });
   }
   return jobId;
+};
+
+/**
+ * A pid that PROVABLY names no process.
+ *
+ * A real child, run to completion and reaped before `spawnSync` returns, so
+ * the number is one the kernel really did hand out and really has taken
+ * back. Not an invented large integer: that would test the code against a
+ * pid the system never used, which is a different question from the one the
+ * reaper asks.
+ */
+const deadPid = (): number => {
+  const child = spawnSync(process.execPath, ['-e', '']);
+  const pid = child.pid;
+  if (pid === undefined) throw new Error('could not spawn a child to get a dead pid from');
+  return pid;
 };
 
 const jobRow = (jobId: string) =>
@@ -200,6 +218,90 @@ describe('reapStalled', () => {
 
     expect(repo.getById(mine)?.state).toBe('held');
     expect(repo.getById(theirs)?.state).toBe('running');
+  });
+
+  it('reclaims a row whose worker pid is gone, without waiting out the threshold', () => {
+    // The whole point of recording the pid: this row's heartbeat is a minute
+    // old, so the day-long threshold says nothing at all about it — and the
+    // process that was doing the work does not exist. Against the threshold
+    // alone this row is `live` and stays claimed until a human notices.
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    createJobRepo(db).setWorker({ jobId, pid: deadPid(), host: hostname() });
+
+    const summary = reapStalled({ db, nowMs: NOW });
+
+    expect(summary.reclaimed).toBe(1);
+    expect(repo.getById(fileId)?.state).toBe('held');
+    expect(jobRow(jobId).ended_at).toBe(NOW);
+    expect(jobRow(jobId).state).toBe('failed');
+  });
+
+  it('leaves a row whose worker pid is alive exactly where it is', () => {
+    // This process is the worker, as far as the row is concerned. A live pid
+    // is not evidence of anything except "do not use the fast path", so the
+    // row falls back to the threshold — which protects it.
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    createJobRepo(db).setWorker({ jobId, pid: process.pid, host: hostname() });
+
+    expect(reapStalled({ db, nowMs: NOW }).live).toBe(1);
+    expect(repo.getById(fileId)?.state).toBe('running');
+    expect(jobRow(jobId).ended_at).toBeNull();
+  });
+
+  it("never reads another host's pid table: a pid from elsewhere is not evidence of death", () => {
+    // The one error this must never make. A second node's worker can be
+    // transcoding perfectly well while its pid means nothing here — so a
+    // recorded host that is not this one disables the fast path entirely and
+    // the row is protected by the threshold like any other.
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    createJobRepo(db).setWorker({ jobId, pid: deadPid(), host: `${hostname()}-somewhere-else` });
+
+    expect(reapStalled({ db, nowMs: NOW }).live).toBe(1);
+    expect(repo.getById(fileId)?.state).toBe('running');
+  });
+
+  it('does not treat a scan of the file as a sign that its worker is alive', () => {
+    // `upsertScanned` is what every walk does to a row it matches by
+    // identity, and a `running` row whose file is present and unchanged is
+    // matched like any other — the in-flight-output guard only covers a
+    // walked file that matches NO row. It stamps `updated_at = now`.
+    //
+    // Taking that as a sign of life disabled this whole mechanism on any
+    // library that is still being scanned: every rescan refreshed the
+    // stranded row, so it read `live` for ever and no amount of waiting
+    // reclaimed it. This is the residual observed on the owner's library.
+    const fileId = runningFile({ claimedAtMs: NOW - 40 * HOUR_MS });
+    runningJob({
+      fileId,
+      startedAtMs: NOW - 40 * HOUR_MS,
+      heartbeatAtMs: NOW - 40 * HOUR_MS + 181,
+    });
+
+    const before = repo.getById(fileId)!;
+    repo.upsertScanned({
+      libraryId: LIB,
+      identity: { inodeKey: before.inode_key, contentKey: before.content_key },
+      path: before.path,
+      nlink: before.nlink,
+      sizeBytes: before.size_bytes,
+      mtimeMs: before.mtime_ms,
+      ctimeMs: before.ctime_ms,
+      container: before.container,
+      nowMs: NOW,
+    });
+
+    // The premise really holds: the scan really did move `updated_at` to now
+    // on a row that is `running`, without disturbing the claim.
+    const after = repo.getById(fileId)!;
+    expect(after.updated_at).toBe(NOW);
+    expect(after.state).toBe('running');
+
+    // And it changes nothing about whether the worker is alive.
+    expect(reapStalled({ db, nowMs: NOW }).reclaimed).toBe(1);
+    expect(repo.getById(fileId)?.state).toBe('held');
   });
 
   it('refuses a threshold short enough to reclaim a legitimate transcode', () => {

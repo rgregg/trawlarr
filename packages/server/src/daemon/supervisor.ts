@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import {
   evaluateSchedule,
   flowRequiredHardware,
@@ -428,6 +429,17 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
       },
       nowMs,
     });
+
+    // WHICH PROCESS IS RUNNING THIS JOB, recorded the instant it exists.
+    //
+    // The row had to be inserted before the fork (the scanner's
+    // in-flight-output guard depends on the claim being committed before any
+    // replacement byte can land), so this is the earliest moment the pid is
+    // knowable. It is what lets the stall reaper reclaim a claim whose
+    // worker is PROVABLY gone instead of waiting out a day of silence — see
+    // `reapStalled`. `os.hostname()` travels with it because a pid means
+    // nothing without the pid table it belongs to.
+    jobRepo.setWorker({ jobId: payload.jobId, pid: agent.pid ?? null, host: hostname() });
 
     let resolveDone: () => void = () => {};
     const done = new Promise<void>((resolve) => {

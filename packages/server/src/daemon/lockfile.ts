@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { processIsAlive } from './process-alive.js';
 import { osFileLock, type OsLockProvider } from './os-file-lock.js';
 
 /**
@@ -92,18 +93,12 @@ export class DaemonAlreadyRunningError extends Error {
  * directory cannot lock at all, and by records written by builds that
  * predate the lock file.
  */
-const defaultIsAlive = (pid: number): boolean => {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process EXISTS and belongs to someone else — a daemon
-    // started by another user is still a daemon, and taking its data
-    // directory over would be exactly the double-ownership this prevents.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-};
+// EPERM means the process EXISTS and belongs to someone else — a daemon
+// started by another user is still a daemon, and taking its data directory
+// over would be exactly the double-ownership this prevents. That reasoning,
+// and the `kill(pid, 0)` that implements it, is shared with the stall
+// reaper's own liveness check rather than written down twice.
+const defaultIsAlive = processIsAlive;
 
 const isRecord = (value: unknown): value is DaemonRecord => {
   if (value === null || typeof value !== 'object') return false;

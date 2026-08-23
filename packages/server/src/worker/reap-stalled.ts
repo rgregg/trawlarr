@@ -1,7 +1,9 @@
+import { hostname } from 'node:os';
 import { applyStall, newLedgerRecord } from '@trawlarr/core';
 import type { Db } from '../db/connection.js';
-import { createJobRepo } from '../db/job-repo.js';
+import { createJobRepo, type JobRow } from '../db/job-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
+import { processIsAlive } from '../daemon/process-alive.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -87,11 +89,27 @@ export interface ReapSummary {
  * case the others cannot:
  *
  *  - `media_file.updated_at` — stamped by `claimNext` at the moment of the
- *    claim. This is the ONLY evidence for an attempt with no job row at
- *    all: a worker killed between `claimNext` committing `running` and
- *    `jobRepo.start` inserting its row leaves nothing else behind, and that
- *    row is otherwise permanently unreachable (`claimNext` takes only
- *    `queued`/`held`, and the scanner refuses to touch `running`).
+ *    claim, AND CONSULTED ONLY WHEN THERE IS NO JOB ROW. It is the only
+ *    evidence for an attempt that never got one: a worker killed between
+ *    `claimNext` committing `running` and `jobRepo.start` inserting its row
+ *    leaves nothing else behind, and that row is otherwise permanently
+ *    unreachable (`claimNext` takes only `queued`/`held`, and the scanner
+ *    refuses to touch `running`).
+ *
+ *    IT IS NOT A SIGN OF LIFE ONCE A JOB ROW EXISTS, and taking it as one
+ *    was a bug that disabled this whole mechanism on any library that is
+ *    still being scanned. `upsertScanned` writes `updated_at = now` on
+ *    EVERY row it matches, on every walk — including a `running` one, whose
+ *    file is present and unchanged and therefore matched by identity like
+ *    any other. (The in-flight-output guard does not cover it: that guard
+ *    only fires for a walked file that matches NO row.) So each periodic
+ *    rescan refreshed the stranded row's `updated_at`, the MAX below never
+ *    aged past the threshold, and a row abandoned by a dead worker was
+ *    counted `live` for ever — the row would outlive the daemon, the
+ *    machine and the operator's patience, which is precisely what was
+ *    observed on the owner's library. Nothing is lost by dropping it: a
+ *    job row's `started_at` is written immediately after the claim that set
+ *    `updated_at`, so it is never the older of the two.
  *  - the latest job's `heartbeat_at`, falling back to its `started_at` — the
  *    normal case, and the only one that distinguishes a live long step from
  *    a dead worker.
@@ -101,14 +119,47 @@ export interface ReapSummary {
  *    this machinery; treating its recency as evidence keeps a row that was
  *    just written to from being reclaimed out from under whatever wrote it.
  */
-const lastActivityOf = (db: Db, row: MediaFileRow): number => {
-  const latest = createJobRepo(db).listForFile(row.id)[0];
+const lastActivityOf = (row: MediaFileRow, latest: JobRow | undefined): number => {
   if (latest === undefined) return row.updated_at;
   return Math.max(
-    row.updated_at,
     latest.heartbeatAt ?? latest.startedAt,
     latest.endedAt ?? Number.NEGATIVE_INFINITY,
   );
+};
+
+/**
+ * Is the process that was running this job PROVABLY not there any more?
+ *
+ * The time threshold above is a guess about liveness, and a deliberately
+ * slow one, because a silent worker is indistinguishable from one three
+ * hours into an Execute step. This is not a guess. The daemon forked the
+ * worker itself and wrote down its pid (`jobRepo.setWorker`); a pid that
+ * does not exist in this host's process table is a process that has ended.
+ *
+ * Every condition here exists to keep the answer FALSE whenever there is any
+ * doubt at all, because the only expensive error is declaring a live encode
+ * dead and handing its file to a second worker:
+ *
+ *  - no job row, or no recorded pid: nothing to check (an in-process
+ *    `trawlarr run`, a job from before the column existed, a worker whose
+ *    fork never surfaced a pid). Falls back to the threshold.
+ *  - a job that has ENDED: its row is not what is holding the file, and
+ *    reclaiming on the strength of it would race whatever is writing the
+ *    outcome right now.
+ *  - a pid recorded on a DIFFERENT host: this host's process table says
+ *    nothing about it. Without this check a second node would read its own
+ *    pids and conclude that a worker transcoding perfectly well elsewhere
+ *    had died — the one error that must never be made.
+ *  - `processIsAlive` itself resolves every ambiguity (EPERM, a reused pid)
+ *    to alive, so a wrong answer here is always the harmless one: the row
+ *    waits out the day-long threshold exactly as it did before.
+ */
+const workerProvablyGone = (latest: JobRow | undefined): boolean => {
+  if (latest === undefined) return false;
+  if (latest.endedAt !== null) return false;
+  if (latest.workerPid === null) return false;
+  if (latest.workerHost !== hostname()) return false;
+  return !processIsAlive(latest.workerPid);
 };
 
 /**
@@ -127,12 +178,25 @@ const lastActivityOf = (db: Db, row: MediaFileRow): number => {
  * worker again, be reclaimed again, for ever. Through `applyStall` it backs
  * off and, after `MAX_ATTEMPTS`, becomes terminal and visible.
  *
- * WHY THIS CANNOT TAKE LIVE WORK: see `DEFAULT_STALE_AFTER_MS`. The
- * threshold is a day and cannot be set below an hour; every source of
- * "recent" is taken at its most generous (`lastActivityOf` takes the MAX,
- * so any one signal of life protects the row); and the reclaim itself
- * re-reads the row inside its own transaction, so a row that left `running`
- * between the read and the write is left exactly as it was found.
+ * A row is abandoned if EITHER of two independent things is true, and they
+ * are not the same kind of statement:
+ *
+ *  - `workerProvablyGone` — the pid the daemon forked for this job is not in
+ *    this host's process table. A fact, and immediate: a claim whose worker
+ *    is provably gone should not wait a day for a human or a clock.
+ *  - the time threshold — no sign of life for `staleAfterMs`. An inference,
+ *    and the only route available for a row the first cannot speak about.
+ *
+ * WHY NEITHER CAN TAKE LIVE WORK. For the threshold: see
+ * `DEFAULT_STALE_AFTER_MS`; it is a day, cannot be set below an hour, and
+ * `lastActivityOf` takes the MAX of every signal, so any one sign of life
+ * protects the row. For the pid: see `workerProvablyGone`; every ambiguity
+ * — an unknown pid, another host, a permission error, a reused pid —
+ * resolves to "alive", so it can only ever reclaim EARLIER than the
+ * threshold would, never something the threshold would have protected. And
+ * for both, the reclaim re-reads the row inside its own transaction, so a
+ * row that left `running` between the decision and the write is left
+ * exactly as it was found.
  */
 export const reapStalled = (input: ReapStalledInput): ReapSummary => {
   const staleAfterMs = input.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
@@ -153,8 +217,13 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
   const summary: ReapSummary = { running: rows.length, reclaimed: 0, live: 0, files: [] };
 
   for (const row of rows) {
-    const lastActivityMs = lastActivityOf(db, row);
-    if (input.nowMs - lastActivityMs <= staleAfterMs) {
+    const latest = jobRepo.listForFile(row.id)[0];
+    const lastActivityMs = lastActivityOf(row, latest);
+    // Two independent routes to "abandoned", and the row needs only one.
+    // The pid route is the fast one and is a FACT; the threshold is the slow
+    // one and is an inference, and it remains the only route for every row
+    // the fast one cannot speak about.
+    if (!workerProvablyGone(latest) && input.nowMs - lastActivityMs <= staleAfterMs) {
       summary.live += 1;
       continue;
     }
@@ -176,15 +245,18 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
         // Close the job row the dead worker left open, so it stops reading
         // as in-flight to anything that looks at job history. An already
         // finished job is left alone: its own outcome is the true one.
-        const latest = jobRepo.listForFile(row.id)[0];
-        if (latest !== undefined && latest.endedAt === null) {
+        const latestNow = jobRepo.listForFile(row.id)[0];
+        if (latestNow !== undefined && latestNow.endedAt === null) {
           jobRepo.finish({
-            jobId: latest.id,
+            jobId: latestNow.id,
             state: 'failed',
-            outcome:
-              `Reclaimed by the stall reaper: no sign of life for ` +
-              `${String(Math.round((input.nowMs - lastActivityMs) / HOUR_MS))} hour(s), so the ` +
-              `worker running this job is presumed dead.`,
+            outcome: workerProvablyGone(latestNow)
+              ? `Reclaimed by the stall reaper: the worker running this job (pid ` +
+                `${String(latestNow.workerPid)} on ${String(latestNow.workerHost)}) no longer ` +
+                `exists, so it cannot still be working on this file.`
+              : `Reclaimed by the stall reaper: no sign of life for ` +
+                `${String(Math.round((input.nowMs - lastActivityMs) / HOUR_MS))} hour(s), so the ` +
+                `worker running this job is presumed dead.`,
             nowMs: input.nowMs,
           });
         }

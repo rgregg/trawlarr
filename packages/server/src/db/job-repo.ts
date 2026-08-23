@@ -15,6 +15,14 @@ export interface JobRow {
   startedAt: number;
   heartbeatAt: number | null;
   endedAt: number | null;
+  /**
+   * The pid of the worker process running this job, and the host whose pid
+   * table that number belongs to. Both null until `setWorker` is called, and
+   * null forever for a run that forks no worker at all (`trawlarr run`).
+   * See `006_job_worker_identity.sql`.
+   */
+  workerPid: number | null;
+  workerHost: string | null;
 }
 
 export interface JobStepRow {
@@ -94,6 +102,14 @@ export interface HeartbeatInput {
   nowMs: number;
 }
 
+export interface SetWorkerInput {
+  jobId: string;
+  /** The forked worker's pid, or null when the fork never surfaced one. */
+  pid: number | null;
+  /** The host that pid belongs to; `os.hostname()` in every real caller. */
+  host: string;
+}
+
 /**
  * A page of job rows plus the TOTAL the filter matched.
  *
@@ -118,6 +134,17 @@ export interface JobRepo {
   recordStep(input: RecordStepInput): void;
   finish(input: FinishJobInput): void;
   heartbeat(input: HeartbeatInput): void;
+  /**
+   * Record which process is running this job.
+   *
+   * Separate from `start` because the two facts become available at
+   * different moments and in that order: the row has to exist before the
+   * worker is forked (the scanner's in-flight guard depends on the claim
+   * being committed first), so the pid is not knowable when the row is
+   * written. A job whose worker dies between the two calls keeps NULL and is
+   * reclaimed by the reaper's time threshold, exactly as before.
+   */
+  setWorker(input: SetWorkerInput): void;
   listForFile(fileId: string): JobRow[];
   getById(jobId: string): JobRow | null;
   /** Filtered, paginated job history, newest first. */
@@ -138,6 +165,8 @@ interface JobRowRaw {
   started_at: number;
   heartbeat_at: number | null;
   ended_at: number | null;
+  worker_pid: number | null;
+  worker_host: string | null;
 }
 
 interface JobStepRowRaw {
@@ -164,6 +193,8 @@ const toJobRow = (row: JobRowRaw): JobRow => ({
   startedAt: row.started_at,
   heartbeatAt: row.heartbeat_at,
   endedAt: row.ended_at,
+  workerPid: row.worker_pid,
+  workerHost: row.worker_host,
 });
 
 const toJobStepRow = (row: JobStepRowRaw): JobStepRow => ({
@@ -221,6 +252,14 @@ export const createJobRepo = (db: Db): JobRepo => {
 
   const heartbeatJob = db.prepare(`UPDATE job SET heartbeat_at = ? WHERE id = ?`);
 
+  // Only while the job is still open. A `setWorker` that landed after the
+  // run had already been folded in would attach a pid to a finished row,
+  // which reads as "this ended job was run by a process that no longer
+  // exists" -- true, and exactly the shape the reaper's fast path looks for.
+  const setWorkerJob = db.prepare(
+    `UPDATE job SET worker_pid = ?, worker_host = ? WHERE id = ? AND ended_at IS NULL`,
+  );
+
   const selectForFile = db.prepare(`SELECT * FROM job WHERE file_id = ? ORDER BY started_at DESC`);
 
   const selectSteps = db.prepare(`SELECT * FROM job_step WHERE job_id = ? ORDER BY seq ASC`);
@@ -260,6 +299,10 @@ export const createJobRepo = (db: Db): JobRepo => {
 
     heartbeat(input) {
       heartbeatJob.run(input.nowMs, input.jobId);
+    },
+
+    setWorker(input) {
+      setWorkerJob.run(input.pid, input.host, input.jobId);
     },
 
     listForFile(fileId) {

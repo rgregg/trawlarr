@@ -447,6 +447,20 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     }
   });
 
+  // BEFORE the first claim, not an hour later: a daemon that is starting is
+  // very often a daemon that was killed, and the rows its previous life left
+  // `running` are exactly the ones whose workers are now provably gone. The
+  // pid route inside `reapStalled` settles those in milliseconds, so the
+  // files they stranded are claimable by the tick immediately below rather
+  // than waiting out the reaper's first interval. A worker that OUTLIVED the
+  // daemon (workers are detached, so a SIGKILLed daemon leaves them running)
+  // still has a live pid and is left completely alone.
+  try {
+    reapStalled({ db, nowMs: nowMs() });
+  } catch (error) {
+    onError(error, { phase: 'stall reaper' });
+  }
+
   // Claim whatever is already queued rather than waiting a whole tick for it.
   void supervisor.tick().catch((error: unknown) => {
     onError(error, { phase: 'supervisor tick' });

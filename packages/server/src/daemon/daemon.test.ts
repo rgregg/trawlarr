@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { extractFacts, type FactSet, type FlowDefinition } from '@trawlarr/core';
@@ -8,6 +8,7 @@ import type { ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
+import { createJobRepo } from '../db/job-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
 import { createSettingsRepo } from '../db/settings-repo.js';
 import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
@@ -313,6 +314,45 @@ describe('startDaemon', () => {
 
     expect((await readDaemonRecord({ dataDir }))!.port).toBe(first.port);
     expect((await health(first.port)).status).toBe(200);
+  });
+
+  it('reclaims a claim its previous life stranded, before it claims anything new', async () => {
+    // A worker that died having written NOTHING leaves the row `running` and
+    // the daemon that forked it is gone too, so nothing in the old process is
+    // ever going to settle it. Before this the row waited for the reaper's
+    // first interval an hour later — and, on a library that is still being
+    // scanned, for ever, because every walk refreshed the row's `updated_at`
+    // and the reaper read that as a sign of life.
+    //
+    // The pid the daemon wrote down is what settles it: a process that is not
+    // in this host's table is not encoding anything. A worker that OUTLIVED
+    // the daemon has a live pid and is deliberately untouched.
+    const dataDir = newDataDir();
+    const { fileId } = seedLibrary(dataDir);
+    const gone = await deadPid();
+
+    const seed = openDataDb(dataDir);
+    createMediaFileRepo(seed).setState({ fileId, state: 'running' });
+    const jobId = createJobRepo(seed).start({
+      fileId,
+      flowId: 'flow',
+      flowHash: 'hash',
+      nowMs: NOW,
+    });
+    createJobRepo(seed).heartbeat({ jobId, nowMs: NOW + 181 });
+    createJobRepo(seed).setWorker({ jobId, pid: gone, host: hostname() });
+    seed.close();
+
+    const { createAgent } = fakeAgents();
+    await start({ dataDir, createAgent, nowMs: () => NOW + 60_000 });
+
+    const after = openDataDb(dataDir);
+    try {
+      expect(createMediaFileRepo(after).getById(fileId)?.state).not.toBe('running');
+      expect(createJobRepo(after).getById(jobId)?.endedAt).not.toBeNull();
+    } finally {
+      after.close();
+    }
   });
 
   it('takes over a data directory whose daemon is gone', async () => {

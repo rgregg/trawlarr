@@ -1,0 +1,29 @@
+-- WHO IS ACTUALLY RUNNING THIS JOB, so that a claim whose worker is provably
+-- gone does not need a human to notice it.
+--
+-- A `running` media_file row is only reclaimable by the stall reaper, which
+-- waits a day of silence before it acts. It has to: `heartbeat_at` advances
+-- only between flow STEPS, and one step is a whole transcode, so a live
+-- worker on a 4K remux can legitimately say nothing for many hours and any
+-- shorter threshold would reclaim a file that is being encoded right now --
+-- two workers on one file being exactly how the destructive layer loses
+-- data. The threshold is therefore a guess about liveness, and it is a
+-- deliberately slow one.
+--
+-- There is a fact available instead of that guess. The daemon forks the
+-- worker itself and knows its pid; a pid that no longer exists on this host
+-- is not a slow encode, it is a dead process. `worker_pid` records it, and
+-- `worker_host` says which machine's pid table the number means -- without
+-- the hostname the number is meaningless anywhere else, and a future node
+-- that reaps rows claimed by ANOTHER node would read its own pid table and
+-- conclude that a worker transcoding perfectly well somewhere else had
+-- died. That is the one direction of error this must never make, so the
+-- host is recorded alongside the pid rather than assumed.
+--
+-- Both are nullable, and every existing row keeps NULL: a job started before
+-- this column existed, an in-process `trawlarr run` (no fork, no worker
+-- pid at all), or a worker whose fork never surfaced a pid, is simply not
+-- eligible for the fast path and falls back to the day-long threshold
+-- exactly as it does today.
+ALTER TABLE job ADD COLUMN worker_pid INTEGER;
+ALTER TABLE job ADD COLUMN worker_host TEXT;
