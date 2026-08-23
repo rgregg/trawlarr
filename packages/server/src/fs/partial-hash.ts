@@ -78,7 +78,19 @@ export const partialHashFile = async (path: string): Promise<PartialHashParts> =
 
     return { sizeBytes: size, headHex: digest(head), tailHex: digest(tail) };
   } finally {
-    await handle.close();
+    // CLOSING IS CLEANUP, AND CLEANUP DOES NOT GET TO DECIDE THE ANSWER. An
+    // `await handle.close()` here would sit in a `finally` wrapping the
+    // `return`, so a close that rejects (EIO on a network mount is the
+    // realistic one) discards a hash that was computed perfectly well. That
+    // is not a cosmetic loss: `runPayload` reads the replaced file's hash
+    // inside a `catch` that treats a throw as "that path is gone", so a
+    // failed close on the file a run just installed would make the run
+    // report that it replaced NOTHING — the row keeps the pre-transcode
+    // identity while the disk carries the post-transcode one, which is the
+    // stale-identity ghost row this hash exists to prevent. The descriptor
+    // is released with the process in the worst case; the identity cannot
+    // be recomputed once it has been thrown away.
+    await handle.close().catch(() => {});
   }
 };
 

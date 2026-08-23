@@ -9,6 +9,7 @@ import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { applyEnvSettings, type EnvApplication } from '../config/env-settings.js';
 import { sweepLibraryTrash } from '../library/trash-sweep.js';
+import { sweepLibraryStaging } from '../library/staging-sweep.js';
 import { sweepJobLogs } from '../job-log/job-log-store.js';
 import { reapStalled } from '../worker/reap-stalled.js';
 import { createEventBus } from './events.js';
@@ -176,9 +177,10 @@ const listen = async (server: Server, port: number, bind: string): Promise<numbe
  *     on, which matters the moment `--port 0` is used.
  *  6. Request a startup scan for every enabled library, then start the
  *     watcher and the periodic rescan.
- *  7. Start the supervisor tick, the daily trash purge (each library's own
- *     flow-declared retention, exactly as `trawlarr run` does it) and the
- *     hourly stall reaper.
+ *  7. Start the supervisor tick, the daily maintenance pass (each library's
+ *     trash, against its own flow-declared retention exactly as `trawlarr
+ *     run` does it; each library's staging directories, against the job rows
+ *     that own them; and the job logs) and the hourly stall reaper.
  *  8. Install the signal handlers that call `stop()`.
  *
  * Anything that fails part way through unwinds what it already started: a
@@ -416,6 +418,20 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
         await sweepLibraryTrash({ db, library, nowMs: nowMs() });
       } catch (error) {
         onError(error, { phase: `trash purge:${library.name}` });
+      }
+
+      // The same shape, on the same timer, for the other directory a run
+      // writes into. A worker killed mid-encode (OOM, segfault, power) never
+      // reaches `runPayload`'s own cleanup, and its partial encode then sits
+      // in the library's staging directory for ever — which, by design, is
+      // ON THE MEDIA FILESYSTEM, because installing the result has to be an
+      // atomic rename. Nothing in this tree removed those before. A live
+      // run's directory is never touched: see `sweepStaging` for why that is
+      // a fact about job rows rather than a guess about ages.
+      try {
+        await sweepLibraryStaging({ db, library, nowMs: nowMs() });
+      } catch (error) {
+        onError(error, { phase: `staging sweep:${library.name}` });
       }
     }
 

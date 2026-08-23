@@ -29,6 +29,7 @@ import {
   type StopReason,
 } from '@trawlarr/engine';
 import { ensureDir, resolveStagingDir, resolveTrashDir } from '../library/paths.js';
+import { workDirPrefix } from '../library/staging-dir.js';
 import {
   crossDeviceErrorSeam,
   findCompanionsSeam,
@@ -179,6 +180,64 @@ const stagingParentFor = async (input: {
 };
 
 /**
+ * How many times the scratch directory's removal is retried before the
+ * failure is merely reported, and how long between attempts.
+ *
+ * `rm` retries `EBUSY`, `EMFILE`, `ENFILE`, `ENOTEMPTY` and `EPERM` itself
+ * with an exponential backoff of `retryDelay * attempt`, so these numbers
+ * are a window of a few seconds rather than a fixed wait. That window is
+ * sized for ONE race in particular. On NFS, unlinking a file some process
+ * still holds open does not remove the directory entry: the client renames
+ * it to `.nfsXXXX` (a "silly rename") and only unlinks it once the last
+ * handle closes. A recursive removal that hits that lands `ENOTEMPTY` on
+ * the final `rmdir` — observed exactly once on a real 8.4 TB NFS library,
+ * `ENOTEMPTY: rmdir '.../staging/trawlarr-job-nNk0ey'`. Retrying is the
+ * whole fix for that race: the silly-renamed entry disappears the moment
+ * the descriptor is released, which is milliseconds later.
+ */
+const WORK_DIR_REMOVE_RETRIES = 5;
+const WORK_DIR_REMOVE_RETRY_DELAY_MS = 200;
+
+/**
+ * Remove a finished run's scratch directory. NEVER THROWS.
+ *
+ * THIS IS THE RULE, AND IT MATTERS MORE THAN THE RETRIES ABOVE: a cleanup
+ * step is not allowed to decide a job's outcome. This runs in a `finally`
+ * that wraps `runPayload`'s `return`, so an exception raised here does not
+ * merely lose the directory — it REPLACES the report the run just produced.
+ * On the success path that turns a completed, verified, correctly installed
+ * conversion into a reported failure: `applyThrownFailure` stalls the
+ * attempt, the row keeps its PRE-transcode identity while the file on disk
+ * carries the post-transcode one, and when the backoff expires the flow
+ * runs again and transcodes an already-transcoded file. A leftover
+ * directory costs disk space that the staging sweeper reclaims on its next
+ * pass (`sweepLibraryStaging`); a substituted outcome costs a second,
+ * pointless encode of a file that was already correct, and pushes the good
+ * copy into trash. The two are not close.
+ *
+ * So every failure is LOGGED AGAINST THE JOB and swallowed. The directory
+ * that survives is exactly the case the staging sweeper exists for, and it
+ * is safe to leave: this job's row is about to end, and a swept directory
+ * is only ever one whose job has ended.
+ */
+const removeWorkDir = async (workDir: string, log: (text: string) => void): Promise<void> => {
+  try {
+    await rm(workDir, {
+      recursive: true,
+      force: true,
+      maxRetries: WORK_DIR_REMOVE_RETRIES,
+      retryDelay: WORK_DIR_REMOVE_RETRY_DELAY_MS,
+    });
+  } catch (error) {
+    log(
+      `The scratch directory "${workDir}" could not be removed (${messageOf(error)}). This does ` +
+        `not affect what this run did or what it reported — the directory is left for the ` +
+        `staging sweeper, which removes it once this job's row has ended.`,
+    );
+  }
+};
+
+/**
  * Drive one payload through its flow and report what happened — WITHOUT
  * touching a database.
  *
@@ -268,7 +327,7 @@ export const runPayload = async (input: {
         return tmpdir();
       },
     );
-    const workDir = await mkdtemp(join(workParent, 'trawlarr-job-'));
+    const workDir = await mkdtemp(join(workParent, workDirPrefix(payload.jobId)));
     try {
       const originalFileObject = toPluginFileObject({
         fileId: payload.fileId,
@@ -645,7 +704,7 @@ export const runPayload = async (input: {
         cancelled: ports.signal?.aborted === true,
       };
     } finally {
-      await rm(workDir, { recursive: true, force: true });
+      await removeWorkDir(workDir, onLog);
     }
   } finally {
     // Runs even when the try above throws — the only case where the log
@@ -654,6 +713,22 @@ export const runPayload = async (input: {
     // there is no JavaScript left to run a `finally` in a process the
     // kernel just tore down, which is exactly why every `append` above is
     // synchronous rather than buffered for this moment to flush.
-    log?.close();
+    //
+    // Closing the log is CLEANUP, and cleanup does not get to decide what a
+    // run reported: `closeSync` can throw (EIO on a full or unreachable
+    // volume is the realistic one), and an uncaught throw here would replace
+    // this function's return value — a completed, verified, installed
+    // transcode reported to the daemon as a failure. See `removeWorkDir` for
+    // the same rule stated at length.
+    try {
+      log?.close();
+    } catch (error) {
+      // Not through `onLog`: the writer this would go to is the one that
+      // just failed to close. The daemon's own channel still works.
+      ports.onLog(
+        `The job log could not be closed cleanly (${messageOf(error)}). The run's own outcome ` +
+          `is unaffected; the descriptor goes when this process exits.`,
+      );
+    }
   }
 };
