@@ -613,14 +613,24 @@ It builds:
 ```
 start -> begin -> Set Container(mkv) -> Check Video Codec
    output 2 ("differs")      -> Set Video Encoder -> Custom Arguments
-   output 1 ("already hevc") ->                      Custom Arguments
-Custom Arguments -> Ensure Audio Stream -> Remove Stream By Property
+                                                  -> Ensure Audio Stream
+   output 1 ("already hevc") ->                      Ensure Audio Stream
+Ensure Audio Stream -> Remove Stream By Property
    -> Execute -> Verify Output -> Replace Original File
 ```
 
 Unlike `transcode-hevc`, output 1 of Check Video Codec is **not** a dead end
 here: a file that is already HEVC may still need a remux, a stereo track or a
-language filter, so it skips only the encoder and rejoins the chain.
+language filter, so it rejoins the chain at Ensure Audio Stream.
+
+It skips two nodes, not one. `Custom Arguments` carries
+`-max_muxing_queue_size`, which is a mitigation for muxing failures *during an
+encode*, and it pushes that argument unconditionally — so a file that needs no
+work at all would arrive at Execute carrying an overall output argument, which
+is a difference the output would carry and therefore an ffmpeg run. That is
+how a converged library gets rewritten end to end. Anything you add to this
+flow belongs on the encode branch unless a file that needs no work can pass
+through it and still come out with an empty command.
 
 If the community plugins are not installed, the command refuses and names
 them rather than storing a flow that would fail on every file:

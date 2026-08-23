@@ -308,13 +308,23 @@ const conformParameters: FlowTemplateParameter[] = [
  * - `forceConform` is `false`. It removes streams the target container cannot
  *   carry, which is right for mkv->mp4 and wrong as a default: for a library
  *   already in the target container it can only take things away.
- * - `muxqueue` sits on the COMMON path, after the branches rejoin. `Custom
- *   Arguments` pushes to `overallOuputArguments`, and `deriveShouldProcess`
- *   reads a non-empty `overallOuputArguments` as work to be done — so a
- *   converged file passing through it would run ffmpeg for ever. That is
- *   harmless here only because this flow always remuxes or transcodes
- *   something by the time it reaches Execute; moving the node means
- *   re-checking that claim.
+ * - `muxqueue` sits on the ENCODE BRANCH ONLY, between `encoder` and the
+ *   rejoin at `audio`. It used to sit on the common path, and that claim —
+ *   "harmless, because this flow always remuxes or transcodes something by
+ *   the time it reaches Execute" — was simply false. `Custom Arguments`
+ *   pushes to `overallOuputArguments` unconditionally; `deriveShouldProcess`
+ *   reads a non-empty `overallOuputArguments` as work to be done, and the
+ *   host's no-op gate reports overall arguments as a difference the output
+ *   would carry. A file already in the target state therefore reached Execute
+ *   with `-c:0 copy` and nothing else to do, and was rewritten anyway: on a
+ *   real 8.4 TB library that queued all 4,621 files, ~1,453 MB of original
+ *   into trash each. `-max_muxing_queue_size` is a mitigation for muxing
+ *   failures DURING an encode, so the encode branch is where it belongs and
+ *   the only place it can be reached from. Anything else added to this flow
+ *   must be checked the same way: every condition in `deriveShouldProcess`
+ *   (overall arguments, stream `outputArgs`, `forceEncoding`, removal,
+ *   `shouldProcess`) must be reachable only on a path that is already
+ *   changing the file.
  */
 const conformLibrary: FlowTemplate = {
   id: 'conform-library',
@@ -445,10 +455,12 @@ const conformLibrary: FlowTemplate = {
         { fromNodeId: 'container', outputNumber: 1, toNodeId: 'check' },
         // Output 1 is "already the target codec". Unlike transcode-hevc it is
         // NOT dead-ended: such a file may still need a remux, a stereo track
-        // or a language filter. It rejoins after the encoder, which is the
-        // only node it skips. Two edges INTO one node is legal; two edges out
-        // of one OUTPUT is not.
-        { fromNodeId: 'check', outputNumber: 1, toNodeId: 'muxqueue' },
+        // or a language filter. It rejoins at `audio`, skipping `encoder` AND
+        // `muxqueue` — the two nodes that only make sense when an encode is
+        // happening, and the two that would otherwise put work into the
+        // command for a file that needs none. Two edges INTO one node is
+        // legal; two edges out of one OUTPUT is not.
+        { fromNodeId: 'check', outputNumber: 1, toNodeId: 'audio' },
         { fromNodeId: 'check', outputNumber: 2, toNodeId: 'encoder' },
         { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'muxqueue' },
         { fromNodeId: 'muxqueue', outputNumber: 1, toNodeId: 'audio' },

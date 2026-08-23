@@ -114,7 +114,7 @@
     {
       "fromNodeId": "check",
       "outputNumber": 1,
-      "toNodeId": "muxqueue"
+      "toNodeId": "audio"
     },
     {
       "fromNodeId": "check",

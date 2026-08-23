@@ -1,5 +1,14 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -152,6 +161,8 @@ const streamsOf = async (
     }
   ).streams;
 };
+
+const md5Of = (path: string): string => createHash('md5').update(readFileSync(path)).digest('hex');
 
 /** A 1s test file, enough for the scanner and ffprobe to have something real. */
 const makeSample = async (path: string): Promise<void> => {
@@ -380,6 +391,116 @@ describe.runIf(available)('installing a community plugin and running it', () => 
       const counts = createMediaFileRepo(db).countsByState(library.id);
       expect(counts.good).toBe(1);
       expect(counts.failed).toBe(0);
+
+      // The muxing-queue flag reached the invocation that actually encoded.
+      // It is a mitigation for "Too many packets buffered for output stream"
+      // DURING an encode, so the encode branch is the one path it must never
+      // be lost from — and moving it off the common path is exactly the kind
+      // of change that could lose it.
+      const step = db
+        .prepare(
+          `SELECT log_excerpt FROM job_step WHERE plugin_id = 'trawlarr:execute' ORDER BY seq`,
+        )
+        .get() as { log_excerpt: string };
+      expect(step.log_excerpt).toContain('Running:');
+      expect(step.log_excerpt).toContain('-max_muxing_queue_size 2048');
+    } finally {
+      db.close();
+    }
+  }, 300_000);
+
+  /**
+   * The other half of the same template: a file that is ALREADY in the state
+   * the flow wants must produce no work at all.
+   *
+   * This is the regression test for a template bug that cost a real 8.4 TB
+   * library ~6.5 TB of churn. `muxqueue` (`ffmpegCommandCustomArguments`,
+   * `-max_muxing_queue_size 2048`) sat on BOTH branches of the codec check,
+   * so a converged file arrived at Execute carrying overall output arguments
+   * — which `deriveShouldProcess` reads as work, and which the no-op gate
+   * reports as a difference the output would carry. All 4,621 files queued,
+   * each remuxed to say what it already said, with ~1,453 MB of original
+   * pushed into a 14-day trash. The engine was right; the flow was wrong.
+   *
+   * The fixture is the real library's converged shape: hevc video, aac 2ch
+   * eng (which satisfies `Ensure Audio Stream`, so it adds nothing) and eac3
+   * 6ch eng, in mkv. Asserted on the decision and on the bytes, never on the
+   * flow's JSON — a test that grepped the template would pass against any
+   * rearrangement that kept the string.
+   */
+  it('leaves a file already in the target state untouched: no encode, no remux, no trash', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-conform-converged-'));
+    const libraryDir = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryDir, { recursive: true });
+    const mediaPath = join(libraryDir, 'Converged.mkv');
+
+    // hevc + aac 2ch eng + eac3 6ch eng, in mkv: every node in the conform
+    // flow has nothing to do with this file.
+    await execFileAsync('ffmpeg', [
+      '-hide_banner', '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=10',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+      '-f', 'lavfi', '-i', 'sine=frequency=880:duration=2',
+      '-map', '0:v', '-map', '1:a', '-map', '2:a',
+      '-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', 'log-level=none',
+      '-c:a:0', 'aac', '-ac:a:0', '2',
+      '-c:a:1', 'eac3', '-ac:a:1', '6',
+      '-metadata:s:a:0', 'language=eng', '-metadata:s:a:1', 'language=eng',
+      mediaPath,
+    ]); // prettier-ignore
+
+    // Guard against the fixture silently not being converged: if ffmpeg ever
+    // produced something other than this, the test below would be asserting
+    // nothing interesting.
+    const before = await streamsOf(mediaPath);
+    expect(before.map((s) => [s.codec_type, s.codec_name, s.channels, s.tags?.language])).toEqual([
+      ['video', 'hevc', undefined, undefined],
+      ['audio', 'aac', 2, 'eng'],
+      ['audio', 'eac3', 6, 'eng'],
+    ]);
+    const md5Before = md5Of(mediaPath);
+    const sizeBefore = statSync(mediaPath).size;
+
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'sync', '--name', 'tdarr', '--data-dir', dataDir]);
+    await runCli([
+      'flow', 'add', '--name', 'Conform', '--template', 'conform-library',
+      '--set', 'encoder=libx265', '--set', 'quality=23',
+      '--data-dir', dataDir,
+    ]); // prettier-ignore
+    await runCli(['library', 'set-flow', '--library', 'Movies', '--flow', 'Conform', '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--library', 'Movies', '--data-dir', dataDir]);
+
+    // Byte for byte the file it was, at the path it was, with nothing in
+    // trash waiting out a 14-day retention.
+    expect(existsSync(mediaPath)).toBe(true);
+    expect(md5Of(mediaPath)).toBe(md5Before);
+    expect(statSync(mediaPath).size).toBe(sizeBefore);
+    const trashDir = join(libraryDir, '.trawlarr', 'trash');
+    expect(existsSync(trashDir) ? readdirSync(trashDir) : []).toEqual([]);
+
+    const db = openStateDb(dataDir);
+    try {
+      const library = createLibraryRepo(db).getByName('Movies')!;
+      const counts = createMediaFileRepo(db).countsByState(library.id);
+      // Converged, not failed and not re-queued.
+      expect(counts.good).toBe(1);
+      expect(counts.failed + counts.held + counts.queued).toBe(0);
+
+      // The DECISION, in the one place an operator can read it after the
+      // fact. Before the fix this said "Running: ffmpeg …
+      // -max_muxing_queue_size 2048" with the video at `-c:0 copy`.
+      const step = db
+        .prepare(
+          `SELECT output_number, log_excerpt FROM job_step WHERE plugin_id = 'trawlarr:execute' ORDER BY seq`,
+        )
+        .get() as { output_number: number; log_excerpt: string };
+      expect(step.output_number).toBe(1);
+      expect(step.log_excerpt).toContain('Skipping ffmpeg');
+      expect(step.log_excerpt).not.toContain('-max_muxing_queue_size');
     } finally {
       db.close();
     }

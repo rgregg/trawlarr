@@ -279,6 +279,34 @@ describe('the conform-library template', () => {
     expect(fromCheck.map((e) => e.outputNumber).sort()).toEqual([1, 2]);
   });
 
+  /**
+   * A cheap always-runs sentinel for the one graph property that cost a real
+   * library ~6.5 TB of churn: `muxqueue` (`ffmpegCommandCustomArguments`)
+   * pushes `-max_muxing_queue_size` unconditionally, and any node the
+   * converged branch reaches which contributes overall arguments, stream
+   * `outputArgs`, `forceEncoding` or a removal turns a file that needs no
+   * work into an ffmpeg run.
+   *
+   * The REAL assertion is on the decision, against real ffmpeg and the real
+   * community plugins, in packages/server/test/plugin-install-end-to-end.ts
+   * ("leaves a file already in the target state untouched"). This one exists
+   * because that suite is gated on ffmpeg and the plugin corpus, so on a host
+   * without them nothing else would notice the node moving back.
+   */
+  it('routes a converged file to Execute without traversing the encoder or the custom arguments', () => {
+    const flow = build();
+    const visited = new Set<string>();
+    let node = flow.edges.find((e) => e.fromNodeId === 'check' && e.outputNumber === 1)?.toNodeId;
+    while (node !== undefined && !visited.has(node)) {
+      visited.add(node);
+      node = flow.edges.find((e) => e.fromNodeId === node)?.toNodeId;
+    }
+
+    expect(visited.has('execute')).toBe(true);
+    expect(visited.has('encoder')).toBe(false);
+    expect(visited.has('muxqueue')).toBe(false);
+  });
+
   it('names every community node with the source the user chose', () => {
     const flow = build({ pluginSource: 'mine' });
     const communityIds = flow.nodes
