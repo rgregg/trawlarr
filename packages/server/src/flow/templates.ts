@@ -258,7 +258,10 @@ const conformParameters: FlowTemplateParameter[] = [
     tooltip:
       'Comma-separated. Audio in any other language is removed. A track with NO language ' +
       'tag is always kept — the plugin never judges a stream whose language is missing, ' +
-      'which is what stops a badly-tagged rip losing all of its audio.',
+      'which is what stops a badly-tagged rip losing all of its audio. A natively ' +
+      'foreign-language title, which has no track in any of these languages at all, keeps ' +
+      'ALL of its audio: the host refuses any removal that would leave a file silent, so ' +
+      'such a file converges with its audio intact instead of failing verification for ever.',
   },
   {
     name: 'preset',
@@ -421,6 +424,12 @@ const conformLibrary: FlowTemplate = {
           // No `keep_undefined` input exists, and none is needed: the plugin
           // never judges a stream whose property reads undefined, so an
           // untagged track is always kept. Pinned in packages/engine/test/compat.
+          //
+          // It has no all-streams-removed failsafe either, and a natively
+          // foreign-language title matches EVERY audio stream here. That is
+          // NOT handled in this template — a template guard would protect
+          // only this flow — but by the host, in `guardStreamRemoval`, which
+          // no flow can opt out of and every flow gets.
           inputs: {
             codecType: 'audio',
             propertyToCheck: 'tags.language',

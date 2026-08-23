@@ -3,11 +3,13 @@ import type { ProbeData, ProbeStream } from '@trawlarr/plugin-api';
 import { beginFfmpegCommand } from './ffmpeg-command.js';
 import {
   compileFfmpegArgs,
+  mappableStreams,
   outputStreamIndex,
   outputStreamTypeIndex,
   shouldCopyStream,
   unmappableStreamReason,
   type DroppedStream,
+  type RestoredStreamGroup,
 } from './ffmpeg-compile.js';
 
 const probe: ProbeData = {
@@ -107,12 +109,26 @@ describe('compileFfmpegArgs', () => {
   });
 
   it('encodes only the video stream, leaving audio and subtitles untouched, with a removed middle stream — asserting -c:<n> refers to OUTPUT stream position, not input index', () => {
-    const cmd = command();
-    // probe order is [video(0), audio(1), subtitle(2)]. Remove the middle
-    // (audio) stream, then encode the video. The surviving streams are
-    // video (input 0) and subtitle (input 2); their OUTPUT positions are 0
-    // and 1 respectively, which must be what "-c:<n>" refers to — not their
-    // input indices (0 and 2).
+    // Two audio tracks on purpose: removing the ONLY audio stream a file has
+    // is the one removal the host refuses to honour (see `guardStreamRemoval`),
+    // and this test is about output-stream numbering, not about that guard.
+    // Probe order is [video(0), audio(1), audio(2), subtitle(3)]. Remove a
+    // middle (audio) stream, then encode the video. The survivors are video
+    // (input 0), audio (input 2) and subtitle (input 3); their OUTPUT
+    // positions are 0, 1 and 2, which must be what "-c:<n>" refers to — not
+    // their input indices.
+    const cmd = beginFfmpegCommand({
+      probe: {
+        streams: [
+          { codec_type: 'video', codec_name: 'h264' },
+          { codec_type: 'audio', codec_name: 'eac3' },
+          { codec_type: 'audio', codec_name: 'aac' },
+          { codec_type: 'subtitle', codec_name: 'subrip' },
+        ],
+      },
+      container: 'mkv',
+      inputPath: '/in.mkv',
+    });
     cmd.streams[1]!.removed = true;
     cmd.streams[0]!.outputArgs.push('-c:v', 'libx265', '-crf', '30');
     expect(compile(cmd)).toEqual([
@@ -127,6 +143,10 @@ describe('compileFfmpegArgs', () => {
       '-map',
       '0:2',
       '-c:1',
+      'copy',
+      '-map',
+      '0:3',
+      '-c:2',
       'copy',
       '/out.mkv',
     ]);
@@ -407,6 +427,132 @@ describe('compileFfmpegArgs — copy directives', () => {
     // The audio stream is only relabelled, so it must be copied, not encoded.
     expect(args.join(' ')).toContain('-c:1 copy');
     expect(args.join(' ')).toContain('-metadata:s:a:0 language=eng');
+  });
+});
+
+/**
+ * The all-audio-removed guard. The measured failure it exists for: a
+ * natively foreign-language title under an `eng` keep-list, where
+ * `Remove Stream By Property` matches EVERY audio stream because there is no
+ * English track to keep. The command then honestly says "write no audio",
+ * `verifyOutput` correctly refuses the result as data loss, and the file
+ * retries to exhaustion — burning a full remux each time — and can never
+ * converge. On one real library: 65 files, 55.7 GB, 47% of the remaining work.
+ *
+ * Asserted on the compiled argv, which is the decision — the streams ffmpeg is
+ * actually told to write — never on log text.
+ */
+describe('the all-audio-removed guard', () => {
+  const withStreams = (streams: ProbeStream[]) =>
+    beginFfmpegCommand({ probe: { streams }, container: 'mkv', inputPath: '/in.mkv' });
+
+  const VIDEO: ProbeStream = { index: 0, codec_type: 'video', codec_name: 'h264' };
+
+  it('keeps the audio when a filter matched every audio stream', () => {
+    const cmd = withStreams([
+      VIDEO,
+      { index: 1, codec_type: 'audio', codec_name: 'eac3', tags: { language: 'kor' } },
+      { index: 2, codec_type: 'audio', codec_name: 'aac', tags: { language: 'kor' } },
+    ]);
+    for (const stream of cmd.streams) if (stream.codec_type === 'audio') stream.removed = true;
+
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    expect(args.join(' ')).toContain('-map 0:1');
+    expect(args.join(' ')).toContain('-map 0:2');
+    expect(mappableStreams(cmd.streams)).toHaveLength(3);
+  });
+
+  it('keeps the audio when the file has exactly one audio stream — the boundary', () => {
+    const cmd = withStreams([
+      VIDEO,
+      { index: 1, codec_type: 'audio', codec_name: 'aac', tags: { language: 'jpn' } },
+    ]);
+    cmd.streams[1]!.removed = true;
+
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' }).join(' ')).toContain(
+      '-map 0:1',
+    );
+  });
+
+  it('says so, once per guarded codec type, for the job log', () => {
+    const cmd = withStreams([VIDEO, { index: 1, codec_type: 'audio', codec_name: 'aac' }]);
+    cmd.streams[1]!.removed = true;
+    const restored: RestoredStreamGroup[] = [];
+    compileFfmpegArgs({
+      command: cmd,
+      outputPath: '/out.mkv',
+      onRestoredStreams: (group) => restored.push(group),
+    });
+    expect(restored).toHaveLength(1);
+    expect(restored[0]!.codecType).toBe('audio');
+    expect(restored[0]!.count).toBe(1);
+  });
+
+  it('honours a filter that left at least one audio stream behind', () => {
+    // The ordinary case, and the one the guard must not touch: an English
+    // track survives, so the Japanese one really does go.
+    const cmd = withStreams([
+      VIDEO,
+      { index: 1, codec_type: 'audio', codec_name: 'aac', tags: { language: 'eng' } },
+      { index: 2, codec_type: 'audio', codec_name: 'aac', tags: { language: 'jpn' } },
+    ]);
+    cmd.streams[2]!.removed = true;
+
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' }).join(' ');
+    expect(args).toContain('-map 0:1');
+    expect(args).not.toContain('-map 0:2');
+    expect(mappableStreams(cmd.streams)).toHaveLength(2);
+  });
+
+  it('does not protect subtitles: removing every subtitle is an ordinary flow', () => {
+    const cmd = withStreams([
+      VIDEO,
+      { index: 1, codec_type: 'audio', codec_name: 'aac' },
+      { index: 2, codec_type: 'subtitle', codec_name: 'subrip' },
+    ]);
+    cmd.streams[2]!.removed = true;
+
+    expect(compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' }).join(' ')).not.toContain(
+      '-map 0:2',
+    );
+  });
+
+  it('still refuses a total wipe, rather than writing an audio-only file', () => {
+    // A flow that removed EVERY stream is broken, not over-matched. Restoring
+    // the audio out of that would replace a loud refusal — ffmpeg never runs,
+    // the original is untouched — with an audio-only file that verification
+    // would accept in a movie's place.
+    const cmd = withStreams([VIDEO, { index: 1, codec_type: 'audio', codec_name: 'aac' }]);
+    for (const stream of cmd.streams) stream.removed = true;
+
+    expect(() => compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' })).toThrow(
+      /every stream was removed/i,
+    );
+  });
+
+  it('cannot be satisfied or triggered by an audio stream no muxer could write', () => {
+    // The guard reads the same rule the compiler does: a stream that is going
+    // to be dropped anyway is not what saves a file from silence. Here the
+    // only surviving audio candidate is unwritable, so there is nothing to
+    // restore and the output legitimately has no audio — which `verifyOutput`
+    // is then left to refuse, loudly.
+    const cmd = withStreams([
+      VIDEO,
+      { index: 1, codec_type: 'audio', codec_name: null as unknown as string, codec_tag: '0x0000' },
+    ]);
+    cmd.streams[1]!.removed = true;
+
+    const args = compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' }).join(' ');
+    expect(args).not.toContain('-map 0:1');
+  });
+
+  it('does not mutate the command it was given', () => {
+    const cmd = withStreams([VIDEO, { index: 1, codec_type: 'audio', codec_name: 'aac' }]);
+    cmd.streams[1]!.removed = true;
+    compileFfmpegArgs({ command: cmd, outputPath: '/out.mkv' });
+    // The flow's own record of what it asked for is untouched; the guard is a
+    // host decision applied when the command is read, not a rewrite of it.
+    expect(cmd.streams[1]!.removed).toBe(true);
   });
 });
 

@@ -506,6 +506,91 @@ describe.runIf(available)('installing a community plugin and running it', () => 
     }
   }, 300_000);
 
+  /**
+   * A NATIVELY foreign-language title under the same `keepLanguages=eng`
+   * template — the shape that made 65 files (55.7 GB, 47% of the remaining
+   * work) in the owner's real library permanently unconvergeable: *The
+   * Bridge*, *Squid Game*, *Ally McBeal*, *One Piece*.
+   *
+   * There is no English track to keep, so `Remove Stream By Property` matches
+   * EVERY audio stream — and `Ensure Audio Stream` adds nothing, because it
+   * finds no `eng` and no untagged stream to build one from. The command then
+   * truthfully says "write no audio", `verifyOutput` correctly refuses the
+   * result as data loss, and the job fails: a full remux burned per attempt,
+   * three attempts, then terminally `failed`, for ever.
+   *
+   * ONE audio stream, on purpose: that is the boundary of "the filter matched
+   * every audio stream", and it is the shape most of those 65 files have.
+   *
+   * The whole flow, the real corpus plugins, real ffmpeg, and the assertions
+   * are on the outcome — the streams in the file on disk and the file's
+   * recorded state — never on log text.
+   */
+  it('converges a natively foreign-language file, keeping its audio, rather than failing verification', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-foreign-audio-e2e-'));
+    const libraryDir = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryDir, { recursive: true });
+    const mediaPath = join(libraryDir, 'Foreign.mp4');
+
+    // h264 in mp4 with a single Korean audio track, and nothing else the
+    // `eng` keep-list could match.
+    await execFileAsync('ffmpeg', [
+      '-hide_banner', '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=10',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+      '-map', '0:v', '-map', '1:a',
+      '-c:v', 'libx264', '-preset', 'ultrafast',
+      '-c:a', 'aac', '-ac:a:0', '2',
+      '-metadata:s:a:0', 'language=kor',
+      mediaPath,
+    ]); // prettier-ignore
+
+    const before = await streamsOf(mediaPath);
+    expect(before.filter((s) => s.codec_type === 'audio').map((s) => s.tags?.language)).toEqual([
+      'kor',
+    ]);
+
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryDir, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'add', '--name', 'tdarr', '--path', CORPUS_DIR, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['plugin', 'source', 'sync', '--name', 'tdarr', '--data-dir', dataDir]);
+    await runCli([
+      'flow', 'add', '--name', 'Conform', '--template', 'conform-library',
+      '--set', 'encoder=libx265', '--set', 'quality=23',
+      '--data-dir', dataDir,
+    ]); // prettier-ignore
+    await runCli(['library', 'set-flow', '--library', 'Movies', '--flow', 'Conform', '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--library', 'Movies', '--data-dir', dataDir]);
+
+    // The file converged: remuxed to mkv and encoded to hevc like any other
+    // file, WITH its Korean audio, because the host refused a removal that
+    // would have left it silent.
+    const outPath = join(libraryDir, 'Foreign.mkv');
+    expect(existsSync(outPath)).toBe(true);
+    expect(existsSync(mediaPath)).toBe(false);
+
+    const after = await streamsOf(outPath);
+    expect(after.filter((s) => s.codec_type === 'video').map((s) => s.codec_name)).toEqual([
+      'hevc',
+    ]);
+    expect(
+      after.filter((s) => s.codec_type === 'audio').map((s) => [s.codec_name, s.tags?.language]),
+    ).toEqual([['aac', 'kor']]);
+
+    const db = openStateDb(dataDir);
+    try {
+      const library = createLibraryRepo(db).getByName('Movies')!;
+      const counts = createMediaFileRepo(db).countsByState(library.id);
+      // The decision, not the log: this file is DONE, and no attempt was
+      // spent failing verification on the way there.
+      expect(counts.good).toBe(1);
+      expect(counts.failed).toBe(0);
+    } finally {
+      db.close();
+    }
+  }, 300_000);
+
   it('refuses the conform template before a plugin source is synced, naming the plugins', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-conform-refuse-'));
     const libraryDir = join(workDir, 'library');

@@ -617,12 +617,27 @@ describe.runIf(available && corpusAvailable)(
       after.close();
     }, 600_000);
 
-    it('still refuses a flow that would remove EVERY audio track', async () => {
-      // The fail-safe, at the same full-flow altitude. This flow's filter
-      // matches both audio tracks, so the command it builds asks for a silent
-      // file and the intended-count check is satisfied by it. Only the host
-      // gate stands between the user and a silent library — and it must stop
-      // the destructive step, not merely log about it.
+    it('keeps every audio track a flow tried to remove, and converges the file untouched', async () => {
+      // The fail-safe, at the same full-flow altitude, and the one place its
+      // behaviour changed: this flow's filter matches BOTH audio tracks, so
+      // the command it builds asks for a silent file and the intended-count
+      // check is satisfied by it. `verifyOutput` used to be the only thing
+      // standing between the user and a silent library — it refused the
+      // result, correctly, but the file then failed on every attempt for
+      // ever, burning a full remux each time. That is what made 65 files in
+      // a real library permanently unconvergeable.
+      //
+      // Now the removal never reaches ffmpeg at all: the host refuses to
+      // honour a filter that matched every audio stream, the command is
+      // inert, the no-op gate skips it, and the file converges AS IT IS.
+      // Both properties are asserted below, because both matter — the
+      // original is still untouched byte for byte (the protection), and it
+      // is now `good` rather than `failed` (the convergence).
+      //
+      // The accepted consequence: a flow that genuinely means "strip all
+      // audio" cannot be expressed. Every audio track a file has is treated
+      // as data the flow may not discard, which is Tdarr's own rule (see
+      // `Tdarr_Plugin_MC93_Migz3CleanAudio`: "we don't want no audio").
       const { dataDir, mediaPath, md5Before, trashDir } = await runRemovalLibrary({
         prefix: 'trawlarr-silent-e2e-',
         removalInputs: {
@@ -642,10 +657,23 @@ describe.runIf(available && corpusAvailable)(
       const db = openStateDb(dataDir);
       const library = createLibraryRepo(db).getByName('Movies');
       const counts = createMediaFileRepo(db).countsByState(library!.id);
-      // Not converged: a refused run is a failed attempt, never a `good` row.
-      expect(counts.good).toBe(0);
-      expect(counts.held + counts.failed).toBe(1);
+      // Converged, first attempt, nothing held or failed: the file is in the
+      // state this flow can actually leave it in, and no attempt was spent
+      // failing verification on the way there.
+      expect(counts.good).toBe(1);
+      expect(counts.held + counts.failed).toBe(0);
       db.close();
+
+      // And it STAYS converged: a second scan re-queues nothing. This is the
+      // property the old behaviour could never have — a file that fails for
+      // a reason nothing about it can change is re-queued for ever.
+      await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+      const after = openStateDb(dataDir);
+      const libraryAgain = createLibraryRepo(after).getByName('Movies');
+      const countsAgain = createMediaFileRepo(after).countsByState(libraryAgain!.id);
+      expect(countsAgain.good).toBe(1);
+      expect(countsAgain.queued).toBe(0);
+      after.close();
     }, 600_000);
   },
 );

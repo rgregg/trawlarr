@@ -1190,15 +1190,39 @@ module.exports = { details, plugin };
   }, 180_000);
 
   it('does not skip a dropped stream', async () => {
+    // The VIDEO stream, not the audio one: this sample carries a single audio
+    // track, and removing every audio stream a file has is the one removal
+    // the host refuses to honour (see the test below). Any other removal is a
+    // change to the file and must run.
     const run = await runConform({
       name: 'dropped-stream',
-      body: `command.streams[1].removed = true;`,
+      body: `command.streams[0].removed = true;`,
     });
 
     expect(run.produced).toBe(true);
     const streams = await streamsOf(run.producedPath);
     expect(streams).toHaveLength((await streamsOf(run.sourcePath)).length - 1);
-    expect(streams.some((stream) => stream.codec_type === 'audio')).toBe(false);
+    expect(streams.some((stream) => stream.codec_type === 'video')).toBe(false);
+  }, 180_000);
+
+  it('skips a flow that removed every audio stream, leaving the file byte-identical', async () => {
+    // The other side of the guard, at the gate: a filter that matched every
+    // audio track the file has is not honoured, so the command it built is
+    // inert — and an inert command must not rewrite the file. Without the
+    // gate reading removals THROUGH the guard, this file would be remuxed on
+    // every scan, for ever, to say exactly what it already says.
+    const run = await runConform({
+      name: 'all-audio-removed',
+      body: `for (const s of command.streams) { if (s.codec_type === 'audio') s.removed = true; }`,
+    });
+
+    expect(run.produced).toBe(false);
+    expect(run.sourceUnchanged).toBe(true);
+    expect(run.resultPath).toBe(run.sourcePath);
+    // The audio is still there, because nothing was written at all.
+    expect((await streamsOf(run.sourcePath)).some((stream) => stream.codec_type === 'audio')).toBe(
+      true,
+    );
   }, 180_000);
 
   it('does not skip a codec change asked for without shouldProcess', async () => {

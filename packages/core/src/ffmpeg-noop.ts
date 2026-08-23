@@ -1,5 +1,5 @@
 import type { FfmpegCommand, FfmpegCommandStream, ProbeStream } from '@trawlarr/plugin-api';
-import { isUnmappableStream } from './ffmpeg-compile.js';
+import { guardStreamRemoval, isRemovedAfterGuard, isUnmappableStream } from './ffmpeg-compile.js';
 
 /**
  * One reason the compiled command would produce a file different from the one
@@ -182,7 +182,14 @@ export const describeCommandChanges = (input: {
     add('overall-arguments', 'hardware decoding is enabled');
   }
 
-  const surviving = command.streams.filter((stream) => stream.removed !== true);
+  // Read through the host's removal guard, not the raw `removed` flags: a
+  // removal the guard refused to honour (every audio stream matched, so none
+  // of them go) is not a change to the file. Counting it as one would send a
+  // file that the flow, in the end, does nothing to through a full remux to
+  // say exactly what it already says — and then do it again on every scan,
+  // because nothing about the file ever changes.
+  const guard = guardStreamRemoval(command.streams);
+  const surviving = command.streams.filter((stream) => !isRemovedAfterGuard(stream, guard));
   const removed = command.streams.length - surviving.length;
   if (removed > 0) {
     add('stream-set', `${String(removed)} stream(s) were removed by the flow`);

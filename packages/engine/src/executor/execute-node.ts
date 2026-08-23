@@ -70,6 +70,11 @@ export const createExecuteRunner =
               `Dropped input stream ${String(dropped.index)} (${dropped.codecName}) from the ` +
                 `output: ${dropped.reason}. Every other stream is mapped unchanged.`,
             ),
+          // The other direction, and equally never silent: the host has just
+          // overruled a removal the flow asked for, and an operator wondering
+          // why the Japanese track is still there must be able to find out
+          // from the job log rather than from the source.
+          onRestoredStreams: (restored) => input.log?.(restored.reason),
         });
 
         input.log?.(`Running: ${input.ffmpegPath} ${ffmpegArgs.join(' ')}`);

@@ -156,15 +156,155 @@ export const isUnmappableStream = (stream: ProbeStream): boolean =>
   unmappableStreamReason(stream) !== null;
 
 /**
- * The streams that will actually be written: those no plugin removed, minus
- * those no muxer could accept.
+ * Codec types a flow may never empty out completely.
+ *
+ * `audio` and nothing else, and the asymmetry is the whole point. An output
+ * with no audio at all is not a filter result, it is a silent film: no
+ * ordinary flow means it, `verifyOutput` refuses it as data loss (see
+ * `requireAudioIfOriginalHadAudio`), and the file can therefore never
+ * converge. Subtitle, data and attachment wipes are the opposite — "remove
+ * all subtitles" and "remove data streams" are ordinary, deliberate flows,
+ * upstream ships a plugin for each, and restoring what they removed would
+ * silently defeat the flow instead of protecting the file. Video is left out
+ * for the same reason one step further: dropping the video track is how an
+ * audio-only extraction is spelled.
+ *
+ * Adding a type here is one line, and the rule below is written against the
+ * set rather than against audio.
+ */
+const GUARDED_CODEC_TYPES: readonly string[] = ['audio'];
+
+/** One codec type the guard put back, for the job log. */
+export interface RestoredStreamGroup {
+  /** The `codec_type` whose streams were restored. */
+  codecType: string;
+  /** How many streams were put back. */
+  count: number;
+  /** Written for an operator reading a job log. */
+  reason: string;
+}
+
+/**
+ * Which removals the host refuses to honour, and why.
+ *
+ * THE RULE: a filter must never remove every stream of a guarded codec type.
+ * When applying what the flow asked for would leave a file with no audio at
+ * all, the removals of those streams are dropped and the file keeps the audio
+ * it came with.
+ *
+ * WHY THIS IS A HOST GATE AND NOT A NODE INPUT, OR A TEMPLATE FIX. The
+ * measured case is a natively foreign-language title under an
+ * `eng` keep-list: `Remove Stream By Property` with `tags.language`,
+ * `not_includes`, `eng` matches EVERY audio stream, because there is no
+ * English track to keep. The command then says, truthfully, "write no
+ * audio"; `verifyOutput` correctly refuses the result as data loss; the job
+ * fails; the file retries to exhaustion, burning a full remux each time. On
+ * one real 8.4 TB library that was 65 files / 55.7 GB — 47% of the remaining
+ * work — permanently unconvergeable. A guard written into the
+ * `conform-library` template would fix those 65 files and leave the trap in
+ * place for every other flow; a guard here protects every flow, including
+ * community ones nobody here wrote, and cannot be opted out of. That is the
+ * same reasoning `docs/engineering-notes/p2-prerequisites.md` records under
+ * "An allow-list is not a rule", and the same place the unmappable-stream
+ * drop already lives.
+ *
+ * It is deliberately indifferent to WHICH plugin removed the streams and on
+ * what property: language is only the case that was measured. A codec
+ * keep-list, a channel-count filter or a plugin written next year produces
+ * the identical dead end, and gets the identical answer.
+ *
+ * UPSTREAM. Tdarr's flow plugin `ffmpegCommandRemoveStreamByProperty` has no
+ * such guard — it sets `removed` on every stream that matches and stops
+ * there. Tdarr's CLASSIC community plugins, doing the same job the older way,
+ * all carry one by hand: `Tdarr_Plugin_MC93_Migz3CleanAudio` bails with
+ * "Cancelling plugin otherwise all audio tracks would be removed. We don't
+ * want no audio", and `Tdarr_Plugin_sdf5_Thierrrrry_Remove_Non_English_Audio`
+ * breaks out of its loop on the same condition. So this is Tdarr's own
+ * behaviour, restored to the flow path it was lost on, and moved from each
+ * plugin (where it protects only the flows that use that plugin, and where we
+ * may not put it — vendored plugin code is run as-is) to the one place every
+ * flow passes through. Unmanic spells the same concern `fail_safe` on its
+ * language plugin.
+ *
+ * Only MAPPABLE streams count on both sides of the question: a stream the
+ * compiler is going to drop anyway (see {@link unmappableStreamReason}) cannot
+ * be what saves a file from silence, so it neither triggers the guard nor
+ * satisfies it. If every audio stream in a file is unwritable, the guard has
+ * nothing to restore, the output legitimately has no audio, and `verifyOutput`
+ * is left to refuse it — which is the right outcome, loudly.
+ */
+export const guardStreamRemoval = (
+  streams: readonly FfmpegCommandStream[],
+): { restored: ReadonlySet<FfmpegCommandStream>; groups: RestoredStreamGroup[] } => {
+  const restored = new Set<FfmpegCommandStream>();
+  const groups: RestoredStreamGroup[] = [];
+
+  // A flow that removed EVERY stream it could write is not a filter that
+  // matched too much, it is a flow that is broken, and this guard cannot
+  // repair it: restoring the audio out of a total wipe would turn a loud
+  // refusal (`compileFfmpegArgs` throws, ffmpeg never runs, the original is
+  // untouched) into an audio-only file that verification would accept and
+  // `replaceOriginal` would then put in a movie's place. So the total wipe
+  // keeps the answer it already has, and the guard stays out of it.
+  const writable = streams.filter((stream) => !isUnmappableStream(stream));
+  if (writable.length > 0 && writable.every((stream) => stream.removed === true)) {
+    return { restored, groups };
+  }
+
+  for (const codecType of GUARDED_CODEC_TYPES) {
+    const candidates = streams.filter(
+      (stream) => stream.codec_type === codecType && !isUnmappableStream(stream),
+    );
+    if (candidates.length === 0) continue;
+    if (!candidates.every((stream) => stream.removed === true)) continue;
+
+    for (const stream of candidates) restored.add(stream);
+    groups.push({
+      codecType,
+      count: candidates.length,
+      reason:
+        `Keeping all ${String(candidates.length)} ${codecType} stream(s): the flow's filters ` +
+        `matched every one of them, and writing a file with no ${codecType} would lose data ` +
+        `the original has. The removals are ignored and the ${codecType} is passed through ` +
+        `unchanged.`,
+    });
+  }
+
+  return { restored, groups };
+};
+
+/** Is this stream removed once the host's guard has had its say? */
+export const isRemovedAfterGuard = (
+  stream: FfmpegCommandStream,
+  guard: { restored: ReadonlySet<FfmpegCommandStream> },
+): boolean => stream.removed === true && !guard.restored.has(stream);
+
+/**
+ * The streams a flow's removals actually leave behind, after the guard above.
+ *
+ * Separate from {@link mappableStreams} because the no-op gate needs it: a
+ * removal the guard put back is not a change to the file, and counting it as
+ * one would remux a file to say exactly what it already said.
+ */
+export const survivingStreams = (
+  streams: readonly FfmpegCommandStream[],
+): FfmpegCommandStream[] => {
+  const guard = guardStreamRemoval(streams);
+  return streams.filter((stream) => !isRemovedAfterGuard(stream, guard));
+};
+
+/**
+ * The streams that will actually be written: those no plugin removed (minus
+ * any removal the guard above refuses to honour), minus those no muxer could
+ * accept.
  *
  * Shared with `verifyOutput`, which counts the streams the flow intended to
  * write and holds the file if the output has fewer — it has to apply the same
- * rule, or every dropped stream would look like a lost one.
+ * rule, or every dropped stream would look like a lost one, and a guarded
+ * stream that ffmpeg wrote would look like one too many.
  */
 export const mappableStreams = (streams: readonly FfmpegCommandStream[]): FfmpegCommandStream[] =>
-  streams.filter((stream) => stream.removed !== true && !isUnmappableStream(stream));
+  survivingStreams(streams).filter((stream) => !isUnmappableStream(stream));
 
 const mapArgsOf = (stream: FfmpegCommandStream, position: number): string[] => {
   if (stream.mapArgs.length > 0) return stream.mapArgs;
@@ -288,6 +428,12 @@ export const compileFfmpegArgs = (input: {
    * `runFlow` also captures into that step's `log_excerpt`.
    */
   onDroppedStream?: (dropped: DroppedStream) => void;
+  /**
+   * Called once per codec type whose removals the guard refused to honour.
+   * Undoing what a flow asked for is never silent either: the Execute node
+   * forwards this to the job log alongside the dropped-stream reports.
+   */
+  onRestoredStreams?: (restored: RestoredStreamGroup) => void;
 }): string[] => {
   const { command, outputPath } = input;
 
@@ -308,7 +454,14 @@ export const compileFfmpegArgs = (input: {
   // to remember to include. A node protects only the flow that declares it; a
   // gate in the compiler protects every flow, including community ones, and
   // cannot be undone by a plugin that maps streams back in.
-  const surviving = command.streams.filter((stream) => stream.removed !== true);
+  //
+  // The same gate is what refuses a removal that would leave the file with no
+  // audio at all — see `guardStreamRemoval`, which is applied here rather than
+  // in any flow, plugin or template for exactly the reasons above.
+  const guard = guardStreamRemoval(command.streams);
+  for (const group of guard.groups) input.onRestoredStreams?.(group);
+
+  const surviving = command.streams.filter((stream) => !isRemovedAfterGuard(stream, guard));
   const kept = surviving.filter((stream) => !isUnmappableStream(stream));
 
   surviving.forEach((stream, position) => {
