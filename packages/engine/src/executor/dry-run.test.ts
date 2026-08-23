@@ -76,6 +76,30 @@ const beginOnly: PluginModule = {
   },
 };
 
+/**
+ * The shape of the bug that motivated giving a dry run reasons: a
+ * command-building node that adds ONE overall output argument to a file that
+ * already is what the flow wants. Every stream is copied, the container is
+ * unchanged, and the file still gets rewritten end to end — which on a real
+ * library meant 4,621 files and ~6.5 TB of churn to add a muxer flag.
+ */
+const beginAndAddMuxingQueue: PluginModule = {
+  details: () => details(),
+  plugin: (args) => {
+    const command = beginFfmpegCommand({
+      probe: { streams: [{ index: 0, codec_type: 'video', codec_name: 'h264' }] },
+      container: 'mkv',
+      inputPath: args.inputFileObj._id,
+    });
+    command.overallOuputArguments.push('-max_muxing_queue_size', '2048');
+    return {
+      outputNumber: 1,
+      outputFileObj: { _id: args.inputFileObj._id },
+      variables: { ...args.variables, ffmpegCommand: command },
+    };
+  },
+};
+
 const node = (id: string, pluginId: string): FlowNode => ({
   id,
   pluginId,
@@ -195,6 +219,73 @@ describe('runDryFlow', () => {
 
     expect(result.complete).toBe(true);
     expect(result.plannedCommands).toHaveLength(0);
+  });
+
+  it('says an overall output argument would rewrite a converged file, and names it', async () => {
+    // The reason strings are the whole point: a verdict of "yes it would run"
+    // that does not name -max_muxing_queue_size leaves an operator with the
+    // same deployment-and-read-the-job-log loop this endpoint exists to
+    // replace.
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:beginCommand'), node('b', 'trawlarr:execute')],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, n.pluginId === 'trawlarr:beginCommand' ? beginAndAddMuxingQueue : pass),
+    });
+
+    expect(result.wouldRunFfmpeg).toBe(true);
+    expect(result.executeDecisions).toHaveLength(1);
+    const decision = result.executeDecisions[0]!;
+    expect(decision.nodeId).toBe('b');
+    expect(decision.skip).toBe(false);
+    expect(decision.reason).toContain('-max_muxing_queue_size 2048');
+    expect(decision.changes).toEqual([
+      {
+        kind: 'overall-arguments',
+        detail: 'overall output arguments: -max_muxing_queue_size 2048',
+      },
+    ]);
+    // The argv the verdict is about, so the two cannot drift apart.
+    expect(decision.command).toEqual(result.plannedCommands[0]);
+  });
+
+  it('says WHY it would skip, so a converged file is not a silent answer', async () => {
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:beginCommand'), node('b', 'trawlarr:execute')],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, n.pluginId === 'trawlarr:beginCommand' ? beginOnly : pass),
+    });
+
+    expect(result.wouldRunFfmpeg).toBe(false);
+    expect(result.executeDecisions).toHaveLength(1);
+    expect(result.executeDecisions[0]!.skip).toBe(true);
+    expect(result.executeDecisions[0]!.command).toBeNull();
+    expect(result.executeDecisions[0]!.reason).toContain('already in the state this flow wants');
+  });
+
+  it('reports no ffmpeg verdict at all for a walk that never reached an Execute', async () => {
+    // `wouldRunFfmpeg: false` on a stopped walk means "nothing was judged",
+    // not "this file is converged", and `executeDecisions` being empty is
+    // what lets a caller tell the two apart.
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:checkVideoCodec'), node('b', 'community:mysteryNode')],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) => loaded(n.pluginId, pass),
+    });
+
+    expect(result.complete).toBe(false);
+    expect(result.wouldRunFfmpeg).toBe(false);
+    expect(result.executeDecisions).toEqual([]);
   });
 
   it('reports the node as failed when the planned Execute would overwrite its input', async () => {

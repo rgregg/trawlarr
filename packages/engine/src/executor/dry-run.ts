@@ -2,15 +2,42 @@ import type { PluginModule } from '@trawlarr/plugin-api';
 import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
-import { decideNoopGate } from './noop-gate.js';
+import { decideNoopGate, type NoopGateDecision } from './noop-gate.js';
 import { runFlow, type FlowRunResult, type RunFlowOptions } from './run-flow.js';
 import { classifySideEffects } from './vouchable.js';
+
+/**
+ * What the no-op gate said about ONE invocation of ONE Execute node — the
+ * same decision, from the same function, that the real Execute runner writes
+ * to the job log as `Running ffmpeg: <reasons>` or `Skipping ffmpeg: ...`.
+ *
+ * This is the entire diagnostic value of a dry run: `plannedCommands` says
+ * WHAT would run, and this says WHETHER it would run and WHY. Without the
+ * reasons, an operator looking at a file that keeps being rewritten has to
+ * deploy the flow and read a job log to find out which node contributed the
+ * argument that stopped it converging.
+ */
+export interface DryRunExecuteDecision extends NoopGateDecision {
+  /** The flow node whose Execute this was. */
+  nodeId: string;
+  /** The argv that would have run, or null when the gate skipped. */
+  command: string[] | null;
+}
 
 export interface DryRunResult extends FlowRunResult {
   complete: boolean;
   stoppedAtNodeId: string | null;
   stoppedBecause: string | null;
   plannedCommands: string[][];
+  /** Every Execute the walk reached, in the order it reached them. */
+  executeDecisions: DryRunExecuteDecision[];
+  /**
+   * True when at least one Execute the walk reached would run ffmpeg. False
+   * on a walk that reached an Execute and skipped it, AND on a walk that
+   * reached no Execute at all — which is why `executeDecisions` is reported
+   * beside it rather than being summarised away.
+   */
+  wouldRunFfmpeg: boolean;
 }
 
 class DryRunStop extends Error {
@@ -41,6 +68,7 @@ export const runDryFlow = async (
   },
 ): Promise<DryRunResult> => {
   const plannedCommands: string[][] = [];
+  const executeDecisions: DryRunExecuteDecision[] = [];
 
   // Nodes whose plugin we declined to vouch for, recorded when the loader
   // wrapper is asked for them. Being asked is NOT the same as being reached:
@@ -52,18 +80,21 @@ export const runDryFlow = async (
   // stoppedAtNodeId it never executed.
   const stopCandidates = new Map<string, string>();
 
-  const inertStandIn = (plugin: LoadedPlugin): PluginModule => ({
+  const inertStandIn = (plugin: LoadedPlugin, nodeId: string): PluginModule => ({
     details: () => plugin.details,
     plugin: (args) => {
       // The SAME gate the real Execute applies, for the same reason the
       // encode target is resolved through the same helper: a dry run that
       // reported a command the real run would skip would be describing work
-      // that is never going to happen.
-      if (
-        plugin.id === 'trawlarr:execute' &&
-        args.variables.ffmpegCommand.init &&
-        !decideNoopGate(args).skip
-      ) {
+      // that is never going to happen. Decided ONCE and recorded, so what the
+      // caller reads is the decision that was acted on here, not a second
+      // evaluation that could differ.
+      const gate =
+        plugin.id === 'trawlarr:execute' && args.variables.ffmpegCommand.init
+          ? decideNoopGate(args)
+          : null;
+
+      if (gate !== null && !gate.skip) {
         // Report the exact command the real Execute would run — same
         // resolver, same scratch write target — so a dry run can never
         // describe an in-place command that would fail if actually run.
@@ -72,12 +103,12 @@ export const runDryFlow = async (
           container: args.variables.ffmpegCommand.container,
           outputPathFor: options.outputPathFor,
         });
-        plannedCommands.push(
-          compileFfmpegArgs({
-            command: args.variables.ffmpegCommand,
-            outputPath: writePath,
-          }),
-        );
+        const compiled = compileFfmpegArgs({
+          command: args.variables.ffmpegCommand,
+          outputPath: writePath,
+        });
+        plannedCommands.push(compiled);
+        executeDecisions.push({ ...gate, nodeId, command: compiled });
         return {
           outputNumber: 1,
           outputFileObj: { _id: args.inputFileObj._id },
@@ -88,10 +119,13 @@ export const runDryFlow = async (
         };
       }
 
-      if (plugin.id === 'trawlarr:execute' && args.variables.ffmpegCommand.init) {
+      if (gate !== null) {
         // Mirrors the real Execute's skip: nothing to do, so no command is
         // planned or recorded, but the command still closes the way the
-        // real node closes it.
+        // real node closes it. The gate's own reason IS recorded — "why was
+        // this file left alone" is as much a question a dry run has to
+        // answer as "why would it be rewritten".
+        executeDecisions.push({ ...gate, nodeId, command: null });
         return {
           outputNumber: 1,
           outputFileObj: { _id: args.inputFileObj._id },
@@ -123,7 +157,7 @@ export const runDryFlow = async (
       }
 
       if (classification === 'engine-controlled') {
-        return { ...plugin, module: inertStandIn(plugin) };
+        return { ...plugin, module: inertStandIn(plugin, node.id) };
       }
 
       return plugin;
@@ -152,5 +186,7 @@ export const runDryFlow = async (
     stoppedAtNodeId,
     stoppedBecause,
     plannedCommands,
+    executeDecisions,
+    wouldRunFfmpeg: executeDecisions.some((decision) => !decision.skip),
   };
 };

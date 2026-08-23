@@ -223,8 +223,22 @@ const main = async (): Promise<number> => {
 
   if (values['dry-run'] === true && 'plannedCommands' in result) {
     const dryResult = result as unknown as Awaited<ReturnType<typeof runDryFlow>>;
-    for (const args of dryResult.plannedCommands) {
-      console.log(`\nWould run: ${values.ffmpeg} ${args.join(' ')}`);
+    // The verdict FIRST, and its reasons before the argv: "would this flow
+    // rewrite this file, and why" is the question a dry run is run to answer,
+    // and a wall of ffmpeg arguments does not answer it. The reason strings
+    // are the no-op gate's own — the same ones a real run writes to the job
+    // log — so an operator can compare the two literally.
+    for (const decision of dryResult.executeDecisions) {
+      console.log(`\nNode "${decision.nodeId}": ${decision.reason}`);
+      for (const change of decision.changes) {
+        console.log(`  - [${change.kind}] ${change.detail}`);
+      }
+      if (decision.command !== null) {
+        console.log(`  Would run: ${values.ffmpeg} ${decision.command.join(' ')}`);
+      }
+    }
+    if (dryResult.executeDecisions.length === 0) {
+      console.log(`\nNo Execute node was reached, so no ffmpeg command was considered.`);
     }
     if (dryResult.stoppedBecause !== null) console.log(`\n${dryResult.stoppedBecause}`);
   }

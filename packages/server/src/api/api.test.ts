@@ -782,19 +782,88 @@ const plugin = (args) => ({
 module.exports = { details, plugin };
 `;
 
-const seedProbedFile = async (libraryId: string): Promise<string> => {
+const seedProbedFile = async (
+  libraryId: string,
+  streams: Record<string, unknown>[] = [
+    { codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+  ],
+): Promise<string> => {
   const dir = await mkdtemp(join(tmpdir(), 'trawlarr-api-file-'));
   const path = join(dir, 'sample.mkv');
   await writeFile(path, 'not really a video');
   const fileId = seedFile({ libraryId, path, state: 'queued' });
   db.prepare(`UPDATE media_file SET probe_json = ? WHERE id = ?`).run(
     JSON.stringify({
-      streams: [{ codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 }],
+      streams,
       format: { duration: '10.0', bit_rate: '1000000' },
     }),
     fileId,
   );
   return fileId;
+};
+
+/** One hevc video stream in an mkv — a file a "conform to hevc/mkv" flow already wants. */
+const CONVERGED_STREAMS = [{ index: 0, codec_type: 'video', codec_name: 'hevc' }];
+
+const chain = (nodes: [string, string, Record<string, unknown>?][]): FlowDefinition => ({
+  nodes: nodes.map(([id, pluginId, inputs]) => ({
+    id,
+    pluginId,
+    pluginVersion: '1.0.0',
+    inputs: inputs ?? {},
+  })),
+  edges: nodes.slice(1).map((to, index) => ({
+    fromNodeId: nodes[index]![0],
+    toNodeId: to[0],
+    outputNumber: 1,
+  })),
+});
+
+/**
+ * A stand-in for the community plugin the owner's real flow actually uses
+ * (`tdarr:ffmpegCommandCustomArguments`): INSTALLED from a plugin source, so
+ * a flow names it by id and nothing but the registry knows its path, and not
+ * a start node. Installed-by-id is the case the dry run got wrong.
+ */
+const CUSTOM_ARGS_PLUGIN = `
+exports.details = () => ({
+  name: 'Custom Arguments',
+  description: 'adds overall output arguments',
+  style: { borderColor: '#fff' },
+  tags: 'ffmpeg',
+  isStartPlugin: false,
+  pType: '',
+  sidebarPosition: 1,
+  icon: '',
+  inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => {
+  args.variables.ffmpegCommand.overallOuputArguments.push('-max_muxing_queue_size', '2048');
+  return { outputNumber: 1, outputFileObj: args.inputFileObj, variables: args.variables };
+};
+`;
+
+const installCustomArgsPlugin = async (): Promise<string> => {
+  const root = await mkdtemp(join(tmpdir(), 'trawlarr-api-plugin-'));
+  const dir = join(root, 'p', 'customArguments', '1.0.0');
+  await mkdir(dir, { recursive: true });
+  const absPath = join(dir, 'index.js');
+  await writeFile(absPath, CUSTOM_ARGS_PLUGIN, 'utf8');
+
+  const repo = createPluginRepo(db);
+  repo.addSource({ id: 'ca', url: root, kind: 'local' });
+  repo.replaceSourcePlugins('ca', [
+    {
+      pluginName: 'customArguments',
+      relPath: join('p', 'customArguments', '1.0.0', 'index.js'),
+      absPath,
+      version: '1.0.0',
+      details: createPluginLoader().load(absPath).details,
+    },
+  ]);
+  return 'ca:customArguments';
 };
 
 describe('dry run', () => {
@@ -843,6 +912,98 @@ describe('dry run', () => {
     expect(
       response.body.nodes.find((node: { nodeId: string }) => node.nodeId === 'mystery').sideEffects,
     ).toBe('unknown');
+  });
+
+  it('resolves an INSTALLED plugin id the way a real run does, not as a file path', async () => {
+    // The bug this covers: the dry run handed the plugin ID to the loader,
+    // which readFileSync'd it, so every installed plugin came back ENOENT —
+    // reported `unresolvable`, with the walk dying on a file-not-found error
+    // instead of on the flow's real behaviour. A real run resolves the id
+    // through the registry first (`payload.pluginPaths`), and so must this.
+    const pluginId = await installCustomArgsPlugin();
+    const flow = createFlowRepo(db).create({
+      name: 'installed',
+      definition: chain([
+        ['start', 'trawlarr:start'],
+        ['n1', pluginId],
+      ]),
+      nowMs: NOW,
+    });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id);
+
+    const response = await api('POST', `/flows/${flow.id}/dry-run`, { fileId });
+
+    expect(response.status).toBe(200);
+    // Resolved: trawlarr loaded the plugin and simply declines to vouch for
+    // one it did not write. `unresolvable` here would mean it never found it.
+    expect(response.body.nodes).toEqual([
+      { nodeId: 'start', pluginId: 'trawlarr:start', sideEffects: 'inert' },
+      { nodeId: 'n1', pluginId, sideEffects: 'unknown' },
+    ]);
+    expect(response.body.stoppedAtNodeId).toBe('n1');
+    expect(response.body.stoppedBecause).toContain('cannot vouch for the side effects');
+    expect(JSON.stringify(response.body)).not.toContain('ENOENT');
+  });
+
+  it('reports that a flow would run ffmpeg on a converged file, and names the reason', async () => {
+    // The shape of the bug that cost a real library ~6.5 TB of churn: the
+    // file is already hevc in mkv, and a command-building node still puts an
+    // argument on the command, so every stream is rewritten to say what it
+    // already said. The verdict alone would not identify the node; the
+    // reasons are the diagnostic.
+    const flow = createFlowRepo(db).create({
+      name: 'encode',
+      definition: chain([
+        ['start', 'trawlarr:start'],
+        ['begin', 'trawlarr:beginCommand'],
+        ['encoder', 'trawlarr:setVideoEncoder', { encoder: 'libx265', quality: '23' }],
+        ['execute', 'trawlarr:execute'],
+      ]),
+      nowMs: NOW,
+    });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id, CONVERGED_STREAMS);
+
+    const response = await api('POST', `/flows/${flow.id}/dry-run`, { fileId });
+
+    expect(response.status).toBe(200);
+    expect(response.body.complete).toBe(true);
+    expect(response.body.wouldRunFfmpeg).toBe(true);
+    expect(response.body.executeDecisions).toHaveLength(1);
+    const decision = response.body.executeDecisions[0];
+    expect(decision.nodeId).toBe('execute');
+    expect(decision.skip).toBe(false);
+    // The executor's own words, verbatim — the same string it writes to the
+    // job log as `Running ffmpeg: <reasons>`.
+    expect(decision.reason).toContain('Running ffmpeg:');
+    expect(decision.reason).toContain('libx265');
+    expect(
+      decision.changes.some((change: { kind: string }) => change.kind === 'stream-arguments'),
+    ).toBe(true);
+  });
+
+  it('reports that a converged file would be left alone, and why', async () => {
+    const flow = createFlowRepo(db).create({
+      name: 'remux-only',
+      definition: chain([
+        ['start', 'trawlarr:start'],
+        ['begin', 'trawlarr:beginCommand'],
+        ['execute', 'trawlarr:execute'],
+      ]),
+      nowMs: NOW,
+    });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id, CONVERGED_STREAMS);
+
+    const response = await api('POST', `/flows/${flow.id}/dry-run`, { fileId });
+
+    expect(response.status).toBe(200);
+    expect(response.body.wouldRunFfmpeg).toBe(false);
+    expect(response.body.plannedCommands).toEqual([]);
+    expect(response.body.executeDecisions).toHaveLength(1);
+    expect(response.body.executeDecisions[0].skip).toBe(true);
+    expect(response.body.executeDecisions[0].reason).toContain('Skipping ffmpeg:');
   });
 
   it('refuses a dry run against a file that has never been probed, saying which', async () => {
