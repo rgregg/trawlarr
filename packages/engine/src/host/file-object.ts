@@ -5,7 +5,7 @@ import type {
   ProbeStream,
   TranscodeDecision,
 } from '@trawlarr/plugin-api';
-import type { FileState } from '@trawlarr/core';
+import { normalizeProbeLanguages, type FileState } from '@trawlarr/core';
 
 export interface ProjectionSource {
   fileId: string;
@@ -143,7 +143,22 @@ const toMegabytes = (bytes: number): number => bytes / BYTES_PER_MEGABYTE;
 const toBytesFromMegabytes = (megabytes: number): number => megabytes * BYTES_PER_MEGABYTE;
 
 export const toPluginFileObject = (source: ProjectionSource): PluginFileObject => {
-  const streams = source.probe.streams ?? [];
+  // Language tags are canonicalised HERE, at the single boundary where the
+  // probe becomes something a plugin can read, because everything a plugin
+  // sees of the file's streams comes through this one field:
+  //   - plugins that read `args.inputFileObj.ffProbeData` directly;
+  //   - `args.variables.ffmpegCommand.streams`, which `Begin Command` seeds
+  //     from exactly this object (`plugins-core/src/beginCommand`);
+  //   - `args.originalLibraryFile`, which the no-op gate compares that command
+  //     against — so both sides of that comparison are normalised the same way
+  //     and a normalisation can never itself look like a change.
+  //
+  // Nothing downstream of this is affected: the probe stored in the database,
+  // the facts convergence is judged on, and `verifyOutput`'s before/after
+  // comparison all use the RAW probe, and no tag is rewritten in the file.
+  // See `normalizeProbeLanguages` for why that cannot loop across scans.
+  const probe = normalizeProbeLanguages(source.probe);
+  const streams = probe.streams ?? [];
   const videoIndex = videoStreamIndexOf(streams);
   const video = streams[videoIndex];
   const audio = streams.find((s) => s.codec_type === 'audio');
@@ -162,15 +177,15 @@ export const toPluginFileObject = (source: ProjectionSource): PluginFileObject =
     // CommunityFlowPlugins/video/checkOverallBitrate/1.0.0/index.js logs
     // `"File bitrate is ${args.inputFileObj.bit_rate} bps"` and compares it
     // directly against bps/kbps/mbps-scaled bounds. No conversion needed.
-    bit_rate: numeric(source.probe.format?.bit_rate),
+    bit_rate: numeric(probe.format?.bit_rate),
     statSync: { mtimeMs: source.mtimeMs, ctimeMs: source.ctimeMs },
     scannerReads: {
-      ffProbeRead: source.probe.streams === undefined ? 'false' : 'true',
+      ffProbeRead: probe.streams === undefined ? 'false' : 'true',
       exiftoolRead: source.exiftool === undefined ? 'false' : 'true',
       mediaInfoRead: source.mediainfo === undefined ? 'false' : 'true',
       closedCaptionRead: 'false',
     },
-    ffProbeData: source.probe,
+    ffProbeData: probe,
     hasClosedCaptions: false,
     bumped: false,
     HealthCheck: source.healthStatus ?? '',

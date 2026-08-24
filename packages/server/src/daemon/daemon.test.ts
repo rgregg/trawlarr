@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -135,6 +135,9 @@ const seedLibrary = (dataDir: string, options?: { deleteFlow?: boolean }): Seede
   db.close();
   return { libraryId: library.id, fileId, root };
 };
+
+/** Where a library with no explicit staging directory stages: inside its own root. */
+const stagingOf = (root: string): string => join(root, '.trawlarr', 'staging');
 
 const rowFor = (dataDir: string, fileId: string): MediaFileRow => {
   const db = openDataDb(dataDir);
@@ -353,6 +356,72 @@ describe('startDaemon', () => {
     } finally {
       after.close();
     }
+  });
+
+  it('sweeps a scratch directory whose job has ended at startup, however new it is', async () => {
+    // The sweep ran only on the daily maintenance timer, so a daemon
+    // restarted more often than once a day never swept staging AT ALL. Two
+    // orphans, one of 1.5 GB, sat on the owner's media filesystem because of
+    // it, and one of them survived a fresh deploy.
+    //
+    // The directory here was modified a moment ago. It goes anyway, because
+    // the decision is about IDENTITY, not age: its job row has ended, so its
+    // owner has reported and can never write into it again.
+    const dataDir = newDataDir();
+    const seeded = seedLibrary(dataDir);
+
+    const seed = openDataDb(dataDir);
+    const jobRepo = createJobRepo(seed);
+    const jobId = jobRepo.start({ fileId: seeded.fileId, flowId: 'f', flowHash: 'h', nowMs: NOW });
+    jobRepo.finish({ jobId, state: 'failed', outcome: 'worker killed', nowMs: NOW });
+    seed.close();
+
+    const orphan = join(stagingOf(seeded.root), `trawlarr-job-${jobId}-aB3xY9`);
+    mkdirSync(orphan, { recursive: true });
+    writeFileSync(join(orphan, 'encode.mkv'), 'partial', 'utf8');
+
+    const { createAgent } = fakeAgents();
+    const daemon = await start({ dataDir, createAgent, nowMs: () => NOW + 60_000 });
+    await daemon.startupStagingSweep;
+
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it('leaves a scratch directory whose job is still open at startup, however old it is', async () => {
+    // Workers are DETACHED, so a SIGKILLed daemon leaves them running and
+    // writing. The restarted daemon must not delete the directory the
+    // survivor is encoding into, and the guarantee is not a clock: the job
+    // row is inserted before the fork and cleared only once the outcome is
+    // folded in, so a live run's directory always has an open row beside it.
+    //
+    // This directory is a month old by mtime and is kept regardless, which
+    // is the same statement made from the other side.
+    const dataDir = newDataDir();
+    const seeded = seedLibrary(dataDir);
+
+    const seed = openDataDb(dataDir);
+    const jobId = createJobRepo(seed).start({
+      fileId: seeded.fileId,
+      flowId: 'f',
+      flowHash: 'h',
+      nowMs: NOW,
+    });
+    seed.close();
+
+    const live = join(stagingOf(seeded.root), `trawlarr-job-${jobId}-aB3xY9`);
+    mkdirSync(live, { recursive: true });
+    const encode = join(live, 'encode.mkv');
+    writeFileSync(encode, 'in progress', 'utf8');
+    const monthAgoSec = (NOW - 30 * 24 * 60 * 60 * 1000) / 1000;
+    utimesSync(encode, monthAgoSec, monthAgoSec);
+    utimesSync(live, monthAgoSec, monthAgoSec);
+
+    const { createAgent } = fakeAgents();
+    const daemon = await start({ dataDir, createAgent, nowMs: () => NOW + 60_000 });
+    await daemon.startupStagingSweep;
+
+    expect(existsSync(live)).toBe(true);
+    expect(existsSync(encode)).toBe(true);
   });
 
   it('takes over a data directory whose daemon is gone', async () => {

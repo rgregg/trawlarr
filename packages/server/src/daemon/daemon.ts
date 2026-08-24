@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import type { HardwareType } from '@trawlarr/core';
 import { createApiContext, createApiServer } from '../api/server.js';
 import { attachWebSocket, type WsChannel } from '../api/ws.js';
 import { openDatabase, type Db } from '../db/connection.js';
@@ -15,7 +16,7 @@ import { reapStalled } from '../worker/reap-stalled.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
 import { acquireDaemonLock, type DaemonLock } from './lockfile.js';
-import { listEncodersWith, preflightHardware, probeEncoderWith } from './hardware-preflight.js';
+import { listEncodersWith, preflightHardware, runEncodeProbe } from './hardware-preflight.js';
 import { createScanCoordinator, type ScanCoordinator } from './scan-coordinator.js';
 import { createSupervisor, type CreateAgentFn, type Supervisor } from './supervisor.js';
 import type { WatchPort } from './watcher.js';
@@ -70,6 +71,15 @@ export interface Daemon {
   readonly apiKeyGenerated: boolean;
   /** Resolves when the daemon has fully stopped, however that was triggered. */
   readonly stopped: Promise<void>;
+  /**
+   * Resolves when the startup staging sweep has finished.
+   *
+   * The daemon is fully started and serving before this settles — it is a
+   * background pass over a filesystem that may be a slow network mount, and
+   * nothing waits on it. Exposed so a test can assert on the directories it
+   * removed instead of on a clock.
+   */
+  readonly startupStagingSweep: Promise<void>;
   /** What each seed-once environment variable did on this start. */
   readonly envApplications: EnvApplication[];
   stop: () => Promise<void>;
@@ -266,14 +276,27 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   // ever. Nothing is corrected: `hardware.available` is what the operator
   // said, and it stays what the operator said.
   const ffmpegPath = settings.getBinaries().ffmpeg;
+  // What ffmpeg actually said about each failed probe, kept beside the
+  // findings rather than inside them: a finding is a verdict the API reports,
+  // and the ffmpeg line is a diagnostic for the operator reading the log. The
+  // one time this preflight was wrong — NVENC reported broken on a machine
+  // that had just encoded 468 files with it — the sentence that would have
+  // settled it in a minute was thrown away with the failed child process.
+  const probeDetails = new Map<HardwareType, string | null>();
   const hardwareFindings = await preflightHardware({
     available: settings.getHardware().available,
     listEncoders: async () => await listEncodersWith(ffmpegPath),
-    tryEncode: async (hardwareType) => await probeEncoderWith(ffmpegPath, hardwareType),
+    tryEncode: async (hardwareType) => {
+      const result = await runEncodeProbe(ffmpegPath, hardwareType);
+      probeDetails.set(hardwareType, result.detail);
+      return result.ok;
+    },
   });
   for (const finding of hardwareFindings) {
+    const detail = probeDetails.get(finding.hardwareType) ?? null;
     console.warn(
-      `[trawlarr] hardware.available declares "${finding.hardwareType}", but ffmpeg at ` +
+      (detail === null ? '' : `[trawlarr] ffmpeg said: ${detail}\n`) +
+        `[trawlarr] hardware.available declares "${finding.hardwareType}", but ffmpeg at ` +
         `"${ffmpegPath}" could not encode a single frame with "${finding.expectedEncoder}" on ` +
         `this machine. Nothing has been changed for you — the declaration stands, so every job ` +
         `a flow routes to that hardware will be attempted and will fail, three attempts each, ` +
@@ -389,6 +412,33 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
   const libraryRepo = createLibraryRepo(db);
 
+  /**
+   * One pass of the staging sweep over every library.
+   *
+   * A worker killed mid-encode (OOM, segfault, power) never reaches
+   * `runPayload`'s own cleanup, and its partial encode then sits in the
+   * library's staging directory for ever — which, by design, is ON THE MEDIA
+   * FILESYSTEM, because installing the result has to be an atomic rename.
+   *
+   * Sequential, and each library independently: one library whose staging
+   * directory is unreachable must not cost the others their sweep. It gives
+   * up as soon as the daemon is stopping, so a shutdown never waits on a
+   * network mount for a directory that will still be there next start.
+   *
+   * A live run's directory is never touched, and that is a fact about job
+   * rows rather than a guess about ages — see `sweepStaging`.
+   */
+  const sweepStagingEverywhere = async (): Promise<void> => {
+    for (const library of libraryRepo.list()) {
+      if (stopping) return;
+      try {
+        await sweepLibraryStaging({ db, library, nowMs: nowMs() });
+      } catch (error) {
+        onError(error, { phase: `staging sweep:${library.name}` });
+      }
+    }
+  };
+
   // A startup walk per enabled library. A paused library is deliberately
   // still scanned by the periodic rescan (discovery is not claiming), but
   // the startup burst is spent on the libraries that can actually converge.
@@ -419,21 +469,11 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       } catch (error) {
         onError(error, { phase: `trash purge:${library.name}` });
       }
-
-      // The same shape, on the same timer, for the other directory a run
-      // writes into. A worker killed mid-encode (OOM, segfault, power) never
-      // reaches `runPayload`'s own cleanup, and its partial encode then sits
-      // in the library's staging directory for ever — which, by design, is
-      // ON THE MEDIA FILESYSTEM, because installing the result has to be an
-      // atomic rename. Nothing in this tree removed those before. A live
-      // run's directory is never touched: see `sweepStaging` for why that is
-      // a fact about job rows rather than a guess about ages.
-      try {
-        await sweepLibraryStaging({ db, library, nowMs: nowMs() });
-      } catch (error) {
-        onError(error, { phase: `staging sweep:${library.name}` });
-      }
     }
+
+    // The same shape, on the same timer, for the other directory a run
+    // writes into. Nothing in this tree removed those before.
+    await sweepStagingEverywhere();
 
     // Same retention principle as the trash sweep, same interval so it
     // costs nothing extra: a job log an operator will never look at again
@@ -460,6 +500,50 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   } catch (error) {
     onError(error, { phase: 'stall reaper' });
   }
+
+  /**
+   * The staging sweep gets a startup pass too, and for the same reason the
+   * reaper does: a daemon that is starting is very often a daemon that was
+   * killed, and a killed worker's scratch directory is exactly what nothing
+   * else removes. On the daily timer alone, a daemon restarted more often
+   * than once a day never swept staging AT ALL — which is how the owner's
+   * server came to hold two orphaned scratch directories, one of 1.5 GB, on
+   * the media filesystem, one of them surviving a fresh deploy.
+   *
+   * AFTER the reaper, deliberately: the reaper is what closes the job rows
+   * of workers that are provably gone, and this sweep reads those rows. Run
+   * before it, the same directories would read as owned by a live run and
+   * wait another day; run after, they are collected on the same start.
+   *
+   * IT CHANGES WHEN THE DECISION IS MADE, NOT THE DECISION. `sweepStaging`
+   * decides by IDENTITY: a directory whose job row is open (`ended_at IS
+   * NULL`) is retained whatever its age, and age is only the fallback for a
+   * directory whose owner cannot be named at all. Nothing here consults how
+   * long the daemon has been up, so a startup pass and the 3 a.m. pass reach
+   * the same verdict on the same directory.
+   *
+   * AND THE DETACHED WORKER THAT OUTLIVED A SIGKILLED DAEMON is safe on that
+   * same fact, not on luck. Workers are detached, so they keep running and
+   * keep writing into their scratch directories across a daemon restart.
+   * Such a worker's job row was inserted before it was forked and is cleared
+   * only when its outcome is folded in — so while it writes, its row is open
+   * and its directory is RETAINED, at startup exactly as at any other time.
+   * The reaper cannot have closed that row either: its pid is alive, so
+   * `workerProvablyGone` is false, and its heartbeat is minutes old, so the
+   * day-long threshold has not elapsed. The age fallback never sees the
+   * directory, and could not condemn it if it did — `surveyDir` takes the
+   * newest mtime of the directory AND its entries, and an ffmpeg writing
+   * into that directory advances it continuously.
+   *
+   * Not awaited, and it does not delay a single claim: a staging directory
+   * lives on the media filesystem, which may be a network mount that is slow
+   * or hung, and `startDaemon` must not be held on one after its API is
+   * already listening. Failures go to `onError` like any other background
+   * phase, and `stopping` ends the pass early on shutdown.
+   */
+  const startupStagingSweep = sweepStagingEverywhere().catch((error: unknown) => {
+    onError(error, { phase: 'staging sweep' });
+  });
 
   // Claim whatever is already queued rather than waiting a whole tick for it.
   void supervisor.tick().catch((error: unknown) => {
@@ -572,6 +656,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     apiKeyGenerated,
     envApplications,
     stopped,
+    startupStagingSweep,
     stop,
   };
 };

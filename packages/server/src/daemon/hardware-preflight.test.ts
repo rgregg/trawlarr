@@ -6,19 +6,28 @@ import { HARDWARE_TYPES, type HardwareType } from '@trawlarr/core';
 import {
   FUNCTIONAL_PROBE,
   listEncodersWith,
+  MIN_PROBE_SIZE,
   preflightHardware,
   probeEncoderWith,
   REQUIRED_ENCODER,
+  runEncodeProbe,
 } from './hardware-preflight.js';
 
 /** A stand-in `ffmpeg`: a script that prints what a test wants and exits how it says. */
-const fakeFfmpeg = (input: { stdout?: string; exitCode?: number; argsFile?: string }): string => {
+const fakeFfmpeg = (input: {
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  argsFile?: string;
+}): string => {
   const dir = mkdtempSync(join(tmpdir(), 'trawlarr-fake-ffmpeg-'));
   const path = join(dir, 'ffmpeg');
   const record = input.argsFile === undefined ? '' : `printf '%s\\n' "$@" > ${input.argsFile}\n`;
+  const complain =
+    input.stderr === undefined ? '' : `printf '%s\\n' ${JSON.stringify(input.stderr)} >&2\n`;
   writeFileSync(
     path,
-    `#!/bin/sh\n${record}cat <<'ENCODERS'\n${input.stdout ?? ''}\nENCODERS\nexit ${String(input.exitCode ?? 0)}\n`,
+    `#!/bin/sh\n${record}${complain}cat <<'ENCODERS'\n${input.stdout ?? ''}\nENCODERS\nexit ${String(input.exitCode ?? 0)}\n`,
     'utf8',
   );
   chmodSync(path, 0o755);
@@ -160,6 +169,60 @@ describe('the tables', () => {
     expect(Object.keys(FUNCTIONAL_PROBE).sort()).toEqual([...HARDWARE_TYPES].sort());
     expect(REQUIRED_ENCODER.cpu).toBeNull();
     expect(FUNCTIONAL_PROBE.cpu).toBeNull();
+  });
+});
+
+describe('the probe geometry', () => {
+  it('asks for a picture the encoder can actually accept', () => {
+    // The observed defect: the probe asked NVENC for 64x64, which is under
+    // NVENC's documented 129x33 minimum for HEVC, so it failed on a machine that had
+    // just encoded 468 files with NVENC — and failed with the same exit
+    // status a missing driver gives, which is why it read as a real fault.
+    // Every probe must clear its own type's minimum, or it is measuring the
+    // request rather than the hardware.
+    for (const [type, probe] of Object.entries(FUNCTIONAL_PROBE)) {
+      const minimum = MIN_PROBE_SIZE[type as HardwareType];
+      if (probe === null || minimum === null) continue;
+      const size = /s=(\d+)x(\d+)/.exec(probe.join(' '));
+      expect(size, `${type} probe must state a frame size`).not.toBeNull();
+      expect(Number(size![1])).toBeGreaterThanOrEqual(minimum.width);
+      expect(Number(size![2])).toBeGreaterThanOrEqual(minimum.height);
+    }
+  });
+
+  it('names a minimum for every type that has a probe at all', () => {
+    for (const [type, probe] of Object.entries(FUNCTIONAL_PROBE)) {
+      if (probe === null) continue;
+      expect(MIN_PROBE_SIZE[type as HardwareType]).not.toBeNull();
+    }
+  });
+});
+
+describe('runEncodeProbe', () => {
+  it('keeps what ffmpeg said when the encode fails, so a false verdict is diagnosable', async () => {
+    const ffmpeg = fakeFfmpeg({
+      exitCode: 1,
+      stderr: '[hevc_nvenc @ 0x1] Cannot load libcuda.so.1',
+    });
+
+    const result = await runEncodeProbe(ffmpeg, 'nvenc');
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('Cannot load libcuda.so.1');
+  });
+
+  it('has nothing to report when the encode succeeds', async () => {
+    expect(await runEncodeProbe(fakeFfmpeg({ exitCode: 0 }), 'nvenc')).toEqual({
+      ok: true,
+      detail: null,
+    });
+  });
+
+  it('reports a binary that cannot be spawned as a failure with a reason, not a throw', async () => {
+    const result = await runEncodeProbe(join(tmpdir(), 'no-such-ffmpeg-a8b3'), 'nvenc');
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).not.toBeNull();
   });
 });
 

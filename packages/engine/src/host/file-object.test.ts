@@ -115,6 +115,57 @@ describe('toPluginFileObject', () => {
     expect(file.video_resolution).toBe('');
     expect(file.videoStreamIndex).toBe(0);
   });
+
+  it('shows plugins ISO 639-2/B language tags, whatever the file actually says', () => {
+    // Every language-aware plugin in the corpus compares tags.language against
+    // ISO codes the user typed, and none of them normalises first. This is the
+    // boundary where that assumption is made true.
+    const raw: ProbeData = {
+      streams: [
+        { codec_type: 'video', codec_name: 'h264' },
+        { codec_type: 'audio', codec_name: 'aac', tags: { language: 'English' } },
+        { codec_type: 'audio', codec_name: 'aac', tags: { language: 'en-US' } },
+        { codec_type: 'audio', codec_name: 'aac', tags: { language: 'deu' } },
+        { codec_type: 'subtitle', codec_name: 'subrip', tags: { language: 'FRA' } },
+      ],
+    };
+    const file = toPluginFileObject(source({ probe: raw }));
+    expect((file.ffProbeData.streams ?? []).map((s) => s.tags?.language)).toEqual([
+      undefined,
+      'eng',
+      'eng',
+      'ger',
+      'fre',
+    ]);
+  });
+
+  it('passes und, empty and unrecognised tags through untouched', () => {
+    // `und` is a statement, not a gap, and a tag nobody can classify must not
+    // be guessed at: a wrong guess deletes the wrong audio track.
+    const raw: ProbeData = {
+      streams: [
+        { codec_type: 'audio', codec_name: 'aac', tags: { language: 'und' } },
+        { codec_type: 'audio', codec_name: 'aac', tags: { language: '' } },
+        { codec_type: 'audio', codec_name: 'aac', tags: { language: 'Deutsch' } },
+        { codec_type: 'audio', codec_name: 'aac', tags: { title: 'Commentary' } },
+      ],
+    };
+    const file = toPluginFileObject(source({ probe: raw }));
+    expect((file.ffProbeData.streams ?? []).map((s) => s.tags?.language)).toEqual([
+      'und',
+      '',
+      'Deutsch',
+      undefined,
+    ]);
+  });
+
+  it('does not touch the caller’s probe, which is what the ledger and verification read', () => {
+    const raw: ProbeData = {
+      streams: [{ codec_type: 'audio', codec_name: 'aac', tags: { language: 'English' } }],
+    };
+    toPluginFileObject(source({ probe: raw }));
+    expect(raw.streams?.[0]?.tags?.language).toBe('English');
+  });
 });
 
 describe('projectTranscodeDecision', () => {
