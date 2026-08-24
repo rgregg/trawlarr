@@ -517,6 +517,92 @@ const booleanInput = (value: unknown, fallback: boolean): boolean => {
 };
 
 /**
+ * How much bigger than the original a replacement may be before the host
+ * refuses to install it, as a fraction of the original's size.
+ *
+ * Not zero — not a strict `>` — because a container change legitimately adds
+ * structure the original did not carry: an mp4 `moov` atom, matroska cues and
+ * a seek head, an index a remux rebuilds. Measured with this repo's own test
+ * fixture, a 2-second sample remuxed from matroska to mp4 grows 657 bytes,
+ * 1.3% of a 50 KB file, without one frame being re-encoded. A strict `>`
+ * would fire the guard on flows working exactly as intended.
+ *
+ * Not Tdarr's 110% either. Upstream's `Compare File Size Ratio` flow node and
+ * its classic twin `Tdarr_Plugin_a9he_New_file_size_check` both default their
+ * upper bound to 110%, but those are OPT-IN nodes a flow author drops in and
+ * tunes, and all they do is route or error; this is an unconditional host
+ * gate no flow can forget to install, so it has to mean what it says. Ten
+ * percent of a 40 GB film is 4 GB, and "converting must not make files
+ * bigger" is not a promise 110% keeps.
+ */
+export const REPLACEMENT_GROWTH_SLACK_RATIO = 0.01;
+
+/**
+ * ...and the floor underneath that fraction, in bytes. BOTH bounds must be
+ * exceeded before a replacement is refused.
+ *
+ * Container overhead is STRUCTURAL, not proportional: it scales with frame
+ * and stream count rather than with the file's size, so on a small file it is
+ * a large fraction of a small number (the 1.3% above) while being nothing at
+ * all in absolute terms. The ratio on its own would refuse small remuxes over
+ * a few hundred kilobytes. Because both bounds must trip, this floor only
+ * governs files under ~100 MiB — above that 1% is the larger of the two and
+ * takes over — so the most waste it can ever admit is one mebibyte on one
+ * file. It is also comfortably more than any real index: an mp4 `moov` for a
+ * feature-length film runs to a few megabytes, but such a file is measured in
+ * gigabytes, where the 1% bound is tens of megabytes.
+ */
+export const REPLACEMENT_GROWTH_SLACK_BYTES = 1_048_576;
+
+export interface GrowthVerdict {
+  /** False when the replacement is too much bigger than the file it replaces. */
+  install: boolean;
+  /** Signed: negative for the ordinary case, a replacement that shrank. */
+  grewByBytes: number;
+  /** The replacement's size as a fraction of the original's; 1 when equal. */
+  ratio: number;
+}
+
+/**
+ * May a replacement of this size be installed over an original of that size?
+ *
+ * A host gate, in the one node that destroys the user's file, and deliberately
+ * NOT a flow setting: a `Compare File Size` node protects only the flows whose
+ * authors remembered to wire one in, while this protects every flow anybody
+ * ever writes — the same reasoning `guardStreamRemoval` records for the
+ * all-audio-removal guard (`7b54644`), and the reason `verifyOutput` keeps its
+ * fail-safes in the host rather than in a node input.
+ *
+ * A pure function of two numbers so the whole decision table is testable
+ * without a filesystem, exactly like `verifyOutput` beside it.
+ *
+ * An original whose size is unknown or zero is no basis for the judgement and
+ * gets none: the same abstention `verifyOutput` makes for `originalSizeBytes
+ * <= 0`, where it says so rather than passing silently. (It has already
+ * refused such a file by the time this runs, in any flow that verifies.)
+ */
+export const guardSizeGrowth = (input: {
+  newSizeBytes: number;
+  originalSizeBytes: number;
+}): GrowthVerdict => {
+  const grewByBytes = input.newSizeBytes - input.originalSizeBytes;
+  const ratio = input.originalSizeBytes > 0 ? input.newSizeBytes / input.originalSizeBytes : 1;
+  if (input.originalSizeBytes <= 0) return { install: true, grewByBytes, ratio };
+  const install =
+    grewByBytes <= input.originalSizeBytes * REPLACEMENT_GROWTH_SLACK_RATIO ||
+    grewByBytes <= REPLACEMENT_GROWTH_SLACK_BYTES;
+  return { install, grewByBytes, ratio };
+};
+
+/** `882 bytes -> 441 bytes` as `50.0% smaller`, so a log line names the direction. */
+const describeSizeChange = (originalSizeBytes: number, newSizeBytes: number): string => {
+  if (originalSizeBytes <= 0) return 'a change of unknown proportion';
+  if (newSizeBytes === originalSizeBytes) return 'the same size';
+  const percent = Math.abs((newSizeBytes / originalSizeBytes - 1) * 100);
+  return `${percent.toFixed(1)}% ${newSizeBytes < originalSizeBytes ? 'smaller' : 'larger'}`;
+};
+
+/**
  * Re-stat the replacement and describe it on the file object.
  *
  * The re-stat is the point: nothing else does one, so without it every size
@@ -559,9 +645,19 @@ const describeReplacement = async (input: {
   file.file_size = finalStats.size / BYTES_PER_MEGABYTE;
   file.newSize = finalStats.size / BYTES_PER_MEGABYTE;
   file.oldSize = input.originalSizeBytes / BYTES_PER_MEGABYTE;
+  // Every size is LABELLED with the file it belongs to, and the direction of
+  // the change is stated in words. The previous wording put the ORIGINAL's
+  // number directly after the phrase "now holds the replacement", which reads
+  // as the replacement's own size to anybody who does not have this line's
+  // source in front of them — and that is not hypothetical: a 2.06x inflation
+  // on the owner's library (884 MB -> 1.82 GB) was read out of a real job log
+  // as "now holds the replacement: 883853072 bytes" and taken to mean the new
+  // file was 884 MB. A guard is only half the answer if the log that would
+  // have shown the problem cannot be read correctly.
   input.say(
-    `"${input.finalPath}" now holds the replacement: ` +
-      `${input.originalSizeBytes} bytes -> ${finalStats.size} bytes.`,
+    `"${input.finalPath}" now holds the replacement: it is ${finalStats.size} bytes, ` +
+      `against the original's ${input.originalSizeBytes} bytes — ` +
+      `${describeSizeChange(input.originalSizeBytes, finalStats.size)}.`,
   );
 };
 
@@ -688,6 +784,54 @@ export const createReplaceOriginalRunner =
             originalPath,
           );
         }
+        // THE SIZE GATE. Asked first of every question about the original,
+        // because a replacement that is not worth installing makes every
+        // later question moot: nothing is going to be installed either way,
+        // and the answers that follow this one all end in a REFUSAL (output
+        // 2, a failed attempt, three encodes and then `failed`), which is the
+        // wrong ending for a file that is simply already as small as this
+        // flow can make it.
+        //
+        // Output 1, with the ORIGINAL's path and the file object left
+        // untouched — the same shape as the "already the file this flow
+        // produced" no-op above, and chosen for the same reason. The run then
+        // reports success having changed nothing, `applyJobReport` sees an
+        // unchanged identity (`claimedModified: false`), and `applyRunOutcome`
+        // records `good` with the signature of the file as it still is. The
+        // next scan computes that same signature and `isKnownGood` skips the
+        // file: it never queues, so it never encodes again. That is the whole
+        // reason this is not a refusal — a refusal would burn one full encode
+        // per attempt, three times, and then need a human to leave `failed`.
+        //
+        // `good` is also the state that means what it says here: "as good as
+        // THIS FLOW can make it". The signature includes the flow definition
+        // hash, so the moment the owner adds a bitrate ceiling or a bigger
+        // -cq, every file parked by this guard is re-queued automatically —
+        // which `not_converging` (terminal, manual `requeue` only) would not
+        // do. And it is not a lie about convergence: the file on disk is
+        // exactly what the flow left alone.
+        const growth = guardSizeGrowth({
+          newSizeBytes: newStats.size,
+          originalSizeBytes: originalStats.size,
+        });
+        if (!growth.install) {
+          say(
+            `Not installing this replacement: the new file is ${newStats.size} bytes, against ` +
+              `the original's ${originalStats.size} bytes — ` +
+              `${describeSizeChange(originalStats.size, newStats.size)} ` +
+              `(+${growth.grewByBytes} bytes). Converting a file must not make it bigger, so ` +
+              `"${originalPath}" stays exactly where it is and nothing was moved to trash. ` +
+              `The encode is discarded and this file is left as it is — this flow has nothing ` +
+              `better to offer it. Give the flow a bitrate ceiling or a lower quality target ` +
+              `(a higher -crf/-cq) and it will be tried again on its own.`,
+          );
+          return {
+            outputNumber: 1,
+            outputFileObj: { _id: originalPath },
+            variables: args.variables,
+          };
+        }
+
         if (originalStats.nlink > 1 && !input.allowHardlinked) {
           return refuse(
             `"${originalPath}" is hardlinked (${originalStats.nlink} links). Replacing it ` +

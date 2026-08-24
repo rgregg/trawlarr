@@ -18,7 +18,13 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PluginDetails, PluginInputArgs } from '@trawlarr/plugin-api';
-import { createReplaceOriginalRunner, type ReplaceRunnerInput } from './replace-original.js';
+import {
+  createReplaceOriginalRunner,
+  guardSizeGrowth,
+  REPLACEMENT_GROWTH_SLACK_BYTES,
+  REPLACEMENT_GROWTH_SLACK_RATIO,
+  type ReplaceRunnerInput,
+} from './replace-original.js';
 import type { LoadedPlugin } from '../host/loader.js';
 
 /**
@@ -106,7 +112,16 @@ const replacePlugin = (): LoadedPlugin =>
 
 const CLOCK_MS = 1_700_000_000_000;
 
-const ORIGINAL_BODY = 'the original the user would be furious to lose';
+/**
+ * 2,000,000 bytes: BIGGER than the replacement below, because the size gate
+ * (`guardSizeGrowth`) refuses to install a replacement that is materially
+ * bigger than the file it replaces. Every test here that expects an install
+ * therefore needs an original a real transcode would plausibly shrink — which
+ * is also the ordinary case on a real library (152 of 157 replacements on the
+ * owner's Shows library shrank the file). The readable phrase survives at the
+ * front so a failing content assertion still says what the file was.
+ */
+const ORIGINAL_BODY = 'the original the user would be furious to lose'.padEnd(2_000_000, '.');
 /** 999999 bytes, so the reported megabyte size is a fraction rather than a
  * whole number and a size assertion cannot pass by accident. (This particular
  * value does survive the MB round-trip exactly; the sizes that do not are
@@ -257,6 +272,105 @@ describe('createReplaceOriginalRunner', () => {
     // And the file object now points at the file that actually exists.
     expect(args.inputFileObj._id).toBe(space.originalPath);
     expect(args.inputFileObj.file).toBe(space.originalPath);
+  });
+
+  it('names BOTH sizes, and which is which, when it does install a replacement', async () => {
+    const space = workspace();
+    const lines: string[] = [];
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => lines.push(text),
+      }),
+    );
+
+    // The line a human reads to see what the flow did to their file. The
+    // replacement's own size must be attached to the replacement — reading
+    // the ORIGINAL's number there is exactly how a 2.06x inflation went
+    // unnoticed on the owner's library until the filesystem was measured.
+    const line = lines.find((text) => text.includes('now holds the replacement'))!;
+    expect(line).toContain(`it is ${NEW_BODY.length} bytes`);
+    expect(line).toContain(`against the original's ${ORIGINAL_BODY.length} bytes`);
+    expect(line).toContain('50.0% smaller');
+  });
+
+  it('refuses to install a replacement bigger than the original, and keeps the original', async () => {
+    const space = workspace();
+    // A 2.0x inflation, the shape of the real incident: hevc_nvenc -cq 23
+    // against an already-lean 1.6 Mbps source, which doubled five episodes.
+    const inflatedBody = 'i'.repeat(ORIGINAL_BODY.length * 2);
+    writeFile(space.newPath, inflatedBody);
+    const originalDigest = sha256(space.originalPath);
+    const lines: string[] = [];
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => lines.push(text),
+      }),
+    );
+
+    // The original is still the library file, byte for byte...
+    expect(sha256(space.originalPath)).toBe(originalDigest);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(statSync(space.originalPath).size).toBe(ORIGINAL_BODY.length);
+    // ...and it was never moved to trash: the trash directory the runner
+    // would have had to create does not even exist.
+    expect(existsSync(space.trashDir)).toBe(false);
+
+    // Output 1 with the ORIGINAL's path: a run that changed nothing and
+    // succeeded, which is what lets the file settle in `good` and stop being
+    // queued. Output 2 here would be a failed attempt, and three more encodes.
+    expect(out.outputNumber).toBe(1);
+    expect(out.outputFileObj._id).toBe(space.originalPath);
+
+    // Both sizes, in the log, on the file that did NOT change.
+    const line = lines.find((text) => text.includes('Not installing this replacement'))!;
+    expect(line).toContain(`${inflatedBody.length} bytes`);
+    expect(line).toContain(`${ORIGINAL_BODY.length} bytes`);
+    expect(line).toContain('100.0% larger');
+  });
+
+  it('leaves the file object describing the ORIGINAL when it refuses an inflated replacement', async () => {
+    const space = workspace();
+    writeFile(space.newPath, 'i'.repeat(ORIGINAL_BODY.length * 2));
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+    const args = argsFor({
+      newPath: space.newPath,
+      originalPath: space.originalPath,
+      jobLog: () => {},
+    });
+
+    await module.plugin(args);
+
+    // `describeReplacement` never ran, so nothing downstream can be told the
+    // library now holds a file it does not hold. The sizes are still the
+    // untouched fixture values.
+    expect(args.inputFileObj.file_size).toBe(0);
+    expect(args.inputFileObj.newSize).toBe(0);
+  });
+
+  it('still installs a replacement that grew only within the slack', async () => {
+    const space = workspace();
+    // +500 bytes on a 2 MB original: 0.025%, and far under a mebibyte. This
+    // is the shape of a container change (an mp4 moov, matroska cues), which
+    // the guard must not mistake for an inflated encode.
+    const slightlyBigger = ORIGINAL_BODY.length + 500;
+    writeFile(space.newPath, 'n'.repeat(slightlyBigger));
+    const module = runnerFor({ trashDir: space.trashDir })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(statSync(space.originalPath).size).toBe(slightlyBigger);
+    expect(readdirSync(space.trashDir)).toHaveLength(1);
   });
 
   it('carries a companion across a container change', async () => {
@@ -1322,5 +1436,56 @@ describe('createReplaceOriginalRunner', () => {
     const trashed = readdirSync(space.trashDir);
     expect(trashed).toHaveLength(1);
     expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
+  });
+});
+
+describe('guardSizeGrowth', () => {
+  const verdict = (newSizeBytes: number, originalSizeBytes: number) =>
+    guardSizeGrowth({ newSizeBytes, originalSizeBytes }).install;
+
+  it('installs anything that shrank, which is the ordinary case', () => {
+    expect(verdict(1, 1_000_000_000)).toBe(true);
+    expect(verdict(883_853_072, 1_823_927_056)).toBe(true);
+  });
+
+  it('installs a file that came out exactly the same size', () => {
+    expect(verdict(1_000_000_000, 1_000_000_000)).toBe(true);
+  });
+
+  it('refuses the real incident: 884 MB in, 1.82 GB out', () => {
+    const result = guardSizeGrowth({ newSizeBytes: 1_823_927_056, originalSizeBytes: 883_853_072 });
+    expect(result.install).toBe(false);
+    expect(result.grewByBytes).toBe(940_073_984);
+    expect(result.ratio).toBeCloseTo(2.06, 2);
+  });
+
+  it('needs BOTH bounds exceeded, so a small file is not refused over container overhead', () => {
+    // The measured mkv -> mp4 remux of this repo's 2-second fixture: 50,773
+    // bytes in, 51,430 out. 1.3% larger — past the ratio, nowhere near the
+    // byte floor — and a flow doing exactly what it was asked to do.
+    expect(verdict(51_430, 50_773)).toBe(true);
+    // A gigabyte-scale file gets no such licence: 2 MiB of growth is under
+    // the ratio, which is what admits it, not the floor.
+    expect(verdict(1_000_000_000 + 2 * REPLACEMENT_GROWTH_SLACK_BYTES, 1_000_000_000)).toBe(true);
+    // Past both: refused.
+    expect(verdict(1_100_000_000, 1_000_000_000)).toBe(false);
+  });
+
+  it('treats each bound as the most a file MAY grow by, not the least', () => {
+    const original = 1_000_000_000;
+    const atRatio = original + original * REPLACEMENT_GROWTH_SLACK_RATIO;
+    expect(verdict(atRatio, original)).toBe(true);
+    expect(verdict(atRatio + 1, original)).toBe(false);
+
+    // Under the ratio's reach, the byte floor is the operative bound.
+    const small = 1_000_000;
+    expect(verdict(small + REPLACEMENT_GROWTH_SLACK_BYTES, small)).toBe(true);
+    expect(verdict(small + REPLACEMENT_GROWTH_SLACK_BYTES + 1, small)).toBe(false);
+  });
+
+  it("abstains when the original's size is no basis for a judgement", () => {
+    // The same abstention `verifyOutput` makes on a zero-byte original —
+    // where it refuses the file outright, before this ever runs.
+    expect(verdict(1_000_000_000, 0)).toBe(true);
   });
 });

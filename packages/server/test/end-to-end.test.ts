@@ -861,3 +861,144 @@ module.exports = { details, plugin };
     after.close();
   }, 600_000);
 });
+
+/**
+ * The size gate at LEDGER altitude: the whole loop, the real database, real
+ * ffmpeg, and a flow whose encode comes out BIGGER than the file it replaces.
+ *
+ * This is the incident that motivated the gate, reduced to one file. On the
+ * owner's Shows library, five *Married at First Sight (AU)* episodes — lean
+ * 720p WEBDL h264 at ~1.6 Mbps — were re-encoded under `hevc_nvenc -cq 23`
+ * with no bitrate ceiling and every one grew, up to 2.17x. S12E15 went 884 MB
+ * to 1.82 GB at identical duration; the smaller original was moved to trash
+ * and the larger file installed in the library. Nothing in the flow was
+ * wrong on its own: constant-quality 23 is a sensible target for a Bluray
+ * source, and it is a HIGHER quality than an already-lean WEBDL was encoded
+ * at, so hevc's efficiency was spent overshooting.
+ *
+ * The same shape is reproduced here with software encoders: a deliberately
+ * lean, noisy source, re-encoded at `-crf 0`.
+ *
+ * Asserted on bytes, on the trash directory, on rows and on job counts —
+ * never on timing, and never on log text alone.
+ */
+describe.runIf(available)('a flow whose encode comes out bigger than the original', () => {
+  beforeAll(() => {
+    assertBuiltCliIsFresh();
+  });
+
+  /**
+   * Lean h264 of NOISE: `-crf 51` throws away almost everything, and noise is
+   * what makes re-encoding it at a high quality target expensive. This is the
+   * synthetic equivalent of a 1.6 Mbps WEBDL — a file whose bitrate is already
+   * below what the flow's quality setting asks for.
+   */
+  const makeLeanNoisySample = (path: string) =>
+    execFileAsync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-f', 'lavfi', '-i', 'testsrc2=duration=20:size=640x480:rate=10',
+      '-vf', 'noise=alls=60:allf=t',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '51',
+      path,
+    ]); // prettier-ignore
+
+  it('leaves the original in place, converges it, and never encodes it again', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'trawlarr-inflation-'));
+    const libraryRoot = join(workDir, 'library');
+    const dataDir = join(workDir, 'data');
+    mkdirSync(libraryRoot, { recursive: true });
+    const mediaPath = join(libraryRoot, 'lean.mkv');
+    await makeLeanNoisySample(mediaPath);
+    const md5Before = md5Of(mediaPath);
+    const sizeBefore = statSync(mediaPath).size;
+    expect(await videoCodecOf(mediaPath)).toBe('h264');
+
+    // `-crf 0` on a source encoded at `-crf 51`: near-lossless, so the output
+    // is several times the input. The flow is otherwise the real one.
+    const flowPath = join(workDir, 'flow.json');
+    writeFileSync(flowPath, JSON.stringify(transcodeFlow('0')), 'utf8');
+
+    await runCli(['library', 'add', '--name', 'Movies', '--root', libraryRoot, '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['flow', 'add', '--name', 'HEVC', '--file', flowPath, '--data-dir', dataDir]);
+    await runCli(['library', 'set-flow', '--library', 'Movies', '--flow', 'HEVC', '--data-dir', dataDir]); // prettier-ignore
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--data-dir', dataDir]);
+
+    // 1. THE FILE. Byte for byte what it was, still h264: the encode ran, was
+    // bigger, and was thrown away rather than installed.
+    expect(md5Of(mediaPath)).toBe(md5Before);
+    expect(statSync(mediaPath).size).toBe(sizeBefore);
+    expect(await videoCodecOf(mediaPath)).toBe('h264');
+
+    // 2. THE TRASH. The original was never given up — nothing to restore by
+    // hand, nothing sitting out a 14-day retention.
+    const trashDir = join(libraryRoot, '.trawlarr', 'trash');
+    expect(existsSync(trashDir) ? readdirSync(trashDir) : []).toEqual([]);
+
+    let jobCountAfterFirstRun: number;
+    let libraryId: string;
+    {
+      const db = openStateDb(dataDir);
+      const library = createLibraryRepo(db).getByName('Movies');
+      libraryId = library!.id;
+
+      // 3. THE ROW. `good`, meaning "as good as THIS FLOW can make it" —
+      // not `failed` (which would have cost three encodes and needed a human
+      // to leave) and not `not_converging` (terminal, manual requeue only).
+      const counts = createMediaFileRepo(db).countsByState(libraryId);
+      expect(counts.good).toBe(1);
+      expect(counts.queued + counts.held + counts.failed + counts.not_converging).toBe(0);
+
+      // The row still describes the file on disk: no replacement was ever
+      // registered against it.
+      const row = db.prepare('SELECT size_bytes FROM media_file').get() as { size_bytes: number };
+      expect(row.size_bytes).toBe(sizeBefore);
+
+      jobCountAfterFirstRun = (db.prepare('SELECT COUNT(*) AS n FROM job').get() as { n: number })
+        .n;
+      expect(jobCountAfterFirstRun).toBe(1);
+
+      // 4. THE JOB LOG. Both sizes, named, in the step that made the call —
+      // so this is visible to somebody reading one job rather than a
+      // disk-usage graph.
+      const step = db
+        .prepare(`SELECT log_excerpt FROM job_step WHERE plugin_id = 'trawlarr:replaceOriginal'`)
+        .get() as { log_excerpt: string };
+      expect(step.log_excerpt).toContain('Not installing this replacement');
+      expect(step.log_excerpt).toContain(`the original's ${sizeBefore} bytes`);
+      expect(step.log_excerpt).toMatch(/the new file is \d+ bytes/);
+      // The number it reports for the new file is the encode's real size, and
+      // it really was bigger — the guard fired on a fact, not on a default.
+      const reported = Number(/the new file is (\d+) bytes/.exec(step.log_excerpt)![1]);
+      expect(reported).toBeGreaterThan(sizeBefore + 1_048_576);
+      db.close();
+    }
+
+    // 5. IT DOES NOT LOOP. A second full convergence cycle — scan, then run —
+    // claims nothing, so no second encode is ever launched. This is the
+    // property a plain refusal could not have: a file that fails for a reason
+    // nothing about it can change is re-queued, re-encoded and refused again
+    // on every pass.
+    await runCli(['scan', '--library', 'Movies', '--data-dir', dataDir]);
+    await runCli(['run', '--data-dir', dataDir]);
+    {
+      const db = openStateDb(dataDir);
+      const counts = createMediaFileRepo(db).countsByState(libraryId);
+      expect(counts.good).toBe(1);
+      expect(counts.queued).toBe(0);
+
+      const jobCountAfterSecondRun = (
+        db.prepare('SELECT COUNT(*) AS n FROM job').get() as { n: number }
+      ).n;
+      expect(jobCountAfterSecondRun).toBe(jobCountAfterFirstRun);
+      // And concretely no second encode: exactly one Execute step exists in
+      // the whole database, the one the first run spent.
+      const executes = db
+        .prepare(`SELECT COUNT(*) AS n FROM job_step WHERE plugin_id = 'trawlarr:execute'`)
+        .get() as { n: number };
+      expect(executes.n).toBe(1);
+      db.close();
+    }
+    expect(md5Of(mediaPath)).toBe(md5Before);
+  }, 600_000);
+});
