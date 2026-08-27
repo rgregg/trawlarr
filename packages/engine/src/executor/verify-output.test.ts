@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { PluginDetails, PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
-import { createVerifyOutputRunner, verifyOutput } from './verify-output.js';
+import type { PluginDetails, PluginInputArgs, ProbeData, ProbeStream } from '@trawlarr/plugin-api';
+import { createVerifyOutputRunner, parseDurationSeconds, verifyOutput } from './verify-output.js';
 import type { LoadedPlugin } from '../host/loader.js';
 
 const GIGABYTE = 1_000 * 1_000 * 1_000;
@@ -88,7 +88,12 @@ describe('verifyOutput', () => {
       requireAudioIfOriginalHadAudio: true,
     });
 
-    expect(report).toEqual({ ok: true, reasons: [] });
+    expect(report).toEqual({
+      ok: true,
+      reasons: [],
+      // These fixtures time only the container, so that is what was compared.
+      duration: { basis: 'container', outputSeconds: 3600, originalSeconds: 3600 },
+    });
   });
 
   it('fails an output that is shorter than the original beyond tolerance', () => {
@@ -123,7 +128,11 @@ describe('verifyOutput', () => {
       requireAudioIfOriginalHadAudio: true,
     });
 
-    expect(report).toEqual({ ok: true, reasons: [] });
+    expect(report).toEqual({
+      ok: true,
+      reasons: [],
+      duration: { basis: 'container', outputSeconds: 3599.5, originalSeconds: 3600 },
+    });
   });
 
   it('fails a 40 GB original that came back as a 200 MB output', () => {
@@ -158,7 +167,11 @@ describe('verifyOutput', () => {
       requireAudioIfOriginalHadAudio: true,
     });
 
-    expect(report).toEqual({ ok: true, reasons: [] });
+    expect(report).toEqual({
+      ok: true,
+      reasons: [],
+      duration: { basis: 'container', outputSeconds: 3600, originalSeconds: 3600 },
+    });
   });
 
   it('fails an output that dropped a stream the original had', () => {
@@ -218,7 +231,11 @@ describe('verifyOutput', () => {
       requireAudioIfOriginalHadAudio: true,
     });
 
-    expect(report).toEqual({ ok: true, reasons: [] });
+    expect(report).toEqual({
+      ok: true,
+      reasons: [],
+      duration: { basis: 'container', outputSeconds: 3599, originalSeconds: 3600 },
+    });
   });
 
   it('fails an output sitting exactly ON the size floor', () => {
@@ -365,7 +382,12 @@ describe('verifyOutput', () => {
       intendedStreamCount: null,
       requireAudioIfOriginalHadAudio: true,
     });
-    expect(good).toEqual({ ok: true, reasons: [] });
+    expect(good).toEqual({
+      ok: true,
+      reasons: [],
+      // The container says nothing, so the VIDEO stream is what was read.
+      duration: { basis: 'video', outputSeconds: 3600, originalSeconds: 3600 },
+    });
 
     // And the check really is being performed, not merely skipped quietly: a
     // truncated output with the same untimed container still fails.
@@ -399,6 +421,508 @@ describe('verifyOutput', () => {
     // Nothing else is meaningful once the file is unreadable: one reason only.
     expect(report.reasons).toHaveLength(1);
     expect(report.reasons[0]).toContain('ffprobe');
+  });
+});
+
+/**
+ * A stream as ffprobe really reports it inside a Matroska file.
+ *
+ * Verified against ffprobe 6.1 rather than assumed: for an `.mkv`, EVERY
+ * stream comes back with `duration` absent (`duration=N/A` in the flat
+ * output) and the real length in a `DURATION` TAG as `HH:MM:SS.nnnnnnnnn`.
+ * A fixture that put a number in `stream.duration` would be testing a shape
+ * these files never present, and the fix would be untested on the very files
+ * that motivated it.
+ */
+const mkvStream = (input: {
+  index: number;
+  codecType: 'video' | 'audio';
+  codecName: string;
+  timecode: string;
+  language?: string;
+}): ProbeStream => ({
+  index: input.index,
+  codec_type: input.codecType,
+  codec_name: input.codecName,
+  tags: {
+    ...(input.language === undefined ? {} : { language: input.language }),
+    ENCODER: 'Lavc60.31.102',
+    DURATION: input.timecode,
+  },
+});
+
+/**
+ * A Matroska probe whose CONTAINER duration is its longest stream, which is
+ * what Matroska actually reports and the whole cause of the defect.
+ */
+const mkvProbe = (streams: ProbeStream[]): ProbeData => {
+  const longest = Math.max(
+    ...streams.map((stream) => {
+      const [hours, minutes, seconds] = String(stream.tags?.DURATION ?? '0:0:0').split(':');
+      return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
+    }),
+  );
+  return { streams, format: { duration: longest.toFixed(6) } };
+};
+
+/** `Foundation S02E02` exactly as it probes, minus the tracks nothing reads. */
+const foundationS02E02 = (input: { video: string; eng: string; ita?: string }): ProbeData =>
+  mkvProbe([
+    mkvStream({ index: 0, codecType: 'video', codecName: 'hevc', timecode: input.video }),
+    mkvStream({
+      index: 1,
+      codecType: 'audio',
+      codecName: 'aac',
+      timecode: input.eng,
+      language: 'eng',
+    }),
+    ...(input.ita === undefined
+      ? []
+      : [
+          mkvStream({
+            index: 2,
+            codecType: 'audio',
+            codecName: 'eac3',
+            timecode: input.ita,
+            language: 'ita',
+          }),
+        ]),
+  ]);
+
+const sizesAndGates = {
+  outputSizeBytes: 4 * GIGABYTE,
+  originalSizeBytes: 8 * GIGABYTE,
+  durationToleranceSeconds: 1,
+  minSizeRatio: 0.05,
+  intendedStreamCount: null,
+  requireAudioIfOriginalHadAudio: true,
+} as const;
+
+describe('the length check reads the programme, not the container', () => {
+  it('passes Foundation S02E02 with its overhanging Italian dub removed', () => {
+    // The measured file: video 00:53:51.436, English 00:53:51.509, Italian
+    // 00:53:52.736 — and a container that calls itself 3232.736s because
+    // Matroska reports its LONGEST STREAM. Dropping the Italian track leaves
+    // the container at 3231.509s, a 1.227s "loss" against a 1s tolerance with
+    // every frame and every retained sample intact. That is the false failure
+    // this exists to prevent; the observed one was reported as 1.2s.
+    const original = foundationS02E02({
+      video: '00:53:51.436000000',
+      eng: '00:53:51.509000000',
+      ita: '00:53:52.736000000',
+    });
+    const output = foundationS02E02({
+      video: '00:53:51.436000000',
+      eng: '00:53:51.509000000',
+    });
+    expect(Number(original.format?.duration)).toBe(3232.736);
+    expect(Number(output.format?.duration)).toBe(3231.509);
+    expect(Number(original.format?.duration) - Number(output.format?.duration)).toBeCloseTo(
+      1.227,
+      6,
+    );
+
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: output,
+      originalProbe: original,
+      // The flow meant to write two streams and wrote two.
+      intendedStreamCount: 2,
+    });
+
+    expect(report.reasons).toEqual([]);
+    expect(report.ok).toBe(true);
+    // And it passed because the VIDEO was compared, unchanged on both sides —
+    // not because anything was skipped or widened.
+    expect(report.duration).toEqual({
+      basis: 'video',
+      outputSeconds: 3231.436,
+      originalSeconds: 3231.436,
+    });
+  });
+
+  it('passes Foundation S02E03, whose dub overhangs by more than twice the tolerance', () => {
+    // video 00:54:23.051, eng 00:54:23.221, ita 00:54:25.248: a 2.027s
+    // container loss, observed as 2.0s. Pinned separately from S02E02 because
+    // it proves nothing about the SIZE of the overhang is being relied on.
+    const original = foundationS02E02({
+      video: '00:54:23.051000000',
+      eng: '00:54:23.221000000',
+      ita: '00:54:25.248000000',
+    });
+    const output = foundationS02E02({
+      video: '00:54:23.051000000',
+      eng: '00:54:23.221000000',
+    });
+    expect(Number(original.format?.duration) - Number(output.format?.duration)).toBeCloseTo(
+      2.027,
+      6,
+    );
+
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: output,
+      originalProbe: original,
+      intendedStreamCount: 2,
+    });
+
+    expect(report.reasons).toEqual([]);
+    expect(report.ok).toBe(true);
+    expect(report.duration).toEqual({
+      basis: 'video',
+      outputSeconds: 3263.051,
+      originalSeconds: 3263.051,
+    });
+  });
+
+  it('still fails a truncated encode of exactly that file', () => {
+    // Same file, same removal, but the encode stopped twenty minutes in. The
+    // protection has to survive the fix, and this is the assertion that says
+    // so: the video is what moved, and the video is what is read.
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: foundationS02E02({ video: '00:33:00.000000000', eng: '00:33:00.070000000' }),
+      originalProbe: foundationS02E02({
+        video: '00:53:51.436000000',
+        eng: '00:53:51.509000000',
+        ita: '00:53:52.736000000',
+      }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.duration).toEqual({
+      basis: 'video',
+      outputSeconds: 1980,
+      originalSeconds: 3231.436,
+    });
+  });
+
+  it('fails a truncation SMALLER than the dub overhang it now forgives', () => {
+    // The sharp edge of the fix. A 1.227s container loss from a removed dub
+    // passes; a 1.227s loss of PICTURE — the same number, a real short encode
+    // — still fails. Forgiving the first must not have forgiven the second.
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: foundationS02E02({ video: '00:53:50.209000000', eng: '00:53:51.509000000' }),
+      originalProbe: foundationS02E02({
+        video: '00:53:51.436000000',
+        eng: '00:53:51.509000000',
+        ita: '00:53:52.736000000',
+      }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.duration.basis).toBe('video');
+    expect(report.duration.originalSeconds - report.duration.outputSeconds).toBeCloseTo(1.227, 6);
+  });
+
+  it('holds the tolerance boundary on the video, both sides of it', () => {
+    // Round timecodes on purpose: the boundary is where `>` and `>=` differ,
+    // and a fixture whose subtraction lands a nanosecond either side of one
+    // second would be pinning floating point rather than the rule.
+    const originalProbe = foundationS02E02({
+      video: '01:00:00.000000000',
+      eng: '01:00:00.070000000',
+      ita: '01:00:02.500000000',
+    });
+
+    const at = verifyOutput({
+      ...sizesAndGates,
+      probe: foundationS02E02({ video: '00:59:59.000000000', eng: '01:00:00.070000000' }),
+      originalProbe,
+      intendedStreamCount: 2,
+    });
+    // Exactly one second short: the tolerance is what the output MAY differ
+    // by, so the boundary itself passes.
+    expect(at.duration).toEqual({ basis: 'video', outputSeconds: 3599, originalSeconds: 3600 });
+    expect(at.ok).toBe(true);
+
+    const past = verifyOutput({
+      ...sizesAndGates,
+      probe: foundationS02E02({ video: '00:59:58.500000000', eng: '01:00:00.070000000' }),
+      originalProbe,
+      intendedStreamCount: 2,
+    });
+    expect(past.duration).toEqual({ basis: 'video', outputSeconds: 3598.5, originalSeconds: 3600 });
+    expect(past.ok).toBe(false);
+
+    // Meanwhile the container lost 2.43s to the removed dub in BOTH cases —
+    // more than the tolerance, and no part of the verdict either time.
+    expect(Number(originalProbe.format?.duration) - 3600.07).toBeCloseTo(2.43, 6);
+  });
+
+  it('reads the longest video stream, not a cover-art frame beside it', () => {
+    // Matroska times a still-image track like any other stream — ffprobe
+    // reports the 0.04s mjpeg cover as a VIDEO stream. Reading the first one
+    // rather than the longest would call an hour of film a fortieth of a
+    // second and fail every file that carries artwork.
+    const withCover = (video: string) =>
+      mkvProbe([
+        mkvStream({ index: 0, codecType: 'video', codecName: 'mjpeg', timecode: '00:00:00.040' }),
+        mkvStream({ index: 1, codecType: 'video', codecName: 'hevc', timecode: video }),
+        mkvStream({
+          index: 2,
+          codecType: 'audio',
+          codecName: 'aac',
+          timecode: '00:53:51.509',
+          language: 'eng',
+        }),
+      ]);
+
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: withCover('00:53:51.436'),
+      originalProbe: withCover('00:53:51.436'),
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.duration).toEqual({
+      basis: 'video',
+      outputSeconds: 3231.436,
+      originalSeconds: 3231.436,
+    });
+  });
+
+  it('ignores a stream ffprobe flagged as attached_pic outright', () => {
+    const coverOnly: ProbeData = {
+      streams: [
+        {
+          ...mkvStream({
+            index: 0,
+            codecType: 'video',
+            codecName: 'mjpeg',
+            timecode: '00:00:00.040',
+          }),
+          disposition: { attached_pic: 1 },
+        },
+        mkvStream({
+          index: 1,
+          codecType: 'audio',
+          codecName: 'flac',
+          timecode: '00:03:20.000',
+          language: 'eng',
+        }),
+      ],
+      format: { duration: '200.000000' },
+    };
+
+    const report = verifyOutput({ ...sizesAndGates, probe: coverOnly, originalProbe: coverOnly });
+
+    // The cover is not the programme, so the AUDIO is what was read.
+    expect(report.ok).toBe(true);
+    expect(report.duration).toEqual({ basis: 'audio', outputSeconds: 200, originalSeconds: 200 });
+  });
+
+  it('falls back to audio for a file with no video stream at all', () => {
+    const audioOnly = (timecode: string): ProbeData =>
+      mkvProbe([
+        mkvStream({ index: 0, codecType: 'audio', codecName: 'flac', timecode, language: 'eng' }),
+      ]);
+
+    const good = verifyOutput({
+      ...sizesAndGates,
+      probe: audioOnly('00:03:20.000000000'),
+      originalProbe: audioOnly('00:03:20.000000000'),
+    });
+    expect(good.ok).toBe(true);
+    expect(good.duration).toEqual({ basis: 'audio', outputSeconds: 200, originalSeconds: 200 });
+
+    // The fallback is a real check, not a pass: a truncated audio-only output
+    // still fails on it.
+    const truncated = verifyOutput({
+      ...sizesAndGates,
+      probe: audioOnly('00:01:00.000000000'),
+      originalProbe: audioOnly('00:03:20.000000000'),
+    });
+    expect(truncated.ok).toBe(false);
+    expect(truncated.duration).toEqual({
+      basis: 'audio',
+      outputSeconds: 60,
+      originalSeconds: 200,
+    });
+  });
+
+  it('falls back to audio when the flow removed the VIDEO stream itself', () => {
+    // Audio extraction: the original has picture, the output deliberately has
+    // none. There is no video to compare, so the audio is compared instead.
+    const original = foundationS02E02({
+      video: '00:53:51.436000000',
+      eng: '00:53:51.509000000',
+    });
+    const extracted = mkvProbe([
+      mkvStream({
+        index: 0,
+        codecType: 'audio',
+        codecName: 'aac',
+        timecode: '00:53:51.509000000',
+        language: 'eng',
+      }),
+    ]);
+
+    const good = verifyOutput({
+      ...sizesAndGates,
+      probe: extracted,
+      originalProbe: original,
+      intendedStreamCount: 1,
+    });
+    expect(good.reasons).toEqual([]);
+    expect(good.duration).toEqual({
+      basis: 'audio',
+      outputSeconds: 3231.509,
+      originalSeconds: 3231.509,
+    });
+
+    // And a truncated extraction is still caught.
+    const truncated = verifyOutput({
+      ...sizesAndGates,
+      probe: mkvProbe([
+        mkvStream({
+          index: 0,
+          codecType: 'audio',
+          codecName: 'aac',
+          timecode: '00:20:00.000000000',
+          language: 'eng',
+        }),
+      ]),
+      originalProbe: original,
+      intendedStreamCount: 1,
+    });
+    expect(truncated.ok).toBe(false);
+    expect(truncated.duration).toEqual({
+      basis: 'audio',
+      outputSeconds: 1200,
+      originalSeconds: 3231.509,
+    });
+  });
+
+  it('keeps the container as a last resort for an original ffprobe times only there', () => {
+    // A raw TS/VOB original: no per-stream durations anywhere, but the
+    // container knows. This used to be the only comparison and must keep
+    // working, or the fix would fail files it used to pass.
+    const untimed: ProbeData = {
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'mpeg2video' },
+        { index: 1, codec_type: 'audio', codec_name: 'ac3' },
+      ],
+      format: { duration: '3600.000000' },
+    };
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: foundationS02E02({ video: '01:00:00.000000000', eng: '01:00:00.000000000' }),
+      originalProbe: untimed,
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.duration).toEqual({
+      basis: 'container',
+      outputSeconds: 3600,
+      originalSeconds: 3600,
+    });
+  });
+
+  it('refuses, rather than passes, when the video duration is unparseable on both clocks', () => {
+    // An unreadable length must never read as a matching length. `N/A` in the
+    // tag and `N/A` in the container leaves nothing to compare, and this is a
+    // gate in front of a destructive step.
+    const unreadable: ProbeData = {
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'hevc', tags: { DURATION: 'N/A' } },
+        { index: 1, codec_type: 'audio', codec_name: 'aac', tags: { DURATION: '' } },
+      ],
+      format: { duration: 'N/A' },
+    };
+
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: unreadable,
+      originalProbe: foundationS02E02({
+        video: '00:53:51.436000000',
+        eng: '00:53:51.509000000',
+      }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.duration).toEqual({
+      basis: null,
+      outputSeconds: Number.NaN,
+      originalSeconds: 3231.436,
+    });
+  });
+
+  it('refuses when the ORIGINAL is the unreadable side', () => {
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: foundationS02E02({ video: '00:53:51.436000000', eng: '00:53:51.509000000' }),
+      originalProbe: {
+        streams: [{ index: 0, codec_type: 'video', codec_name: 'hevc', tags: { DURATION: 'N/A' } }],
+        format: { duration: 'N/A' },
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.duration).toEqual({
+      basis: null,
+      outputSeconds: 3231.436,
+      originalSeconds: Number.NaN,
+    });
+  });
+
+  it('treats a malformed timecode as unreadable rather than as a number', () => {
+    // "00:53:xx" must not become 53 minutes of something. A value that cannot
+    // be understood has to fall through to the next clock, and refuse if
+    // there is no next clock — never be guessed at.
+    const malformed: ProbeData = {
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'hevc', tags: { DURATION: '00:53:xx' } },
+      ],
+      format: { duration: 'N/A' },
+    };
+
+    const report = verifyOutput({
+      ...sizesAndGates,
+      probe: malformed,
+      originalProbe: malformed,
+      requireAudioIfOriginalHadAudio: false,
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.duration).toEqual({
+      basis: null,
+      outputSeconds: Number.NaN,
+      originalSeconds: Number.NaN,
+    });
+  });
+});
+
+describe('parseDurationSeconds', () => {
+  it('reads both shapes ffprobe uses', () => {
+    // The Matroska tag shape, confirmed against ffprobe 6.1 on a real file.
+    expect(parseDurationSeconds('00:53:52.736000000')).toBe(3232.736);
+    expect(parseDurationSeconds('01:00:00.000000000')).toBe(3600);
+    // And the plain seconds `format.duration` carries.
+    expect(parseDurationSeconds('3232.736000')).toBe(3232.736);
+    expect(parseDurationSeconds(3232.736)).toBe(3232.736);
+  });
+
+  it('answers NaN for everything it cannot understand', () => {
+    for (const value of [
+      'N/A',
+      '',
+      '   ',
+      undefined,
+      null,
+      'garbage',
+      '00:53:xx',
+      '12abc',
+      '00::30',
+      '1:2:3:4',
+      -5,
+      '-5',
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expect(parseDurationSeconds(value)).toBeNaN();
+    }
   });
 });
 

@@ -1,10 +1,34 @@
-import type { PluginModule, ProbeData } from '@trawlarr/plugin-api';
+import type { PluginModule, ProbeData, ProbeStream } from '@trawlarr/plugin-api';
 import { mappableStreams } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
+
+/**
+ * Which of the file's clocks the length check actually read.
+ *
+ * `video` is the intended answer for a video library; the rest are the
+ * documented fallbacks in {@link compareDurations}.
+ */
+export type DurationBasis = 'video' | 'audio' | 'container';
+
+/**
+ * The two numbers the length check compared, and where they came from.
+ *
+ * Reported rather than merely logged so a caller — and a test — can assert on
+ * WHAT was compared, not on the wording of a sentence.
+ */
+export interface DurationComparison {
+  /** `null` when no clock was readable on both sides. */
+  basis: DurationBasis | null;
+  /** `NaN` when the output had no readable duration at the chosen basis. */
+  outputSeconds: number;
+  /** `NaN` when the original had no readable duration at the chosen basis. */
+  originalSeconds: number;
+}
 
 export interface VerifyReport {
   ok: boolean;
   reasons: string[];
+  duration: DurationComparison;
 }
 
 /**
@@ -60,7 +84,11 @@ export const verifyOutput = (input: {
   if (streams.length === 0) {
     reasons.push('the output has no streams — ffprobe could not read it');
     // Nothing else is meaningful once the file is unreadable.
-    return { ok: false, reasons };
+    return {
+      ok: false,
+      reasons,
+      duration: { basis: null, outputSeconds: Number.NaN, originalSeconds: Number.NaN },
+    };
   }
 
   const originalStreams = input.originalProbe.streams ?? [];
@@ -98,8 +126,9 @@ export const verifyOutput = (input: {
   // floor comfortably. Either way the length check did not happen, and saying
   // nothing about that is a false pass on the gate protecting a destructive
   // step.
-  const outDuration = durationSecondsOf(input.probe);
-  const origDuration = durationSecondsOf(input.originalProbe);
+  const duration = compareDurations(input.probe, input.originalProbe);
+  const outDuration = duration.outputSeconds;
+  const origDuration = duration.originalSeconds;
   if (!Number.isFinite(origDuration)) {
     reasons.push(
       `the original's duration could not be read, so the output's length could not be ` +
@@ -117,8 +146,8 @@ export const verifyOutput = (input: {
     // drift of exactly the tolerance passes.
     if (drift > input.durationToleranceSeconds) {
       reasons.push(
-        `the output runs ${outDuration.toFixed(1)}s against the original's ` +
-          `${origDuration.toFixed(1)}s, a ${drift.toFixed(1)}s difference`,
+        `the output's ${duration.basis ?? 'container'} runs ${outDuration.toFixed(1)}s against ` +
+          `the original's ${origDuration.toFixed(1)}s, a ${drift.toFixed(1)}s difference`,
       );
     }
   }
@@ -144,32 +173,160 @@ export const verifyOutput = (input: {
     );
   }
 
-  return { ok: reasons.length === 0, reasons };
+  return { ok: reasons.length === 0, reasons, duration };
 };
 
 /**
- * How long the media runs, in seconds, or `NaN` if nothing says.
+ * How long the PROGRAMME runs, in seconds, at one particular clock.
  *
- * `format.duration` first, then the video stream's own duration. The fallback
- * matters: plenty of containers report `N/A` at format level while every
- * stream inside is timed, and `probeFile` already asks for `-show_streams`, so
- * the baseline is sitting in the data we hold. Without it, such a file fails
- * verification for want of a number that was right there — and since an
- * unreadable duration is (correctly) a refusal on a gate in front of a
- * destructive step, that refusal would land on files we could perfectly well
- * have checked.
+ * `video` and `audio` take the LONGEST stream of that type, so a file carrying
+ * a still-image cover art track (a 0.04s mjpeg video stream, which Matroska
+ * times just like any other) is not mistaken for a four-hundredth of a second
+ * of film. A stream flagged `attached_pic` is skipped outright.
  */
-const durationSecondsOf = (probe: ProbeData): number => {
-  const fromFormat = Number.parseFloat(String(probe.format?.duration ?? ''));
-  if (Number.isFinite(fromFormat)) return fromFormat;
+const durationAt = (probe: ProbeData, basis: DurationBasis): number => {
+  if (basis === 'container') return parseDurationSeconds(probe.format?.duration);
 
-  const streams = probe.streams ?? [];
-  const video = streams.filter((stream) => stream.codec_type === 'video');
-  for (const stream of [...video, ...streams]) {
-    const fromStream = Number.parseFloat(String(stream.duration ?? ''));
-    if (Number.isFinite(fromStream)) return fromStream;
+  const timed = (probe.streams ?? [])
+    .filter((stream) => stream.codec_type === basis && !isAttachedPicture(stream))
+    .map(streamDurationSeconds)
+    .filter((seconds) => Number.isFinite(seconds));
+  return timed.length === 0 ? Number.NaN : Math.max(...timed);
+};
+
+/**
+ * The clocks tried, in order of how well each one survives a stream being
+ * removed ON PURPOSE.
+ */
+const DURATION_BASES: readonly DurationBasis[] = ['video', 'audio', 'container'];
+
+/**
+ * The two durations to compare, and which clock they came from.
+ *
+ * The container's own duration is the LAST resort, not the first, and that is
+ * the whole point of this function.
+ *
+ * A Matroska container reports its duration as its LONGEST STREAM. Dubs and
+ * commentary tracks routinely overhang the picture by a second or three —
+ * `Foundation S02E02` carries video of 00:53:51.436, English audio of
+ * 00:53:51.509 and an Italian dub of 00:53:52.736, and the container calls
+ * itself 3232.736s because of the dub. A flow that deliberately drops the
+ * Italian track therefore produces a container 1.2s shorter than the original
+ * WITH EVERY FRAME AND EVERY RETAINED SAMPLE INTACT, and a container-to-
+ * container comparison read that as a 1.2s loss against a 1.0s tolerance and
+ * failed a perfect file. Two more episodes of the same run failed at 2.0s and
+ * 2.3s for the same reason. Any release whose dub or commentary overhangs the
+ * picture hits this, so the answer is not a wider tolerance — that would blunt
+ * the check for every file to accommodate a number that was never evidence of
+ * loss — but a clock that DOES NOT MOVE when a stream is removed on purpose.
+ *
+ * The video stream is that clock. It is the programme; it is what a truncated
+ * encode shortens; and removing an audio track cannot change it. It is chosen
+ * over "the longest RETAINED stream" because retention cannot be established
+ * from two probes: nothing in an output stream identifies which original
+ * stream it came from, so "retained" would have to be guessed from language
+ * tags and ordering, and a wrong guess silently weakens the gate in front of a
+ * destructive step. The video stream needs no guess.
+ *
+ * The fallbacks handle the files that have no such clock, and the rule is the
+ * same each time — the FIRST basis both sides can answer wins:
+ *
+ * - `audio` catches the audio-only file (no video stream on either side) and
+ *   the flow that deliberately removed the VIDEO stream (audio extraction):
+ *   the output has no video to read, so the audio is compared instead, and a
+ *   truncated extraction still shows up short.
+ * - `container` is what remains for a raw TS/VOB original whose streams are
+ *   individually untimed but whose container is not — the pre-existing
+ *   behaviour, kept so this change fails nothing it used to pass.
+ *
+ * When no basis is readable on both sides, the numbers are reported as they
+ * stand so the caller can say WHICH side was unreadable, and an unreadable
+ * duration remains a REFUSAL rather than a silent pass — see the caller.
+ */
+export const compareDurations = (
+  probe: ProbeData,
+  originalProbe: ProbeData,
+): DurationComparison => {
+  for (const basis of DURATION_BASES) {
+    const outputSeconds = durationAt(probe, basis);
+    const originalSeconds = durationAt(originalProbe, basis);
+    if (Number.isFinite(outputSeconds) && Number.isFinite(originalSeconds)) {
+      return { basis, outputSeconds, originalSeconds };
+    }
+  }
+  // Nothing lines up. Report each side's best available reading anyway: the
+  // caller distinguishes "the original is untimed" from "the output is
+  // untimed", and both are failures with different wording.
+  return {
+    basis: null,
+    outputSeconds: anyDurationOf(probe),
+    originalSeconds: anyDurationOf(originalProbe),
+  };
+};
+
+/** The first readable duration at any basis, for the unreadable-side message. */
+const anyDurationOf = (probe: ProbeData): number => {
+  for (const basis of DURATION_BASES) {
+    const seconds = durationAt(probe, basis);
+    if (Number.isFinite(seconds)) return seconds;
   }
   return Number.NaN;
+};
+
+/** Cover art, which is a video stream to ffprobe and not to a viewer. */
+const isAttachedPicture = (stream: ProbeStream): boolean =>
+  Number((stream.disposition as Record<string, unknown> | undefined)?.attached_pic ?? 0) === 1;
+
+/**
+ * One stream's duration, in seconds, or `NaN` if nothing says.
+ *
+ * `stream.duration` is absent on Matroska — ffprobe reports `duration=N/A` for
+ * every stream in an mkv and puts the real number in the stream's `DURATION`
+ * TAG instead, as `HH:MM:SS.nnnnnnnnn`. Reading only the numeric field would
+ * therefore find no video duration at all on exactly the files this change
+ * exists for, fall through to the container, and change nothing. Some muxers
+ * write the tag per language (`DURATION-eng`); the longest of them wins.
+ */
+const streamDurationSeconds = (stream: ProbeStream): number => {
+  const direct = parseDurationSeconds(stream.duration);
+  if (Number.isFinite(direct)) return direct;
+
+  const tagged = Object.entries(stream.tags ?? {})
+    .filter(([key]) => key.toUpperCase().startsWith('DURATION'))
+    .map(([, value]) => parseDurationSeconds(value))
+    .filter((seconds) => Number.isFinite(seconds));
+  return tagged.length === 0 ? Number.NaN : Math.max(...tagged);
+};
+
+/**
+ * Seconds from either shape ffprobe uses, or `NaN` for anything else.
+ *
+ * Anything unparseable — `N/A`, an empty tag, `garbage`, a negative number —
+ * answers `NaN` rather than a guess, because `NaN` is what the caller turns
+ * into a refusal. A value that cannot be understood must never be allowed to
+ * read as a value that matches.
+ */
+export const parseDurationSeconds = (value: unknown): number => {
+  if (typeof value === 'number') return value >= 0 && Number.isFinite(value) ? value : Number.NaN;
+  const text = String(value ?? '').trim();
+  if (text === '') return Number.NaN;
+
+  if (text.includes(':')) {
+    const parts = text.split(':');
+    if (parts.length > 3) return Number.NaN;
+    let seconds = 0;
+    for (const part of parts) {
+      // Number.parseFloat would accept "12abc"; Number() does not, and a
+      // malformed timecode must not silently become a plausible length.
+      const unit = part === '' ? Number.NaN : Number(part);
+      if (!Number.isFinite(unit) || unit < 0) return Number.NaN;
+      seconds = seconds * 60 + unit;
+    }
+    return seconds;
+  }
+
+  const plain = Number(text);
+  return Number.isFinite(plain) && plain >= 0 ? plain : Number.NaN;
 };
 
 /** A node input the user typed, read as a number with a documented default. */
@@ -263,6 +420,9 @@ export const createVerifyOutputRunner =
           report = {
             ok: false,
             reasons: [`the output could not be inspected: ${messageOf(error)}`],
+            // Nothing was compared, and saying so is not the same as saying
+            // the lengths matched.
+            duration: { basis: null, outputSeconds: Number.NaN, originalSeconds: Number.NaN },
           };
         }
 
