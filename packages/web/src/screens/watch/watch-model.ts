@@ -171,6 +171,75 @@ export const toRunningRows = (live: LiveState): RunningRow[] =>
     workerId: job.workerId,
   }));
 
+/**
+ * One row of `GET /jobs?state=running`, as `job-repo.ts`'s `JobRow` reports
+ * it. A job row carries no path and no `workerId` — the path is on the file
+ * (fetched separately, the same fetch that already decorated a running row
+ * with its size) and the worker is identified durably by pid and host.
+ */
+export interface RestRunningJob {
+  id: string;
+  fileId: string;
+  workerPid: number | null;
+  workerHost: string | null;
+}
+
+const restWorkerLabel = (job: RestRunningJob): string => {
+  if (job.workerPid === null) return 'unknown';
+  return job.workerHost === null
+    ? `pid ${String(job.workerPid)}`
+    : `${job.workerHost} pid ${String(job.workerPid)}`;
+};
+
+/**
+ * What is running, from the RECORD, with the socket's frames laid over it.
+ *
+ * A DEAD SOCKET MUST MAKE THIS SCREEN LESS LIVELY, NEVER WRONG. Running rows
+ * used to come from `live.jobs` alone, so a dropped socket rendered the idle
+ * box — "Waiting for a worker — N files are queued" — while a transcode was
+ * in fact running. That is not stale, it is false, and it is the one thing
+ * this screen is not allowed to be.
+ *
+ * The liveness-only discipline is kept exactly (`worker/protocol.ts`): the
+ * durable facts — that a job exists, which file it is on, which worker holds
+ * it — all come from `GET /jobs?state=running` and `GET /files/:id`. The
+ * socket contributes `percent` and `stage` and nothing else, laid over the
+ * fetched row.
+ *
+ * LIVE-ONLY ROWS ARE STILL SHOWN, appended after the fetched ones. This is
+ * not a durable read: `job.started` deliberately bumps no staleness counter
+ * (see `api/events.ts`), so a job that started since the last fetch would
+ * otherwise be invisible until something else forced a refetch. Showing it
+ * costs nothing — the next fetch subsumes it under its own id.
+ */
+export const mergeRunningRows = (input: {
+  rest: RestRunningJob[];
+  files: Record<string, { path: string } | undefined>;
+  live: LiveState;
+}): RunningRow[] => {
+  const { rest, files, live } = input;
+  const rows: RunningRow[] = rest.map((job) => {
+    const liveJob = live.jobs[job.id];
+    // The live frame's path is the same path and arrives sooner; the fetched
+    // one is what makes the row appear at all with no socket.
+    const path = files[job.fileId]?.path ?? liveJob?.path;
+    return {
+      jobId: job.id,
+      fileId: job.fileId,
+      name: path === undefined ? 'Loading name…' : basename(path),
+      percent: liveJob?.percent ?? null,
+      stage: liveJob?.stage ?? 'Running',
+      workerId: liveJob?.workerId ?? restWorkerLabel(job),
+    };
+  });
+
+  const fetched = new Set(rest.map((job) => job.id));
+  for (const row of toRunningRows(live)) {
+    if (!fetched.has(row.jobId)) rows.push(row);
+  }
+  return rows;
+};
+
 export interface IdleReason {
   headline: string;
   detail: string;
@@ -190,6 +259,15 @@ export interface IdleReason {
  * worker is simply between polls. Order matters: a library that is both
  * outside its window AND has zero workers is reported as "set workers" first,
  * because raising the count is the fix that matters regardless of the clock.
+ *
+ * `workers` IS THE OPERATOR'S PERMANENT SETTING and `withinWindow` says
+ * whether the schedule is granting any workers RIGHT NOW — two different
+ * numbers (`baseCounts` and `target` on `GET /workers`), and the "worker
+ * count is 0" branch is only true when BOTH say zero. It used to fire on
+ * `workers === 0` alone, so a base of 0 plus an active window granting
+ * workers reported "Nothing will start — worker count is 0" while workers
+ * were in fact allocated and about to claim. See `toIdleInputs`, which is
+ * where the two numbers get these meanings.
  */
 export const explainIdle = (input: {
   queued: number;
@@ -204,7 +282,7 @@ export const explainIdle = (input: {
       action: null,
     };
   }
-  if (input.workers === 0) {
+  if (input.workers === 0 && !input.withinWindow) {
     return {
       headline: 'Nothing will start',
       detail: `${String(input.queued)} files are queued, but worker count is 0.`,
@@ -225,10 +303,63 @@ export const explainIdle = (input: {
   };
 };
 
+/**
+ * The four numbers `explainIdle` reasons over, derived from the two fetches
+ * that carry them. Extracted from `Watch.tsx` because this mapping — not the
+ * branch ladder — is where `converged` and `withinWindow` GET their meanings,
+ * and getting either wrong makes the screen state a confident falsehood
+ * about why nothing is running.
+ *
+ * `withinWindow` is `sum(target) > 0`: `target` is the schedule-EVALUATED
+ * count (`routes/workers.ts` applies any active window before answering), so
+ * "the schedule is granting workers right now" is exactly what a non-zero
+ * target means. `workers` is `sum(baseCounts)`, the permanent setting, which
+ * is the only one an operator can raise from the Configure screen the
+ * "Set workers" action links to.
+ *
+ * `converged` treats an EMPTY install as converged: zero files means no file
+ * needs work, and "0% converged, nothing queued" would read as a fault on a
+ * fresh install that has simply never scanned.
+ */
+export const toIdleInputs = (input: {
+  totals: { total: number; good: number; queued: number };
+  workers: { target: Record<string, number>; baseCounts: Record<string, number> };
+}): { queued: number; workers: number; converged: boolean; withinWindow: boolean } => {
+  const sum = (counts: Record<string, number>): number =>
+    Object.values(counts).reduce((total, count) => total + count, 0);
+  return {
+    queued: input.totals.queued,
+    workers: sum(input.workers.baseCounts),
+    converged: input.totals.total === 0 || input.totals.good === input.totals.total,
+    withinWindow: sum(input.workers.target) > 0,
+  };
+};
+
 export interface Job24h {
   state: string;
-  ranFfmpeg: boolean;
+  /**
+   * `null` means NOT YET KNOWN, never "did not run ffmpeg". Whether ffmpeg
+   * ran is only on `GET /jobs/:id`, one request per job, and that lookup is
+   * capped (see `JOB_DETAIL_CAP`) — so a busy day leaves some jobs in the
+   * window unclassified, and one that could not be fetched stays unclassified
+   * too. Counting either as a skip would quietly under-report encodes, which
+   * is the one number this panel exists to give.
+   */
+  ranFfmpeg: boolean | null;
 }
+
+/**
+ * How many `GET /jobs/:id` lookups one refresh of the 24h summary may make.
+ *
+ * The panel used to fetch the step trace for EVERY job in the window and
+ * re-run the whole thing on every `job.finished` frame — hundreds of
+ * requests per completed file on a converging library. `Watch.tsx` now
+ * remembers each answer for as long as the job stays in the window and
+ * fetches at most this many NEW ones per refresh, so the steady state is one
+ * lookup per completion; anything past the cap is reported as unclassified
+ * rather than guessed at.
+ */
+export const JOB_DETAIL_CAP = 25;
 
 /**
  * Encoded vs. skipped is the whole question a "what did the last day do"
@@ -244,16 +375,19 @@ export const summarise24h = (
   encoded: number;
   skipped: number;
   failed: number;
+  unclassified: number;
 } => {
   let encoded = 0;
   let skipped = 0;
   let failed = 0;
+  let unclassified = 0;
   for (const job of jobs) {
     if (job.state === 'failed') failed += 1;
+    else if (job.ranFfmpeg === null) unclassified += 1;
     else if (job.ranFfmpeg) encoded += 1;
     else skipped += 1;
   }
-  return { encoded, skipped, failed };
+  return { encoded, skipped, failed, unclassified };
 };
 
 export interface StepExcerpt {

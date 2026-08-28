@@ -224,6 +224,23 @@ main {
   margin: 0 0 0.2rem;
 }
 
+/* The library name is the link to that library's filtered file list — the
+   only place in this UI that emits `?library=`, and without it the Files
+   library filter can only be reached by typing a uuid by hand. Sized to the
+   touch-target floor the rest of the sheet uses. */
+.library-card-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.library-card-link:hover h3,
+.library-card-link:focus-visible h3 {
+  text-decoration: underline;
+}
+
 .card .headline {
   margin: 0;
   font-size: 1.25rem;
