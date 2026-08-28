@@ -5,7 +5,7 @@ import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Libraries } from './screens/Libraries.js';
-import { Overview } from './screens/Overview.js';
+import { Watch } from './screens/watch/Watch.js';
 import { KeyGate } from './shell/KeyGate.js';
 import { Link } from './shell/Link.js';
 import { useApi } from './shell/useApi.js';
@@ -81,15 +81,14 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         ))}
       </nav>
 
-      {/* Watch and Configure are still pre-redesign components at their old
-          identities — Overview under Watch, Libraries under Configure —
-          because those screens don't exist yet. Files and Diagnose are real
-          now. Later tasks replace each remaining one in turn; nothing here
-          reaches back into a Screen union, so a route can be repointed
-          without touching the nav. */}
+      {/* Configure is still a pre-redesign component at its old identity —
+          Libraries — because that screen doesn't exist yet. Watch, Files and
+          Diagnose are real now. Later tasks replace Configure in turn;
+          nothing here reaches back into a Screen union, so a route can be
+          repointed without touching the nav. */}
       <main>
         {route.name === 'watch' && (
-          <Overview client={props.client} live={live} onOverall={setOverall} />
+          <Watch client={props.client} live={live} navigate={navigate} onOverall={setOverall} />
         )}
         {route.name === 'diagnose' && <Diagnose client={props.client} navigate={navigate} />}
         {route.name === 'files' && (

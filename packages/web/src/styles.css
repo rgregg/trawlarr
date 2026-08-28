@@ -590,6 +590,135 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* --- watch ---------------------------------------------------------------
+   The default route: what is running now, and — the far more common case on
+   a healthy install — why nothing is. Sections stack in a fixed order
+   (Running, Libraries, Last 24 hours, Runtime) rather than a two-column
+   layout, which is what keeps that order identical on a phone and a desktop
+   with no extra breakpoint rule needed below. */
+
+.watch {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.watch h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.6rem;
+}
+
+.watch-running-head {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.watch-running-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.watch-running-meta .detail {
+  margin: 0;
+}
+
+/* Both links are the actual tap targets on a running row (the row itself is
+   not a button here, unlike Activity's list) — `min-height` keeps each at
+   least 2.75rem regardless of how short the label is. */
+.watch-running-head .job-file,
+.watch-job-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--ink);
+}
+
+/* The idle box IS the point of this screen: the steady state of a healthy
+   install is "nothing running", and this is what tells the operator whether
+   that is fine or something they need to act on. Border weight carries the
+   distinction, not colour alone, the same rule every status badge follows. */
+.idle-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+}
+
+.idle-box h3 {
+  margin: 0;
+}
+
+.idle-box p {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
+.idle-ok {
+  border-left-color: var(--good);
+}
+
+.idle-attention {
+  border-left-color: var(--warn);
+}
+
+.idle-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  margin-top: 0.6rem;
+  padding: 0.35em 0.8em;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.watch-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin: 0;
+}
+
+.watch-stats div {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  min-width: 6rem;
+}
+
+.watch-stats dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.watch-stats dd {
+  margin: 0.2rem 0 0;
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.watch-runtime .worker-target {
+  margin: 0;
+  color: var(--muted);
+}
+
+.watch-runtime .detail {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
 /* --- files --------------------------------------------------------------- */
 
 .files h2 {
