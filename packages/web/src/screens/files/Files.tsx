@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute, type FileFilters } from '../../shell/route.js';
+import { FILES_NARROW, useMedia } from '../../shell/useMedia.js';
 import { visibleRange } from '../../shell/virtual.js';
 import { describeFailure } from '../config/library-form-model.js';
 import {
@@ -14,8 +15,24 @@ import {
   type SortColumn,
 } from './files-model.js';
 
-/** `2.25rem` at the 16px root this sheet assumes elsewhere (see `styles.css`). */
+/**
+ * How tall one row is, at each of the two shapes `styles.css` gives it.
+ *
+ * WINDOWING NEEDS AN EXACT NUMBER, not an approximate one: it drives both
+ * spacer divs and the index the scroll position maps to, so a row height
+ * that is wrong by 3x makes the scrollbar wrong by 3x over 4,625 rows and
+ * skips rows as you drag. Wide, `.file-row` is a five-column grid one line
+ * tall. Below `48rem` the sheet turns it into a stacked card — five lines,
+ * each with its own `::before` label — and the sheet pins that card to an
+ * EXACT `height` (not a `min-height`) precisely so this constant can be
+ * exact too; the name is ellipsised on one line there for the same reason.
+ *
+ * The alternative considered and rejected: dropping windowing below `48rem`.
+ * The list is not short there — it is the same 4,625 rows — and the phone is
+ * the device least able to hold 4,625 rows of five elements each in the DOM.
+ */
 const ROW_HEIGHT_PX = 36;
+const NARROW_ROW_HEIGHT_PX = 128;
 const PAGE_SIZE = 200;
 
 // `ALL_STATES` lives in `@trawlarr/server`, which this package does not (and
@@ -181,11 +198,12 @@ export const Files = (props: {
     navigate(formatRoute({ name: 'files', filters: next }));
   };
 
+  const rowHeight = useMedia(FILES_NARROW) ? NARROW_ROW_HEIGHT_PX : ROW_HEIGHT_PX;
   const sorted = sortRows(rows, sort.column, sort.direction);
   const range = visibleRange({
     scrollTop,
     viewportHeight,
-    rowHeight: ROW_HEIGHT_PX,
+    rowHeight,
     count: sorted.length,
     overscan: 6,
   });
@@ -337,11 +355,11 @@ export const Files = (props: {
               setScrollTop(event.currentTarget.scrollTop);
             }}
           >
-            <div style={{ height: `${String(range.start * ROW_HEIGHT_PX)}px` }} />
+            <div style={{ height: `${String(range.start * rowHeight)}px` }} />
             {windowed.map((row) => (
               <FileRowLine key={row.id} row={row} navigate={navigate} />
             ))}
-            <div style={{ height: `${String((sorted.length - range.end) * ROW_HEIGHT_PX)}px` }} />
+            <div style={{ height: `${String((sorted.length - range.end) * rowHeight)}px` }} />
           </div>
           <p className="files-footer">
             {String(total)} files · {formatBytes(sumBytes)} · {String(percent)}% converged

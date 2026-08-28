@@ -787,9 +787,31 @@ const TrashSection = (props: { client: ApiClient }): JSX.Element => {
   );
 };
 
+/**
+ * One entry of `GET /system/version`'s `hardware`, field for field as the
+ * daemon reports it — `HardwareFinding` in
+ * `packages/server/src/daemon/hardware-preflight.ts`, carried through by
+ * `routes/system.ts`. THERE IS NO `type` AND NO `reason` ON THE WIRE: this
+ * used to be declared as `{ type, reason }` behind an `as` cast, so every
+ * finding rendered as a bare `": "` with an undefined key — the one place in
+ * the UI that shows the hardware verdict, silently blank in exactly the
+ * situation it exists for (a false NVENC preflight failure). The type is
+ * matched, and nothing is cast.
+ *
+ * A finding is only ever emitted with `present: false` (`hardware-preflight.ts`
+ * pushes findings in the two negative branches and in no other), so the
+ * sentence below is built from the two fields that carry meaning rather than
+ * from a `reason` string the server never sends.
+ */
+interface HardwareFinding {
+  hardwareType: string;
+  expectedEncoder: string;
+  present: boolean;
+}
+
 interface VersionResource {
   binaries: Record<string, { path: string; resolved: boolean }>;
-  hardware: Array<{ type: string; reason: string }> | unknown[];
+  hardware: HardwareFinding[];
 }
 
 const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
@@ -855,9 +877,14 @@ const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
         <p className="detail">No hardware findings — every declared type checked out.</p>
       ) : (
         <ul className="problems">
-          {(version.hardware as Array<{ type: string; reason: string }>).map((finding) => (
-            <li key={finding.type}>
-              {finding.type}: {finding.reason}
+          {version.hardware.map((finding) => (
+            <li key={finding.hardwareType}>
+              <strong>{finding.hardwareType}</strong> — this node declares {finding.hardwareType},
+              but the configured ffmpeg could not be shown to encode with{' '}
+              <code>{finding.expectedEncoder}</code>. Either the encoder is not compiled in, or the
+              one-frame probe through it failed (a missing driver or device looks exactly like
+              this). Jobs that ask for {finding.hardwareType} will fail until it is fixed or the
+              declaration is removed.
             </li>
           ))}
         </ul>

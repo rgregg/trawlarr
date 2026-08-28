@@ -777,18 +777,29 @@ main {
 
 /* Below 48rem a row becomes a stacked card: name on its own line, then
    state/codecs/size — never a grid the viewport has to scroll sideways to
-   read. Primary content must never scroll horizontally at this width. */
+   read. Primary content must never scroll horizontally at this width.
+
+   THE CARD'S HEIGHT IS EXACT, not a minimum, and that is load-bearing:
+   `Files.tsx` windows 4,625 rows on a constant row height, so a card whose
+   height depends on how long the filename happens to be would put the
+   scrollbar and the scroll position at odds with the content. Five lines
+   at `line-height: 1.35` (1.35rem for the name, 1.215rem each for the four
+   labelled lines), four 0.15rem gaps and 1.2rem of padding come to just
+   under 8rem, which is `NARROW_ROW_HEIGHT_PX = 128` there. Change one and
+   change the other. The name stays on ONE line here for the same reason —
+   ellipsised, not wrapped; the full path is in its `title` and on the file's
+   own screen, and an ellipsis does not scroll the viewport sideways. */
 @media (max-width: 48rem) {
   .file-row {
     grid-template-columns: 1fr;
     gap: 0.15rem;
     padding: 0.6rem 0.75rem;
-    min-height: 2.75rem;
+    height: 8rem;
+    line-height: 1.35;
+    overflow: hidden;
   }
 
   .file-name {
-    white-space: normal;
-    overflow-wrap: anywhere;
     font-weight: 600;
   }
 
@@ -796,7 +807,6 @@ main {
   .file-codec,
   .file-size {
     text-align: left;
-    white-space: normal;
   }
 
   .file-state::before {
