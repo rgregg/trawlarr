@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { ApiClient } from './api/client.js';
 import { Config } from './screens/config/Config.js';
 import { Diagnose } from './screens/diagnose/Diagnose.js';
@@ -40,23 +39,24 @@ const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
  * is a separate credential path: a browser cannot set a header on a WebSocket
  * upgrade, so the key travels in the query string there and only there. Every
  * REST call still goes through `client`, which sends `X-Api-Key`.
+ *
+ * THE HEADER NO LONGER SHOWS AN OVERALL CONVERGENCE FIGURE. It used to come
+ * from an `onOverall` callback `Watch` fired after its own libraries fetch,
+ * which meant the number was wrong or blank on every other screen — Diagnose,
+ * Files and Config never mounted `Watch` to produce it. Giving the shell its
+ * own libraries fetch would fix that at the cost of a second `/libraries`
+ * round trip racing Watch's, purely to keep a header line the operator can
+ * already get on the Watch screen it summarises. Not worth the duplicate
+ * fetch, so it is gone rather than made global.
  */
 const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }): JSX.Element => {
   const { live, connected } = useLive(props.apiKey);
   const { route, navigate } = useRoute();
-  const [overall, setOverall] = useState<{ percent: number; total: number; good: number } | null>(
-    null,
-  );
 
   return (
     <div className="app">
       <header className="app-header">
         <span className="product">trawlarr</span>
-        <span className="overall">
-          {overall === null
-            ? 'Convergence unknown'
-            : `${String(overall.percent)}% converged (${String(overall.good)}/${String(overall.total)})`}
-        </span>
         {/* Text, not a coloured dot: a disconnected socket is a liveness
             statement the operator has to be able to read, and the screens
             stay correct while it is down because they re-fetch. */}
@@ -83,9 +83,7 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
       </nav>
 
       <main>
-        {route.name === 'watch' && (
-          <Watch client={props.client} live={live} navigate={navigate} onOverall={setOverall} />
-        )}
+        {route.name === 'watch' && <Watch client={props.client} live={live} navigate={navigate} />}
         {route.name === 'diagnose' && <Diagnose client={props.client} navigate={navigate} />}
         {route.name === 'files' && (
           <Files client={props.client} filters={route.filters} navigate={navigate} />

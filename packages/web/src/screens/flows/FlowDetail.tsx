@@ -22,7 +22,7 @@ interface ApiFlowResource {
   updatedAt: number;
 }
 
-/** The one field this screen needs from `GET /libraries` — see `overview-model.ts`. */
+/** The one field this screen needs from `GET /libraries` — see `watch-model.ts`. */
 interface ApiLibraryStub {
   id: string;
   name: string;

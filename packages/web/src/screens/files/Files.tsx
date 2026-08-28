@@ -194,7 +194,7 @@ export const Files = (props: {
   const good = rows.filter((row) => row.state === 'good').length;
   const sumBytes = rows.reduce((sum, row) => sum + row.sizeBytes, 0);
   // Floored, and 100 reserved for an exact match — the same rule
-  // `overview-model.ts` uses for a library card's percentage, so this
+  // `watch-model.ts` uses for a library card's percentage, so this
   // number and that one never disagree over a rounding rule.
   const percent = total === 0 ? 0 : good === total ? 100 : Math.floor((good / total) * 100);
 

@@ -137,7 +137,7 @@ export const JobDetail = (props: {
   // secondary fetch.
   //
   // THIS WATCHES ONE JOB'S OWN EDGE rather than `live.staleness.jobs`, the
-  // global counter `Overview.tsx`, `Libraries.tsx` and `Activity.tsx` all
+  // global counter `Watch.tsx`, `Diagnose.tsx` and `Libraries.tsx` all
   // key their refetches off. Those screens each render a LIST of jobs, so
   // any job finishing is relevant to what they show and the shared counter
   // is the right granularity. This screen renders exactly one job, so the
@@ -189,7 +189,7 @@ export const JobDetail = (props: {
   return (
     <div className="job-page">
       <Link to="/diagnose" navigate={navigate} className="job-page-back">
-        ← Activity
+        ← Diagnose
       </Link>
 
       {failure !== null && (

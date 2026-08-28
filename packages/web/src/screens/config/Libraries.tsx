@@ -3,15 +3,15 @@ import type { ApiClient } from '../../api/client.js';
 import type { LiveState } from '../../api/events.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
-import type { LibraryResource } from '../overview-model.js';
+import type { LibraryResource } from '../watch/watch-model.js';
 import { FlowPicker } from './FlowPicker.js';
 import { describeFailure } from './library-form-model.js';
 import { LibrarySetup } from './LibrarySetup.js';
 
 /**
- * A library as this screen reads it: the fields Overview already declares,
- * plus the two only the form needs. A structural subset, so a field added to
- * the resource never breaks these types.
+ * A library as this screen reads it: the fields `watch-model.ts` already
+ * declares, plus the two only the form needs. A structural subset, so a
+ * field added to the resource never breaks these types.
  */
 export interface LibraryRow extends LibraryResource {
   extensions: string[];

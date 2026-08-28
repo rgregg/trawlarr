@@ -3,15 +3,17 @@ import type { ApiClient } from '../../api/client.js';
 import type { LiveState } from '../../api/events.js';
 import { formatBytes } from '../files/files-model.js';
 import { Link } from '../../shell/Link.js';
-import type { JobListRow } from '../activity-model.js';
 import {
-  overallConvergence,
+  explainIdle,
+  ranFfmpeg,
+  summarise24h,
   toLibraryCard,
+  toRunningRows,
+  type JobListRow,
   type LibraryCard,
   type LibraryResource,
   type LibraryStats,
-} from '../overview-model.js';
-import { explainIdle, ranFfmpeg, summarise24h, toRunningRows } from './watch-model.js';
+} from './watch-model.js';
 
 interface WorkerRow {
   id: string;
@@ -57,8 +59,8 @@ const sumValues = (counts: Record<string, number>): number =>
  * case on a healthy install — why nothing is.
  *
  * Absorbs the old Overview (library convergence, the worker strip) and
- * Activity (the running-jobs list) screens, both of which stay in the tree
- * unrouted until a later task deletes them.
+ * Activity (the running-jobs list) screens; both are gone from the tree,
+ * their model types folded into `watch-model.ts`.
  *
  * FOUR INDEPENDENT SECTIONS, each with its own fetch and its own failure
  * state, in the fixed order Running / Libraries / Last 24 hours / Runtime.
@@ -66,8 +68,8 @@ const sumValues = (counts: Record<string, number>): number =>
  * three, which is the regression Task 4 shipped and Task 6 had to avoid
  * repeating. Library stats re-fetch on `live.staleness.libraries`, the 24h
  * counters on `live.staleness.jobs`, and worker/health/schedule on
- * `live.staleness.workers` — the same per-view counters `Overview.tsx`,
- * `Libraries.tsx` and `Activity.tsx` already key their re-fetches off.
+ * `live.staleness.workers` — the same per-view counters `Libraries.tsx`
+ * already keys its re-fetch off.
  * Nothing here reads a durable fact off the socket: progress, stage and log
  * are liveness only (`worker/protocol.ts`), so every count, every state and
  * every size comes from REST and stays correct with the socket dead.
@@ -76,7 +78,6 @@ export const Watch = (props: {
   client: ApiClient;
   live: LiveState;
   navigate: (to: string) => void;
-  onOverall?: (overall: { percent: number; total: number; good: number }) => void;
 }): JSX.Element => {
   const { client, live, navigate } = props;
 
@@ -128,12 +129,6 @@ export const Watch = (props: {
     // in-flight job or a running scan re-derives the cards' status text
     // without a re-fetch.
   }, [client, staleLibraries, live]);
-
-  const overallSoFar = libraryCards === null ? null : overallConvergence(libraryCards);
-  const onOverall = props.onOverall;
-  useEffect(() => {
-    if (overallSoFar !== null) onOverall?.(overallSoFar);
-  }, [onOverall, overallSoFar?.percent, overallSoFar?.total, overallSoFar?.good]);
 
   // --- Runtime: worker counts, daemon health, the schedule. --------------
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null);
