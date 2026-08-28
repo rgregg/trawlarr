@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react';
-import type { ApiClient } from '../api/client.js';
-import type { LiveState } from '../api/events.js';
+import type { ApiClient } from '../../api/client.js';
+import type { LiveState } from '../../api/events.js';
+import { Link } from '../../shell/Link.js';
+import { formatRoute } from '../../shell/route.js';
+import type { LibraryResource } from '../watch/watch-model.js';
 import { FlowPicker } from './FlowPicker.js';
 import { describeFailure } from './library-form-model.js';
 import { LibrarySetup } from './LibrarySetup.js';
-import type { LibraryResource } from './overview-model.js';
 
 /**
- * A library as this screen reads it: the fields Overview already declares,
- * plus the two only the form needs. A structural subset, so a field added to
- * the resource never breaks these types.
+ * A library as this screen reads it: the fields `watch-model.ts` already
+ * declares, plus the two only the form needs. A structural subset, so a
+ * field added to the resource never breaks these types.
  */
 export interface LibraryRow extends LibraryResource {
   extensions: string[];
@@ -25,6 +27,7 @@ const Row = (props: {
   client: ApiClient;
   library: LibraryRow;
   live: LiveState;
+  navigate: (to: string) => void;
   onEdit: () => void;
   onFlow: () => void;
   onChanged: (library: LibraryRow) => void;
@@ -71,7 +74,12 @@ const Row = (props: {
           No flow attached, so nothing in this library can converge. Attach one below.
         </p>
       ) : (
-        <p className="detail">Flow {library.flowId}</p>
+        <p className="detail">
+          Flow{' '}
+          <Link to={formatRoute({ name: 'flow', id: library.flowId })} navigate={props.navigate}>
+            {library.flowId}
+          </Link>
+        </p>
       )}
 
       {scanning !== undefined && <p className="detail">Scanning — {String(scanning)} files seen</p>}
@@ -142,7 +150,11 @@ const Row = (props: {
  * its pause reason the moment it is created, and dropping the operator back
  * on a list of one paused library would be an odd way to explain that.
  */
-export const Libraries = (props: { client: ApiClient; live: LiveState }): JSX.Element => {
+export const Libraries = (props: {
+  client: ApiClient;
+  live: LiveState;
+  navigate: (to: string) => void;
+}): JSX.Element => {
   const [libraries, setLibraries] = useState<LibraryRow[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'list' });
@@ -231,6 +243,7 @@ export const Libraries = (props: { client: ApiClient; live: LiveState }): JSX.El
               client={client}
               library={library}
               live={props.live}
+              navigate={props.navigate}
               onEdit={() => {
                 setView({ kind: 'setup', library });
               }}

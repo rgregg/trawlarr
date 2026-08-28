@@ -588,6 +588,65 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
   });
 
+  it('raises a file priority so it is claimed next', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    const response = await api('POST', `/files/${fileId}/priority`, { priority: 10 });
+
+    expect(response.status).toBe(200);
+    expect(response.body.file.priority).toBe(10);
+    expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(10);
+  });
+
+  it('refuses a priority that is not a finite number', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    const response = await api('POST', `/files/${fileId}/priority`, { priority: 'high' });
+
+    expect(response.status).toBe(400);
+    expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
+  });
+
+  it('refuses a priority that is not an integer', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    const response = await api('POST', `/files/${fileId}/priority`, { priority: 1.5 });
+
+    expect(response.status).toBe(400);
+    expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
+  });
+
+  it('refuses a priority outside the range that keeps it a nudge', async () => {
+    // `claimNext` orders `priority DESC`, so an unbounded number is a way to
+    // make a file unreachable by accident: a large negative sinks it below
+    // every file the daemon will ever discover, which from the outside looks
+    // exactly like a file the queue has forgotten.
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    for (const priority of [-99999999, 101, -101]) {
+      const response = await api('POST', `/files/${fileId}/priority`, { priority });
+      expect(response.status).toBe(400);
+      expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
+    }
+
+    // The edges of the range are accepted, so "bounded" does not quietly
+    // mean "one narrower than documented".
+    for (const priority of [100, -100, 0]) {
+      const response = await api('POST', `/files/${fileId}/priority`, { priority });
+      expect(response.status).toBe(200);
+      expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(priority);
+    }
+  });
+
+  it('answers 404 for a file that does not exist', async () => {
+    const response = await api('POST', '/files/missing/priority', { priority: 1 });
+    expect(response.status).toBe(404);
+  });
+
   it('holds a file until a deadline, and refuses a hold with no deadline', async () => {
     const library = seedLibrary();
     const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
@@ -1956,5 +2015,24 @@ describe('the web bundle, on the daemon’s own port', () => {
     expect(body.error.code).toBe('web-ui-not-built');
     // The point of the 503: the API is unaffected.
     expect(health.status).toBe(200);
+  });
+
+  it('survives a reload on a deep link, while the API keeps answering in JSON', async () => {
+    await startWith(await bundleWithApiShapedFile());
+
+    // `/files/abc-123` is `route.ts`'s `file` route: a reload has to reach
+    // this same `index.html`, or every link this UI hands out breaks the
+    // instant someone refreshes it.
+    const deepLink = await fetch(`${webBase}/files/abc-123`);
+    const deepLinkText = await deepLink.text();
+    const unknownApiRoute = await fetch(`${webBase}/api/v1/nope`);
+    const unknownApiBody = (await unknownApiRoute.json()) as { error: { code: string } };
+
+    expect(deepLink.status).toBe(200);
+    expect(deepLink.headers.get('content-type')).toContain('text/html');
+    expect(deepLinkText).toContain('<!doctype html>');
+    expect(unknownApiRoute.status).toBe(404);
+    expect(unknownApiRoute.headers.get('content-type')).toContain('application/json');
+    expect(unknownApiBody.error.code).toBe('not-found');
   });
 });

@@ -125,8 +125,9 @@ button:disabled {
 
 .app-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 1rem;
+  gap: 0.5rem 1rem;
   padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--line);
 }
@@ -135,12 +136,13 @@ button:disabled {
   font-weight: 700;
 }
 
-.app-header .overall {
-  color: var(--muted);
-}
-
+/* Sign out sits in the header on every screen, so it gets the same
+   2.75rem floor every other control in the app already has — scoped here
+   rather than on the global `button` rule, which would resize controls
+   across the whole app. */
 .app-header button {
   margin-left: auto;
+  min-height: 2.75rem;
 }
 
 /* Connection state is TEXT ("Live" / "Reconnecting…"); the colour only
@@ -153,13 +155,42 @@ button:disabled {
   color: var(--warn);
 }
 
+/* `flex-wrap` rather than a horizontal scroll container: four nav entries
+   do not fit one row at 380px, and a nav the operator has to scroll
+   sideways to see the rest of is worse than one that wraps to a second
+   line. */
 .app-nav {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
 }
 
-.app-nav button[aria-current='page'] {
+/* The nav used to be `<button>`s, styled by the bare `button` rule above.
+   It is `<Link>`s now — real anchors, so middle-click and "copy link
+   address" work (see `shell/Link.tsx`) — so the button's chrome is
+   reproduced here explicitly instead of falling out of an element-type
+   selector. `min-height` (not just padding) is what keeps the touch target
+   at least 2.75rem on a phone even for a short label like "Files". */
+.app-nav .nav-link {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.35em 0.8em;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* The active screen, marked the same way the job list marks the selected
+   job: border weight and font weight both shift, not colour alone (see the
+   file header). This has to hold with no `:hover` involved — `aria-current`
+   is set from the route on every render, keyboard and touch included. */
+.app-nav .nav-link[aria-current='page'] {
   border-color: var(--ink);
   font-weight: 600;
 }
@@ -168,20 +199,9 @@ main {
   padding: 0 1rem 2rem;
 }
 
-/* --- overview ---------------------------------------------------------- */
-
-.overview {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 18rem);
-  gap: 1.5rem;
-  align-items: start;
-}
-
-@media (max-width: 60rem) {
-  .overview {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
+/* --- library and worker cards -------------------------------------------
+   Shared by the Watch screen (`Watch.tsx`) — the old Overview screen these
+   were written for is gone, but the card markup it defined lives on there. */
 
 .library-cards {
   list-style: none;
@@ -202,6 +222,23 @@ main {
 
 .card h3 {
   margin: 0 0 0.2rem;
+}
+
+/* The library name is the link to that library's filtered file list — the
+   only place in this UI that emits `?library=`, and without it the Files
+   library filter can only be reached by typing a uuid by hand. Sized to the
+   touch-target floor the rest of the sheet uses. */
+.library-card-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.library-card-link:hover h3,
+.library-card-link:focus-visible h3 {
+  text-decoration: underline;
 }
 
 .card .headline {
@@ -225,6 +262,9 @@ main {
   color: var(--muted);
 }
 
+/* Also used directly on a `<dl class="card dl">` — the System tab's
+   hardware/binary listing (`Config.tsx`) — for the definition-list layout a
+   plain `.card` does not itself provide. */
 .card dl {
   margin: 0.6rem 0 0;
   display: flex;
@@ -266,45 +306,8 @@ main {
   border-left-color: var(--line);
 }
 
-.workers {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.9rem 1rem;
-}
-
-.workers h2 {
-  margin: 0 0 0.4rem;
-  font-size: 1rem;
-}
-
 .worker-target {
   margin: 0;
-  color: var(--muted);
-}
-
-.worker-list {
-  list-style: none;
-  margin: 0.6rem 0 0;
-  padding: 0;
-  display: grid;
-  gap: 0.35rem;
-  font-size: 0.9rem;
-}
-
-.worker-class {
-  color: var(--muted);
-}
-
-.worker-file {
-  overflow-wrap: anywhere;
-}
-
-.worker-percent {
-  font-variant-numeric: tabular-nums;
-}
-
-.worker-stage {
   color: var(--muted);
 }
 
@@ -448,25 +451,11 @@ main {
   margin-top: 0.6rem;
 }
 
-/* --- activity ----------------------------------------------------------- */
-
-.activity {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 26rem);
-  gap: 1.5rem;
-  align-items: start;
-}
-
-@media (max-width: 70rem) {
-  .activity {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.activity h2 {
-  font-size: 1.1rem;
-  margin: 1rem 0 0.4rem;
-}
+/* --- running-job list -----------------------------------------------------
+   `.job-list` and its rows are the Watch screen's "what's running now"
+   section (`Watch.tsx`); the old Activity screen these were written for is
+   gone. Rows are `<li>`s of `<Link>`s, not buttons — Activity's list was
+   `<button>`-driven and its button-scoped rules went with it. */
 
 .job-list {
   list-style: none;
@@ -474,28 +463,6 @@ main {
   padding: 0;
   display: grid;
   gap: 0.45rem;
-}
-
-.job-list button {
-  display: flex;
-  gap: 0.75rem;
-  width: 100%;
-  text-align: left;
-  background: var(--panel);
-}
-
-.job-list button[aria-current='true'] {
-  border-color: var(--ink);
-}
-
-/* Running and finished differ in EDGE WEIGHT as well as hue, so the two
-   groups are still distinguishable without colour. */
-.job.running button {
-  border-left: 4px solid var(--busy);
-}
-
-.job.finished button {
-  border-left: 1px solid var(--line);
 }
 
 .job-file {
@@ -524,34 +491,8 @@ main {
   border-radius: 2px;
 }
 
-.job-detail {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.9rem 1rem;
-}
-
-.job-detail h3 {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.job-detail h4 {
-  margin: 1rem 0 0.3rem;
-  font-size: 0.95rem;
-}
-
-.steps {
-  margin: 0;
-  padding-left: 1.2rem;
-  display: grid;
-  gap: 0.25rem;
-}
-
-.step-plugin {
-  overflow-wrap: anywhere;
-}
-
+/* Shared by `JobDetail.tsx`'s log panel — see the `.job-page` section below
+   for the rest of that screen's rules. */
 .job-log {
   margin: 0;
   max-height: 22rem;
@@ -564,4 +505,1429 @@ main {
   font-size: 0.85rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* --- watch ---------------------------------------------------------------
+   The default route: what is running now, and — the far more common case on
+   a healthy install — why nothing is. Sections stack in a fixed order
+   (Running, Libraries, Last 24 hours, Runtime) rather than a two-column
+   layout, which is what keeps that order identical on a phone and a desktop
+   with no extra breakpoint rule needed below. */
+
+.watch {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.watch h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.6rem;
+}
+
+.watch-running-head {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.watch-running-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.watch-running-meta .detail {
+  margin: 0;
+}
+
+/* Both links are the actual tap targets on a running row (the row itself is
+   not a button here, unlike Activity's list) — `min-height` keeps each at
+   least 2.75rem regardless of how short the label is. */
+.watch-running-head .job-file,
+.watch-job-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--ink);
+}
+
+/* The idle box IS the point of this screen: the steady state of a healthy
+   install is "nothing running", and this is what tells the operator whether
+   that is fine or something they need to act on. Border weight carries the
+   distinction, not colour alone, the same rule every status badge follows. */
+.idle-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+}
+
+.idle-box h3 {
+  margin: 0;
+}
+
+.idle-box p {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
+.idle-ok {
+  border-left-color: var(--good);
+}
+
+.idle-attention {
+  border-left-color: var(--warn);
+}
+
+.idle-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  margin-top: 0.6rem;
+  padding: 0.35em 0.8em;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.watch-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin: 0;
+}
+
+.watch-stats div {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  min-width: 6rem;
+}
+
+.watch-stats dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.watch-stats dd {
+  margin: 0.2rem 0 0;
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.watch-runtime .worker-target {
+  margin: 0;
+  color: var(--muted);
+}
+
+.watch-runtime .detail {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+}
+
+/* --- files --------------------------------------------------------------- */
+
+.files h2 {
+  font-size: 1.1rem;
+  margin: 1rem 0 0.6rem;
+}
+
+.files-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.files-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.files-filters input,
+.files-filters select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+  min-height: 2.75rem;
+}
+
+.files-filters button,
+.clear-filters {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.clear-filters {
+  color: var(--ink);
+}
+
+.files-sort {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.files-sort button {
+  min-height: 2.75rem;
+}
+
+.files-sort button[aria-current='true'] {
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+/* The scroll container that `visibleRange` windows. A fixed height, so the
+   virtualisation math (`viewportHeight`, measured off this element) has
+   something stable to measure — a container that grew with its content
+   would just render every row anyway. */
+.file-scroll {
+  height: 32rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) 6rem 5rem 8rem 6rem 6rem;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  min-height: 2.25rem;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--line);
+  border-left: 4px solid transparent;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.file-row:last-child {
+  border-bottom: none;
+}
+
+/* A converging library still has some rows in every state; `good` is left
+   with no accent (it is the expected case), and the states worth noticing
+   at a glance each get a left edge in the same two colours the rest of the
+   sheet already uses for trouble — colour is never the only carrier, since
+   the state name is always printed in `.file-state` beside it. */
+.file-row-state-failed,
+.file-row-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.file-row-state-held {
+  border-left-color: var(--warn);
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-state,
+.file-codec,
+.file-size,
+.file-updated {
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size,
+.file-updated {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.skeleton-row {
+  height: 2.25rem;
+  margin: 0.4rem 0.75rem;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--panel) 25%, var(--line) 37%, var(--panel) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+.files-empty {
+  padding: 1.5rem 0;
+  color: var(--muted);
+}
+
+.files-footer {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Below 48rem a row becomes a stacked card: name on its own line, then
+   state/codecs/size — never a grid the viewport has to scroll sideways to
+   read. Primary content must never scroll horizontally at this width.
+
+   THE CARD'S HEIGHT IS EXACT, not a minimum, and that is load-bearing:
+   `Files.tsx` windows 4,625 rows on a constant row height, so a card whose
+   height depends on how long the filename happens to be would put the
+   scrollbar and the scroll position at odds with the content. Six lines
+   at `line-height: 1.35` (1.35rem for the name, 1.215rem each for the five
+   labelled lines), five 0.15rem gaps and 1.2rem of padding come to just
+   under 9.5rem, which is `NARROW_ROW_HEIGHT_PX = 152` there. Change one and
+   change the other. The name stays on ONE line here for the same reason —
+   ellipsised, not wrapped; the full path is in its `title` and on the file's
+   own screen, and an ellipsis does not scroll the viewport sideways. */
+@media (max-width: 48rem) {
+  .file-row {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+    padding: 0.6rem 0.75rem;
+    height: 9.5rem;
+    line-height: 1.35;
+    overflow: hidden;
+  }
+
+  .file-name {
+    font-weight: 600;
+  }
+
+  .file-state,
+  .file-codec,
+  .file-size,
+  .file-updated {
+    text-align: left;
+  }
+
+  .file-state::before {
+    content: 'State: ';
+  }
+
+  .file-codec:nth-of-type(3)::before {
+    content: 'Video: ';
+  }
+
+  .file-codec:nth-of-type(4)::before {
+    content: 'Audio: ';
+  }
+
+  .file-size::before {
+    content: 'Size: ';
+  }
+
+  .file-updated::before {
+    content: 'Updated: ';
+  }
+}
+
+/* THE RETRY BUTTON IS THE ONLY ESCAPE FROM AN ERROR STATE, so it has to be
+   as tappable as everything else. `.job-page button`, `.flow-page button`
+   and `.config button` each scope the 2.75rem floor already; `.diagnose`,
+   `.files`, `.file-detail` and `.watch` had no such rule, so their `.failure` Retry
+   fell back to the global ~30px. Scoped per screen, deliberately — the
+   global `button` rule stays untouched, the way earlier tasks set it up. */
+.diagnose button,
+.files button,
+.file-detail button,
+.watch button {
+  min-height: 2.75rem;
+}
+
+/* --- file detail ----------------------------------------------------------
+   The "why is this file like this" panel. Desktop keeps the Files table
+   mounted beside it (App.tsx renders both under `.file-detail-layout` at
+   the `/files/:id` route); below 48rem there is no room for both, so the
+   list is hidden and the panel becomes the whole screen at that same URL. */
+
+.file-detail-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.file-detail-layout > .files {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.file-detail-layout > .file-detail {
+  flex: 2 1 28rem;
+  min-width: 0;
+}
+
+.file-detail {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.file-detail-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-left: 4px solid transparent;
+  padding-left: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.file-detail-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.file-detail-path {
+  margin: 0.3rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* The answer to "why is this file like this", set apart from everything
+   else on the panel because it is the entire reason the panel exists. */
+.file-detail-explain {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--busy);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.file-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.file-detail-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.file-detail-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.file-detail-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.file-detail-actions button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.file-detail-action-error {
+  color: var(--bad);
+  margin: 0 0 0.8rem;
+}
+
+/* The one place Dry-run admits it substituted a stale flow for the
+   library's (missing) current one — `--warn`, the same vocabulary as a
+   held file's row accent, because this is a caution rather than a failure. */
+.file-detail-flow-fallback {
+  color: var(--warn);
+  margin: 0 0 0.8rem;
+}
+
+.file-detail-dry-run {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.file-detail-dry-run ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.file-detail h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.stream-table-scroll {
+  overflow-x: auto;
+}
+
+.stream-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.stream-table th,
+.stream-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.job-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.job-history-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.75rem;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.job-history li:last-child .job-history-row {
+  border-bottom: none;
+}
+
+.job-history-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-width: 5.5rem;
+}
+
+.job-history-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-detail-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.file-detail-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+@media (max-width: 48rem) {
+  .file-detail-layout {
+    display: block;
+  }
+
+  /* No room for the table behind the panel at this width — the panel IS
+     the screen, same URL, same route; see the file-level comment above. */
+  .file-detail-layout > .files {
+    display: none;
+  }
+
+  .file-detail-layout > .file-detail {
+    flex: unset;
+  }
+
+  .job-history-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+
+  .job-history-reason {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* --- job detail -----------------------------------------------------------
+   The screen this whole task was for: the engine's own sentences, unshortened.
+   A single-column page rather than a panel beside a list — a job has no
+   sibling list worth keeping mounted the way a file's row does. */
+
+.job-page {
+  max-width: 56rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.job-page-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.job-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-left: 4px solid transparent;
+  padding-left: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.job-page-state-failed {
+  border-left-color: var(--bad);
+}
+
+.job-page-state-running {
+  border-left-color: var(--busy);
+}
+
+.job-page-state-cancelled {
+  border-left-color: var(--warn);
+}
+
+.job-page-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.job-page-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-page-file {
+  margin: 0.4rem 0 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.job-page-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.job-page-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.job-page-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.job-page-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* The job's own outcome sentence — same treatment as a step's reason: full
+   width, verbatim, never truncated. */
+.job-page-outcome {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.job-page h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.job-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.job-step {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 4px;
+  padding: 0.5rem 0.7rem;
+}
+
+.job-step-ok {
+  border-left-color: var(--line);
+}
+
+.job-step-failed {
+  border-left-color: var(--bad);
+}
+
+.job-step-running {
+  border-left-color: var(--busy);
+}
+
+.job-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.job-step-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Colour is never the only carrier of a step's outcome — the word itself
+   ("Failed", "Running") sits beside the label, matching the vocabulary
+   `.file-row-state-*` already uses for the same rule. */
+.job-step-failed .job-step-outcome {
+  color: var(--bad);
+}
+
+.job-step-running .job-step-outcome {
+  color: var(--busy);
+}
+
+.job-step-duration {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The engine's own reason, verbatim: full width, wrapping rather than
+   truncating, with its own scroll container so a pathological unbroken run
+   (a long path with no spaces) cannot widen the page instead of scrolling. */
+.job-step-reason {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
+.job-page button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.job-page-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.job-page-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+@media (max-width: 48rem) {
+  .job-page {
+    max-width: none;
+  }
+
+  .job-step-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.2rem;
+  }
+
+  .job-step-duration {
+    margin-left: 0;
+  }
+}
+
+/* --- diagnose -------------------------------------------------------------
+   Problems, grouped by cause, not a list of failed rows — see
+   `diagnose-model.ts` for why. The empty state (`.problem-empty`) is the
+   normal one: both real libraries are fully converged most of the time, and
+   it has to read as calm and deliberate, never like `.failure` below it in
+   this file, which is what an operator should worry about instead. */
+
+.diagnose h2 {
+  font-size: 1.1rem;
+  margin: 1rem 0 0.6rem;
+}
+
+.diagnose-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.problem-empty {
+  padding: 2.5rem 1rem;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.problem-empty-headline {
+  margin: 0 0 0.6rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--good);
+}
+
+.problem-empty a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--ink);
+}
+
+.problem-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.problem-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid transparent;
+  border-radius: 6px;
+  padding: 0.8rem 1rem 1rem;
+}
+
+/* Same vocabulary as `.file-row-state-*`: `--bad` for a failure that is not
+   improving on its own, `--warn` for one that is being held rather than
+   retried forever. */
+.problem-card-state-failed,
+.problem-card-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.problem-card-state-held {
+  border-left-color: var(--warn);
+}
+
+.problem-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.problem-card-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.problem-card-count {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The engine's own sentence, shown verbatim. Wrapped, not truncated — an
+   elided reason is a lost diagnosis, the same rule `.failure p` follows for
+   the daemon's refusals — and given its own horizontal scroll as a fallback
+   for a single unbroken token a wrap cannot break, so a long reason can
+   never force the page itself to scroll sideways. */
+.problem-reason-scroll {
+  max-height: 8rem;
+  overflow-y: auto;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.problem-reason {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Same vocabulary as `.file-detail-flow-fallback`: `--warn` for a caution
+   rather than a failure — this card's grouping may have merged causes that
+   only look alike with their numbers stripped (`exit code 1` vs `exit code
+   137`), and this is where that gets said. */
+.problem-reason-note {
+  margin: 0.4rem 0 0.7rem;
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
+.problem-files {
+  list-style: none;
+  margin: 0 0 0.7rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+}
+
+.problem-files li {
+  font-size: 0.9rem;
+}
+
+.problem-files a {
+  color: var(--ink);
+}
+
+.problem-files-more {
+  color: var(--muted);
+}
+
+.problem-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+}
+
+.problem-inspect {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.problem-requeue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.8rem;
+}
+
+.problem-requeue button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.problem-requeue-ok {
+  margin: 0;
+  color: var(--good);
+  font-size: 0.9rem;
+}
+
+.problem-requeue-fail {
+  margin: 0;
+  color: var(--bad);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 48rem) {
+  .problem-card-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .problem-inspect,
+  .problem-requeue button {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* --- configure --------------------------------------------------------------
+   Four tabs behind one `?tab=` route (`Config.tsx`). The worker-count control
+   here is the start/stop button for every transcode this daemon runs, so it
+   gets its own emphasis; trash purge is the one irreversible action on the
+   screen, so it is set apart with `--bad` rather than sharing a card with
+   anything routine. */
+
+/* Every button this task's four tabs add — Save worker counts, the
+   Retry buttons on a failed section fetch, Sync, Add window, Remove,
+   Purge now…, Cancel, and the purge confirm itself — is a plain
+   `<button>`, and the global `button` rule (above) sets no `min-height`.
+   One rule here, rather than repeating `min-height: 2.75rem` on every
+   button class in this section: the confirm button on an irreversible
+   233 GB delete is the worst place in this screen to have a target
+   under 44px, so nothing in `.config` is allowed to fall under the
+   touch-target minimum every other interactive element here already
+   meets. Scoped to `.config` rather than the global `button` rule,
+   which would change every screen in the app. */
+.config button {
+  min-height: 2.75rem;
+}
+
+.config-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1.2rem;
+}
+
+.config-tab-link {
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.35em 0.9em;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.config-tab-link[aria-current='page'] {
+  border-color: var(--ink);
+}
+
+.config-section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+  margin-bottom: 1.2rem;
+}
+
+.config-section h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.config-section h4 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+.stale-note {
+  color: var(--warn);
+}
+
+/* --- workers tab --------------------------------------------------------- */
+
+.worker-count-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.6rem 0;
+}
+
+.worker-count-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.worker-count-field label {
+  font-weight: 600;
+}
+
+.worker-count-field input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+  min-height: 2.75rem;
+  width: 8rem;
+}
+
+/* The measured warning from the brief: a caution, same vocabulary as every
+   other `--warn` note in this sheet, never hidden behind a tooltip. */
+.worker-count-warning {
+  color: var(--warn);
+  max-width: 34rem;
+}
+
+/* --- schedule -------------------------------------------------------------- */
+
+.schedule-windows {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.schedule-add {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-width: 28rem;
+}
+
+.schedule-add legend {
+  padding: 0;
+}
+
+.schedule-add label {
+  font-weight: 600;
+}
+
+.schedule-add input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+  min-height: 2.75rem;
+}
+
+.schedule-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+
+.schedule-days label {
+  font-weight: 400;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/* --- trash purge ------------------------------------------------------------
+   `--bad`, not `--panel`: this is the one destructive action on the screen
+   and it must never read as just another settings card. */
+
+.trash-section {
+  border-color: var(--bad);
+  border-left-width: 4px;
+}
+
+.trash-total {
+  margin: 0.4rem 0 0.8rem;
+}
+
+.trash-confirm {
+  margin-top: 0.6rem;
+}
+
+.trash-confirm .row-actions {
+  margin-top: 0.6rem;
+}
+
+@media (max-width: 48rem) {
+  .config-tabs {
+    flex-direction: column;
+  }
+
+  .config-tab-link {
+    justify-content: center;
+  }
+
+  .worker-count-fields {
+    flex-direction: column;
+  }
+
+  .worker-count-field input {
+    width: 100%;
+  }
+
+  .schedule-add {
+    max-width: none;
+  }
+}
+
+/* --- flow detail ------------------------------------------------------------
+   Read-only, deliberately: no edit control lives here (see FlowDetail.tsx's
+   doc comment). The graph gets its own scroll container because a deep
+   nested flow indents further than a phone is wide, and primary content on
+   this screen must never force the PAGE to scroll sideways. */
+
+.flow-page {
+  max-width: 56rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.flow-page-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.flow-page-header {
+  margin-top: 0.4rem;
+}
+
+.flow-page-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.flow-page-description {
+  margin: 0.4rem 0 0.8rem;
+  color: var(--muted);
+}
+
+.flow-page-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.flow-page-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.flow-page-meta dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-page-libraries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* `--warn`, not `--bad`: this is not an error, it is the one sentence on the
+   screen that matters most — that this view cannot edit the flow and why —
+   so it gets the same visual weight the rest of this app reserves for a
+   caution rather than a neutral `.help` aside. */
+.flow-page-notice {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.flow-page-actions {
+  margin: 0 0 1rem;
+}
+
+.flow-page h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.flow-page-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.flow-page-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+/* Its own horizontal scroll container: a deep flow indents by
+   `depth * 1.25rem` (see FlowDetail.tsx's `GraphNode`), which on a phone can
+   exceed the viewport long before the page itself needs to move. */
+.flow-graph-scroll {
+  overflow-x: auto;
+}
+
+.flow-graph {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+  min-width: 22rem;
+}
+
+.flow-graph-row {
+  border-left: 2px solid var(--line);
+  padding-top: 0.2rem;
+  padding-bottom: 0.2rem;
+}
+
+.flow-graph-node {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+}
+
+.flow-graph-node-id {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* A node no path from the start reaches. Both the edge and the badge carry
+   it — colour is never the only signal — because a node that is in the flow
+   but never runs is exactly the kind of thing this screen exists to show. */
+.flow-graph-row-unreachable {
+  border-left-color: var(--bad);
+}
+
+.flow-graph .badge-bad {
+  color: var(--bad);
+}
+
+/* The OTHER branches that reach a node drawn once. */
+.flow-graph-also {
+  margin: 0 0 0 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Same pill `.card .badge` uses, scoped rather than bare: this is the one
+   element on the whole screen that must not read as prose. `branchLabel` is
+   the reason this screen exists — the muxqueue defect was a node on the
+   wrong side of exactly this label. `flex-shrink: 0` keeps it from being the
+   thing that gives when the row wraps at narrow widths, so it stays a whole
+   pill rather than breaking across two lines. */
+.flow-graph .badge {
+  flex-shrink: 0;
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--busy);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.55em;
+  white-space: nowrap;
+}
+
+.flow-graph-inputs {
+  margin: 0 0 0 0.2rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.2rem 0.8rem;
+}
+
+.flow-graph-inputs dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  display: inline;
+}
+
+.flow-graph-inputs dt::after {
+  content: ': ';
+}
+
+.flow-graph-inputs dd {
+  margin: 0;
+  display: inline;
+  overflow-wrap: anywhere;
+}
+
+.flow-graph-inputs div {
+  overflow-wrap: anywhere;
+}
+
+/* Scoped rule, same pattern `.config button` uses: every control on this
+   screen (Retry, Copy JSON) meets the touch-target floor without touching
+   the global `button` rule every other screen also relies on. */
+.flow-page button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+@media (max-width: 48rem) {
+  .flow-graph-inputs {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The link from a file to the graph that decides what happens to it. */
+.file-detail-flow-link {
+  margin: 0.5rem 0 0;
+}
+
+.file-detail-flow-link a,
+.not-found-home {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
+/* An unknown URL is an error state like any other, and an error state with
+   no way out of it is a dead end. */
+.not-found {
+  padding: 1rem 0;
 }
