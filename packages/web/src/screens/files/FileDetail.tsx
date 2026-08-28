@@ -85,6 +85,13 @@ export const FileDetail = (props: {
   // re-pointed to a different flow on a real system: the binding had moved,
   // the job row hadn't, and dry-run kept asking the old flow's question.
   const [libraryFlowId, setLibraryFlowId] = useState<string | null>(null);
+  // True only when the library lookup itself failed (deleted library,
+  // permissions hiccup, a blip on that one endpoint) — kept SEPARATE from
+  // "the library has no flow bound", which is also `libraryFlowId === null`
+  // but is a fact about the library, not a failure to find one out. The two
+  // must never share a UI sentence: one says what IS true, the other says
+  // what could not be checked.
+  const [libraryLookupFailed, setLibraryLookupFailed] = useState(false);
 
   const [requeueBusy, setRequeueBusy] = useState(false);
   const [priorityBusy, setPriorityBusy] = useState(false);
@@ -108,15 +115,29 @@ export const FileDetail = (props: {
         // flow) still goes out together, not as a further chain of two.
         const detail = await client.get<{ file: ApiFileDetail; probe: unknown }>(`/files/${id}`);
         if (cancelled) return;
-        const [jobPage, library] = await Promise.all([
+        // The library lookup is a REFINEMENT — everything this screen needs
+        // to explain the file (its own row, its job history) is already in
+        // hand by the time this fires. `Promise.all` rejects as a whole on
+        // any member's rejection, and that used to mean a deleted library or
+        // a permissions hiccup on this ONE extra lookup blanked the entire
+        // page behind the generic failure view — exactly backwards for a
+        // screen whose job is explaining a file when something is wrong.
+        // Catching it inline turns a library-lookup failure into a plain
+        // value (`ok: false`) instead of a rejection, so it can never fail
+        // the `Promise.all` it travels in.
+        const [jobPage, libraryResult] = await Promise.all([
           client.get<{ items: ApiJob[] }>(`/jobs?fileId=${id}&limit=20`),
-          client.get<ApiLibrary>(`/libraries/${detail.file.libraryId}`),
+          client.get<ApiLibrary>(`/libraries/${detail.file.libraryId}`).then(
+            (library) => ({ ok: true as const, flowId: library.flowId }),
+            () => ({ ok: false as const, flowId: null }),
+          ),
         ]);
         if (cancelled) return;
         setFile(detail.file);
         setProbe(detail.probe);
         setJobs(jobPage.items);
-        setLibraryFlowId(library.flowId);
+        setLibraryFlowId(libraryResult.flowId);
+        setLibraryLookupFailed(!libraryResult.ok);
         setLoading(false);
       } catch (error) {
         if (cancelled) return;
@@ -163,11 +184,15 @@ export const FileDetail = (props: {
   // The flow to replay is the library's CURRENT binding — never a job's
   // frozen `flowId`, which stops being the truth the moment the library is
   // re-pointed at a different flow (see the `libraryFlowId` comment above).
-  // The one fallback is a library with NO flow bound at all, where the last
-  // job's flow is the only lead there is; `usedStaleFlowFallback` says so in
-  // the UI rather than silently substituting one flow for another.
+  // There are two distinct reasons `libraryFlowId` can be null, and the UI
+  // must not blur them into one sentence: the library genuinely has no flow
+  // bound (a fact), versus the lookup that would have told us failed (an
+  // unknown). Both fall back to the last job's flow as the only lead left,
+  // but only one of them is entitled to say what the library's state is.
   const flowId = libraryFlowId ?? jobs[0]?.flowId ?? null;
-  const usedStaleFlowFallback = libraryFlowId === null && jobs[0]?.flowId !== undefined;
+  const hasStaleFlowFallback = libraryFlowId === null && jobs[0]?.flowId !== undefined;
+  const libraryHasNoFlowFallback = hasStaleFlowFallback && !libraryLookupFailed;
+  const libraryLookupFailedFallback = hasStaleFlowFallback && libraryLookupFailed;
 
   const onDryRun = useCallback((): void => {
     if (flowId === null) return;
@@ -290,10 +315,17 @@ export const FileDetail = (props: {
             </button>
           </div>
 
-          {usedStaleFlowFallback && (
+          {libraryHasNoFlowFallback && (
             <p className="file-detail-flow-fallback">
               This library has no flow assigned right now, so Dry-run is using the flow from this
               file&apos;s last run instead — it may not be the flow you expect.
+            </p>
+          )}
+
+          {libraryLookupFailedFallback && (
+            <p className="file-detail-flow-fallback">
+              This library&apos;s current flow could not be determined, so Dry-run is using the flow
+              from this file&apos;s last run instead — it may not be the flow you expect.
             </p>
           )}
 
