@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import type { ApiClient } from '../api/client.js';
+import type { ApiClient } from '../../api/client.js';
 import {
   describeFailure,
   draftProblems,

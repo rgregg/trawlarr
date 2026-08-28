@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
-import { describeFailure } from '../library-form-model.js';
+import { describeFailure } from '../config/library-form-model.js';
 import { explainState, toStreamRows } from './file-detail-model.js';
 import { formatBytes, type ApiFile } from './files-model.js';
 

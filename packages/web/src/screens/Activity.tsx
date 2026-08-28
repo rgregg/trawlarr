@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../api/client.js';
 import { LIVE_LOG_LINES, type LiveJob, type LiveState } from '../api/events.js';
-import { describeFailure } from './library-form-model.js';
+import { describeFailure } from './config/library-form-model.js';
 import {
   formatProgress,
   mergeJobs,

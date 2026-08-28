@@ -3,7 +3,7 @@ import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute, type FileFilters } from '../../shell/route.js';
 import { visibleRange } from '../../shell/virtual.js';
-import { describeFailure } from '../library-form-model.js';
+import { describeFailure } from '../config/library-form-model.js';
 import {
   filtersToQuery,
   formatBytes,

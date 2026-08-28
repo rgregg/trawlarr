@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
+import { describeFailure } from '../config/library-form-model.js';
 import { formatBytes, type ApiFile } from '../files/files-model.js';
-import { describeFailure } from '../library-form-model.js';
 import { groupProblems, type ProblemGroup } from './diagnose-model.js';
 
 // The three states worth diagnosing. `unknown`, `queued` and `running` are

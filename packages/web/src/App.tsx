@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import type { ApiClient } from './api/client.js';
+import { Config } from './screens/config/Config.js';
 import { Diagnose } from './screens/diagnose/Diagnose.js';
 import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
-import { Libraries } from './screens/Libraries.js';
 import { Watch } from './screens/watch/Watch.js';
 import { KeyGate } from './shell/KeyGate.js';
 import { Link } from './shell/Link.js';
@@ -81,11 +81,6 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         ))}
       </nav>
 
-      {/* Configure is still a pre-redesign component at its old identity —
-          Libraries — because that screen doesn't exist yet. Watch, Files and
-          Diagnose are real now. Later tasks replace Configure in turn;
-          nothing here reaches back into a Screen union, so a route can be
-          repointed without touching the nav. */}
       <main>
         {route.name === 'watch' && (
           <Watch client={props.client} live={live} navigate={navigate} onOverall={setOverall} />
@@ -108,7 +103,9 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         {route.name === 'job' && (
           <JobDetail client={props.client} id={route.id} live={live} navigate={navigate} />
         )}
-        {route.name === 'config' && <Libraries client={props.client} live={live} />}
+        {route.name === 'config' && (
+          <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />
+        )}
         {route.name === 'notFound' && <p>No screen for {route.path}.</p>}
       </main>
     </div>
