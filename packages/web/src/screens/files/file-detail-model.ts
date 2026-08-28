@@ -61,7 +61,16 @@ export const toStreamRows = (probe: unknown): StreamRow[] => {
   }));
 };
 
-const humanDelay = (ms: number): string => {
+/**
+ * A delay, in words. `null` when the deadline has already passed — the
+ * caller has to say something else entirely there, not a smaller number.
+ * `Math.max(1, minutes)` used to floor an elapsed hold at "1m", so a file
+ * whose hold expired an hour ago read "It will be retried in 1m" for as long
+ * as nothing came along to pick it up, which is a promise about the future
+ * built from a fact about the past.
+ */
+const humanDelay = (ms: number): string | null => {
+  if (ms <= 0) return null;
   const minutes = Math.round(ms / 60_000);
   if (minutes < 60) return `${String(Math.max(1, minutes))}m`;
   return `${String(Math.round(minutes / 60))}h`;
@@ -104,12 +113,13 @@ export const explainState = (input: {
       return `Failed after ${String(input.attemptCount)} attempts${
         input.lastJobReason === null ? '' : `: ${input.lastJobReason}`
       }. It will not retry on its own.`;
-    case 'held':
-      return input.holdUntilMs === null
-        ? 'Held after a failed attempt. It will be retried.'
-        : `Held after a failed attempt. It will be retried in ${humanDelay(
-            input.holdUntilMs - input.nowMs,
-          )}.`;
+    case 'held': {
+      if (input.holdUntilMs === null) return 'Held after a failed attempt. It will be retried.';
+      const delay = humanDelay(input.holdUntilMs - input.nowMs);
+      return delay === null
+        ? 'Held after a failed attempt. Its hold has already expired, so it is claimable now — if it stays here, nothing is picking it up.'
+        : `Held after a failed attempt. It will be retried in ${delay}.`;
+    }
     case 'not_converging':
       return 'Not converging. The flow ran without changing it enough to converge, so it has been set aside.';
     // `unknown` is the ledger's own starting state (`newLedgerRecord` in
@@ -122,4 +132,62 @@ export const explainState = (input: {
     default:
       return `State ${input.state}.`;
   }
+};
+
+/**
+ * WHICH FLOW A DRY RUN REPLAYS, and what the screen has to admit about that
+ * choice. Four booleans lived inline in `FileDetail.tsx` under a twelve-line
+ * comment describing the production bug they exist to prevent; extracted
+ * here so every branch is covered by a test rather than by that comment.
+ *
+ * THE BUG. A job row records the flow it ran under at `start()` and is never
+ * updated. Reading it as "the flow now" is exactly what silently mis-targeted
+ * a dry run after a library was re-pointed at a different flow on a real
+ * system: the binding had moved, the job row had not, and dry-run kept
+ * asking the old flow's question while the operator read the answer as if it
+ * were about the current one. So the library's CURRENT binding wins whenever
+ * it is known, and the job's frozen `flowId` is only ever a last resort.
+ *
+ * THE TWO NULLS ARE NOT THE SAME NULL, and the UI must never blur them into
+ * one sentence. `libraryFlowId === null` with `lookupFailed === false` is a
+ * FACT: this library has no flow bound. The same null with
+ * `lookupFailed === true` is an UNKNOWN: the lookup that would have told us
+ * did not come back. Both fall back to the last job's flow as the only lead
+ * left, but only one of them is entitled to state what the library's flow
+ * binding is.
+ */
+export interface FlowBinding {
+  /** The flow to dry-run against, or `null` when there is nothing to replay. */
+  flowId: string | null;
+  /** True when `flowId` came from a job row rather than from the library. */
+  fromLastJob: boolean;
+  /**
+   * Which sentence the screen owes the operator about that fallback:
+   * `library-has-no-flow` states a fact, `library-lookup-failed` admits an
+   * unknown, and `null` means no explanation is owed at all.
+   */
+  warning: 'library-has-no-flow' | 'library-lookup-failed' | null;
+}
+
+export const resolveFlowBinding = (input: {
+  /** The library's CURRENT binding, or null — see the two nulls above. */
+  libraryFlowId: string | null;
+  /** Whether the library lookup itself failed, as opposed to answering null. */
+  libraryLookupFailed: boolean;
+  /** The most recent job's frozen `flowId`, if this file has ever run. */
+  lastJobFlowId: string | null;
+}): FlowBinding => {
+  if (input.libraryFlowId !== null) {
+    return { flowId: input.libraryFlowId, fromLastJob: false, warning: null };
+  }
+  if (input.lastJobFlowId === null) {
+    // Nothing to replay: no binding and no history. The screen disables
+    // Dry-run rather than warning about a flow it does not have.
+    return { flowId: null, fromLastJob: false, warning: null };
+  }
+  return {
+    flowId: input.lastJobFlowId,
+    fromLastJob: true,
+    warning: input.libraryLookupFailed ? 'library-lookup-failed' : 'library-has-no-flow',
+  };
 };

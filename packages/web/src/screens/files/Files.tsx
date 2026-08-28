@@ -53,11 +53,19 @@ const SORTS: Array<{ column: SortColumn; label: string }> = [
  * clickable, keyboard-focusable and middle-click-able — see `shell/Link.tsx`
  * for why that matters more than it looks like it should.
  */
-const FileRowLine = (props: { row: FileRow; navigate: (to: string) => void }): JSX.Element => {
+const FileRowLine = (props: {
+  row: FileRow;
+  filters: FileFilters;
+  navigate: (to: string) => void;
+}): JSX.Element => {
   const { row } = props;
   return (
     <Link
-      to={`/files/${row.id}`}
+      // The filters travel WITH the click. A file detail route carries them
+      // (see `route.ts`) so the list mounted behind the panel is this list,
+      // and the panel's back-link returns to this view rather than to a bare
+      // `/files`.
+      to={formatRoute({ name: 'file', id: row.id, filters: props.filters })}
       navigate={props.navigate}
       className={`file-row file-row-state-${row.state}`}
     >
@@ -357,7 +365,7 @@ export const Files = (props: {
           >
             <div style={{ height: `${String(range.start * rowHeight)}px` }} />
             {windowed.map((row) => (
-              <FileRowLine key={row.id} row={row} navigate={navigate} />
+              <FileRowLine key={row.id} row={row} filters={filters} navigate={navigate} />
             ))}
             <div style={{ height: `${String((sorted.length - range.end) * rowHeight)}px` }} />
           </div>

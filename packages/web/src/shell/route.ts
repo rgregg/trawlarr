@@ -19,7 +19,14 @@ export type Route =
   | { name: 'watch' }
   | { name: 'diagnose' }
   | { name: 'files'; filters: FileFilters }
-  | { name: 'file'; id: string }
+  // A file detail route CARRIES THE FILTERS IT WAS OPENED FROM. Opening a
+  // file is not leaving the list: the list stays mounted behind the panel on
+  // desktop, and the panel's back-link has to return to the view you came
+  // from. Without them, arriving from `/files?state=failed` and going back
+  // dropped the filter — and the list behind the panel was the whole
+  // unfiltered library, which is also ~24 sequential requests nobody asked
+  // for. Same three params as `files`, read and written identically.
+  | { name: 'file'; id: string; filters: FileFilters }
   | { name: 'job'; id: string }
   | { name: 'flow'; id: string }
   | { name: 'config'; tab: ConfigTab }
@@ -44,23 +51,28 @@ export const parseRoute = (pathname: string, search: string): Route => {
   }
 
   if (segments[0] === 'files') {
-    if (segments.length === 1) {
-      return {
-        name: 'files',
-        filters: {
-          library: params.get('library'),
-          state: params.get('state'),
-          q: params.get('q'),
-        },
-      };
-    }
-    if (segments.length === 2) return { name: 'file', id: segments[1]! };
+    const filters: FileFilters = {
+      library: params.get('library'),
+      state: params.get('state'),
+      q: params.get('q'),
+    };
+    if (segments.length === 1) return { name: 'files', filters };
+    if (segments.length === 2) return { name: 'file', id: segments[1]!, filters };
   }
 
   if (segments[0] === 'jobs' && segments.length === 2) return { name: 'job', id: segments[1]! };
   if (segments[0] === 'flows' && segments.length === 2) return { name: 'flow', id: segments[1]! };
 
   return { name: 'notFound', path };
+};
+
+const filterQuery = (filters: FileFilters): string => {
+  const params = new URLSearchParams();
+  if (filters.library !== null) params.set('library', filters.library);
+  if (filters.state !== null) params.set('state', filters.state);
+  if (filters.q !== null) params.set('q', filters.q);
+  const query = params.toString();
+  return query.length === 0 ? '' : `?${query}`;
 };
 
 export const formatRoute = (route: Route): string => {
@@ -70,7 +82,7 @@ export const formatRoute = (route: Route): string => {
     case 'diagnose':
       return '/diagnose';
     case 'file':
-      return `/files/${route.id}`;
+      return `/files/${route.id}${filterQuery(route.filters)}`;
     case 'job':
       return `/jobs/${route.id}`;
     case 'flow':
@@ -79,13 +91,7 @@ export const formatRoute = (route: Route): string => {
       return route.tab === 'workers' ? '/config' : `/config?tab=${route.tab}`;
     case 'notFound':
       return route.path;
-    case 'files': {
-      const params = new URLSearchParams();
-      if (route.filters.library !== null) params.set('library', route.filters.library);
-      if (route.filters.state !== null) params.set('state', route.filters.state);
-      if (route.filters.q !== null) params.set('q', route.filters.q);
-      const query = params.toString();
-      return query.length === 0 ? '/files' : `/files?${query}`;
-    }
+    case 'files':
+      return `/files${filterQuery(route.filters)}`;
   }
 };

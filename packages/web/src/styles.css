@@ -843,6 +843,18 @@ main {
   }
 }
 
+/* THE RETRY BUTTON IS THE ONLY ESCAPE FROM AN ERROR STATE, so it has to be
+   as tappable as everything else. `.job-page button`, `.flow-page button`
+   and `.config button` each scope the 2.75rem floor already; `.diagnose`,
+   `.files` and `.file-detail` had no such rule, so their `.failure` Retry
+   fell back to the global ~30px. Scoped per screen, deliberately — the
+   global `button` rule stays untouched, the way earlier tasks set it up. */
+.diagnose button,
+.files button,
+.file-detail button {
+  min-height: 2.75rem;
+}
+
 /* --- file detail ----------------------------------------------------------
    The "why is this file like this" panel. Desktop keeps the Files table
    mounted beside it (App.tsx renders both under `.file-detail-layout` at
@@ -1874,4 +1886,22 @@ main {
   .flow-graph-inputs {
     grid-template-columns: 1fr;
   }
+}
+
+/* The link from a file to the graph that decides what happens to it. */
+.file-detail-flow-link {
+  margin: 0.5rem 0 0;
+}
+
+.file-detail-flow-link a,
+.not-found-home {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
+/* An unknown URL is an error state like any other, and an error state with
+   no way out of it is a dead end. */
+.not-found {
+  padding: 1rem 0;
 }

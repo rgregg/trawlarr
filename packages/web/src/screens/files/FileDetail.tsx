@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
+import { formatRoute, type FileFilters } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
-import { explainState, toStreamRows } from './file-detail-model.js';
+import { explainState, resolveFlowBinding, toStreamRows } from './file-detail-model.js';
 import { formatBytes, type ApiFile } from './files-model.js';
 
 /**
@@ -68,9 +69,11 @@ const RAISED_PRIORITY = 10;
 export const FileDetail = (props: {
   client: ApiClient;
   id: string;
+  /** The filters this file was opened from — see `route.ts`'s `file` route. */
+  filters: FileFilters;
   navigate: (to: string) => void;
 }): JSX.Element => {
-  const { client, id, navigate } = props;
+  const { client, id, filters, navigate } = props;
 
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
@@ -108,12 +111,17 @@ export const FileDetail = (props: {
 
     void (async () => {
       try {
-        // The library id needed to fetch the CURRENT flow binding is only
-        // known once the file itself has come back, so that one fetch is
-        // unavoidably first — but everything that depends only on the file
-        // id (the job history) or the now-known library id (the library's
-        // flow) still goes out together, not as a further chain of two.
-        const detail = await client.get<{ file: ApiFileDetail; probe: unknown }>(`/files/${id}`);
+        // ONE REQUEST FOR THE FILE AND ITS HISTORY. `GET /files/:id` already
+        // returns this file's run history as `jobs` (see
+        // `packages/server/src/api/routes/files.ts`, which calls
+        // `jobRepo.listForFile`), and this screen used to discard it and
+        // issue `GET /jobs?fileId=…` beside it — two sources for one fact on
+        // one screen, which can only ever disagree.
+        const detail = await client.get<{
+          file: ApiFileDetail;
+          probe: unknown;
+          jobs: ApiJob[];
+        }>(`/files/${id}`);
         if (cancelled) return;
         // The library lookup is a REFINEMENT — everything this screen needs
         // to explain the file (its own row, its job history) is already in
@@ -124,18 +132,17 @@ export const FileDetail = (props: {
         // screen whose job is explaining a file when something is wrong.
         // Catching it inline turns a library-lookup failure into a plain
         // value (`ok: false`) instead of a rejection, so it can never fail
-        // the `Promise.all` it travels in.
-        const [jobPage, libraryResult] = await Promise.all([
-          client.get<{ items: ApiJob[] }>(`/jobs?fileId=${id}&limit=20`),
-          client.get<ApiLibrary>(`/libraries/${detail.file.libraryId}`).then(
+        // the promise it travels in.
+        const libraryResult = await client
+          .get<ApiLibrary>(`/libraries/${detail.file.libraryId}`)
+          .then(
             (library) => ({ ok: true as const, flowId: library.flowId }),
             () => ({ ok: false as const, flowId: null }),
-          ),
-        ]);
+          );
         if (cancelled) return;
         setFile(detail.file);
         setProbe(detail.probe);
-        setJobs(jobPage.items);
+        setJobs(detail.jobs);
         setLibraryFlowId(libraryResult.flowId);
         setLibraryLookupFailed(!libraryResult.ok);
         setLoading(false);
@@ -181,18 +188,16 @@ export const FileDetail = (props: {
     );
   }, [client, id, runAction]);
 
-  // The flow to replay is the library's CURRENT binding — never a job's
-  // frozen `flowId`, which stops being the truth the moment the library is
-  // re-pointed at a different flow (see the `libraryFlowId` comment above).
-  // There are two distinct reasons `libraryFlowId` can be null, and the UI
-  // must not blur them into one sentence: the library genuinely has no flow
-  // bound (a fact), versus the lookup that would have told us failed (an
-  // unknown). Both fall back to the last job's flow as the only lead left,
-  // but only one of them is entitled to say what the library's state is.
-  const flowId = libraryFlowId ?? jobs[0]?.flowId ?? null;
-  const hasStaleFlowFallback = libraryFlowId === null && jobs[0]?.flowId !== undefined;
-  const libraryHasNoFlowFallback = hasStaleFlowFallback && !libraryLookupFailed;
-  const libraryLookupFailedFallback = hasStaleFlowFallback && libraryLookupFailed;
+  // Which flow a dry run replays, and what this screen owes the operator
+  // about that choice — every branch of it lives in `file-detail-model.ts`
+  // now, where a test can reach it. See `resolveFlowBinding`'s doc comment
+  // for the production bug it exists to prevent.
+  const binding = resolveFlowBinding({
+    libraryFlowId,
+    libraryLookupFailed,
+    lastJobFlowId: jobs[0]?.flowId ?? null,
+  });
+  const flowId = binding.flowId;
 
   const onDryRun = useCallback((): void => {
     if (flowId === null) return;
@@ -227,7 +232,15 @@ export const FileDetail = (props: {
 
   return (
     <div className="file-detail">
-      <Link to="/files" navigate={navigate} className="file-detail-back">
+      {/* Back to the view this file was opened from, filters and all —
+          arriving from `/files?state=failed` and landing on a bare `/files`
+          made the one thing the spec asks for ("reproduce a view exactly")
+          impossible. */}
+      <Link
+        to={formatRoute({ name: 'files', filters })}
+        navigate={navigate}
+        className="file-detail-back"
+      >
         ← Files
       </Link>
 
@@ -315,14 +328,25 @@ export const FileDetail = (props: {
             </button>
           </div>
 
-          {libraryHasNoFlowFallback && (
+          {flowId !== null && (
+            // "Why did this file get rewritten" is usually a question about
+            // the GRAPH, and this screen holds a flow id — without this link
+            // `/flows/:id` was reachable only from Configure → Libraries.
+            <p className="file-detail-flow-link">
+              <Link to={`/flows/${flowId}`} navigate={navigate}>
+                {binding.fromLastJob ? 'See the flow from its last run' : "See this library's flow"}
+              </Link>
+            </p>
+          )}
+
+          {binding.warning === 'library-has-no-flow' && (
             <p className="file-detail-flow-fallback">
               This library has no flow assigned right now, so Dry-run is using the flow from this
               file&apos;s last run instead — it may not be the flow you expect.
             </p>
           )}
 
-          {libraryLookupFailedFallback && (
+          {binding.warning === 'library-lookup-failed' && (
             <p className="file-detail-flow-fallback">
               This library&apos;s current flow could not be determined, so Dry-run is using the flow
               from this file&apos;s last run instead — it may not be the flow you expect.

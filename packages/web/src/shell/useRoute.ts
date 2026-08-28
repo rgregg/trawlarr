@@ -15,7 +15,10 @@ interface RouteWindow {
   location: { pathname: string; search: string };
   addEventListener: (type: 'popstate', listener: () => void) => void;
   removeEventListener: (type: 'popstate', listener: () => void) => void;
-  history: { pushState: (data: unknown, unused: string, url: string) => void };
+  history: {
+    pushState: (data: unknown, unused: string, url: string) => void;
+    replaceState: (data: unknown, unused: string, url: string) => void;
+  };
 }
 
 const browserWindow = (): RouteWindow => {
@@ -50,7 +53,19 @@ export const useRoute = (): { route: Route; navigate: (to: string) => void } => 
 
   const navigate = useCallback(
     (to: string): void => {
-      win.history.pushState(null, '', to);
+      // NAVIGATING TO WHERE YOU ALREADY ARE REPLACES, IT DOES NOT PUSH.
+      // Every nav entry is a `<Link>` that calls this, so clicking "Files"
+      // while already on Files used to stack another identical entry — and
+      // three idle clicks made Back appear broken, because the first three
+      // presses went nowhere visible. Compared against the URL the browser
+      // currently shows rather than against `route`, since that is the
+      // entry that would be duplicated.
+      const current = `${win.location.pathname}${win.location.search}`;
+      if (to === current) {
+        win.history.replaceState(null, '', to);
+      } else {
+        win.history.pushState(null, '', to);
+      }
       setRoute(parseRoute(win.location.pathname, win.location.search));
     },
     [win],

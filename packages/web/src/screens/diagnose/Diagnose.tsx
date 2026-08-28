@@ -145,7 +145,17 @@ const ProblemCard = (props: {
       <ul className="problem-files">
         {shown.map((file) => (
           <li key={file.id}>
-            <Link to={`/files/${file.id}`} navigate={navigate}>
+            {/* The state travels with the click, so the list behind the
+                file panel — and the panel's back-link — is this problem's
+                files rather than the whole library. */}
+            <Link
+              to={formatRoute({
+                name: 'file',
+                id: file.id,
+                filters: { library: null, state, q: null },
+              })}
+              navigate={navigate}
+            >
               {basename(file.path)}
             </Link>
           </li>
@@ -270,8 +280,12 @@ export const Diagnose = (props: {
 
       {failure === null && !loading && groups.length === 0 && (
         <div className="problem-empty" role="status">
+          {/* This screen has never counted libraries — it fetches files by
+              state — so it must not claim how many there are. It said "both
+              libraries are converged", hardcoding this one install's count
+              into the state it shows almost always. */}
           <p className="problem-empty-headline">
-            Nothing needs you — both libraries are converged.
+            Nothing needs you — no file is failed, held or stuck.
           </p>
           <Link to="/files" navigate={navigate}>
             Browse files

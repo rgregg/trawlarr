@@ -20,9 +20,24 @@ describe('parseRoute', () => {
   });
 
   it('reads object routes', () => {
-    expect(parseRoute('/files/abc-123', '')).toEqual({ name: 'file', id: 'abc-123' });
+    expect(parseRoute('/files/abc-123', '')).toEqual({
+      name: 'file',
+      id: 'abc-123',
+      filters: { library: null, state: null, q: null },
+    });
     expect(parseRoute('/jobs/job-9', '')).toEqual({ name: 'job', id: 'job-9' });
     expect(parseRoute('/flows/flow-7', '')).toEqual({ name: 'flow', id: 'flow-7' });
+  });
+
+  it('carries the filters a file was opened from, so both ways back keep them', () => {
+    // Arriving at a file from `/files?state=failed` must not drop the
+    // filter — not on the back-link, and not for the list still mounted
+    // behind the panel.
+    expect(parseRoute('/files/abc-123', '?state=failed&library=lib-1')).toEqual({
+      name: 'file',
+      id: 'abc-123',
+      filters: { library: 'lib-1', state: 'failed', q: null },
+    });
   });
 
   it('names an unknown path rather than silently showing the default screen', () => {
@@ -33,7 +48,12 @@ describe('parseRoute', () => {
     const routes = [
       { name: 'watch' } as const,
       { name: 'diagnose' } as const,
-      { name: 'file', id: 'abc-123' } as const,
+      { name: 'file', id: 'abc-123', filters: { library: null, state: null, q: null } } as const,
+      {
+        name: 'file',
+        id: 'abc-123',
+        filters: { library: 'lib-1', state: 'failed', q: null },
+      } as const,
       { name: 'job', id: 'job-9' } as const,
       { name: 'flow', id: 'flow-7' } as const,
       { name: 'config', tab: 'libraries' } as const,

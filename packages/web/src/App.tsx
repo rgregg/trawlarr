@@ -9,6 +9,7 @@ import { Watch } from './screens/watch/Watch.js';
 import { KeyGate } from './shell/KeyGate.js';
 import { Link } from './shell/Link.js';
 import { useApi } from './shell/useApi.js';
+import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
 import { useRoute } from './shell/useRoute.js';
 import type { Route } from './shell/route.js';
@@ -19,12 +20,6 @@ import './styles.css';
  * knows how to parse — the nav is not a second source of truth about what
  * screens exist, just labels over `route.ts`'s table.
  */
-// `file` is a separate route from `files` (see `route.ts`) and carries no
-// filters of its own — reusing "no filter" here rather than inventing a
-// second empty-filters literal keeps `filtersToQuery`'s "everything" case
-// the one this shell ever asks for behind a detail panel.
-const NO_FILE_FILTERS = { library: null, state: null, q: null };
-
 const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
   { to: '/', label: 'Watch', matches: 'watch' },
   { to: '/diagnose', label: 'Diagnose', matches: 'diagnose' },
@@ -52,6 +47,10 @@ const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
 const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }): JSX.Element => {
   const { live, connected } = useLive(props.apiKey);
   const { route, navigate } = useRoute();
+  // Below 48rem the sheet sets `display: none` on the list behind the file
+  // panel (`styles.css`), so mounting it there paged an entire library —
+  // ~24 sequential requests on 4,625 files — to render nothing at all.
+  const narrow = useMedia(FILES_NARROW);
 
   return (
     <div className="app">
@@ -91,12 +90,18 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         {route.name === 'file' && (
           // The list stays mounted behind the panel on desktop — a click
           // into a file should feel like opening a drawer over the table it
-          // came from, not like leaving it. `file-detail-layout` in
-          // styles.css is what hides the list below 48rem, where there is
-          // no room for both and the panel becomes the whole screen.
+          // came from, not like leaving it. It is THE SAME FILTERED LIST the
+          // click came from: the route carries the filters (see `route.ts`),
+          // so the table behind the panel is never the whole unfiltered
+          // library, and `FileDetail`'s back-link returns to the exact view.
           <div className="file-detail-layout">
-            <Files client={props.client} filters={NO_FILE_FILTERS} navigate={navigate} />
-            <FileDetail client={props.client} id={route.id} navigate={navigate} />
+            {!narrow && <Files client={props.client} filters={route.filters} navigate={navigate} />}
+            <FileDetail
+              client={props.client}
+              id={route.id}
+              filters={route.filters}
+              navigate={navigate}
+            />
           </div>
         )}
         {route.name === 'job' && (
@@ -108,7 +113,16 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         {route.name === 'config' && (
           <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />
         )}
-        {route.name === 'notFound' && <p>No screen for {route.path}.</p>}
+        {route.name === 'notFound' && (
+          <div className="not-found">
+            <p>No screen for {route.path}.</p>
+            {/* An error state with no way out of it is a dead end; every
+                other failure on this branch offers one. */}
+            <Link to="/" navigate={navigate} className="not-found-home">
+              Go to Watch
+            </Link>
+          </div>
+        )}
       </main>
     </div>
   );

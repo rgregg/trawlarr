@@ -121,15 +121,22 @@ export const FlowDetail = (props: {
 
   // A SECONDARY fetch — which libraries use this flow — and its failure must
   // never blank a screen that already has the flow and its graph to show.
-  // The list simply stays empty, which under-reports rather than lying.
+  // But it must not be SILENT either: `libraries === null` is the loading
+  // state, rendered as "…", and a failed fetch used to leave it null for
+  // ever, so the one place on this branch where loading, empty and failed
+  // were indistinguishable rendered a permanent ellipsis. Three states, three
+  // renderings.
+  const [librariesFailed, setLibrariesFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const all = await client.get<ApiLibraryStub[]>('/libraries');
-        if (!cancelled) setLibraries(all.filter((library) => library.flowId === id));
+        if (cancelled) return;
+        setLibrariesFailed(false);
+        setLibraries(all.filter((library) => library.flowId === id));
       } catch {
-        // Intentionally silent — see the comment above.
+        if (!cancelled) setLibrariesFailed(true);
       }
     })();
     return () => {
@@ -204,7 +211,9 @@ export const FlowDetail = (props: {
             <div>
               <dt>Libraries using this flow</dt>
               <dd>
-                {libraries === null ? (
+                {librariesFailed ? (
+                  'Could not be checked — the library list did not load.'
+                ) : libraries === null ? (
                   '…'
                 ) : libraries.length === 0 ? (
                   'None'

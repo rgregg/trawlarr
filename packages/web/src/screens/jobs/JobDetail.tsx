@@ -9,8 +9,9 @@ import { toStepRows, type ApiStep } from './job-detail-model.js';
  * `GET /jobs/:id`'s shape, as the daemon actually returns it — see
  * `packages/server/src/db/job-repo.ts`'s `JobRow` and `JobStepRow`, and
  * `packages/server/src/api/routes/jobs.ts`. `flowHash` and `nodeId` are
- * fetched but unused here on purpose: this screen answers "what did this
- * job do and why", not "which flow build ran it".
+ * fetched and shown as a link to the graph the job walked (frozen at
+ * `start()`, so not necessarily the library's binding now); `nodeId` is
+ * fetched and unused on purpose.
  */
 interface ApiJobRow {
   id: string;
@@ -188,9 +189,17 @@ export const JobDetail = (props: {
 
   return (
     <div className="job-page">
-      <Link to="/diagnose" navigate={navigate} className="job-page-back">
-        ← Diagnose
-      </Link>
+      {/* BACK GOES TO THE FILE, not to Diagnose. This link was hardcoded
+          "← Diagnose" regardless of how the job was reached, while the
+          dominant path is file detail → job history → job; Diagnose is one
+          nav click away and the file is not. Until the detail arrives there
+          is no file id to point at, so the link waits rather than pointing
+          somewhere it might have to change. */}
+      {detail !== null && (
+        <Link to={`/files/${detail.job.fileId}`} navigate={navigate} className="job-page-back">
+          ← File
+        </Link>
+      )}
 
       {failure !== null && (
         <div role="alert" className="failure">
@@ -247,6 +256,20 @@ export const JobDetail = (props: {
           </p>
 
           <dl className="job-page-meta">
+            <div>
+              {/* The graph this job walked. `flowId` was fetched and
+                  deliberately unused here; but "why did this file get
+                  rewritten" is usually a question about the graph, and this
+                  screen holds the id — so it links rather than hides it.
+                  Note it is the flow the job RAN UNDER (frozen at start),
+                  which is not necessarily the library's binding now. */}
+              <dt>Flow</dt>
+              <dd>
+                <Link to={`/flows/${detail.job.flowId}`} navigate={navigate}>
+                  {detail.job.flowId}
+                </Link>
+              </dd>
+            </div>
             <div>
               <dt>Worker class</dt>
               <dd>{detail.job.workerClass}</dd>
