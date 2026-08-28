@@ -159,7 +159,31 @@ button:disabled {
   padding: 0.75rem 1rem;
 }
 
-.app-nav button[aria-current='page'] {
+/* The nav used to be `<button>`s, styled by the bare `button` rule above.
+   It is `<Link>`s now — real anchors, so middle-click and "copy link
+   address" work (see `shell/Link.tsx`) — so the button's chrome is
+   reproduced here explicitly instead of falling out of an element-type
+   selector. `min-height` (not just padding) is what keeps the touch target
+   at least 2.75rem on a phone even for a short label like "Files". */
+.app-nav .nav-link {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.35em 0.8em;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* The active screen, marked the same way the job list marks the selected
+   job: border weight and font weight both shift, not colour alone (see the
+   file header). This has to hold with no `:hover` involved — `aria-current`
+   is set from the route on every render, keyboard and touch included. */
+.app-nav .nav-link[aria-current='page'] {
   border-color: var(--ink);
   font-weight: 600;
 }
