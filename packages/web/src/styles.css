@@ -1341,6 +1341,16 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* Same vocabulary as `.file-detail-flow-fallback`: `--warn` for a caution
+   rather than a failure — this card's grouping may have merged causes that
+   only look alike with their numbers stripped (`exit code 1` vs `exit code
+   137`), and this is where that gets said. */
+.problem-reason-note {
+  margin: 0.4rem 0 0.7rem;
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
 .problem-files {
   list-style: none;
   margin: 0 0 0.7rem;

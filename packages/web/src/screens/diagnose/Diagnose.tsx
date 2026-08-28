@@ -8,8 +8,8 @@ import { groupProblems, type ProblemGroup } from './diagnose-model.js';
 
 // The three states worth diagnosing. `unknown`, `queued` and `running` are
 // not problems — they are work still ahead of the queue — so they never
-// appear here; see `files-model.ts`'s `STATES` for the full seven the
-// Files screen filters on.
+// appear here; see `Files.tsx`'s `STATES` for the full seven the Files
+// screen filters on.
 const PROBLEM_STATES = ['failed', 'held', 'not_converging'];
 
 const PAGE_SIZE = 200;
@@ -128,6 +128,19 @@ const ProblemCard = (props: {
       <div className="problem-reason-scroll">
         <p className="problem-reason">{group.reason}</p>
       </div>
+
+      {group.reasonsDiffer && (
+        // The grouping key strips every digit (see `normaliseReason`'s doc
+        // comment), so files that land on one card do not always share the
+        // exact same sentence — "exit code 1" and "exit code 137" both
+        // become "exit code N" and can end up here together even though one
+        // is an OOM kill and the other is not. `group.reason` above is only
+        // ONE member's exact wording; this line is the tell that the others
+        // may read differently, before anyone clicks through to check.
+        <p className="problem-reason-note">
+          Not every file here reports the exact same reason — open a file below to see its own.
+        </p>
+      )}
 
       <ul className="problem-files">
         {shown.map((file) => (

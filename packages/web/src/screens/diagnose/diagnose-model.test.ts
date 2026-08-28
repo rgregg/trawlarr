@@ -88,4 +88,26 @@ describe('groupProblems', () => {
     expect(groups[0]!.files).toHaveLength(2);
     expect(groups[0]!.reason).toBe('No reason was recorded for this failure.');
   });
+
+  it('flags a group whose members do not all share the exact same raw reason', () => {
+    // "exit code 1" and "exit code 137" both normalise to "exit code N" and
+    // land in one group — a real over-collapse `normaliseReason`'s doc
+    // comment names — so the group must say its members disagree even
+    // though it can only show one of their sentences verbatim.
+    const groups = groupProblems({
+      files: [file('a', 'failed', 100), file('b', 'failed', 200)],
+      reasons: { a: 'exit code 1', b: 'exit code 137' },
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.reasonsDiffer).toBe(true);
+  });
+
+  it('leaves reasonsDiffer false when every member shares the exact same reason', () => {
+    const groups = groupProblems({
+      files: [file('a', 'failed', 100), file('b', 'failed', 200)],
+      reasons: { a: 'exit code 1', b: 'exit code 1' },
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.reasonsDiffer).toBe(false);
+  });
 });
