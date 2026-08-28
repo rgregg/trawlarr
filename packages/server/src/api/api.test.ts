@@ -595,7 +595,7 @@ describe('files', () => {
     const response = await api('POST', `/files/${fileId}/priority`, { priority: 10 });
 
     expect(response.status).toBe(200);
-    expect(response.body.priority).toBe(10);
+    expect(response.body.file.priority).toBe(10);
     expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(10);
   });
 
@@ -604,6 +604,16 @@ describe('files', () => {
     const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
 
     const response = await api('POST', `/files/${fileId}/priority`, { priority: 'high' });
+
+    expect(response.status).toBe(400);
+    expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
+  });
+
+  it('refuses a priority that is not an integer', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    const response = await api('POST', `/files/${fileId}/priority`, { priority: 1.5 });
 
     expect(response.status).toBe(400);
     expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);

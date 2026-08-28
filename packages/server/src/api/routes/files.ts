@@ -139,20 +139,21 @@ export const fileRoutes: Route[] = [
     method: 'POST',
     path: '/files/:id/priority',
     handler: ({ params, body, ctx }) => {
-      const row = requireFile(ctx, params.id!);
       const raw = (body as { priority?: unknown } | null)?.priority;
-      if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+      if (typeof raw !== 'number' || !Number.isInteger(raw)) {
         throw new ApiError(
           400,
           'invalid-body',
-          `"priority" must be a finite number, got ${JSON.stringify(raw)}.`,
+          `"priority" must be an integer, got ${JSON.stringify(raw)}.`,
         );
       }
       const repo = createMediaFileRepo(ctx.db);
-      repo.setPriority(row.id, raw, ctx.nowMs());
+      if (!repo.setPriority(params.id!, raw)) {
+        throw new ApiError(404, 'file-not-found', `No file with id "${params.id}".`);
+      }
       // `claimNext` orders `priority DESC, discovered_at ASC` — this is the
       // only way an operator moves a file ahead of the rest of the queue.
-      return toFileResource(repo.getById(row.id)!);
+      return { file: toFileResource(repo.getById(params.id!)!) };
     },
   },
 
