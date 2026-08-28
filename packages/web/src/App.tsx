@@ -4,6 +4,7 @@ import { Config } from './screens/config/Config.js';
 import { Diagnose } from './screens/diagnose/Diagnose.js';
 import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
+import { FlowDetail } from './screens/flows/FlowDetail.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
 import { KeyGate } from './shell/KeyGate.js';
@@ -102,6 +103,9 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         )}
         {route.name === 'job' && (
           <JobDetail client={props.client} id={route.id} live={live} navigate={navigate} />
+        )}
+        {route.name === 'flow' && (
+          <FlowDetail client={props.client} id={route.id} navigate={navigate} />
         )}
         {route.name === 'config' && (
           <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />

@@ -1756,3 +1756,176 @@ main {
     max-width: none;
   }
 }
+
+/* --- flow detail ------------------------------------------------------------
+   Read-only, deliberately: no edit control lives here (see FlowDetail.tsx's
+   doc comment). The graph gets its own scroll container because a deep
+   nested flow indents further than a phone is wide, and primary content on
+   this screen must never force the PAGE to scroll sideways. */
+
+.flow-page {
+  max-width: 56rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.flow-page-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.flow-page-header {
+  margin-top: 0.4rem;
+}
+
+.flow-page-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.flow-page-description {
+  margin: 0.4rem 0 0.8rem;
+  color: var(--muted);
+}
+
+.flow-page-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.flow-page-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.flow-page-meta dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-page-libraries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* `--warn`, not `--bad`: this is not an error, it is the one sentence on the
+   screen that matters most — that this view cannot edit the flow and why —
+   so it gets the same visual weight the rest of this app reserves for a
+   caution rather than a neutral `.help` aside. */
+.flow-page-notice {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.flow-page-actions {
+  margin: 0 0 1rem;
+}
+
+.flow-page h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.flow-page-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.flow-page-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+/* Its own horizontal scroll container: a deep flow indents by
+   `depth * 1.25rem` (see FlowDetail.tsx's `GraphNode`), which on a phone can
+   exceed the viewport long before the page itself needs to move. */
+.flow-graph-scroll {
+  overflow-x: auto;
+}
+
+.flow-graph {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+  min-width: 22rem;
+}
+
+.flow-graph-row {
+  border-left: 2px solid var(--line);
+  padding-top: 0.2rem;
+  padding-bottom: 0.2rem;
+}
+
+.flow-graph-node {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+}
+
+.flow-graph-node-id {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.flow-graph-inputs {
+  margin: 0 0 0 0.2rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.2rem 0.8rem;
+}
+
+.flow-graph-inputs dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  display: inline;
+}
+
+.flow-graph-inputs dt::after {
+  content: ': ';
+}
+
+.flow-graph-inputs dd {
+  margin: 0;
+  display: inline;
+  overflow-wrap: anywhere;
+}
+
+.flow-graph-inputs div {
+  overflow-wrap: anywhere;
+}
+
+/* Scoped rule, same pattern `.config button` uses: every control on this
+   screen (Retry, Copy JSON) meets the touch-target floor without touching
+   the global `button` rule every other screen also relies on. */
+.flow-page button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+@media (max-width: 48rem) {
+  .flow-graph-inputs {
+    grid-template-columns: 1fr;
+  }
+}
