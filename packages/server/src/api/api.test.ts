@@ -1957,4 +1957,23 @@ describe('the web bundle, on the daemon’s own port', () => {
     // The point of the 503: the API is unaffected.
     expect(health.status).toBe(200);
   });
+
+  it('survives a reload on a deep link, while the API keeps answering in JSON', async () => {
+    await startWith(await bundleWithApiShapedFile());
+
+    // `/files/abc-123` is `route.ts`'s `file` route: a reload has to reach
+    // this same `index.html`, or every link this UI hands out breaks the
+    // instant someone refreshes it.
+    const deepLink = await fetch(`${webBase}/files/abc-123`);
+    const deepLinkText = await deepLink.text();
+    const unknownApiRoute = await fetch(`${webBase}/api/v1/nope`);
+    const unknownApiBody = (await unknownApiRoute.json()) as { error: { code: string } };
+
+    expect(deepLink.status).toBe(200);
+    expect(deepLink.headers.get('content-type')).toContain('text/html');
+    expect(deepLinkText).toContain('<!doctype html>');
+    expect(unknownApiRoute.status).toBe(404);
+    expect(unknownApiRoute.headers.get('content-type')).toContain('application/json');
+    expect(unknownApiBody.error.code).toBe('not-found');
+  });
 });

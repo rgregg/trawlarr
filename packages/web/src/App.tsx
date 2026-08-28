@@ -4,16 +4,23 @@ import { Activity } from './screens/Activity.js';
 import { Libraries } from './screens/Libraries.js';
 import { Overview } from './screens/Overview.js';
 import { KeyGate } from './shell/KeyGate.js';
+import { Link } from './shell/Link.js';
 import { useApi } from './shell/useApi.js';
 import { useLive } from './shell/useLive.js';
+import { useRoute } from './shell/useRoute.js';
+import type { Route } from './shell/route.js';
 import './styles.css';
 
-type Screen = 'overview' | 'libraries' | 'activity';
-
-const SCREENS: Array<{ id: Screen; label: string }> = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'libraries', label: 'Libraries' },
-  { id: 'activity', label: 'Activity' },
+/**
+ * The four modes, as nav entries. Each is a real path `useRoute` already
+ * knows how to parse — the nav is not a second source of truth about what
+ * screens exist, just labels over `route.ts`'s table.
+ */
+const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
+  { to: '/', label: 'Watch', matches: 'watch' },
+  { to: '/diagnose', label: 'Diagnose', matches: 'diagnose' },
+  { to: '/files', label: 'Files', matches: 'files' },
+  { to: '/config', label: 'Configure', matches: 'config' },
 ];
 
 /**
@@ -26,7 +33,7 @@ const SCREENS: Array<{ id: Screen; label: string }> = [
  */
 const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }): JSX.Element => {
   const { live, connected } = useLive(props.apiKey);
-  const [screen, setScreen] = useState<Screen>('overview');
+  const { route, navigate } = useRoute();
   const [overall, setOverall] = useState<{ percent: number; total: number; good: number } | null>(
     null,
   );
@@ -52,26 +59,34 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
       </header>
 
       <nav className="app-nav" aria-label="Screens">
-        {SCREENS.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            aria-current={screen === entry.id ? 'page' : undefined}
-            onClick={() => {
-              setScreen(entry.id);
-            }}
+        {NAV.map((entry) => (
+          <Link
+            key={entry.to}
+            to={entry.to}
+            navigate={navigate}
+            className="nav-link"
+            aria-current={route.name === entry.matches ? 'page' : undefined}
           >
             {entry.label}
-          </button>
+          </Link>
         ))}
       </nav>
 
+      {/* Watch, Diagnose, Files and Configure are the app's real screens.
+          For now they render the pre-redesign components at their old
+          identities — Overview under Watch, Activity under both Diagnose
+          and Files, Libraries under Configure — because those screens don't
+          exist yet. Later tasks replace each one in turn; nothing here
+          reaches back into a Screen union, so a route can be repointed
+          without touching the nav. */}
       <main>
-        {screen === 'overview' && (
+        {route.name === 'watch' && (
           <Overview client={props.client} live={live} onOverall={setOverall} />
         )}
-        {screen === 'libraries' && <Libraries client={props.client} live={live} />}
-        {screen === 'activity' && <Activity client={props.client} live={live} />}
+        {route.name === 'diagnose' && <Activity client={props.client} live={live} />}
+        {route.name === 'files' && <Activity client={props.client} live={live} />}
+        {route.name === 'config' && <Libraries client={props.client} live={live} />}
+        {route.name === 'notFound' && <p>No screen for {route.path}.</p>}
       </main>
     </div>
   );
