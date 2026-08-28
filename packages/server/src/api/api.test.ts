@@ -619,6 +619,29 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
   });
 
+  it('refuses a priority outside the range that keeps it a nudge', async () => {
+    // `claimNext` orders `priority DESC`, so an unbounded number is a way to
+    // make a file unreachable by accident: a large negative sinks it below
+    // every file the daemon will ever discover, which from the outside looks
+    // exactly like a file the queue has forgotten.
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    for (const priority of [-99999999, 101, -101]) {
+      const response = await api('POST', `/files/${fileId}/priority`, { priority });
+      expect(response.status).toBe(400);
+      expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
+    }
+
+    // The edges of the range are accepted, so "bounded" does not quietly
+    // mean "one narrower than documented".
+    for (const priority of [100, -100, 0]) {
+      const response = await api('POST', `/files/${fileId}/priority`, { priority });
+      expect(response.status).toBe(200);
+      expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(priority);
+    }
+  });
+
   it('answers 404 for a file that does not exist', async () => {
     const response = await api('POST', '/files/missing/priority', { priority: 1 });
     expect(response.status).toBe(404);

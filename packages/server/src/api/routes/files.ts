@@ -4,6 +4,14 @@ import { ALL_STATES, createMediaFileRepo, type MediaFileRow } from '../../db/med
 import { ApiError, optionalNumber, parsePaging, type ApiContext, type Route } from '../router.js';
 
 /**
+ * The range `POST /files/:id/priority` accepts. `media_file.priority` is an
+ * ordering key read by `claimNext` (`priority DESC, discovered_at ASC`);
+ * these bounds keep an operator's nudge a nudge.
+ */
+const PRIORITY_MIN = -100;
+const PRIORITY_MAX = 100;
+
+/**
  * A media file row as the API reports it: camel-cased, with `probe_json`
  * left OUT of listings.
  *
@@ -145,6 +153,22 @@ export const fileRoutes: Route[] = [
           400,
           'invalid-body',
           `"priority" must be an integer, got ${JSON.stringify(raw)}.`,
+        );
+      }
+      // BOUNDED, because this column is a queue ORDER and an unbounded one is
+      // a way to make a file unreachable by accident. `claimNext` orders
+      // `priority DESC`, so a fat-fingered `-99999999` sinks a file below
+      // every file the daemon will ever discover — indistinguishable, from
+      // the outside, from a file the queue has forgotten — and a matching
+      // positive number pins one above everything for ever. The range is
+      // deliberately small: it is a nudge, not a scheduler.
+      if (raw < PRIORITY_MIN || raw > PRIORITY_MAX) {
+        throw new ApiError(
+          400,
+          'invalid-body',
+          `"priority" must be between ${String(PRIORITY_MIN)} and ${String(PRIORITY_MAX)}, got ` +
+            `${String(raw)}. Priority is a queue nudge, not a scheduler: a number outside this ` +
+            `range orders a file below (or above) every file this daemon will ever discover.`,
         );
       }
       const repo = createMediaFileRepo(ctx.db);

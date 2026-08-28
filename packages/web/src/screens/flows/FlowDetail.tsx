@@ -39,12 +39,23 @@ const copyToClipboard = (text: string): Promise<void> | null => {
 const GraphNode = (props: { row: GraphRow }): JSX.Element => {
   const { row } = props;
   return (
-    <li className="flow-graph-row" style={{ paddingLeft: `${String(row.depth * 1.25)}rem` }}>
+    <li
+      className={`flow-graph-row${row.unreachable ? ' flow-graph-row-unreachable' : ''}`}
+      style={{ paddingLeft: `${String(row.depth * 1.25)}rem` }}
+    >
       <div className="flow-graph-node">
         {row.branchLabel !== null && <span className="badge">{row.branchLabel}</span>}
+        {row.unreachable && <span className="badge badge-bad">not reached from the start</span>}
         <code>{row.pluginId}</code>
         <span className="flow-graph-node-id">{row.nodeId}</span>
       </div>
+      {/* The other branches that reach this same node. Drawing it once is
+          right — flows rejoin — but drawing it once with no mention of the
+          second branch is how the muxqueue node, which sat on BOTH branches
+          of a codec check, would render as though it were on one. */}
+      {row.alsoReachedFrom.length > 0 && (
+        <p className="flow-graph-also">Also reached from {row.alsoReachedFrom.join(', ')}</p>
+      )}
       {row.inputs.length > 0 && (
         <dl className="flow-graph-inputs">
           {row.inputs.map((input) => (
@@ -75,8 +86,9 @@ const GraphNode = (props: { row: GraphRow }): JSX.Element => {
  * Deliberately untested, the same split every other detail screen in this
  * app uses (`JobDetail.tsx`, `FileDetail.tsx`): `flow-graph-model.ts` is
  * fully tested and carries every branch of the walk (indentation, branch
- * labels, the twice-reachable node, the missing-start-node case); this file
- * stays a thin renderer over it.
+ * labels, the twice-reachable node and the other branches that reach it, the
+ * node nothing reaches, and both undrawable definitions); this file stays a
+ * thin renderer over it.
  */
 export const FlowDetail = (props: {
   client: ApiClient;
@@ -241,7 +253,7 @@ export const FlowDetail = (props: {
 
           <h3>Graph</h3>
           {rows.length === 0 ? (
-            <p className="help">This flow has no start node — nothing to draw.</p>
+            <p className="help">This flow has no nodes — nothing to draw.</p>
           ) : (
             <div className="flow-graph-scroll">
               <ol className="flow-graph">

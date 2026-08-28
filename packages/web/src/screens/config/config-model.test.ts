@@ -17,6 +17,29 @@ describe('parseWorkerCount', () => {
     expect(parseWorkerCount('1.5').ok).toBe(false);
   });
 
+  it('refuses an empty box, which is not a request for zero workers', () => {
+    // `Number('')` is 0 and `Number.isInteger(0)` is true, so a cleared
+    // field used to parse clean and Save wrote 0 — stopping every transcode
+    // while the operator looked at an empty box.
+    expect(parseWorkerCount('')).toEqual({
+      ok: false,
+      message: 'Enter a number of workers. An empty box is not zero.',
+    });
+    expect(parseWorkerCount('   ')).toEqual({
+      ok: false,
+      message: 'Enter a number of workers. An empty box is not zero.',
+    });
+  });
+
+  it('refuses the forms `Number` would happily accept but nobody types', () => {
+    // `Number('0x10')` is 16 and `Number('1e3')` is 1000 — a count that does
+    // not look like what is on screen is worse than a rejected one.
+    expect(parseWorkerCount('0x10').ok).toBe(false);
+    expect(parseWorkerCount('1e3').ok).toBe(false);
+    expect(parseWorkerCount('+5').ok).toBe(false);
+    expect(parseWorkerCount('Infinity').ok).toBe(false);
+  });
+
   it('refuses text', () => {
     expect(parseWorkerCount('lots')).toEqual({
       ok: false,

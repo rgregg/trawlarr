@@ -1824,6 +1824,24 @@ main {
   font-size: 0.85rem;
 }
 
+/* A node no path from the start reaches. Both the edge and the badge carry
+   it — colour is never the only signal — because a node that is in the flow
+   but never runs is exactly the kind of thing this screen exists to show. */
+.flow-graph-row-unreachable {
+  border-left-color: var(--bad);
+}
+
+.flow-graph .badge-bad {
+  color: var(--bad);
+}
+
+/* The OTHER branches that reach a node drawn once. */
+.flow-graph-also {
+  margin: 0 0 0 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 /* Same pill `.card .badge` uses, scoped rather than bare: this is the one
    element on the whole screen that must not read as prose. `branchLabel` is
    the reason this screen exists — the muxqueue defect was a node on the

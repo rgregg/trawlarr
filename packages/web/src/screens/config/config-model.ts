@@ -19,14 +19,35 @@
 export type WorkerClass = 'transcode' | 'health';
 export const WORKER_CLASSES: readonly WorkerClass[] = ['transcode', 'health'];
 
+/**
+ * A worker count, from the box the operator typed it into.
+ *
+ * AN EMPTY BOX IS NOT ZERO. `Number('')` is `0` and `Number.isInteger(0)` is
+ * true, so a cleared field used to parse as a valid `{ ok: true, value: 0 }`:
+ * no validation error, nothing marked invalid, and Save wrote 0 — stopping
+ * every transcode — while the operator looked at an empty box rather than at
+ * a `0`. On the one control that is both this system's start button and its
+ * runaway stop button, "I cleared the field" and "I asked for zero workers"
+ * must not be the same request.
+ *
+ * The digits-only test is deliberate, and stricter than `Number.isInteger`
+ * on `Number(raw)`: `Number` also accepts `'0x10'` (16), `'1e3'` (1000),
+ * `'  7 '`, `'Infinity'` and `'+5'`. None of those is a number of workers
+ * anyone means to type, and each would silently set a count that does not
+ * look like what is on screen. `'0'` still parses — zero is how work is
+ * stopped, and that has to stay sayable.
+ */
 export const parseWorkerCount = (
   raw: string,
 ): { ok: true; value: number } | { ok: false; message: string } => {
-  const value = Number(raw.trim());
-  if (!Number.isInteger(value) || value < 0) {
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return { ok: false, message: 'Enter a number of workers. An empty box is not zero.' };
+  }
+  if (!/^\d+$/.test(trimmed)) {
     return { ok: false, message: 'Enter a whole number of workers.' };
   }
-  return { ok: true, value };
+  return { ok: true, value: Number(trimmed) };
 };
 
 export const parseWindow = (
