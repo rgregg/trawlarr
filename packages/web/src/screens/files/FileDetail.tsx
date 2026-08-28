@@ -30,6 +30,12 @@ interface ApiJob {
   endedAt: number | null;
 }
 
+/** Only the one field this screen needs: the library's CURRENT flow binding. */
+interface ApiLibrary {
+  id: string;
+  flowId: string | null;
+}
+
 interface DryRunExecuteDecision {
   nodeId: string;
   skip: boolean;
@@ -72,6 +78,13 @@ export const FileDetail = (props: {
   const [file, setFile] = useState<ApiFileDetail | null>(null);
   const [probe, setProbe] = useState<unknown>(null);
   const [jobs, setJobs] = useState<ApiJob[]>([]);
+  // The library's CURRENT flow binding, fetched fresh every load — never a
+  // job's frozen `flowId`. A job row records the flow it ran under at
+  // `start()` and is never updated, so reading it as "the flow now" is
+  // exactly what silently mis-targeted a dry run after a library was
+  // re-pointed to a different flow on a real system: the binding had moved,
+  // the job row hadn't, and dry-run kept asking the old flow's question.
+  const [libraryFlowId, setLibraryFlowId] = useState<string | null>(null);
 
   const [requeueBusy, setRequeueBusy] = useState(false);
   const [priorityBusy, setPriorityBusy] = useState(false);
@@ -88,14 +101,22 @@ export const FileDetail = (props: {
 
     void (async () => {
       try {
-        const [detail, jobPage] = await Promise.all([
-          client.get<{ file: ApiFileDetail; probe: unknown }>(`/files/${id}`),
+        // The library id needed to fetch the CURRENT flow binding is only
+        // known once the file itself has come back, so that one fetch is
+        // unavoidably first — but everything that depends only on the file
+        // id (the job history) or the now-known library id (the library's
+        // flow) still goes out together, not as a further chain of two.
+        const detail = await client.get<{ file: ApiFileDetail; probe: unknown }>(`/files/${id}`);
+        if (cancelled) return;
+        const [jobPage, library] = await Promise.all([
           client.get<{ items: ApiJob[] }>(`/jobs?fileId=${id}&limit=20`),
+          client.get<ApiLibrary>(`/libraries/${detail.file.libraryId}`),
         ]);
         if (cancelled) return;
         setFile(detail.file);
         setProbe(detail.probe);
         setJobs(jobPage.items);
+        setLibraryFlowId(library.flowId);
         setLoading(false);
       } catch (error) {
         if (cancelled) return;
@@ -139,10 +160,14 @@ export const FileDetail = (props: {
     );
   }, [client, id, runAction]);
 
-  // The flow to replay is the one the file's own history ran under — a file
-  // with no jobs yet has never run through any flow, so there is nothing to
-  // dry-run against and the button stays disabled rather than guessing.
-  const flowId = jobs[0]?.flowId ?? null;
+  // The flow to replay is the library's CURRENT binding — never a job's
+  // frozen `flowId`, which stops being the truth the moment the library is
+  // re-pointed at a different flow (see the `libraryFlowId` comment above).
+  // The one fallback is a library with NO flow bound at all, where the last
+  // job's flow is the only lead there is; `usedStaleFlowFallback` says so in
+  // the UI rather than silently substituting one flow for another.
+  const flowId = libraryFlowId ?? jobs[0]?.flowId ?? null;
+  const usedStaleFlowFallback = libraryFlowId === null && jobs[0]?.flowId !== undefined;
 
   const onDryRun = useCallback((): void => {
     if (flowId === null) return;
@@ -167,11 +192,6 @@ export const FileDetail = (props: {
       : explainState({
           state: file.state,
           signature: file.signature,
-          // Best-effort: the file's own row does not carry a flow hash, and
-          // `explainState` does not branch on this value today — the flow a
-          // file most recently ran under is close enough to be informative
-          // without a third fetch just to look up the library's current one.
-          flowHash: jobs[0]?.flowHash ?? null,
           attemptCount: file.attemptCount,
           lastJobReason: jobs[0]?.outcome ?? null,
           holdUntilMs: file.holdUntilMs,
@@ -261,7 +281,7 @@ export const FileDetail = (props: {
               disabled={dryRunBusy || flowId === null}
               title={
                 flowId === null
-                  ? 'No run history — nothing to replay a flow against yet.'
+                  ? 'No run history and no flow assigned — nothing to replay a flow against yet.'
                   : undefined
               }
               onClick={onDryRun}
@@ -269,6 +289,13 @@ export const FileDetail = (props: {
               {dryRunBusy ? 'Running dry-run…' : 'Dry-run'}
             </button>
           </div>
+
+          {usedStaleFlowFallback && (
+            <p className="file-detail-flow-fallback">
+              This library has no flow assigned right now, so Dry-run is using the flow from this
+              file&apos;s last run instead — it may not be the flow you expect.
+            </p>
+          )}
 
           {actionError !== null && (
             <p role="alert" className="file-detail-action-error">

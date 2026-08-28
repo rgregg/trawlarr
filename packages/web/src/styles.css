@@ -909,6 +909,14 @@ main {
   margin: 0 0 0.8rem;
 }
 
+/* The one place Dry-run admits it substituted a stale flow for the
+   library's (missing) current one — `--warn`, the same vocabulary as a
+   held file's row accent, because this is a caution rather than a failure. */
+.file-detail-flow-fallback {
+  color: var(--warn);
+  margin: 0 0 0.8rem;
+}
+
 .file-detail-dry-run {
   background: var(--bg);
   border: 1px solid var(--line);

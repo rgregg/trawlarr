@@ -48,7 +48,6 @@ describe('toStreamRows', () => {
 describe('explainState', () => {
   const base = {
     signature: 'abc',
-    flowHash: 'flow-1',
     attemptCount: 0,
     lastJobReason: null,
     holdUntilMs: null,
@@ -83,6 +82,18 @@ describe('explainState', () => {
   it('says when a held file will come back', () => {
     expect(explainState({ ...base, state: 'held', holdUntilMs: 61_000, nowMs: 1_000 })).toBe(
       'Held after a failed attempt. It will be retried in 1m.',
+    );
+  });
+
+  it('says a running file is being worked on, rather than falling into the generic default', () => {
+    expect(explainState({ ...base, state: 'running' })).toBe(
+      'Running now. A worker has claimed it and is partway through the flow.',
+    );
+  });
+
+  it('says an unknown file has never been evaluated, rather than falling into the generic default', () => {
+    expect(explainState({ ...base, state: 'unknown' })).toBe(
+      'Unknown. This file has not been evaluated against a flow yet.',
     );
   });
 });
