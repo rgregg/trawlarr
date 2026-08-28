@@ -1025,3 +1025,207 @@ main {
     overflow-wrap: anywhere;
   }
 }
+
+/* --- job detail -----------------------------------------------------------
+   The screen this whole task was for: the engine's own sentences, unshortened.
+   A single-column page rather than a panel beside a list — a job has no
+   sibling list worth keeping mounted the way a file's row does. */
+
+.job-page {
+  max-width: 56rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.job-page-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.job-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-left: 4px solid transparent;
+  padding-left: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.job-page-state-failed {
+  border-left-color: var(--bad);
+}
+
+.job-page-state-running {
+  border-left-color: var(--busy);
+}
+
+.job-page-state-cancelled {
+  border-left-color: var(--warn);
+}
+
+.job-page-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.job-page-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-page-file {
+  margin: 0.4rem 0 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.job-page-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.job-page-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.job-page-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.job-page-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* The job's own outcome sentence — same treatment as a step's reason: full
+   width, verbatim, never truncated. */
+.job-page-outcome {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.job-page h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.job-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.job-step {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 4px;
+  padding: 0.5rem 0.7rem;
+}
+
+.job-step-ok {
+  border-left-color: var(--line);
+}
+
+.job-step-failed {
+  border-left-color: var(--bad);
+}
+
+.job-step-running {
+  border-left-color: var(--busy);
+}
+
+.job-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.job-step-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Colour is never the only carrier of a step's outcome — the word itself
+   ("Failed", "Running") sits beside the label, matching the vocabulary
+   `.file-row-state-*` already uses for the same rule. */
+.job-step-failed .job-step-outcome {
+  color: var(--bad);
+}
+
+.job-step-running .job-step-outcome {
+  color: var(--busy);
+}
+
+.job-step-duration {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The engine's own reason, verbatim: full width, wrapping rather than
+   truncating, with its own scroll container so a pathological unbroken run
+   (a long path with no spaces) cannot widen the page instead of scrolling. */
+.job-step-reason {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
+.job-page button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.job-page-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.job-page-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+@media (max-width: 48rem) {
+  .job-page {
+    max-width: none;
+  }
+
+  .job-step-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.2rem;
+  }
+
+  .job-step-duration {
+    margin-left: 0;
+  }
+}

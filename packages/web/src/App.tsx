@@ -3,6 +3,7 @@ import type { ApiClient } from './api/client.js';
 import { Activity } from './screens/Activity.js';
 import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
+import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Libraries } from './screens/Libraries.js';
 import { Overview } from './screens/Overview.js';
 import { KeyGate } from './shell/KeyGate.js';
@@ -104,6 +105,9 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
             <Files client={props.client} filters={NO_FILE_FILTERS} navigate={navigate} />
             <FileDetail client={props.client} id={route.id} navigate={navigate} />
           </div>
+        )}
+        {route.name === 'job' && (
+          <JobDetail client={props.client} id={route.id} live={live} navigate={navigate} />
         )}
         {route.name === 'config' && <Libraries client={props.client} live={live} />}
         {route.name === 'notFound' && <p>No screen for {route.path}.</p>}
