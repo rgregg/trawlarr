@@ -1,0 +1,71 @@
+import { describe, expect, it } from 'vitest';
+import { filtersToQuery, formatBytes, sortRows, toFileRows } from './files-model.js';
+
+const apiFile = {
+  id: 'f1',
+  libraryId: 'lib-1',
+  path: '/library/shows/Foundation (2021)/Season 2/S02E02.mkv',
+  state: 'good',
+  videoCodec: 'hevc',
+  audioCodec: 'aac,eac3',
+  sizeBytes: 1_900_000_000,
+  updatedAt: 1_000,
+};
+
+describe('toFileRows', () => {
+  it('shows the file name, keeping the full path for the title', () => {
+    const [row] = toFileRows([apiFile]);
+    expect(row!.name).toBe('S02E02.mkv');
+    expect(row!.path).toBe(apiFile.path);
+  });
+
+  it('renders a missing codec as a dash rather than "null"', () => {
+    const [row] = toFileRows([{ ...apiFile, videoCodec: null, audioCodec: null }]);
+    expect(row!.video).toBe('—');
+    expect(row!.audio).toBe('—');
+  });
+});
+
+describe('sortRows', () => {
+  const rows = toFileRows([
+    { ...apiFile, id: 'b', path: '/x/b.mkv', sizeBytes: 300, updatedAt: 2 },
+    { ...apiFile, id: 'a', path: '/x/a.mkv', sizeBytes: 100, updatedAt: 3 },
+    { ...apiFile, id: 'c', path: '/x/c.mkv', sizeBytes: 200, updatedAt: 1 },
+  ]);
+
+  it('sorts by name ascending', () => {
+    expect(sortRows(rows, 'name', 'asc').map((r) => r.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('sorts by size descending', () => {
+    expect(sortRows(rows, 'size', 'desc').map((r) => r.id)).toEqual(['b', 'c', 'a']);
+  });
+
+  it('does not mutate the array it was given', () => {
+    const before = rows.map((r) => r.id);
+    sortRows(rows, 'size', 'desc');
+    expect(rows.map((r) => r.id)).toEqual(before);
+  });
+});
+
+describe('formatBytes', () => {
+  it('scales to a readable unit', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(1_900_000_000)).toBe('1.9 GB');
+    expect(formatBytes(8_400_000_000_000)).toBe('8.4 TB');
+  });
+});
+
+describe('filtersToQuery', () => {
+  it('omits absent filters and always carries paging', () => {
+    expect(filtersToQuery({ library: null, state: null, q: null }, 200, 0)).toBe(
+      '?limit=200&offset=0',
+    );
+  });
+
+  it('maps the UI filter names onto the API parameter names', () => {
+    expect(filtersToQuery({ library: 'lib-1', state: 'failed', q: 'found' }, 200, 400)).toBe(
+      '?libraryId=lib-1&state=failed&q=found&limit=200&offset=400',
+    );
+  });
+});
