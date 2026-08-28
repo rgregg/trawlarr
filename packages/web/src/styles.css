@@ -1885,6 +1885,25 @@ main {
   font-size: 0.85rem;
 }
 
+/* Same pill `.card .badge` uses, scoped rather than bare: this is the one
+   element on the whole screen that must not read as prose. `branchLabel` is
+   the reason this screen exists — the muxqueue defect was a node on the
+   wrong side of exactly this label. `flex-shrink: 0` keeps it from being the
+   thing that gives when the row wraps at narrow widths, so it stays a whole
+   pill rather than breaking across two lines. */
+.flow-graph .badge {
+  flex-shrink: 0;
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--busy);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.55em;
+  white-space: nowrap;
+}
+
 .flow-graph-inputs {
   margin: 0 0 0 0.2rem;
   padding: 0.3rem 0.6rem;
