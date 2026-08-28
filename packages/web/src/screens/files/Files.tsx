@@ -42,7 +42,7 @@ const FileRowLine = (props: { row: FileRow; navigate: (to: string) => void }): J
     <Link
       to={`/files/${row.id}`}
       navigate={props.navigate}
-      className={`file-row state-${row.state}`}
+      className={`file-row file-row-state-${row.state}`}
     >
       <span className="file-name" title={row.path}>
         {row.name}
@@ -90,6 +90,23 @@ export const Files = (props: {
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(480);
   const resizeObserver = useRef<{ disconnect(): void } | null>(null);
+
+  // Controlled, and resynchronised whenever `filters` changes from OUTSIDE
+  // this form — Clear filters, browser back/forward, or a pasted URL. An
+  // uncontrolled `defaultValue` only reads its initial prop; since `Files`
+  // is never remounted on a route change (no `key` in `App.tsx`), that left
+  // these two inputs showing stale text after such a change while the URL
+  // and the fetched rows were already correct — and clicking Apply again
+  // would silently resubmit the stale value. `state` never had this bug
+  // because its `<select>` was controlled from the start; these now match.
+  const [libraryDraft, setLibraryDraft] = useState(filters.library ?? '');
+  const [qDraft, setQDraft] = useState(filters.q ?? '');
+  useEffect(() => {
+    setLibraryDraft(filters.library ?? '');
+  }, [filters.library]);
+  useEffect(() => {
+    setQDraft(filters.q ?? '');
+  }, [filters.q]);
 
   const attachContainer = useCallback((el: { clientHeight: number } | null) => {
     resizeObserver.current?.disconnect();
@@ -188,9 +205,8 @@ export const Files = (props: {
       className="files-filters"
       onSubmit={(event) => {
         event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        const q = String(data.get('q') ?? '').trim();
-        const library = String(data.get('library') ?? '').trim();
+        const library = libraryDraft.trim();
+        const q = qDraft.trim();
         setFilters({
           library: library === '' ? null : library,
           state: filters.state,
@@ -200,11 +216,26 @@ export const Files = (props: {
     >
       <label>
         Library ID
-        <input name="library" type="text" defaultValue={filters.library ?? ''} />
+        <input
+          name="library"
+          type="text"
+          value={libraryDraft}
+          onChange={(event) => {
+            setLibraryDraft(event.currentTarget.value);
+          }}
+        />
       </label>
       <label>
         Search
-        <input name="q" type="text" defaultValue={filters.q ?? ''} placeholder="path contains…" />
+        <input
+          name="q"
+          type="text"
+          value={qDraft}
+          onChange={(event) => {
+            setQDraft(event.currentTarget.value);
+          }}
+          placeholder="path contains…"
+        />
       </label>
       <label>
         State

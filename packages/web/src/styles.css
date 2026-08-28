@@ -673,12 +673,27 @@ main {
   min-height: 2.25rem;
   box-sizing: border-box;
   border-bottom: 1px solid var(--line);
+  border-left: 4px solid transparent;
   color: var(--ink);
   text-decoration: none;
 }
 
 .file-row:last-child {
   border-bottom: none;
+}
+
+/* A converging library still has some rows in every state; `good` is left
+   with no accent (it is the expected case), and the states worth noticing
+   at a glance each get a left edge in the same two colours the rest of the
+   sheet already uses for trouble — colour is never the only carrier, since
+   the state name is always printed in `.file-state` beside it. */
+.file-row-state-failed,
+.file-row-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.file-row-state-held {
+  border-left-color: var(--warn);
 }
 
 .file-name {
