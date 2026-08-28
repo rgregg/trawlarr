@@ -588,6 +588,32 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
   });
 
+  it('raises a file priority so it is claimed next', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    const response = await api('POST', `/files/${fileId}/priority`, { priority: 10 });
+
+    expect(response.status).toBe(200);
+    expect(response.body.priority).toBe(10);
+    expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(10);
+  });
+
+  it('refuses a priority that is not a finite number', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });
+
+    const response = await api('POST', `/files/${fileId}/priority`, { priority: 'high' });
+
+    expect(response.status).toBe(400);
+    expect(createMediaFileRepo(db).getById(fileId)!.priority).toBe(0);
+  });
+
+  it('answers 404 for a file that does not exist', async () => {
+    const response = await api('POST', '/files/missing/priority', { priority: 1 });
+    expect(response.status).toBe(404);
+  });
+
   it('holds a file until a deadline, and refuses a hold with no deadline', async () => {
     const library = seedLibrary();
     const fileId = seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'queued' });

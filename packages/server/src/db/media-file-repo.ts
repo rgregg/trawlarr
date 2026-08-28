@@ -135,6 +135,13 @@ export interface MediaFileRepo {
   }): void;
   getById(fileId: string): MediaFileRow | null;
   /**
+   * Move a row up (or down) `claimNext`'s queue: that statement orders
+   * `ORDER BY priority DESC, discovered_at ASC`, so a higher number is
+   * claimed sooner. Returns false when no row matched, so a caller (the API
+   * route) can tell "raised" from "no such file" without a separate lookup.
+   */
+  setPriority(fileId: string, priority: number, nowMs: number): boolean;
+  /**
    * Stores `probe_json` verbatim and derives the denormalised filter columns
    * (`video_codec`, `audio_codec`, `resolution`, `duration_ms`, `bitrate`)
    * from `facts`. The `facts` argument itself is NOT persisted — the schema
@@ -336,6 +343,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     `UPDATE media_file SET missing_since_ms = NULL WHERE id = ?`,
   );
 
+  const updatePriority = db.prepare(
+    `UPDATE media_file SET priority = ?, updated_at = ? WHERE id = ?`,
+  );
+
   /**
    * Claim in one statement. A read-then-write queue lets two workers select
    * the same row and transcode it twice into each other's output, so the
@@ -465,6 +476,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
 
     getById(fileId) {
       return (selectById.get(fileId) as MediaFileRow | undefined) ?? null;
+    },
+
+    setPriority(fileId, priority, nowMs) {
+      return updatePriority.run(priority, nowMs, fileId).changes > 0;
     },
 
     // `input.facts` is used ONLY to derive the five denormalised columns
