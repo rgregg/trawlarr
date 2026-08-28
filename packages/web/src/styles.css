@@ -853,12 +853,13 @@ main {
 /* THE RETRY BUTTON IS THE ONLY ESCAPE FROM AN ERROR STATE, so it has to be
    as tappable as everything else. `.job-page button`, `.flow-page button`
    and `.config button` each scope the 2.75rem floor already; `.diagnose`,
-   `.files` and `.file-detail` had no such rule, so their `.failure` Retry
+   `.files`, `.file-detail` and `.watch` had no such rule, so their `.failure` Retry
    fell back to the global ~30px. Scoped per screen, deliberately — the
    global `button` rule stays untouched, the way earlier tasks set it up. */
 .diagnose button,
 .files button,
-.file-detail button {
+.file-detail button,
+.watch button {
   min-height: 2.75rem;
 }
 
