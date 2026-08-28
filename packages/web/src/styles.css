@@ -1562,6 +1562,21 @@ main {
    screen, so it is set apart with `--bad` rather than sharing a card with
    anything routine. */
 
+/* Every button this task's four tabs add — Save worker counts, the
+   Retry buttons on a failed section fetch, Sync, Add window, Remove,
+   Purge now…, Cancel, and the purge confirm itself — is a plain
+   `<button>`, and the global `button` rule (above) sets no `min-height`.
+   One rule here, rather than repeating `min-height: 2.75rem` on every
+   button class in this section: the confirm button on an irreversible
+   233 GB delete is the worst place in this screen to have a target
+   under 44px, so nothing in `.config` is allowed to fall under the
+   touch-target minimum every other interactive element here already
+   meets. Scoped to `.config` rather than the global `button` rule,
+   which would change every screen in the app. */
+.config button {
+  min-height: 2.75rem;
+}
+
 .config-tabs {
   display: flex;
   flex-wrap: wrap;
