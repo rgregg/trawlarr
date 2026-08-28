@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ApiClient } from './api/client.js';
 import { Activity } from './screens/Activity.js';
+import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
 import { Libraries } from './screens/Libraries.js';
 import { Overview } from './screens/Overview.js';
@@ -17,6 +18,12 @@ import './styles.css';
  * knows how to parse — the nav is not a second source of truth about what
  * screens exist, just labels over `route.ts`'s table.
  */
+// `file` is a separate route from `files` (see `route.ts`) and carries no
+// filters of its own — reusing "no filter" here rather than inventing a
+// second empty-filters literal keeps `filtersToQuery`'s "everything" case
+// the one this shell ever asks for behind a detail panel.
+const NO_FILE_FILTERS = { library: null, state: null, q: null };
+
 const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
   { to: '/', label: 'Watch', matches: 'watch' },
   { to: '/diagnose', label: 'Diagnose', matches: 'diagnose' },
@@ -86,6 +93,17 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         {route.name === 'diagnose' && <Activity client={props.client} live={live} />}
         {route.name === 'files' && (
           <Files client={props.client} filters={route.filters} navigate={navigate} />
+        )}
+        {route.name === 'file' && (
+          // The list stays mounted behind the panel on desktop — a click
+          // into a file should feel like opening a drawer over the table it
+          // came from, not like leaving it. `file-detail-layout` in
+          // styles.css is what hides the list below 48rem, where there is
+          // no room for both and the panel becomes the whole screen.
+          <div className="file-detail-layout">
+            <Files client={props.client} filters={NO_FILE_FILTERS} navigate={navigate} />
+            <FileDetail client={props.client} id={route.id} navigate={navigate} />
+          </div>
         )}
         {route.name === 'config' && <Libraries client={props.client} live={live} />}
         {route.name === 'notFound' && <p>No screen for {route.path}.</p>}

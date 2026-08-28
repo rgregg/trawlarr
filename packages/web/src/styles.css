@@ -786,3 +786,234 @@ main {
     content: 'Size: ';
   }
 }
+
+/* --- file detail ----------------------------------------------------------
+   The "why is this file like this" panel. Desktop keeps the Files table
+   mounted beside it (App.tsx renders both under `.file-detail-layout` at
+   the `/files/:id` route); below 48rem there is no room for both, so the
+   list is hidden and the panel becomes the whole screen at that same URL. */
+
+.file-detail-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.file-detail-layout > .files {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.file-detail-layout > .file-detail {
+  flex: 2 1 28rem;
+  min-width: 0;
+}
+
+.file-detail {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.file-detail-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-left: 4px solid transparent;
+  padding-left: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.file-detail-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.file-detail-path {
+  margin: 0.3rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* The answer to "why is this file like this", set apart from everything
+   else on the panel because it is the entire reason the panel exists. */
+.file-detail-explain {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--busy);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.file-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.file-detail-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.file-detail-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.file-detail-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.file-detail-actions button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.file-detail-action-error {
+  color: var(--bad);
+  margin: 0 0 0.8rem;
+}
+
+.file-detail-dry-run {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.file-detail-dry-run ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.file-detail h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.stream-table-scroll {
+  overflow-x: auto;
+}
+
+.stream-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.stream-table th,
+.stream-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.job-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.job-history-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.75rem;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.job-history li:last-child .job-history-row {
+  border-bottom: none;
+}
+
+.job-history-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-width: 5.5rem;
+}
+
+.job-history-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-detail-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.file-detail-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+@media (max-width: 48rem) {
+  .file-detail-layout {
+    display: block;
+  }
+
+  /* No room for the table behind the panel at this width — the panel IS
+     the screen, same URL, same route; see the file-level comment above. */
+  .file-detail-layout > .files {
+    display: none;
+  }
+
+  .file-detail-layout > .file-detail {
+    flex: unset;
+  }
+
+  .job-history-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+
+  .job-history-reason {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
