@@ -100,3 +100,18 @@ export const filtersToQuery = (filters: FileFilters, limit: number, offset: numb
   params.set('offset', String(offset));
   return `?${params.toString()}`;
 };
+
+/**
+ * When a row last changed, as a date.
+ *
+ * The table has a working "Updated" sort button and had no column to sort
+ * BY — the one ordering an operator reaches for after a run ("what did
+ * tonight touch?") was invisible in the rows it reordered. Date only, and
+ * ISO rather than a locale format: this is a table of thousands of rows
+ * scanned by eye, so it has to be fixed-width and unambiguous, and the exact
+ * timestamp is one click away on the file's own screen.
+ */
+export const formatUpdated = (updatedAt: number): string => {
+  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return '—';
+  return new Date(updatedAt).toISOString().slice(0, 10);
+};

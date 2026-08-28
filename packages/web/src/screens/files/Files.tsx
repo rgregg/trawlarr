@@ -8,6 +8,7 @@ import { describeFailure } from '../config/library-form-model.js';
 import {
   filtersToQuery,
   formatBytes,
+  formatUpdated,
   sortRows,
   toFileRows,
   type ApiFile,
@@ -22,17 +23,17 @@ import {
  * spacer divs and the index the scroll position maps to, so a row height
  * that is wrong by 3x makes the scrollbar wrong by 3x over 4,625 rows and
  * skips rows as you drag. Wide, `.file-row` is a five-column grid one line
- * tall. Below `48rem` the sheet turns it into a stacked card — five lines,
+ * tall. Below `48rem` the sheet turns it into a stacked card — six lines,
  * each with its own `::before` label — and the sheet pins that card to an
  * EXACT `height` (not a `min-height`) precisely so this constant can be
  * exact too; the name is ellipsised on one line there for the same reason.
  *
  * The alternative considered and rejected: dropping windowing below `48rem`.
  * The list is not short there — it is the same 4,625 rows — and the phone is
- * the device least able to hold 4,625 rows of five elements each in the DOM.
+ * the device least able to hold 4,625 rows of six elements each in the DOM.
  */
 const ROW_HEIGHT_PX = 36;
-const NARROW_ROW_HEIGHT_PX = 128;
+const NARROW_ROW_HEIGHT_PX = 152;
 const PAGE_SIZE = 200;
 
 // `ALL_STATES` lives in `@trawlarr/server`, which this package does not (and
@@ -76,6 +77,7 @@ const FileRowLine = (props: {
       <span className="file-codec">{row.video}</span>
       <span className="file-codec">{row.audio}</span>
       <span className="file-size">{formatBytes(row.sizeBytes)}</span>
+      <span className="file-updated">{formatUpdated(row.updatedAt)}</span>
     </Link>
   );
 };
@@ -222,7 +224,16 @@ export const Files = (props: {
   // Floored, and 100 reserved for an exact match — the same rule
   // `watch-model.ts` uses for a library card's percentage, so this
   // number and that one never disagree over a rounding rule.
-  const percent = total === 0 ? 0 : good === total ? 100 : Math.floor((good / total) * 100);
+  //
+  // THE DENOMINATOR IS WHAT HAS ARRIVED, not the server's `total`. This set
+  // is paged in, and dividing a partial `good` by the full total made the
+  // figure start near 0 and climb to the truth only as the last page landed
+  // — a convergence number that is wrong for the twenty seconds an operator
+  // is most likely to be reading it. Over the loaded rows it is a real
+  // sample from the first row onward, and the footer already says it is
+  // still loading.
+  const counted = rows.length;
+  const percent = counted === 0 ? 0 : good === counted ? 100 : Math.floor((good / counted) * 100);
 
   const hasFilters = filters.library !== null || filters.state !== null || filters.q !== null;
 
