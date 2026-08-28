@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ApiClient } from './api/client.js';
-import { Activity } from './screens/Activity.js';
+import { Diagnose } from './screens/diagnose/Diagnose.js';
 import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
@@ -81,17 +81,17 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         ))}
       </nav>
 
-      {/* Watch, Diagnose and Configure are still pre-redesign components at
-          their old identities — Overview under Watch, Activity under
-          Diagnose, Libraries under Configure — because those screens don't
-          exist yet. Files is real now. Later tasks replace each remaining
-          one in turn; nothing here reaches back into a Screen union, so a
-          route can be repointed without touching the nav. */}
+      {/* Watch and Configure are still pre-redesign components at their old
+          identities — Overview under Watch, Libraries under Configure —
+          because those screens don't exist yet. Files and Diagnose are real
+          now. Later tasks replace each remaining one in turn; nothing here
+          reaches back into a Screen union, so a route can be repointed
+          without touching the nav. */}
       <main>
         {route.name === 'watch' && (
           <Overview client={props.client} live={live} onOverall={setOverall} />
         )}
-        {route.name === 'diagnose' && <Activity client={props.client} live={live} />}
+        {route.name === 'diagnose' && <Diagnose client={props.client} navigate={navigate} />}
         {route.name === 'files' && (
           <Files client={props.client} filters={route.filters} navigate={navigate} />
         )}
