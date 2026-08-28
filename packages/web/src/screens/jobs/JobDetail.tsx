@@ -135,6 +135,15 @@ export const JobDetail = (props: {
   // cost this screen liveness, never correctness or a blanked view — the
   // exact regression Task 4 shipped and then had to fix for its OWN
   // secondary fetch.
+  //
+  // THIS WATCHES ONE JOB'S OWN EDGE rather than `live.staleness.jobs`, the
+  // global counter `Overview.tsx`, `Libraries.tsx` and `Activity.tsx` all
+  // key their refetches off. Those screens each render a LIST of jobs, so
+  // any job finishing is relevant to what they show and the shared counter
+  // is the right granularity. This screen renders exactly one job, so the
+  // precise signal — did THIS job's live entry just disappear — is what
+  // fires the refetch instead of every unrelated job finishing anywhere in
+  // the system.
   const wasLiveRef = useRef(isLive);
   useEffect(() => {
     const justFinished = wasLiveRef.current && !isLive;

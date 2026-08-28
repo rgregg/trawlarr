@@ -10,6 +10,17 @@ describe('pluginLabel', () => {
   it('leaves an id it cannot parse alone', () => {
     expect(pluginLabel('weird')).toBe('weird');
   });
+
+  it('treats a second colon as another word separator, not part of the name', () => {
+    expect(pluginLabel('a:b:c')).toBe('B C');
+  });
+
+  it('falls back to the whole id when nothing follows the colon', () => {
+    // A trailing colon leaves an empty remainder — there is nothing here to
+    // read as words, and blanking the label would be worse than showing
+    // the raw id.
+    expect(pluginLabel('a:')).toBe('a:');
+  });
 });
 
 describe('toStepRows', () => {
@@ -48,6 +59,28 @@ describe('toStepRows', () => {
       { seq: 3, pluginId: 'trawlarr:execute', outputNumber: null, durationMs: 0, logExcerpt: null },
     ]);
     expect(rows[0]!.outcome).toBe('running');
+    expect(rows[0]!.reason).toBeNull();
+  });
+
+  // This is the REAL empty case, not the `null` above. `repo.getSteps`
+  // returns only persisted, completed steps, so a still-running step never
+  // reaches this array at all — `null` in `ApiStep` is a defensive type
+  // allowance, never what the daemon actually sends. What it DOES send for
+  // a step whose plugin never called `jobLog` is `''` (`log_excerpt TEXT
+  // NOT NULL DEFAULT ''`), and that is the common case for most non-Execute
+  // steps. A test built only on `null`, like the one above, would pass
+  // while every one of those steps rendered an empty reason box in
+  // production — which is what happened here the first time around.
+  it('treats an empty log excerpt as no reason, not a blank box', () => {
+    const rows = toStepRows([
+      {
+        seq: 4,
+        pluginId: 'trawlarr:verifyOutput',
+        outputNumber: 1,
+        durationMs: 12,
+        logExcerpt: '',
+      },
+    ]);
     expect(rows[0]!.reason).toBeNull();
   });
 });
