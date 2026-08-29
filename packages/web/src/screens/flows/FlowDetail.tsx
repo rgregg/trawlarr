@@ -38,7 +38,13 @@ const copyToClipboard = (text: string): Promise<void> | null => {
   return clipboard === undefined ? null : clipboard.writeText(text);
 };
 
-const GraphNode = (props: { row: GraphRow }): JSX.Element => {
+/**
+ * Exported so `FlowVersion.tsx` can draw a historical version's graph with
+ * the exact same rendering — branch labels, the "also reached from" note,
+ * the unreachable-node marker — rather than a second component drifting
+ * from what this one does.
+ */
+export const GraphNode = (props: { row: GraphRow }): JSX.Element => {
   const { row } = props;
   return (
     <li

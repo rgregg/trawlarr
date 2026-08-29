@@ -17,6 +17,7 @@
   "files": [
     "dist"
   ],
+  "sideEffects": false,
   "dependencies": {
     "@trawlarr/plugin-api": "workspace:*"
   }

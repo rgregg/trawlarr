@@ -1972,6 +1972,73 @@ main {
   padding: 0.4em 1em;
 }
 
+/* --- flow compare -----------------------------------------------------------
+   Two versions, diffed as a graph rather than as text — see
+   `flow-diff.ts`'s doc comment for why: the `-max_muxing_queue_size` defect
+   was one removed edge and one added edge, invisible in a JSON diff and
+   obvious once rendered this way. */
+
+.flow-compare-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.flow-compare-side dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.flow-compare-side dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-diff {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.flow-diff-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 0.4rem;
+  border-left: 2px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+/* The prefix carries the same meaning as the colour, so a reader who cannot
+   distinguish `--bad` from `--good` still sees a removal, an addition, or a
+   change as three different characters — colour is never the only signal. */
+.flow-diff-prefix {
+  flex-shrink: 0;
+  font-family: monospace;
+  font-weight: 700;
+}
+
+.flow-diff-line-removed {
+  color: var(--bad);
+  border-left-color: var(--bad);
+}
+
+.flow-diff-line-added {
+  color: var(--good);
+  border-left-color: var(--good);
+}
+
+.flow-diff-line-changed {
+  color: var(--warn);
+  border-left-color: var(--warn);
+}
+
 @media (max-width: 48rem) {
   .flow-graph-inputs {
     grid-template-columns: 1fr;

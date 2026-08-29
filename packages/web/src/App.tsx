@@ -3,7 +3,9 @@ import { Config } from './screens/config/Config.js';
 import { Diagnose } from './screens/diagnose/Diagnose.js';
 import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
+import { FlowCompare } from './screens/flows/FlowCompare.js';
 import { FlowDetail } from './screens/flows/FlowDetail.js';
+import { FlowVersion } from './screens/flows/FlowVersion.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
 import { KeyGate } from './shell/KeyGate.js';
@@ -12,7 +14,7 @@ import { useApi } from './shell/useApi.js';
 import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
 import { useRoute } from './shell/useRoute.js';
-import { formatRoute, type Route } from './shell/route.js';
+import type { Route } from './shell/route.js';
 import './styles.css';
 
 /**
@@ -110,24 +112,22 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         {route.name === 'flow' && (
           <FlowDetail client={props.client} id={route.id} navigate={navigate} />
         )}
-        {/* `flowVersion` and `flowCompare` are real, linkable routes as of
-            this task — the History section on `FlowDetail` already points at
-            them — but the screens that render a single version and a
-            comparison are Task 7's work, and the job-hash entry point
-            (`flowVersionDirect`) is Task 8's. Until then a visit here is not
-            a dead end: it names what is missing and offers the one link back
-            that makes sense, the same shape `notFound` below already uses. */}
-        {(route.name === 'flowVersion' || route.name === 'flowCompare') && (
-          <div className="not-found">
-            <p>This view is not built yet.</p>
-            <Link
-              to={formatRoute({ name: 'flow', id: route.flowId })}
-              navigate={navigate}
-              className="not-found-home"
-            >
-              Back to flow
-            </Link>
-          </div>
+        {route.name === 'flowVersion' && (
+          <FlowVersion
+            client={props.client}
+            flowId={route.flowId}
+            versionId={route.versionId}
+            navigate={navigate}
+          />
+        )}
+        {route.name === 'flowCompare' && (
+          <FlowCompare
+            client={props.client}
+            flowId={route.flowId}
+            from={route.from}
+            to={route.to}
+            navigate={navigate}
+          />
         )}
         {route.name === 'config' && (
           <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />

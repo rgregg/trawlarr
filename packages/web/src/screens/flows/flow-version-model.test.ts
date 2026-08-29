@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatWhen, toVersionRows } from './flow-version-model.js';
+import { formatWhen, toDiffLines, toVersionRows } from './flow-version-model.js';
 
 const v = (id: string, hash: string, note: string, createdAt: number, isCurrent = false) => ({
   id,
@@ -48,5 +48,111 @@ describe('formatWhen', () => {
 
   it('renders a missing timestamp as a dash rather than "Invalid Date"', () => {
     expect(formatWhen(0, 1000)).toBe('—');
+  });
+});
+
+describe('toDiffLines', () => {
+  it('renders a re-pointed edge as a removal and an addition', () => {
+    const lines = toDiffLines({
+      nodesAdded: [],
+      nodesRemoved: [],
+      nodePluginChanged: [],
+      inputsChanged: [],
+      edgesRemoved: [{ fromNodeId: 'check', outputNumber: 1, toNodeId: 'muxqueue' }],
+      edgesAdded: [{ fromNodeId: 'check', outputNumber: 1, toNodeId: 'audio' }],
+    });
+
+    expect(lines).toEqual([
+      { kind: 'edge-removed', text: 'check output 1 → muxqueue' },
+      { kind: 'edge-added', text: 'check output 1 → audio' },
+    ]);
+  });
+
+  it('renders an input change with both values', () => {
+    const lines = toDiffLines({
+      nodesAdded: [],
+      nodesRemoved: [],
+      nodePluginChanged: [],
+      inputsChanged: [{ nodeId: 'lang', key: 'keepLanguages', from: 'eng', to: 'eng,kor' }],
+      edgesAdded: [],
+      edgesRemoved: [],
+    });
+
+    expect(lines).toEqual([{ kind: 'input-changed', text: 'lang.keepLanguages: eng → eng,kor' }]);
+  });
+
+  it('names an absent value rather than printing "null"', () => {
+    const lines = toDiffLines({
+      nodesAdded: [],
+      nodesRemoved: [],
+      nodePluginChanged: [],
+      inputsChanged: [{ nodeId: 'e', key: 'quality', from: null, to: '23' }],
+      edgesAdded: [],
+      edgesRemoved: [],
+    });
+
+    expect(lines[0]!.text).toBe('e.quality: not set → 23');
+  });
+
+  it('returns nothing for two identical definitions', () => {
+    expect(
+      toDiffLines({
+        nodesAdded: [],
+        nodesRemoved: [],
+        nodePluginChanged: [],
+        inputsChanged: [],
+        edgesAdded: [],
+        edgesRemoved: [],
+      }),
+    ).toEqual([]);
+  });
+
+  it('renders node removals and additions by id', () => {
+    const lines = toDiffLines({
+      nodesAdded: ['audio'],
+      nodesRemoved: ['muxqueue'],
+      nodePluginChanged: [],
+      inputsChanged: [],
+      edgesAdded: [],
+      edgesRemoved: [],
+    });
+
+    expect(lines).toEqual([
+      { kind: 'node-removed', text: 'muxqueue removed' },
+      { kind: 'node-added', text: 'audio added' },
+    ]);
+  });
+
+  it('renders a plugin change with both plugin ids', () => {
+    const lines = toDiffLines({
+      nodesAdded: [],
+      nodesRemoved: [],
+      nodePluginChanged: [{ nodeId: 'check', from: 'codecCheck', to: 'codecCheckV2' }],
+      inputsChanged: [],
+      edgesAdded: [],
+      edgesRemoved: [],
+    });
+
+    expect(lines).toEqual([{ kind: 'plugin-changed', text: 'check: codecCheck → codecCheckV2' }]);
+  });
+
+  it('orders lines nodes removed, nodes added, plugin changes, input changes, edges removed, edges added', () => {
+    const lines = toDiffLines({
+      nodesAdded: ['newNode'],
+      nodesRemoved: ['oldNode'],
+      nodePluginChanged: [{ nodeId: 'check', from: 'a', to: 'b' }],
+      inputsChanged: [{ nodeId: 'lang', key: 'k', from: '1', to: '2' }],
+      edgesAdded: [{ fromNodeId: 'x', outputNumber: 1, toNodeId: 'y' }],
+      edgesRemoved: [{ fromNodeId: 'x', outputNumber: 1, toNodeId: 'z' }],
+    });
+
+    expect(lines.map((line) => line.kind)).toEqual([
+      'node-removed',
+      'node-added',
+      'plugin-changed',
+      'input-changed',
+      'edge-removed',
+      'edge-added',
+    ]);
   });
 });

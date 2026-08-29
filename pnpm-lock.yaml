@@ -126,6 +126,9 @@ importers:
 
   packages/web:
     dependencies:
+      '@trawlarr/core':
+        specifier: workspace:*
+        version: link:../core
       '@trawlarr/plugin-api':
         specifier: workspace:*
         version: link:../plugin-api

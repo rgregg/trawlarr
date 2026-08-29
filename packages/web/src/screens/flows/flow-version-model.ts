@@ -62,3 +62,62 @@ export const toVersionRows = (items: ApiVersionSummary[], nowMs: number): Versio
     when: formatWhen(item.createdAt, nowMs),
     isCurrent: item.isCurrent,
   }));
+
+/**
+ * `diffFlowDefinitions`'s output (`@trawlarr/core`'s `FlowDiff`), rendered
+ * as lines a screen can list — same split as `toGraphRows`: every branch of
+ * the rendering logic lives here, tested, so `FlowCompare.tsx` stays a thin
+ * `<ul>` over this array.
+ */
+export interface DiffLine {
+  kind:
+    | 'node-added'
+    | 'node-removed'
+    | 'plugin-changed'
+    | 'input-changed'
+    | 'edge-added'
+    | 'edge-removed';
+  text: string;
+}
+
+/** `FlowDiff`'s own shape (`@trawlarr/core`'s `flow-diff.ts`), named here so this
+ * file does not need the package import just to type its one parameter. */
+interface DiffInput {
+  nodesAdded: string[];
+  nodesRemoved: string[];
+  nodePluginChanged: Array<{ nodeId: string; from: string; to: string }>;
+  inputsChanged: Array<{ nodeId: string; key: string; from: string | null; to: string | null }>;
+  edgesAdded: Array<{ fromNodeId: string; outputNumber: number; toNodeId: string }>;
+  edgesRemoved: Array<{ fromNodeId: string; outputNumber: number; toNodeId: string }>;
+}
+
+/** An absent input value compares as `null` in `FlowDiff` — this names it
+ * rather than printing the literal word "null", which reads as a bug. */
+const orNotSet = (value: string | null): string => (value === null ? 'not set' : value);
+
+const edgeLine = (edge: { fromNodeId: string; outputNumber: number; toNodeId: string }): string =>
+  `${edge.fromNodeId} output ${String(edge.outputNumber)} → ${edge.toNodeId}`;
+
+/**
+ * Ordered nodes removed, nodes added, plugin changes, input changes, edges
+ * removed, edges added — so a re-pointed branch (one edge removed, one
+ * added, same nodes) reads as an adjacent pair rather than being split
+ * across the list by an unrelated sort key.
+ */
+export const toDiffLines = (diff: DiffInput): DiffLine[] => [
+  ...diff.nodesRemoved.map((nodeId): DiffLine => ({
+    kind: 'node-removed',
+    text: `${nodeId} removed`,
+  })),
+  ...diff.nodesAdded.map((nodeId): DiffLine => ({ kind: 'node-added', text: `${nodeId} added` })),
+  ...diff.nodePluginChanged.map((change): DiffLine => ({
+    kind: 'plugin-changed',
+    text: `${change.nodeId}: ${change.from} → ${change.to}`,
+  })),
+  ...diff.inputsChanged.map((change): DiffLine => ({
+    kind: 'input-changed',
+    text: `${change.nodeId}.${change.key}: ${orNotSet(change.from)} → ${orNotSet(change.to)}`,
+  })),
+  ...diff.edgesRemoved.map((edge): DiffLine => ({ kind: 'edge-removed', text: edgeLine(edge) })),
+  ...diff.edgesAdded.map((edge): DiffLine => ({ kind: 'edge-added', text: edgeLine(edge) })),
+];
