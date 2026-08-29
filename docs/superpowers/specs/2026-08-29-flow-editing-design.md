@@ -4,6 +4,11 @@
 work deferred by `docs/superpowers/specs/2026-08-27-web-ui-task-first-redesign-design.md`.
 Onboarding, the other deferred half, remains out of scope.
 
+**Sub-project 2 of two. Depends on `2026-08-29-flow-versioning-design.md`, which
+ships first** — publishing a flow re-queues thousands of files, and this design
+makes publishing easy for the first time, so the history it publishes into needs
+to exist already.
+
 ## Goal
 
 Edit a flow — including its shape — from Configure, without going through a
@@ -58,7 +63,7 @@ deleting a flow that is in use, naming the libraries.
 
 ## Data model
 
-Migration **007** adds two nullable columns to `flow`:
+Migration **008** adds two nullable columns to `flow`:
 
 ```sql
 ALTER TABLE flow ADD COLUMN draft_json TEXT;
