@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -113,6 +113,68 @@ describe('migrate', () => {
         )
         .run(randomUUID()),
     ).toThrow(/UNIQUE constraint failed/);
+
+    db.close();
+  });
+
+  /**
+   * No helper in this file migrates to an arbitrary version, so this test
+   * follows the same pattern as the migration-002 test above: apply the
+   * pre-007 migration files directly (001 through 006) and stamp the schema
+   * version by hand, landing the database exactly where it stood the moment
+   * before 007 existed.
+   */
+  it('backfills each existing flow as its first version', () => {
+    const db = memoryDb();
+    const preVersionMigrations = ['001', '002', '003', '004', '005', '006'];
+    for (const prefix of preVersionMigrations) {
+      const file = readdirSync(migrationsDir).find((name) => name.startsWith(`${prefix}_`));
+      if (file === undefined) {
+        throw new Error(`No migration file found with prefix ${prefix}`);
+      }
+      db.exec(readFileSync(join(migrationsDir, file), 'utf8'));
+    }
+    db.exec(`CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    db.prepare(`INSERT INTO setting (key, value) VALUES ('schema_version', '6')`).run();
+
+    db.prepare(
+      `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
+                         created_at, updated_at)
+       VALUES ('f1', 'Shows Conform', '', '', '{"nodes":[],"edges":[]}', 'abc123', 10, 10)`,
+    ).run();
+
+    migrate(db);
+
+    const rows = db.prepare(`SELECT * FROM flow_version WHERE flow_id = 'f1'`).all() as Array<{
+      definition_hash: string;
+      definition_json: string;
+      note: string;
+      id: string;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.definition_hash).toBe('abc123');
+    expect(rows[0]!.definition_json).toBe('{"nodes":[],"edges":[]}');
+    expect(rows[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+
+    db.close();
+  });
+
+  it("deletes a flow's versions with the flow", () => {
+    const db = memoryDb();
+    migrate(db);
+    db.prepare(
+      `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
+                         created_at, updated_at)
+       VALUES ('f2', 'Trial', '', '', '{"nodes":[],"edges":[]}', 'h', 10, 10)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO flow_version (id, flow_id, definition_hash, definition_json, note, created_at)
+       VALUES ('v1', 'f2', 'h', '{}', '', 10)`,
+    ).run();
+
+    db.prepare(`DELETE FROM flow WHERE id = 'f2'`).run();
+
+    expect(db.prepare(`SELECT COUNT(*) c FROM flow_version`).get()).toEqual({ c: 0 });
 
     db.close();
   });
