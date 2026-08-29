@@ -218,4 +218,30 @@ describe('createFlowRepo: version history', () => {
     expect(again.definitionHash).toBe(flow.definitionHash);
     expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 }).total).toBe(2);
   });
+
+  it('rolls the definition write back when the version append fails', () => {
+    // Forces a failure INSIDE the transaction, after the `flow` write has
+    // already run but before it commits -- the one scenario the other
+    // tests in this block cannot reach, because `assertFlowDefinitionValid`
+    // always rejects before `updateTx` is ever called. If the
+    // `db.transaction` wrapper around the UPDATE + append were removed, the
+    // UPDATE below would already be committed by the time the INSERT
+    // throws, and every assertion after it would fail.
+    const { db, repo } = seed();
+    const flow = repo.create({ name: 'New', definition: DEF, nowMs: 10 });
+
+    db.exec(
+      `CREATE TRIGGER boom BEFORE INSERT ON flow_version BEGIN SELECT RAISE(ABORT, 'boom'); END;`,
+    );
+    try {
+      expect(() => repo.update({ id: flow.id, definition: OTHER_DEF, nowMs: 20 })).toThrow(/boom/);
+    } finally {
+      db.exec(`DROP TRIGGER boom`);
+    }
+
+    const reread = repo.getById(flow.id)!;
+    expect(reread.definitionHash).toBe(flow.definitionHash);
+    expect(reread.updatedAt).toBe(flow.updatedAt);
+    expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 }).total).toBe(1);
+  });
 });

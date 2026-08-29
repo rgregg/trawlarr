@@ -58,6 +58,33 @@ describe('flow version repo', () => {
     expect(createFlowVersionRepo(db).byHash('never')).toBeNull();
   });
 
+  it('breaks a created_at tie deterministically, newer row first', () => {
+    // Two rows can legitimately share a millisecond -- a create immediately
+    // followed by an update through the API, both stamped with the same
+    // `nowMs`. Without a tiebreak in `ORDER BY`, SQLite is free to return
+    // them in either order.
+    const { db, flowId } = seed();
+    const repo = createFlowVersionRepo(db);
+    const first = repo.append({
+      flowId,
+      definitionHash: 'a',
+      definition: DEF,
+      note: 'first',
+      nowMs: 10,
+    });
+    const second = repo.append({
+      flowId,
+      definitionHash: 'b',
+      definition: DEF,
+      note: 'second',
+      nowMs: 10,
+    });
+
+    const page = repo.list({ flowId, limit: 10, offset: 0 });
+
+    expect(page.items.map((v) => v.id)).toEqual([second.id, first.id]);
+  });
+
   it('round-trips the definition through JSON', () => {
     const { db, flowId } = seed();
     const repo = createFlowVersionRepo(db);

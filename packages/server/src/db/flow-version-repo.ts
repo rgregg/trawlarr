@@ -89,9 +89,18 @@ const toSummary = (row: FlowVersionSummaryRow): FlowVersionSummary => ({
  */
 export const createFlowVersionRepo = (db: Db): FlowVersionRepo => {
   const selectById = db.prepare(`SELECT * FROM flow_version WHERE id = ?`);
+  // `created_at` alone is not a total order: two rows can legitimately share
+  // a millisecond (a create immediately followed by an update through the
+  // API, both stamped with the same `nowMs`), and without a tiebreak SQLite
+  // is free to return them in either order. `rowid` breaks the tie
+  // deterministically and keeps the newer row first: this table has no
+  // `WITHOUT ROWID` clause and its primary key is TEXT rather than
+  // `INTEGER PRIMARY KEY`, so SQLite still assigns a hidden rowid that
+  // increases with each insert — exactly the append order this ledger cares
+  // about.
   const selectByFlow = db.prepare(
     `SELECT id, flow_id, definition_hash, note, created_at
-     FROM flow_version WHERE flow_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+     FROM flow_version WHERE flow_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`,
   );
   const countByFlow = db.prepare(`SELECT COUNT(*) AS n FROM flow_version WHERE flow_id = ?`);
   // Newest match first, so LIMIT 1 answers "the newest version carrying this
