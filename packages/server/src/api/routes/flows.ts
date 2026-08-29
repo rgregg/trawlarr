@@ -1,6 +1,7 @@
 import { FlowValidationError, validateFlowDefinition, type FlowDefinition } from '@trawlarr/core';
 import { checkAllLibraries } from '../../daemon/library-health.js';
 import { createFlowRepo, type FlowRecord } from '../../db/flow-repo.js';
+import { createFlowVersionRepo, type FlowVersionRecord } from '../../db/flow-version-repo.js';
 import { createLibraryRepo } from '../../db/library-repo.js';
 import { createNodeCapabilityResolver } from '../../flow/node-capabilities.js';
 import { createPluginRegistry } from '../../plugins/registry.js';
@@ -10,6 +11,7 @@ import {
   ApiError,
   created,
   noContent,
+  parsePaging,
   requireString,
   type ApiContext,
   type Route,
@@ -33,6 +35,40 @@ const requireFlow = (ctx: ApiContext, id: string): FlowRecord => {
   const flow = createFlowRepo(ctx.db).getById(id);
   if (flow === null) throw new ApiError(404, 'flow-not-found', `No flow with id "${id}".`);
   return flow;
+};
+
+/**
+ * A version that both exists AND belongs to the flow the URL names — a
+ * version id from a DIFFERENT flow must 404 here rather than restore or
+ * display someone else's history under this flow's id.
+ */
+const requireFlowVersion = (
+  ctx: ApiContext,
+  flowId: string,
+  versionId: string,
+): FlowVersionRecord => {
+  const version = createFlowVersionRepo(ctx.db).get(versionId);
+  if (version === null || version.flowId !== flowId) {
+    throw new ApiError(
+      404,
+      'flow-version-not-found',
+      `No version "${versionId}" on flow "${flowId}".`,
+    );
+  }
+  return version;
+};
+
+/**
+ * The most recent version row for a flow — the one whose hash matches the
+ * live `flow` row right now, and the only entry `isCurrent` should ever mark
+ * true. Determined by id rather than by hash: hashes are deliberately not
+ * unique (publish A, then B, then A again), so only "newest row" identifies
+ * "current" unambiguously, and it must hold regardless of which page of the
+ * listing that row happens to fall on.
+ */
+const newestVersionId = (ctx: ApiContext, flowId: string): string | null => {
+  const { items } = createFlowVersionRepo(ctx.db).list({ flowId, limit: 1, offset: 0 });
+  return items[0]?.id ?? null;
 };
 
 const requireDefinition = (body: unknown): FlowDefinition => {
@@ -91,6 +127,40 @@ const fromTemplate = (templateId: string, values: unknown): FlowDefinition => {
   }
 };
 
+/**
+ * The one door through which a flow's live definition ever changes:
+ * `update`, then the two consequences that keep the rest of the system
+ * honest about it. `PUT /flows/:id` and `POST
+ * /flows/:id/versions/:versionId/restore` both publish through here — a
+ * restore is a publish of an OLD definition, not a special case, so it must
+ * run every step a normal edit runs. Skipping the rescan step would leave a
+ * library claiming convergence under a definition it never actually ran.
+ */
+const publishFlow = (
+  ctx: ApiContext,
+  input: { id: string; definition: FlowDefinition; note?: string },
+): FlowRecord => {
+  const updated = createFlowRepo(ctx.db).update({
+    id: input.id,
+    definition: input.definition,
+    nowMs: ctx.nowMs(),
+    note: input.note,
+  });
+  // A flow edit can make a paused library runnable, or an attached flow
+  // unrunnable. Re-checked here so the library's `pausedReason` is correct
+  // immediately rather than at the next daemon tick.
+  checkAllLibraries({ db: ctx.db, bus: ctx.bus });
+  // The edit also changed what "converged" MEANS for every library using
+  // this flow: their files' signatures no longer match the flow's hash. Only
+  // a scan re-derives that (see `scanLibrary`'s rule 7), so one is requested
+  // per affected library rather than leaving a library visibly "100%
+  // converged" under a flow it has never been run through.
+  for (const library of createLibraryRepo(ctx.db).list()) {
+    if (library.flowId === updated.id) ctx.scans.request(library.id, 'manual');
+  }
+  return updated;
+};
+
 export const flowRoutes: Route[] = [
   {
     method: 'GET',
@@ -144,6 +214,37 @@ export const flowRoutes: Route[] = [
       })),
   },
 
+  /**
+   * Listed near the other literal `/flows/...` routes for a reader's sake —
+   * NOT because registration order matters. `createRouter` (see
+   * `router.ts`) picks among candidates whose SEGMENT COUNT matches the
+   * request first, then picks the candidate with the most literal segments
+   * among those; declaration order only breaks a tie between two patterns
+   * with the SAME literal count, which cannot happen here. This route has
+   * four segments (`flows`, `versions`, `by-hash`, `:hash`) and its second
+   * segment is the literal `versions`, so it can never be matched by
+   * `/flows/:id/versions/:versionId` (whose second segment is a param but
+   * whose THIRD segment must literally equal `versions`) or by `/flows/:id`
+   * (two segments, a different length entirely). There is no length or
+   * position at which the two patterns compete.
+   */
+  {
+    method: 'GET',
+    path: '/flows/versions/by-hash/:hash',
+    handler: ({ params, ctx }) => {
+      const version = createFlowVersionRepo(ctx.db).byHash(params.hash!);
+      if (version === null) {
+        throw new ApiError(
+          404,
+          'version-not-recorded',
+          `No version was ever recorded with hash "${params.hash!}" — it may predate flow ` +
+            `versioning, or the hash may simply be wrong.`,
+        );
+      }
+      return version;
+    },
+  },
+
   {
     method: 'GET',
     path: '/flows/:id',
@@ -151,31 +252,68 @@ export const flowRoutes: Route[] = [
   },
 
   {
-    method: 'PUT',
-    path: '/flows/:id',
-    handler: ({ params, body, ctx }) => {
+    method: 'GET',
+    path: '/flows/:id/versions',
+    handler: ({ params, query, ctx }) => {
       const flow = requireFlow(ctx, params.id!);
+      const { limit, offset } = parsePaging(query);
+      const page = createFlowVersionRepo(ctx.db).list({ flowId: flow.id, limit, offset });
+      const currentId = newestVersionId(ctx, flow.id);
+      return {
+        total: page.total,
+        limit,
+        offset,
+        items: page.items.map((item) => ({ ...item, isCurrent: item.id === currentId })),
+      };
+    },
+  },
+
+  {
+    method: 'GET',
+    path: '/flows/:id/versions/:versionId',
+    handler: ({ params, ctx }) => requireFlowVersion(ctx, params.id!, params.versionId!),
+  },
+
+  {
+    method: 'POST',
+    path: '/flows/:id/versions/:versionId/restore',
+    handler: ({ params, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const version = requireFlowVersion(ctx, flow.id, params.versionId!);
+      // Restoring publishes the OLD definition as a brand-new version — the
+      // ledger is append-only, so this never rewrites or removes anything;
+      // it just makes the past the present again, with a note saying so.
+      // Revalidated on the way in like any other publish: a plugin the old
+      // definition named may have been uninstalled since it last ran.
       let updated: FlowRecord;
       try {
-        updated = createFlowRepo(ctx.db).update({
+        updated = publishFlow(ctx, {
           id: flow.id,
-          definition: requireDefinition(body),
-          nowMs: ctx.nowMs(),
+          definition: version.definition,
+          note: `Restored from ${version.definitionHash}`,
         });
       } catch (error) {
         return asFlowValidationError(error);
       }
-      // A flow edit can make a paused library runnable, or an attached flow
-      // unrunnable. Re-checked here so the library's `pausedReason` is
-      // correct immediately rather than at the next daemon tick.
-      checkAllLibraries({ db: ctx.db, bus: ctx.bus });
-      // The edit also changed what "converged" MEANS for every library using
-      // this flow: their files' signatures no longer match the flow's hash.
-      // Only a scan re-derives that (see `scanLibrary`'s rule 7), so one is
-      // requested per affected library rather than leaving a library visibly
-      // "100% converged" under a flow it has never been run through.
-      for (const library of createLibraryRepo(ctx.db).list()) {
-        if (library.flowId === updated.id) ctx.scans.request(library.id, 'manual');
+      return toFlowResource(updated);
+    },
+  },
+
+  {
+    method: 'PUT',
+    path: '/flows/:id',
+    handler: ({ params, body, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const patch = body as Record<string, unknown>;
+      let updated: FlowRecord;
+      try {
+        updated = publishFlow(ctx, {
+          id: flow.id,
+          definition: requireDefinition(body),
+          note: typeof patch.note === 'string' ? patch.note : undefined,
+        });
+      } catch (error) {
+        return asFlowValidationError(error);
       }
       return toFlowResource(updated);
     },
