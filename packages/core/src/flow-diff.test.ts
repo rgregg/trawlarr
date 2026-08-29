@@ -94,6 +94,31 @@ describe('diffFlowDefinitions', () => {
     expect(isEmptyDiff(diffFlowDefinitions(a, b))).toBe(true);
   });
 
+  it('guards edgeKey against dropping outputNumber: same from/to node, only the output number differs, must be reported as a real edge change', () => {
+    // This is the muxqueue defect shape: check -> muxqueue exists on BOTH
+    // sides, and only the output number says whether it is wired to the
+    // already-correct branch or the encode branch. An edgeKey that keys off
+    // (fromNodeId, toNodeId) alone would see these as the same edge and
+    // report no change at all -- silently losing the one property this
+    // feature exists to catch.
+    const before = {
+      nodes: [],
+      edges: [{ fromNodeId: 'check', outputNumber: 1, toNodeId: 'muxqueue' }],
+    };
+    const after = {
+      nodes: [],
+      edges: [{ fromNodeId: 'check', outputNumber: 2, toNodeId: 'muxqueue' }],
+    };
+
+    const diff = diffFlowDefinitions(before, after);
+    expect(diff.edgesRemoved).toEqual([
+      { fromNodeId: 'check', outputNumber: 1, toNodeId: 'muxqueue' },
+    ]);
+    expect(diff.edgesAdded).toEqual([
+      { fromNodeId: 'check', outputNumber: 2, toNodeId: 'muxqueue' },
+    ]);
+  });
+
   it('reports an added node and the edge that reaches it', () => {
     const before = { nodes: [node('a', 'x')], edges: [] };
     const after = {

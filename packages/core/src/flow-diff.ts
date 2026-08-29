@@ -1,4 +1,4 @@
-import type { FlowDefinition, FlowNode } from './flow.js';
+import type { FlowDefinition, FlowEdge, FlowNode } from './flow.js';
 
 /**
  * Diffs two flow definitions as a graph, not as text.
@@ -13,11 +13,7 @@ import type { FlowDefinition, FlowNode } from './flow.js';
  * That rendering is the entire value of this feature.
  */
 
-export interface EdgeRef {
-  fromNodeId: string;
-  outputNumber: number;
-  toNodeId: string;
-}
+export type EdgeRef = FlowEdge;
 
 export interface FlowDiff {
   nodesAdded: string[];
