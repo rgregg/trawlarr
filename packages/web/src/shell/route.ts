@@ -29,6 +29,17 @@ export type Route =
   | { name: 'file'; id: string; filters: FileFilters }
   | { name: 'job'; id: string }
   | { name: 'flow'; id: string }
+  // A single entry from a flow's history, reached from the flow it belongs
+  // to — `flowId` is known because the link that opens this route always
+  // starts on that flow's page (see `FlowDetail.tsx`'s History section).
+  // Task 8 adds a THIRD route, `flowVersionDirect`, for the one place a
+  // version is reached WITHOUT its flow already in hand (a job's recorded
+  // hash) — that route does not exist yet.
+  | { name: 'flowVersion'; flowId: string; versionId: string }
+  // `from`/`to` are nullable so `/flows/:id/compare` alone is a valid,
+  // linkable route (an empty comparison screen prompting for both sides)
+  // rather than only ever existing pre-filled.
+  | { name: 'flowCompare'; flowId: string; from: string | null; to: string | null }
   | { name: 'config'; tab: ConfigTab }
   | { name: 'notFound'; path: string };
 
@@ -61,7 +72,21 @@ export const parseRoute = (pathname: string, search: string): Route => {
   }
 
   if (segments[0] === 'jobs' && segments.length === 2) return { name: 'job', id: segments[1]! };
+
   if (segments[0] === 'flows' && segments.length === 2) return { name: 'flow', id: segments[1]! };
+
+  if (segments[0] === 'flows' && segments.length === 4 && segments[2] === 'versions') {
+    return { name: 'flowVersion', flowId: segments[1]!, versionId: segments[3]! };
+  }
+
+  if (segments[0] === 'flows' && segments.length === 3 && segments[2] === 'compare') {
+    return {
+      name: 'flowCompare',
+      flowId: segments[1]!,
+      from: params.get('from'),
+      to: params.get('to'),
+    };
+  }
 
   return { name: 'notFound', path };
 };
@@ -87,6 +112,15 @@ export const formatRoute = (route: Route): string => {
       return `/jobs/${route.id}`;
     case 'flow':
       return `/flows/${route.id}`;
+    case 'flowVersion':
+      return `/flows/${route.flowId}/versions/${route.versionId}`;
+    case 'flowCompare': {
+      const params = new URLSearchParams();
+      if (route.from !== null) params.set('from', route.from);
+      if (route.to !== null) params.set('to', route.to);
+      const query = params.toString();
+      return `/flows/${route.flowId}/compare${query.length === 0 ? '' : `?${query}`}`;
+    }
     case 'config':
       return route.tab === 'workers' ? '/config' : `/config?tab=${route.tab}`;
     case 'notFound':

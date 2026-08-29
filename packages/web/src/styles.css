@@ -1900,6 +1900,70 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* History: one row per published version, newest first (the API's own
+   order). A row is a link to the whole version — hash, note and date read
+   together as one target — with "Compare with current" as a second,
+   separate touch target rather than nested inside the first. */
+.flow-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.flow-history-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.flow-history-link {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 1 1 auto;
+  min-height: 2.75rem;
+  color: var(--ink);
+}
+
+.flow-history-note {
+  color: var(--muted);
+}
+
+.flow-history-when {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Same pill as `.flow-graph .badge`, scoped here instead of shared — this
+   is the only place on this screen a badge means "current" rather than
+   "branch" or "unreachable", so it earns its own color rather than
+   borrowing `--busy` off the graph's rule. */
+.flow-history .badge {
+  flex-shrink: 0;
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--good);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.55em;
+  white-space: nowrap;
+}
+
+.flow-history-compare {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
 /* Scoped rule, same pattern `.config button` uses: every control on this
    screen (Retry, Copy JSON) meets the touch-target floor without touching
    the global `button` rule every other screen also relies on. */

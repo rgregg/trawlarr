@@ -12,7 +12,7 @@ import { useApi } from './shell/useApi.js';
 import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
 import { useRoute } from './shell/useRoute.js';
-import type { Route } from './shell/route.js';
+import { formatRoute, type Route } from './shell/route.js';
 import './styles.css';
 
 /**
@@ -109,6 +109,25 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         )}
         {route.name === 'flow' && (
           <FlowDetail client={props.client} id={route.id} navigate={navigate} />
+        )}
+        {/* `flowVersion` and `flowCompare` are real, linkable routes as of
+            this task — the History section on `FlowDetail` already points at
+            them — but the screens that render a single version and a
+            comparison are Task 7's work, and the job-hash entry point
+            (`flowVersionDirect`) is Task 8's. Until then a visit here is not
+            a dead end: it names what is missing and offers the one link back
+            that makes sense, the same shape `notFound` below already uses. */}
+        {(route.name === 'flowVersion' || route.name === 'flowCompare') && (
+          <div className="not-found">
+            <p>This view is not built yet.</p>
+            <Link
+              to={formatRoute({ name: 'flow', id: route.flowId })}
+              navigate={navigate}
+              className="not-found-home"
+            >
+              Back to flow
+            </Link>
+          </div>
         )}
         {route.name === 'config' && (
           <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />
