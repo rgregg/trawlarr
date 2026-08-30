@@ -241,7 +241,20 @@ describe('scanLibrary: reconciling rows against the filesystem', () => {
 
     const repo = createMediaFileRepo(db);
     const row = rowFor(a);
-    repo.setLedger({ fileId: row.id, record: { ...repo.getLedger(row.id)!, state: 'queued' } });
+
+    // The scan leaves BOTH files `queued`, and both carry the same priority
+    // and the same `discovered_at` (the clock here is a constant). That is a
+    // complete tie in `claimNext`'s `ORDER BY priority DESC, discovered_at
+    // ASC`, so which row it hands out is decided by insertion order —
+    // readdir order — and ext4 hashes filenames with a per-filesystem seed.
+    // The claim below therefore returned `a` on one machine and `keep` on
+    // another, every time, and CI was the machine that answered `keep`.
+    // `keep` is only here to hold the root non-empty once `a` is renamed
+    // away, so retire it from the queue and leave exactly one claimable row.
+    repo.setLedger({
+      fileId: rowFor(keep).id,
+      record: { ...repo.getLedger(rowFor(keep).id)!, state: 'good' },
+    });
     expect(repo.claimNext({ workerClass: 'transcode', nowMs: NOW })?.fileId).toBe(row.id);
 
     // Replace has renamed the original away and not yet recorded the new
