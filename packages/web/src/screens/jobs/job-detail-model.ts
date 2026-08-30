@@ -61,6 +61,29 @@ export const pluginLabel = (pluginId: string): string => {
 
 const capitalise = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1);
 
+/**
+ * A job's `flowHash` resolved through `GET /flows/versions/by-hash/:hash`,
+ * turned into a line this screen can render without a branch of its own.
+ *
+ * A `404 version-not-recorded` — the answer for roughly 5,500 job rows on
+ * the owner's real install, everything that ran before migration 007's
+ * backfill — is NOT a failure: `JobDetail.tsx` catches it and passes
+ * `versionId: null` here, same as any other lookup that came back empty.
+ * Only a DIFFERENT failure (network, 500, …) is shown as one, by that
+ * screen's own failure box, never by this function, which has no failure
+ * state to express — it always returns a line to print.
+ */
+export const describeFlowVersion = (input: {
+  hash: string;
+  versionId: string | null;
+}): { text: string; to: string | null } => {
+  const shortHash = input.hash.slice(0, 8);
+  if (input.versionId === null) {
+    return { text: `${shortHash} — this version was not recorded`, to: null };
+  }
+  return { text: shortHash, to: `/flows/versions/${input.versionId}` };
+};
+
 /** Output 2 is the failure branch by convention throughout the flow contract. */
 export const toStepRows = (steps: ApiStep[]): StepRow[] =>
   steps.map((step) => ({

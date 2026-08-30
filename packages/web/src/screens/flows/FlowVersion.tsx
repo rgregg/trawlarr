@@ -49,10 +49,23 @@ type BlastRadius = { kind: 'loading' } | { kind: 'ready'; totalFiles: number } |
  * the button to do it ever appears — it never estimates how many of those
  * files will actually re-encode, because that number is not cheaply
  * computable and a guess would be worse than saying nothing.
+ *
+ * REACHED TWO WAYS, per `route.ts`'s `flowVersion` and `flowVersionDirect`.
+ * `FlowDetail.tsx`'s History section already knows the flow, so it passes
+ * `flowId` and this fetches `GET /flows/:id/versions/:versionId` exactly as
+ * before Task 8. `JobDetail.tsx` knows only a job's `flowHash`, resolved to
+ * a bare version id through `GET /flows/versions/by-hash/:hash` — it has no
+ * flow id to hand over, so `flowId` is `null` there and this fetches
+ * `GET /flows/versions/:versionId` instead, a route that needs none. Either
+ * way the response carries `flowId` (see `ApiFlowVersion` below), which is
+ * ALL this screen actually needs it for — the back-link, "Compare with
+ * current" and Restore all resolve `resolvedFlowId` from the fetched
+ * version once it lands, rather than duplicating a second source of truth
+ * for "which flow" that could disagree with what was fetched.
  */
 export const FlowVersion = (props: {
   client: ApiClient;
-  flowId: string;
+  flowId: string | null;
   versionId: string;
   navigate: (to: string) => void;
 }): JSX.Element => {
@@ -63,6 +76,11 @@ export const FlowVersion = (props: {
   const [attempt, setAttempt] = useState(0);
   const loading = failure === null && version === null;
 
+  // Known immediately when reached via `flowVersion` (the prop is set);
+  // known only once the fetch below resolves when reached via
+  // `flowVersionDirect` (the prop is `null` and this waits on `version`).
+  const resolvedFlowId = flowId ?? version?.flowId ?? null;
+
   useEffect(() => {
     setVersion(null);
     setFailure(null);
@@ -72,7 +90,11 @@ export const FlowVersion = (props: {
     let cancelled = false;
     void (async () => {
       try {
-        const next = await client.get<ApiFlowVersion>(`/flows/${flowId}/versions/${versionId}`);
+        const path =
+          flowId !== null
+            ? `/flows/${flowId}/versions/${versionId}`
+            : `/flows/versions/${versionId}`;
+        const next = await client.get<ApiFlowVersion>(path);
         if (cancelled) return;
         setVersion(next);
         setFailure(null);
@@ -106,10 +128,15 @@ export const FlowVersion = (props: {
   useEffect(() => {
     let cancelled = false;
     setCurrentVersionId(undefined);
+    // Reached via `flowVersionDirect`, `resolvedFlowId` is `null` until the
+    // primary fetch above resolves it — this simply waits for that render
+    // rather than guessing, the same "undefined means not yet known" rule
+    // the state's own comment states.
+    if (resolvedFlowId === null) return;
     void (async () => {
       try {
         const page = await client.get<{ items: ApiVersionSummary[] }>(
-          `/flows/${flowId}/versions?limit=1`,
+          `/flows/${resolvedFlowId}/versions?limit=1`,
         );
         if (cancelled) return;
         setCurrentVersionId(page.items[0]?.id ?? null);
@@ -120,7 +147,7 @@ export const FlowVersion = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, flowId]);
+  }, [client, resolvedFlowId]);
 
   const isCurrent = version !== null && currentVersionId === version.id;
 
@@ -134,11 +161,12 @@ export const FlowVersion = (props: {
     let cancelled = false;
     setLibraries(null);
     setLibrariesFailed(false);
+    if (resolvedFlowId === null) return;
     void (async () => {
       try {
         const all = await client.get<ApiLibraryStub[]>('/libraries');
         if (cancelled) return;
-        setLibraries(all.filter((library) => library.flowId === flowId));
+        setLibraries(all.filter((library) => library.flowId === resolvedFlowId));
       } catch {
         if (!cancelled) setLibrariesFailed(true);
       }
@@ -146,7 +174,7 @@ export const FlowVersion = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, flowId]);
+  }, [client, resolvedFlowId]);
 
   // The exact re-queue count Restore's confirmation must state: the sum of
   // every affected library's file total, from `GET /files?libraryId=…`'s
@@ -189,11 +217,15 @@ export const FlowVersion = (props: {
   );
 
   const restore = async (): Promise<void> => {
+    // Guarded defensively — the Restore button below only ever renders once
+    // `version` is loaded, at which point `resolvedFlowId` is always a
+    // string (either the prop, or `version.flowId`).
+    if (resolvedFlowId === null) return;
     setRestoring(true);
     setRestoreFailure(null);
     try {
-      await client.post(`/flows/${flowId}/versions/${versionId}/restore`, {});
-      props.navigate(formatRoute({ name: 'flow', id: flowId }));
+      await client.post(`/flows/${resolvedFlowId}/versions/${versionId}/restore`, {});
+      props.navigate(formatRoute({ name: 'flow', id: resolvedFlowId }));
     } catch (error) {
       setRestoreFailure(describeFailure(error));
     } finally {
@@ -206,13 +238,19 @@ export const FlowVersion = (props: {
 
   return (
     <div className="flow-page">
-      <Link
-        to={formatRoute({ name: 'flow', id: flowId })}
-        navigate={props.navigate}
-        className="flow-page-back"
-      >
-        ← Back to flow
-      </Link>
+      {/* Waits on `resolvedFlowId` the same way `JobDetail.tsx`'s back-link
+          waits on `detail`: reached via `flowVersionDirect` there is no
+          flow id to point at until the version itself has loaded, and a
+          link to `undefined` is a worse answer than no link yet. */}
+      {resolvedFlowId !== null && (
+        <Link
+          to={formatRoute({ name: 'flow', id: resolvedFlowId })}
+          navigate={props.navigate}
+          className="flow-page-back"
+        >
+          ← Back to flow
+        </Link>
+      )}
 
       {failure !== null && (
         <div role="alert" className="failure">
@@ -282,7 +320,7 @@ export const FlowVersion = (props: {
               <Link
                 to={formatRoute({
                   name: 'flowCompare',
-                  flowId,
+                  flowId: version.flowId,
                   from: version.id,
                   to: currentVersionId,
                 })}

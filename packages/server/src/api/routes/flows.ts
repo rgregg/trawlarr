@@ -245,6 +245,42 @@ export const flowRoutes: Route[] = [
     },
   },
 
+  /**
+   * The version equivalent of `/flows/versions/by-hash/:hash` above: reached
+   * by a caller that has a version id but not the flow it belongs to — the
+   * web UI's job detail screen, which stores only `flowHash` on a job row
+   * and resolves it through the by-hash route to get here (see
+   * `describeFlowVersion` in `packages/web/src/screens/jobs/job-detail-model.ts`).
+   * `GET /flows/:id/versions/:versionId` above stays the route for a caller
+   * that already has the flow (`FlowDetail.tsx`'s History section); this one
+   * exists because that caller doesn't, not as a shortcut for one that does.
+   *
+   * SAME SPECIFICITY REASONING AS THE by-hash ROUTE, one segment shorter:
+   * this pattern's three segments are `flows`, the literal `versions`, and
+   * `:versionId`. `/flows/:id` is two segments — never a candidate together.
+   * `/flows/:id/versions` is also three segments, but its literal `versions`
+   * sits at position 2, not position 1 — for a concrete request the two
+   * patterns only tie when the actual second AND third segments are both
+   * literally `versions` (a flow whose id is literally "versions"), the same
+   * class of edge case `/flows/templates` above already accepts for a flow
+   * id of "templates" rather than guarding against it.
+   */
+  {
+    method: 'GET',
+    path: '/flows/versions/:versionId',
+    handler: ({ params, ctx }) => {
+      const version = createFlowVersionRepo(ctx.db).get(params.versionId!);
+      if (version === null) {
+        throw new ApiError(
+          404,
+          'flow-version-not-found',
+          `No version with id "${params.versionId!}".`,
+        );
+      }
+      return version;
+    },
+  },
+
   {
     method: 'GET',
     path: '/flows/:id',

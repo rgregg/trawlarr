@@ -120,6 +120,18 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
             navigate={navigate}
           />
         )}
+        {route.name === 'flowVersionDirect' && (
+          // No flow id in hand — a job row's `flowHash` resolves only to a
+          // version id (`describeFlowVersion` in `job-detail-model.ts`).
+          // `FlowVersion` fetches `GET /flows/versions/:versionId` instead
+          // of the flow-scoped route when `flowId` is `null`.
+          <FlowVersion
+            client={props.client}
+            flowId={null}
+            versionId={route.versionId}
+            navigate={navigate}
+          />
+        )}
         {route.name === 'flowCompare' && (
           <FlowCompare
             client={props.client}

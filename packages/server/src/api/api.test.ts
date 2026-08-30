@@ -884,6 +884,29 @@ describe('flows', () => {
     expect((res.body as { error: { code: string } }).error.code).toBe('version-not-recorded');
   });
 
+  it('resolves a version by id alone, without knowing its flow', async () => {
+    const flow = await createFlowViaApi();
+    const byHash = (await api('GET', `/flows/versions/by-hash/${flow.definitionHash}`)).body as {
+      id: string;
+      flowId: string;
+    };
+
+    const res = await api('GET', `/flows/versions/${byHash.id}`);
+
+    expect(res.status).toBe(200);
+    const body = res.body as { id: string; flowId: string; definition: unknown };
+    expect(body.id).toBe(byHash.id);
+    expect(body.flowId).toBe(flow.id);
+    expect(body.definition).toBeDefined();
+  });
+
+  it('404s a version id that was never published', async () => {
+    const res = await api('GET', '/flows/versions/nope');
+
+    expect(res.status).toBe(404);
+    expect((res.body as { error: { code: string } }).error.code).toBe('flow-version-not-found');
+  });
+
   it('omits definitions from the listing', async () => {
     const flow = await createFlowViaApi();
     const body = (await api('GET', `/flows/${flow.id}/versions`)).body as {
