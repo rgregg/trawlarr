@@ -9,7 +9,8 @@
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "build": "tsc --build && pnpm -r --if-present run build:sql && pnpm --filter @trawlarr/web run build",
-    "test": "vitest run --typecheck",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test:watch": "vitest",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
