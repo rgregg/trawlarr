@@ -39,11 +39,20 @@ export interface FlowVersionRepo {
     items: FlowVersionSummary[];
   };
   get(id: string): FlowVersionRecord | null;
-  /** Resolves a hash to the newest version carrying it — `definition_hash` is
+  /**
+   * Resolves a hash to the newest version carrying it — `definition_hash` is
    * deliberately not unique, so publishing A, then B, then A again leaves two
    * rows sharing a hash, and only the newest one reflects what "this hash"
-   * currently means to the flow's history. */
-  byHash(hash: string): FlowVersionRecord | null;
+   * currently means to the flow's history.
+   *
+   * `flowId` scopes the search, and a caller that knows it must pass it. A
+   * hash is a pure function of the definition, so two flows with the same
+   * graph — duplicating a flow for Movies and Shows is the obvious way to get
+   * there — share every hash they publish. Unscoped, a job on the Movies flow
+   * resolves to a Shows version, and the restore button on that page then
+   * republishes and re-queues the wrong library.
+   */
+  byHash(input: { hash: string; flowId?: string }): FlowVersionRecord | null;
 }
 
 interface FlowVersionRow {
@@ -111,6 +120,10 @@ export const createFlowVersionRepo = (db: Db): FlowVersionRepo => {
   const selectByHash = db.prepare(
     `SELECT * FROM flow_version WHERE definition_hash = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
+  const selectByHashInFlow = db.prepare(
+    `SELECT * FROM flow_version WHERE definition_hash = ? AND flow_id = ?
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  );
 
   const get = (id: string): FlowVersionRecord | null => {
     const row = selectById.get(id) as FlowVersionRow | undefined;
@@ -147,8 +160,12 @@ export const createFlowVersionRepo = (db: Db): FlowVersionRepo => {
 
     get,
 
-    byHash(hash) {
-      const row = selectByHash.get(hash) as FlowVersionRow | undefined;
+    byHash(input) {
+      const row = (
+        input.flowId === undefined
+          ? selectByHash.get(input.hash)
+          : selectByHashInFlow.get(input.hash, input.flowId)
+      ) as FlowVersionRow | undefined;
       return row === undefined ? null : toRecord(row);
     },
   };

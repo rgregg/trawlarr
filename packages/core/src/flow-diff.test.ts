@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { diffFlowDefinitions, isEmptyDiff } from './flow-diff.js';
+import { flowDefinitionHash } from './signature.js';
 
-const node = (id: string, pluginId: string, inputs: Record<string, unknown> = {}) => ({
+const node = (
+  id: string,
+  pluginId: string,
+  inputs: Record<string, unknown> = {},
+  pluginVersion = '1.0.0',
+) => ({
   id,
   pluginId,
-  pluginVersion: '1.0.0',
+  pluginVersion,
   inputs,
 });
 
@@ -146,5 +152,90 @@ describe('diffFlowDefinitions', () => {
     expect(diffFlowDefinitions(before, after).inputsChanged).toEqual([
       { nodeId: 'n', key: 'flag', from: 'true', to: 'false' },
     ]);
+  });
+
+  it('reports a plugin version bump, naming the versions', () => {
+    // The hash covers pluginVersion, so this publish re-queues the library.
+    // A diff that called it identical would be lying on the one screen whose
+    // job is saying what changed.
+    const before = { nodes: [node('n', 'tdarr:encode', {}, '1.0.0')], edges: [] };
+    const after = { nodes: [node('n', 'tdarr:encode', {}, '2.0.0')], edges: [] };
+
+    expect(diffFlowDefinitions(before, after).nodePluginChanged).toEqual([
+      { nodeId: 'n', from: 'tdarr:encode@1.0.0', to: 'tdarr:encode@2.0.0' },
+    ]);
+  });
+
+  it('leaves the version out when only the plugin id moved', () => {
+    const before = { nodes: [node('n', 'tdarr:a')], edges: [] };
+    const after = { nodes: [node('n', 'tdarr:b')], edges: [] };
+
+    expect(diffFlowDefinitions(before, after).nodePluginChanged).toEqual([
+      { nodeId: 'n', from: 'tdarr:a', to: 'tdarr:b' },
+    ]);
+  });
+
+  it('distinguishes an input whose type changed, and quotes it so the reader can see why', () => {
+    // `5` and `"5"` hash differently and re-queue the library; rendering both
+    // as `5` would read as "changed from 5 to 5".
+    const before = { nodes: [node('n', 'x', { crf: 5 })], edges: [] };
+    const after = { nodes: [node('n', 'x', { crf: '5' })], edges: [] };
+
+    expect(diffFlowDefinitions(before, after).inputsChanged).toEqual([
+      { nodeId: 'n', key: 'crf', from: '5', to: '"5"' },
+    ]);
+  });
+
+  it('still shows a string input unquoted when nothing about the type moved', () => {
+    const before = { nodes: [node('n', 'x', { codec: 'h264' })], edges: [] };
+    const after = { nodes: [node('n', 'x', { codec: 'hevc' })], edges: [] };
+
+    expect(diffFlowDefinitions(before, after).inputsChanged).toEqual([
+      { nodeId: 'n', key: 'codec', from: 'h264', to: 'hevc' },
+    ]);
+  });
+
+  it('is empty exactly when the two definitions share a flow hash', () => {
+    // The property the whole screen rests on: an empty diff is the UI's
+    // licence to say "these versions are identical", and a differing hash is
+    // what re-queued the library. Any pair where those two disagree is a
+    // screen telling a user nothing changed about a publish that re-encoded
+    // their library. Every field the hash covers needs a case here.
+    const base = node('n', 'tdarr:encode', { codec: 'h264', crf: 20, fast: true }, '1.0.0');
+    const variants: Array<{ what: string; nodes: ReturnType<typeof node>[] }> = [
+      { what: 'unchanged', nodes: [base] },
+      { what: 'pluginId', nodes: [node('n', 'tdarr:other', base.inputs, '1.0.0')] },
+      { what: 'pluginVersion', nodes: [node('n', 'tdarr:encode', base.inputs, '2.0.0')] },
+      { what: 'node id', nodes: [node('m', 'tdarr:encode', base.inputs, '1.0.0')] },
+      {
+        what: 'input value',
+        nodes: [node('n', 'tdarr:encode', { ...base.inputs, codec: 'hevc' }, '1.0.0')],
+      },
+      {
+        what: 'input type: number to string',
+        nodes: [node('n', 'tdarr:encode', { ...base.inputs, crf: '20' }, '1.0.0')],
+      },
+      {
+        what: 'input type: boolean to string',
+        nodes: [node('n', 'tdarr:encode', { ...base.inputs, fast: 'true' }, '1.0.0')],
+      },
+      {
+        what: 'input removed',
+        nodes: [node('n', 'tdarr:encode', { codec: 'h264', crf: 20 }, '1.0.0')],
+      },
+      { what: 'node removed', nodes: [] },
+    ];
+
+    for (const a of variants) {
+      for (const b of variants) {
+        const from = { nodes: a.nodes, edges: [] };
+        const to = { nodes: b.nodes, edges: [] };
+        const sameHash = flowDefinitionHash(from) === flowDefinitionHash(to);
+        expect(
+          isEmptyDiff(diffFlowDefinitions(from, to)),
+          `${a.what} vs ${b.what}: diff emptiness must match hash equality`,
+        ).toBe(sameHash);
+      }
+    }
   });
 });

@@ -231,14 +231,21 @@ export const flowRoutes: Route[] = [
   {
     method: 'GET',
     path: '/flows/versions/by-hash/:hash',
-    handler: ({ params, ctx }) => {
-      const version = createFlowVersionRepo(ctx.db).byHash(params.hash!);
+    handler: ({ params, query, ctx }) => {
+      // `flowId` is optional but the web UI always sends it: a hash is a pure
+      // function of the definition, so two flows with the same graph share
+      // one, and an unscoped lookup can hand a job on flow A a version of
+      // flow B — which the restore button would then republish, re-queueing a
+      // library the user was never looking at.
+      const flowId = query.get('flowId') ?? undefined;
+      const version = createFlowVersionRepo(ctx.db).byHash({ hash: params.hash!, flowId });
       if (version === null) {
         throw new ApiError(
           404,
           'version-not-recorded',
-          `No version was ever recorded with hash "${params.hash!}" — it may predate flow ` +
-            `versioning, or the hash may simply be wrong.`,
+          `No version was ever recorded with hash "${params.hash!}"` +
+            (flowId === undefined ? '' : ` for flow "${flowId}"`) +
+            ` — it may predate flow versioning, or the hash may simply be wrong.`,
         );
       }
       return version;

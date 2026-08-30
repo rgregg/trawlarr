@@ -44,12 +44,32 @@ function edgesByKey(edges: EdgeRef[]): Map<string, EdgeRef> {
   return map;
 }
 
-/** Stringifies an input value so `true`/`false`/objects compare as text, and a missing key compares as `null`. */
-function inputValueToString(value: unknown): string | null {
+/**
+ * An input value in two forms: one to compare on and one to show.
+ *
+ * They have to be separate. Comparing on the readable form collapses the
+ * number `5` and the string `"5"` (and `true` and `"true"`) into one value,
+ * so a publish that changed an input's type — what a hand-edited or imported
+ * flow produces — gets a different `flowDefinitionHash`, re-queues the
+ * library, and shows an empty diff. Showing the compared form instead would
+ * quote every string in the UI. So: compare on JSON, display readably, and
+ * fall back to the JSON form only when the two readable forms would collide
+ * (`5 → 5` tells the reader nothing; `5 → "5"` tells them everything).
+ *
+ * A missing key is `null` in both forms, which is why `null` is not itself
+ * representable here — `JSON.stringify(null)` is the string `'null'`.
+ */
+interface InputRepr {
+  compare: string | null;
+  display: string | null;
+}
+
+function inputValueRepr(value: unknown): InputRepr {
   if (value === undefined) {
-    return null;
+    return { compare: null, display: null };
   }
-  return typeof value === 'string' ? value : JSON.stringify(value);
+  const json = JSON.stringify(value) ?? 'undefined';
+  return { compare: json, display: typeof value === 'string' ? value : json };
 }
 
 function compareEdgeRefs(a: EdgeRef, b: EdgeRef): number {
@@ -92,16 +112,33 @@ export function diffFlowDefinitions(from: FlowDefinition, to: FlowDefinition): F
       continue;
     }
 
-    if (fromNode.pluginId !== toNode.pluginId) {
-      nodePluginChanged.push({ nodeId: toNode.id, from: fromNode.pluginId, to: toNode.pluginId });
+    // `flowDefinitionHash` hashes `pluginVersion` alongside `pluginId`, so a
+    // node whose plugin moved from 1.0.0 to 2.0.0 is a different flow and
+    // re-queues the whole library. Diffing on `pluginId` alone reported that
+    // as "identical" on the one screen whose entire job is saying what
+    // changed. The version is only spelled out when it is what moved, so an
+    // ordinary plugin swap still reads as one id becoming another.
+    if (fromNode.pluginId !== toNode.pluginId || fromNode.pluginVersion !== toNode.pluginVersion) {
+      const versionMoved = fromNode.pluginVersion !== toNode.pluginVersion;
+      nodePluginChanged.push({
+        nodeId: toNode.id,
+        from: versionMoved ? `${fromNode.pluginId}@${fromNode.pluginVersion}` : fromNode.pluginId,
+        to: versionMoved ? `${toNode.pluginId}@${toNode.pluginVersion}` : toNode.pluginId,
+      });
     }
 
     const keys = new Set<string>([...Object.keys(fromNode.inputs), ...Object.keys(toNode.inputs)]);
     for (const key of keys) {
-      const fromValue = inputValueToString(fromNode.inputs[key]);
-      const toValue = inputValueToString(toNode.inputs[key]);
-      if (fromValue !== toValue) {
-        inputsChanged.push({ nodeId: toNode.id, key, from: fromValue, to: toValue });
+      const fromValue = inputValueRepr(fromNode.inputs[key]);
+      const toValue = inputValueRepr(toNode.inputs[key]);
+      if (fromValue.compare !== toValue.compare) {
+        const collides = fromValue.display === toValue.display;
+        inputsChanged.push({
+          nodeId: toNode.id,
+          key,
+          from: collides ? fromValue.compare : fromValue.display,
+          to: collides ? toValue.compare : toValue.display,
+        });
       }
     }
   }

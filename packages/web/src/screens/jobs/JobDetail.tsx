@@ -189,12 +189,20 @@ export const JobDetail = (props: {
   // fetched by has not actually changed.
   useEffect(() => {
     const hash = detail?.job.flowHash;
-    if (hash === undefined) return;
+    const flowId = detail?.job.flowId;
+    if (hash === undefined || flowId === undefined) return;
     let cancelled = false;
     setVersionLookup({ kind: 'loading' });
     void (async () => {
       try {
-        const version = await client.get<{ id: string }>(`/flows/versions/by-hash/${hash}`);
+        // Scoped to THIS job's flow. A hash is a pure function of the
+        // definition, so two flows built from the same graph — one library
+        // duplicated for Movies and Shows — share it, and an unscoped lookup
+        // sends this link to the other flow's version, whose Restore button
+        // re-queues a library the user never opened.
+        const version = await client.get<{ id: string }>(
+          `/flows/versions/by-hash/${hash}?flowId=${encodeURIComponent(flowId)}`,
+        );
         if (!cancelled) setVersionLookup({ kind: 'resolved', versionId: version.id });
       } catch (error) {
         if (cancelled) return;
@@ -211,7 +219,7 @@ export const JobDetail = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, detail?.job.flowHash]);
+  }, [client, detail?.job.flowHash, detail?.job.flowId]);
 
   const onFetchLog = useCallback((): void => {
     setLogRequested(true);

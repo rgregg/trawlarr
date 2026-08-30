@@ -8,15 +8,19 @@ const NOW = 1_700_000_000_000;
 
 const DEF: FlowDefinition = { nodes: [], edges: [] };
 
-const seed = () => {
-  const db = openDatabase({ file: ':memory:' });
-  migrate(db);
-  const flowId = 'flow-1';
+const insertFlow = (db: ReturnType<typeof openDatabase>, id: string, name: string): string => {
   db.prepare(
     `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
                        created_at, updated_at)
      VALUES (?, ?, '', '', ?, 'seed-hash', ?, ?)`,
-  ).run(flowId, 'Seed flow', JSON.stringify(DEF), NOW, NOW);
+  ).run(id, name, JSON.stringify(DEF), NOW, NOW);
+  return id;
+};
+
+const seed = () => {
+  const db = openDatabase({ file: ':memory:' });
+  migrate(db);
+  const flowId = insertFlow(db, 'flow-1', 'Seed flow');
   return { db, flowId };
 };
 
@@ -50,12 +54,50 @@ describe('flow version repo', () => {
     repo.append({ flowId, definitionHash: 'a', definition: DEF, note: 'old', nowMs: 10 });
     repo.append({ flowId, definitionHash: 'a', definition: DEF, note: 'new', nowMs: 30 });
 
-    expect(repo.byHash('a')?.note).toBe('new');
+    expect(repo.byHash({ hash: 'a' })?.note).toBe('new');
   });
 
   it('answers null for a hash that was never recorded', () => {
     const { db } = seed();
-    expect(createFlowVersionRepo(db).byHash('never')).toBeNull();
+    expect(createFlowVersionRepo(db).byHash({ hash: 'never' })).toBeNull();
+  });
+
+  it('never resolves a hash to another flow when the caller names its own', () => {
+    // `definition_hash` is a pure function of the definition, so duplicating a
+    // flow for a second library gives the two flows the same hash on every
+    // publish. Unscoped, a job on flow-1 resolved to flow-2's version, and the
+    // Restore button on that page re-queues flow-2's libraries — a library the
+    // user was never looking at.
+    const { db, flowId } = seed();
+    const otherId = insertFlow(db, 'flow-2', 'Same graph, other library');
+    const repo = createFlowVersionRepo(db);
+    const mine = repo.append({
+      flowId,
+      definitionHash: 'shared',
+      definition: DEF,
+      note: 'mine',
+      nowMs: 10,
+    });
+    // Newer, so it wins an unscoped `ORDER BY created_at DESC`.
+    repo.append({
+      flowId: otherId,
+      definitionHash: 'shared',
+      definition: DEF,
+      note: 'theirs',
+      nowMs: 30,
+    });
+
+    expect(repo.byHash({ hash: 'shared', flowId })?.id).toBe(mine.id);
+    expect(repo.byHash({ hash: 'shared', flowId })?.flowId).toBe(flowId);
+  });
+
+  it('answers null when the hash exists but not on the flow that was asked about', () => {
+    const { db, flowId } = seed();
+    const otherId = insertFlow(db, 'flow-2', 'Other');
+    const repo = createFlowVersionRepo(db);
+    repo.append({ flowId: otherId, definitionHash: 'x', definition: DEF, note: '', nowMs: 10 });
+
+    expect(repo.byHash({ hash: 'x', flowId })).toBeNull();
   });
 
   it('breaks a created_at tie on byHash deterministically, newer row first', () => {
@@ -73,7 +115,7 @@ describe('flow version repo', () => {
       nowMs: 10,
     });
 
-    expect(repo.byHash('a')?.id).toBe(second.id);
+    expect(repo.byHash({ hash: 'a' })?.id).toBe(second.id);
   });
 
   it('breaks a created_at tie deterministically, newer row first', () => {

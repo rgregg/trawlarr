@@ -172,11 +172,18 @@ export const FlowVersion = (props: {
   // failure disables Restore's confirm (never a guessed count) without
   // touching the graph this screen exists to show.
   const [libraries, setLibraries] = useState<ApiLibraryStub[] | null>(null);
+  const [blastRadius, setBlastRadius] = useState<BlastRadius>({ kind: 'loading' });
   const [librariesFailed, setLibrariesFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setLibraries(null);
     setLibrariesFailed(false);
+    // Reset here, not only in the blast-radius effect below — that one bails
+    // out while `libraries` is null, so on the render where the NEXT flow's
+    // libraries arrive it has not run yet, and the Restore section paints the
+    // PREVIOUS flow's file count with the confirm button live. A stale count
+    // on an armed button is the one thing this section must never show.
+    setBlastRadius({ kind: 'loading' });
     if (resolvedFlowId === null) return;
     void (async () => {
       try {
@@ -196,7 +203,6 @@ export const FlowVersion = (props: {
   // every affected library's file total, from `GET /files?libraryId=…`'s
   // `total` (the same field `Files.tsx` pages against) — not the number that
   // will re-encode, which nothing here claims to know.
-  const [blastRadius, setBlastRadius] = useState<BlastRadius>({ kind: 'loading' });
   useEffect(() => {
     if (libraries === null) return;
     if (libraries.length === 0) {
