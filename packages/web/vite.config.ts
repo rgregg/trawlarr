@@ -1,18 +1,6 @@
-import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      // `@trawlarr/core`'s barrel export pulls in `node:crypto` (see
-      // `src/shell/browser-node-crypto-stub.ts`'s doc comment for why this
-      // is needed at all, and why it is safe: nothing this app calls ever
-      // reaches it).
-      'node:crypto': fileURLToPath(
-        new URL('./src/shell/browser-node-crypto-stub.ts', import.meta.url),
-      ),
-    },
-  },
   // NO `@vitejs/plugin-react`. That plugin exists to run Babel for React Fast
   // Refresh, and it drags in @babel/core -> browserslist -> caniuse-lite,
   // whose licence is CC-BY-4.0 and fails `pnpm audit:licenses`. The rule this

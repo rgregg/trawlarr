@@ -10,6 +10,8 @@
  * something even when the publisher left it blank, and which row is live.
  */
 
+import type { FlowDiff } from '@trawlarr/core';
+
 /** `GET /flows/:id/versions`'s per-item shape — see `flows.ts`'s handler. */
 export interface ApiVersionSummary {
   id: string;
@@ -80,17 +82,6 @@ export interface DiffLine {
   text: string;
 }
 
-/** `FlowDiff`'s own shape (`@trawlarr/core`'s `flow-diff.ts`), named here so this
- * file does not need the package import just to type its one parameter. */
-interface DiffInput {
-  nodesAdded: string[];
-  nodesRemoved: string[];
-  nodePluginChanged: Array<{ nodeId: string; from: string; to: string }>;
-  inputsChanged: Array<{ nodeId: string; key: string; from: string | null; to: string | null }>;
-  edgesAdded: Array<{ fromNodeId: string; outputNumber: number; toNodeId: string }>;
-  edgesRemoved: Array<{ fromNodeId: string; outputNumber: number; toNodeId: string }>;
-}
-
 /** An absent input value compares as `null` in `FlowDiff` — this names it
  * rather than printing the literal word "null", which reads as a bug. */
 const orNotSet = (value: string | null): string => (value === null ? 'not set' : value);
@@ -104,7 +95,7 @@ const edgeLine = (edge: { fromNodeId: string; outputNumber: number; toNodeId: st
  * added, same nodes) reads as an adjacent pair rather than being split
  * across the list by an unrelated sort key.
  */
-export const toDiffLines = (diff: DiffInput): DiffLine[] => [
+export const toDiffLines = (diff: FlowDiff): DiffLine[] => [
   ...diff.nodesRemoved.map((nodeId): DiffLine => ({
     kind: 'node-removed',
     text: `${nodeId} removed`,

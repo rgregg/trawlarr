@@ -88,13 +88,24 @@ export const FlowVersion = (props: {
   // A SECONDARY fetch, same rule as `FlowDetail.tsx`'s libraries/history
   // fetches: whether this is the newest version decides how the page frames
   // itself and whether Restore/Compare make sense to offer, but its failure
-  // must never blank a screen that already has the version to draw. Failure
-  // — or a flow with no versions at all — falls back to `'unknown'`, which
-  // this screen treats as "not provably current" rather than guessing.
-  const [currentVersionId, setCurrentVersionId] = useState<string | null | 'unknown'>('unknown');
+  // must never blank a screen that already has the version to draw.
+  //
+  // THREE STATES, and the type system has to see all three: `undefined`
+  // means "not yet known" (still loading, or the fetch failed) — this
+  // screen treats that as "not provably current" rather than guessing.
+  // `null` means the fetch succeeded and genuinely found no current version
+  // (a flow with no versions at all). A STRING is the one case Restore's
+  // "Compare with current" link may use. An earlier version of this used the
+  // string `'unknown'` as the "not yet known" sentinel — which
+  // `useState<string | null | 'unknown'>` widens to `string | null`, so
+  // `typeof currentVersionId === 'string'` was true for `'unknown'` too, and
+  // "Compare with current" linked to `/flows/:id/versions/unknown` before
+  // the fetch resolved (or forever, if it failed). `undefined` cannot be
+  // mistaken for a real id the way a string sentinel can.
+  const [currentVersionId, setCurrentVersionId] = useState<string | null | undefined>(undefined);
   useEffect(() => {
     let cancelled = false;
-    setCurrentVersionId('unknown');
+    setCurrentVersionId(undefined);
     void (async () => {
       try {
         const page = await client.get<{ items: ApiVersionSummary[] }>(
@@ -103,7 +114,7 @@ export const FlowVersion = (props: {
         if (cancelled) return;
         setCurrentVersionId(page.items[0]?.id ?? null);
       } catch {
-        if (!cancelled) setCurrentVersionId('unknown');
+        if (!cancelled) setCurrentVersionId(undefined);
       }
     })();
     return () => {

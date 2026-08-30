@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { diffFlowDefinitions, isEmptyDiff, type FlowDefinition } from '@trawlarr/core';
+import { diffFlowDefinitions, isEmptyDiff } from '@trawlarr/core/flow-diff';
+import type { FlowDefinition } from '@trawlarr/core';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
@@ -36,6 +37,21 @@ const CLASS: Record<DiffLine['kind'], string> = {
   'edge-added': 'flow-diff-line-added',
   'plugin-changed': 'flow-diff-line-changed',
   'input-changed': 'flow-diff-line-changed',
+};
+
+/** The word the `+`/`−`/`~` prefix stands for, read by assistive technology
+ * that a bare `aria-hidden` glyph would otherwise say nothing to. Colour and
+ * the glyph both carry this same meaning for a sighted reader; this is the
+ * one carrier a screen reader gets, so it must say something, not nothing —
+ * the whole content of a diff line is whether it was removed, added, or
+ * changed. */
+const WORD: Record<DiffLine['kind'], string> = {
+  'node-removed': 'removed',
+  'edge-removed': 'removed',
+  'node-added': 'added',
+  'edge-added': 'added',
+  'plugin-changed': 'changed',
+  'input-changed': 'changed',
 };
 
 const VersionSummary = (props: { label: string; version: ApiFlowVersion }): JSX.Element => (
@@ -180,6 +196,7 @@ export const FlowCompare = (props: {
                   <span className="flow-diff-prefix" aria-hidden="true">
                     {PREFIX[line.kind]}
                   </span>
+                  <span className="visually-hidden">{WORD[line.kind]}: </span>
                   {line.text}
                 </li>
               ))}
