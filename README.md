@@ -40,22 +40,24 @@ plugin.
 
 ## Status
 
-Early. There is no UI yet. What exists is a `trawlarr` command-line tool
-that can point at a real folder of media, scan it, and drain the queue
-against real `ffmpeg`/`ffprobe` — see "Try it" below — and a `trawlarr
-daemon` that does the same thing unattended behind an HTTP API, a filesystem
-watcher and a schedule (see "Run it as a service"), plus the libraries behind
-both.
+Early. What exists is a `trawlarr` command-line tool that can point at a real
+folder of media, scan it, and drain the queue against real `ffmpeg`/`ffprobe`
+— see "Try it" below — and a `trawlarr daemon` that does the same thing
+unattended behind an HTTP API, a filesystem watcher and a schedule (see "Run
+it as a service"), plus the libraries behind both. The daemon serves a web UI
+covering library setup, flow attachment, a library-centric overview and live
+activity; everything else is still CLI or API only.
 
-The pnpm workspace holds five packages:
+The pnpm workspace holds six packages:
 
 | Package                  | What it is                                                                                                                                                                                                                                                                                                                                                                                     |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@trawlarr/core`         | Pure domain logic: file identity, fact extraction, the convergence ledger, flow definitions and their signature hash, and the cooperative ffmpeg command model (build → compile to argv). No I/O.                                                                                                                                                                                              |
 | `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                                                                                                                                   |
-| `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute.                                                                                                                                                                                                                                                                              |
+| `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute, Verify Output, Replace Original File.                                                                                                                                                                                                                                        |
 | `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run.                                                                                                          |
 | `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the worker supervisor and its forked worker processes, the filesystem watcher and scan coordinator, the REST API and its event stream, the daemon that composes all of it, and the `trawlarr` CLI — which becomes that daemon's client whenever one is running. |
+| `@trawlarr/web`          | The React UI the daemon serves as static files: the API-key gate, the library-centric Overview, library setup and flow attachment, and a live Activity screen fed by the event stream. Built by `pnpm build`; the Docker image ships it.                                                                                                                                                       |
 
 ### Run it in Docker
 
@@ -245,8 +247,9 @@ side effects: it reports the exact ffmpeg command Execute would run, and stops
 at the first node whose side effects the engine cannot vouch for — which is
 every third-party plugin, because a plugin can spawn subprocesses directly.
 
-Transcodes write to a new path. The engine never implicitly replaces a file;
-an explicit Replace Original File node is not implemented yet.
+Transcodes write to a new path. The engine never implicitly replaces a file:
+replacement happens only where a flow says so, through an explicit Replace
+Original File node.
 
 ### Compatibility harness
 
@@ -277,3 +280,8 @@ pnpm test
 pnpm lint
 pnpm audit:licenses
 ```
+
+[`AGENTS.md`](./AGENTS.md) is the orientation for coding agents — the commands
+above in more detail, the shape of the workspace, and the invariants that are
+easy to break without reading several files first. It is worth a read for
+humans too. `CLAUDE.md` and `GEMINI.md` are symlinks to it.
