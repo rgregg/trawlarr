@@ -104,9 +104,12 @@ export const createFlowVersionRepo = (db: Db): FlowVersionRepo => {
   );
   const countByFlow = db.prepare(`SELECT COUNT(*) AS n FROM flow_version WHERE flow_id = ?`);
   // Newest match first, so LIMIT 1 answers "the newest version carrying this
-  // hash" without scanning every row that ever shared it.
+  // hash" without scanning every row that ever shared it. Same `rowid`
+  // tiebreak as `selectByFlow` above, and for the same reason: a hash can
+  // repeat within the millisecond a create and an update through the API
+  // share, and `created_at` alone cannot order those two rows.
   const selectByHash = db.prepare(
-    `SELECT * FROM flow_version WHERE definition_hash = ? ORDER BY created_at DESC LIMIT 1`,
+    `SELECT * FROM flow_version WHERE definition_hash = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
 
   const get = (id: string): FlowVersionRecord | null => {

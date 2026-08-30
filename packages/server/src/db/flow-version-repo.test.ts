@@ -58,6 +58,24 @@ describe('flow version repo', () => {
     expect(createFlowVersionRepo(db).byHash('never')).toBeNull();
   });
 
+  it('breaks a created_at tie on byHash deterministically, newer row first', () => {
+    // Same rule as the `list` tiebreak test above, but for `byHash`: two
+    // rows can share both a hash and a millisecond timestamp, and without
+    // the `rowid` tiebreak in `ORDER BY` SQLite is free to return either one.
+    const { db, flowId } = seed();
+    const repo = createFlowVersionRepo(db);
+    repo.append({ flowId, definitionHash: 'a', definition: DEF, note: 'first', nowMs: 10 });
+    const second = repo.append({
+      flowId,
+      definitionHash: 'a',
+      definition: DEF,
+      note: 'second',
+      nowMs: 10,
+    });
+
+    expect(repo.byHash('a')?.id).toBe(second.id);
+  });
+
   it('breaks a created_at tie deterministically, newer row first', () => {
     // Two rows can legitimately share a millisecond -- a create immediately
     // followed by an update through the API, both stamped with the same
