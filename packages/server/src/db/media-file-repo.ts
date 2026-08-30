@@ -135,6 +135,20 @@ export interface MediaFileRepo {
   }): void;
   getById(fileId: string): MediaFileRow | null;
   /**
+   * Move a row up (or down) `claimNext`'s queue: that statement orders
+   * `ORDER BY priority DESC, discovered_at ASC`, so a higher number is
+   * claimed sooner. Returns false when no row matched, so a caller (the API
+   * route) can tell "raised" from "no such file" without a separate lookup.
+   *
+   * Deliberately does NOT touch `updated_at`. That column is the stalled-
+   * worker reaper's only liveness signal for a `running` row that has no
+   * job row yet (see `reap-stalled.ts`) — a claim it refreshed would look
+   * alive long after the worker that made it is gone. `updated_at` records
+   * an OBSERVATION of the file; priority is operator INTENT, not an
+   * observation, so setting it must never reset that signal.
+   */
+  setPriority(fileId: string, priority: number): boolean;
+  /**
    * Stores `probe_json` verbatim and derives the denormalised filter columns
    * (`video_codec`, `audio_codec`, `resolution`, `duration_ms`, `bitrate`)
    * from `facts`. The `facts` argument itself is NOT persisted — the schema
@@ -336,6 +350,8 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     `UPDATE media_file SET missing_since_ms = NULL WHERE id = ?`,
   );
 
+  const updatePriority = db.prepare(`UPDATE media_file SET priority = ? WHERE id = ?`);
+
   /**
    * Claim in one statement. A read-then-write queue lets two workers select
    * the same row and transcode it twice into each other's output, so the
@@ -465,6 +481,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
 
     getById(fileId) {
       return (selectById.get(fileId) as MediaFileRow | undefined) ?? null;
+    },
+
+    setPriority(fileId, priority) {
+      return updatePriority.run(priority, fileId).changes > 0;
     },
 
     // `input.facts` is used ONLY to derive the five denormalised columns

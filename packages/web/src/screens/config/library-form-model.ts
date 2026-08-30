@@ -1,4 +1,4 @@
-import { ApiClientError } from '../api/client.js';
+import { ApiClientError } from '../../api/client.js';
 
 export interface LibraryDraft {
   name: string;

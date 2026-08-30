@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApiClientError } from '../api/client.js';
+import { ApiClientError } from '../../api/client.js';
 import {
   describeFailure,
   draftProblems,

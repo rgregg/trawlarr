@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ApiClient } from '../api/client.js';
+import type { ApiClient } from '../../api/client.js';
 import { describeFailure } from './library-form-model.js';
 import type { LibraryRow } from './Libraries.js';
 
