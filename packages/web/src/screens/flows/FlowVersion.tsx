@@ -6,7 +6,17 @@ import { formatRoute } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { GraphNode } from './FlowDetail.js';
 import { toGraphRows } from './flow-graph-model.js';
-import { formatWhen, type ApiVersionSummary } from './flow-version-model.js';
+import {
+  describeRestoreConfirmation,
+  describeRestorePreview,
+  describeVersionNotice,
+  formatWhen,
+  isRestoreNoOp,
+  resolveVersionStatus,
+  restoreButtonLabel,
+  type ApiVersionSummary,
+  type CurrentVersionState,
+} from './flow-version-model.js';
 
 /**
  * `GET /flows/:id/versions/:versionId`'s shape — the full record, `definition`
@@ -112,26 +122,27 @@ export const FlowVersion = (props: {
   // itself and whether Restore/Compare make sense to offer, but its failure
   // must never blank a screen that already has the version to draw.
   //
-  // THREE STATES, and the type system has to see all three: `undefined`
-  // means "not yet known" (still loading, or the fetch failed) — this
-  // screen treats that as "not provably current" rather than guessing.
-  // `null` means the fetch succeeded and genuinely found no current version
-  // (a flow with no versions at all). A STRING is the one case Restore's
-  // "Compare with current" link may use. An earlier version of this used the
-  // string `'unknown'` as the "not yet known" sentinel — which
-  // `useState<string | null | 'unknown'>` widens to `string | null`, so
-  // `typeof currentVersionId === 'string'` was true for `'unknown'` too, and
-  // "Compare with current" linked to `/flows/:id/versions/unknown` before
-  // the fetch resolved (or forever, if it failed). `undefined` cannot be
-  // mistaken for a real id the way a string sentinel can.
-  const [currentVersionId, setCurrentVersionId] = useState<string | null | undefined>(undefined);
+  // `CurrentVersionState` (see `flow-version-model.ts`) keeps "still
+  // loading" and "the fetch failed" as two distinct states rather than
+  // collapsing both into one sentinel — collapsing them was the bug: a
+  // failed lookup used to render identically to "checked, and it turned out
+  // not to be current", so this page asserted HISTORICAL, and offered
+  // Restore, for a version it had simply failed to check. `resolveVersionStatus`
+  // turns this state plus the version id into the one of four states the
+  // page actually renders.
+  //
+  // The `hash` carried alongside `id` is what `isRestoreNoOp` below compares
+  // against this version's own hash — a DIFFERENT version row can be current
+  // by id while this one is still a no-op to restore by hash (publish A,
+  // then B, then A again: id changed, hash didn't).
+  const [currentVersion, setCurrentVersion] = useState<CurrentVersionState>({ kind: 'loading' });
+  const [currentAttempt, setCurrentAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    setCurrentVersionId(undefined);
+    setCurrentVersion({ kind: 'loading' });
     // Reached via `flowVersionDirect`, `resolvedFlowId` is `null` until the
     // primary fetch above resolves it — this simply waits for that render
-    // rather than guessing, the same "undefined means not yet known" rule
-    // the state's own comment states.
+    // rather than guessing.
     if (resolvedFlowId === null) return;
     void (async () => {
       try {
@@ -139,17 +150,22 @@ export const FlowVersion = (props: {
           `/flows/${resolvedFlowId}/versions?limit=1`,
         );
         if (cancelled) return;
-        setCurrentVersionId(page.items[0]?.id ?? null);
+        const top = page.items[0];
+        setCurrentVersion({
+          kind: 'known',
+          id: top?.id ?? null,
+          hash: top?.definitionHash ?? null,
+        });
       } catch {
-        if (!cancelled) setCurrentVersionId(undefined);
+        if (!cancelled) setCurrentVersion({ kind: 'failed' });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [client, resolvedFlowId]);
+  }, [client, resolvedFlowId, currentAttempt]);
 
-  const isCurrent = version !== null && currentVersionId === version.id;
+  const status = version === null ? 'loading' : resolveVersionStatus(currentVersion, version.id);
 
   // ANOTHER secondary fetch — which libraries use this flow — needed only to
   // state Restore's blast radius. Same isolation as the two above: its
@@ -234,7 +250,7 @@ export const FlowVersion = (props: {
   };
 
   const rows = version === null ? [] : toGraphRows(version.definition);
-  const libraryCountLabel = (count: number): string => `librar${count === 1 ? 'y' : 'ies'}`;
+  const noOp = version !== null && isRestoreNoOp(currentVersion, version.definitionHash);
 
   return (
     <div className="flow-page">
@@ -291,12 +307,21 @@ export const FlowVersion = (props: {
           </div>
 
           <div role="note" className="flow-page-notice">
-            {isCurrent
-              ? 'This is the current version of this flow — it is what runs today.'
-              : 'This is a HISTORICAL version, not the one currently in effect. Restoring it ' +
-                'publishes this definition again, as a brand-new version — the history is ' +
-                'append-only, so restoring never rewrites or removes anything.'}
+            {describeVersionNotice(status)}
           </div>
+
+          {status === 'failed' && (
+            <p className="detail">
+              <button
+                type="button"
+                onClick={() => {
+                  setCurrentAttempt((n) => n + 1);
+                }}
+              >
+                Retry
+              </button>
+            </p>
+          )}
 
           <dl className="flow-page-meta">
             <div>
@@ -315,22 +340,24 @@ export const FlowVersion = (props: {
             </div>
           </dl>
 
-          {!isCurrent && typeof currentVersionId === 'string' && (
-            <div className="flow-page-actions">
-              <Link
-                to={formatRoute({
-                  name: 'flowCompare',
-                  flowId: version.flowId,
-                  from: version.id,
-                  to: currentVersionId,
-                })}
-                navigate={props.navigate}
-                className="flow-history-compare"
-              >
-                Compare with current
-              </Link>
-            </div>
-          )}
+          {status === 'historical' &&
+            currentVersion.kind === 'known' &&
+            currentVersion.id !== null && (
+              <div className="flow-page-actions">
+                <Link
+                  to={formatRoute({
+                    name: 'flowCompare',
+                    flowId: version.flowId,
+                    from: version.id,
+                    to: currentVersion.id,
+                  })}
+                  navigate={props.navigate}
+                  className="flow-history-compare"
+                >
+                  Compare with current
+                </Link>
+              </div>
+            )}
 
           <h3>Graph</h3>
           {rows.length === 0 ? (
@@ -345,7 +372,7 @@ export const FlowVersion = (props: {
             </div>
           )}
 
-          {!isCurrent && (
+          {status === 'historical' && (
             <>
               <h3>Restore</h3>
               <p className="help">
@@ -375,70 +402,62 @@ export const FlowVersion = (props: {
 
               {!librariesFailed && libraries !== null && blastRadius.kind === 'ready' && (
                 <>
-                  <p className="trash-total">
-                    {libraries.length === 0 ? (
-                      'No library currently uses this flow — restoring would re-queue nothing.'
-                    ) : (
+                  {(() => {
+                    const preview = {
+                      isNoOp: noOp,
+                      totalFiles: blastRadius.totalFiles,
+                      libraryCount: libraries.length,
+                    };
+                    return (
                       <>
-                        Restoring now would re-queue{' '}
-                        <strong>{String(blastRadius.totalFiles)} file(s)</strong> across{' '}
-                        <strong>
-                          {String(libraries.length)} {libraryCountLabel(libraries.length)}
-                        </strong>
-                        :
+                        <p className="trash-total">{describeRestorePreview(preview)}</p>
+
+                        {libraries.length > 0 && (
+                          <ul className="flow-page-libraries">
+                            {libraries.map((library) => (
+                              <li key={library.id}>{library.name}</li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {!confirming ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirming(true);
+                            }}
+                          >
+                            Restore this version…
+                          </button>
+                        ) : (
+                          <div role="alert" className="failure trash-confirm">
+                            <strong>
+                              Restoring publishes this definition again, as a new version.
+                            </strong>
+                            <p>{describeRestoreConfirmation(preview)}</p>
+                            <div className="row-actions">
+                              <button
+                                type="button"
+                                disabled={restoring}
+                                onClick={() => void restore()}
+                              >
+                                {restoreButtonLabel(preview, restoring)}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={restoring}
+                                onClick={() => {
+                                  setConfirming(false);
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </>
-                    )}
-                  </p>
-
-                  {libraries.length > 0 && (
-                    <ul className="flow-page-libraries">
-                      {libraries.map((library) => (
-                        <li key={library.id}>{library.name}</li>
-                      ))}
-                    </ul>
-                  )}
-
-                  {!confirming ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setConfirming(true);
-                      }}
-                    >
-                      Restore this version…
-                    </button>
-                  ) : (
-                    <div role="alert" className="failure trash-confirm">
-                      <strong>Restoring publishes this definition again, as a new version.</strong>
-                      <p>
-                        {blastRadius.totalFiles === 0
-                          ? 'No files will be re-queued — no library currently uses this flow.'
-                          : `${String(blastRadius.totalFiles)} file(s) across ${String(
-                              libraries.length,
-                            )} ${libraryCountLabel(libraries.length)} will be re-queued for a ` +
-                            'rescan. How many will actually need re-encoding is not known ahead ' +
-                            'of time.'}
-                      </p>
-                      <div className="row-actions">
-                        <button type="button" disabled={restoring} onClick={() => void restore()}>
-                          {restoring
-                            ? 'Restoring…'
-                            : blastRadius.totalFiles === 0
-                              ? 'Yes, restore'
-                              : `Yes, restore and re-queue ${String(blastRadius.totalFiles)} file(s)`}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={restoring}
-                          onClick={() => {
-                            setConfirming(false);
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </>
               )}
 
