@@ -2,3 +2,7 @@ docs/
 pnpm-lock.yaml
 tsconfig.vitest-temp.json
 packages/web/dist
+# Symlinks to AGENTS.md. Formatting them would rewrite the link as a real
+# file and silently fork the instructions; AGENTS.md itself is checked.
+CLAUDE.md
+GEMINI.md
