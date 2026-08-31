@@ -884,6 +884,36 @@ describe('flows', () => {
     expect((res.body as { error: { code: string } }).error.code).toBe('version-not-recorded');
   });
 
+  it('scopes a by-hash lookup to the flow the caller names', async () => {
+    // Two flows built from the same definition share every hash they publish,
+    // which is what duplicating a flow for a second library produces. Without
+    // the scope, a job on the first flow resolves to the second flow's
+    // version, and Restore on that page re-queues the wrong library.
+    const mine = (await createFlowViaApi()) as { id: string; definitionHash: string };
+    const theirs = (await createFlowViaApi()) as { id: string; definitionHash: string };
+    expect(theirs.definitionHash).toBe(mine.definitionHash);
+
+    const res = await api(
+      'GET',
+      `/flows/versions/by-hash/${mine.definitionHash}?flowId=${mine.id}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect((res.body as { flowId: string }).flowId).toBe(mine.id);
+  });
+
+  it('says not-recorded when the hash exists but not on the flow that was named', async () => {
+    const flow = (await createFlowViaApi()) as { id: string; definitionHash: string };
+
+    const res = await api(
+      'GET',
+      `/flows/versions/by-hash/${flow.definitionHash}?flowId=no-such-flow`,
+    );
+
+    expect(res.status).toBe(404);
+    expect((res.body as { error: { code: string } }).error.code).toBe('version-not-recorded');
+  });
+
   it('resolves a version by id alone, without knowing its flow', async () => {
     const flow = await createFlowViaApi();
     const byHash = (await api('GET', `/flows/versions/by-hash/${flow.definitionHash}`)).body as {
