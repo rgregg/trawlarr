@@ -44,6 +44,53 @@ describe('parseRoute', () => {
     expect(parseRoute('/nope', '')).toEqual({ name: 'notFound', path: '/nope' });
   });
 
+  it('routes a single flow version and a comparison', () => {
+    expect(parseRoute('/flows/f1/versions/v9', '')).toEqual({
+      name: 'flowVersion',
+      flowId: 'f1',
+      versionId: 'v9',
+    });
+    expect(parseRoute('/flows/f1/compare', '?from=v1&to=v2')).toEqual({
+      name: 'flowCompare',
+      flowId: 'f1',
+      from: 'v1',
+      to: 'v2',
+    });
+  });
+
+  it('reaches a version by id alone — the route a job hash resolves to', () => {
+    expect(parseRoute('/flows/versions/v9', '')).toEqual({
+      name: 'flowVersionDirect',
+      versionId: 'v9',
+    });
+  });
+
+  it('is not swallowed by, and does not swallow, the two- and four-segment flow routes', () => {
+    // Segment counts 2, 3 and 4 respectively — none of these three patterns
+    // ever compete for the same path.
+    expect(parseRoute('/flows/f1', '')).toEqual({ name: 'flow', id: 'f1' });
+    expect(parseRoute('/flows/versions/v9', '')).toEqual({
+      name: 'flowVersionDirect',
+      versionId: 'v9',
+    });
+    expect(parseRoute('/flows/f1/versions/v9', '')).toEqual({
+      name: 'flowVersion',
+      flowId: 'f1',
+      versionId: 'v9',
+    });
+  });
+
+  it('round-trips the new flow routes', () => {
+    for (const route of [
+      { name: 'flowVersion', flowId: 'f1', versionId: 'v9' } as const,
+      { name: 'flowVersionDirect', versionId: 'v9' } as const,
+      { name: 'flowCompare', flowId: 'f1', from: 'v1', to: 'v2' } as const,
+    ]) {
+      const url = new URL(formatRoute(route), 'http://x');
+      expect(parseRoute(url.pathname, url.search)).toEqual(route);
+    }
+  });
+
   it('round-trips every route through formatRoute', () => {
     const routes = [
       { name: 'watch' } as const,
@@ -56,6 +103,10 @@ describe('parseRoute', () => {
       } as const,
       { name: 'job', id: 'job-9' } as const,
       { name: 'flow', id: 'flow-7' } as const,
+      { name: 'flowVersion', flowId: 'flow-7', versionId: 'v-1' } as const,
+      { name: 'flowVersionDirect', versionId: 'v-1' } as const,
+      { name: 'flowCompare', flowId: 'flow-7', from: null, to: null } as const,
+      { name: 'flowCompare', flowId: 'flow-7', from: 'v-1', to: 'v-2' } as const,
       { name: 'config', tab: 'libraries' } as const,
       { name: 'files', filters: { library: 'lib-1', state: 'failed', q: 'x' } } as const,
     ];

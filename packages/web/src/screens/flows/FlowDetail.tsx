@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
+import { formatRoute } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { toGraphRows, type FlowDefinition, type GraphRow } from './flow-graph-model.js';
+import { toVersionRows, type ApiVersionSummary, type VersionRow } from './flow-version-model.js';
 
 /**
  * `GET /flows/:id`'s shape, as `packages/server/src/api/routes/flows.ts`'s
@@ -36,7 +38,13 @@ const copyToClipboard = (text: string): Promise<void> | null => {
   return clipboard === undefined ? null : clipboard.writeText(text);
 };
 
-const GraphNode = (props: { row: GraphRow }): JSX.Element => {
+/**
+ * Exported so `FlowVersion.tsx` can draw a historical version's graph with
+ * the exact same rendering — branch labels, the "also reached from" note,
+ * the unreachable-node marker — rather than a second component drifting
+ * from what this one does.
+ */
+export const GraphNode = (props: { row: GraphRow }): JSX.Element => {
   const { row } = props;
   return (
     <li
@@ -107,11 +115,24 @@ export const FlowDetail = (props: {
   const [libraries, setLibraries] = useState<ApiLibraryStub[] | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // History gets the SAME failure/loading/empty split as the flow itself —
+  // not the libraries panel's quieter inline text — because a broken
+  // history fetch is something an operator retries, and a Retry button that
+  // does not exist cannot be reached for.
+  const [versions, setVersions] = useState<VersionRow[] | null>(null);
+  const [versionsFailure, setVersionsFailure] = useState<ReturnType<typeof describeFailure> | null>(
+    null,
+  );
+  const [versionsAttempt, setVersionsAttempt] = useState(0);
+  const versionsLoading = versionsFailure === null && versions === null;
+
   useEffect(() => {
     setFlow(null);
     setFailure(null);
     setLibraries(null);
     setCopied(false);
+    setVersions(null);
+    setVersionsFailure(null);
   }, [id]);
 
   useEffect(() => {
@@ -156,7 +177,34 @@ export const FlowDetail = (props: {
     };
   }, [client, id]);
 
+  // ANOTHER independent, secondary fetch — a flow's history — with the same
+  // rule as the libraries fetch above: this screen's job is to show the
+  // flow and its graph, and a broken history request must not take that
+  // away. It gets its OWN failure state rather than reusing `failure`
+  // above, precisely so a history failure renders confined to the History
+  // section instead of replacing the whole page with a Retry button for a
+  // fetch the graph never needed.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const page = await client.get<{ items: ApiVersionSummary[] }>(
+          `/flows/${id}/versions?limit=50`,
+        );
+        if (cancelled) return;
+        setVersions(toVersionRows(page.items, Date.now()));
+        setVersionsFailure(null);
+      } catch (error) {
+        if (!cancelled) setVersionsFailure(describeFailure(error));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, id, versionsAttempt]);
+
   const rows = flow === null ? [] : toGraphRows(flow.definition);
+  const currentVersion = versions?.find((version) => version.isCurrent) ?? null;
 
   const onCopy = (): void => {
     if (flow === null) return;
@@ -263,6 +311,67 @@ export const FlowDetail = (props: {
               </ol>
             </div>
           )}
+
+          <h3>History</h3>
+          {versionsFailure !== null && (
+            <div role="alert" className="failure">
+              <strong>{versionsFailure.title}</strong>
+              <p className="verbatim">{versionsFailure.message}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setVersionsAttempt((n) => n + 1);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {versionsFailure === null && versionsLoading && <p className="help">Loading history…</p>}
+
+          {versionsFailure === null &&
+            !versionsLoading &&
+            versions !== null &&
+            versions.length === 0 && (
+              <p className="help">This flow has never been published — there is no history yet.</p>
+            )}
+
+          {versionsFailure === null &&
+            !versionsLoading &&
+            versions !== null &&
+            versions.length > 0 && (
+              <ul className="flow-history">
+                {versions.map((version) => (
+                  <li key={version.id} className="flow-history-row">
+                    <Link
+                      to={formatRoute({ name: 'flowVersion', flowId: id, versionId: version.id })}
+                      navigate={props.navigate}
+                      className="flow-history-link"
+                    >
+                      <code>{version.shortHash}</code>
+                      {version.isCurrent && <span className="badge">current</span>}
+                      <span className="flow-history-note">{version.note}</span>
+                      <span className="flow-history-when">{version.when}</span>
+                    </Link>
+                    {!version.isCurrent && currentVersion !== null && (
+                      <Link
+                        to={formatRoute({
+                          name: 'flowCompare',
+                          flowId: id,
+                          from: version.id,
+                          to: currentVersion.id,
+                        })}
+                        navigate={props.navigate}
+                        className="flow-history-compare"
+                      >
+                        Compare with current
+                      </Link>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
         </>
       )}
     </div>

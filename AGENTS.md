@@ -27,7 +27,8 @@ Node 22 (`.nvmrc`, `nvm use`) and pnpm 9. `better-sqlite3` prebuilds are Node-22
 ```bash
 pnpm install
 pnpm build            # tsc --build, copy SQL migrations into dist, vite build for web
-pnpm test             # vitest run --typecheck
+pnpm test             # vitest run
+pnpm typecheck        # type-check tests too (build tsconfigs exclude them)
 pnpm lint             # eslint . && prettier --check .
 pnpm format
 pnpm check:refs       # tsconfig project references match package deps (CI runs it first)
@@ -50,10 +51,13 @@ Running the built artifacts: `node packages/server/dist/cli.js …` (the `trawla
 single-file engine harness). Both require `pnpm build` first. `packages/web` dev server:
 `pnpm --filter @trawlarr/web dev`.
 
-Tests are Vitest with **typecheck enabled**: package build tsconfigs exclude `*.test.ts`,
-so `tsconfig.typecheck.json` is what type-checks tests. A type error in a test fails
-`pnpm test` — that is intentional, because several tests are structural guards written as
-type-level literals.
+**Type-checking tests is a separate step.** Package build tsconfigs exclude `*.test.ts`,
+so `tsc --build` never sees a test file; `pnpm typecheck` runs `tsc --noEmit` over
+`tsconfig.typecheck.json`, which is what covers `packages/*/test` and `*.test.ts`. Run it
+alongside `pnpm test` and keep it in CI — several tests are structural guards written as
+type-level literals, and they guard nothing if nobody type-checks them. It is deliberately
+not a vitest typecheck project: that needs its own `include` glob, which made every test
+file and test get counted twice.
 
 Suites that need real `ffmpeg`/`ffprobe` gate on `test-support/tool-availability.ts`.
 Only `ENOENT` skips; a check that _fails_ throws, because a skipped suite is green and

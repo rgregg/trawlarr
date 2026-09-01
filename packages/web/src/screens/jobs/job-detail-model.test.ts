@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { pluginLabel, toStepRows } from './job-detail-model.js';
+import { describeFlowVersion, pluginLabel, toStepRows } from './job-detail-model.js';
+
+describe('describeFlowVersion', () => {
+  it('links a hash that was recorded', () => {
+    expect(describeFlowVersion({ hash: '17dce8bd5e34', versionId: 'v9' })).toEqual({
+      text: '17dce8bd',
+      to: '/flows/versions/v9',
+    });
+  });
+
+  it('says a hash predating versioning was never recorded, and links nowhere', () => {
+    expect(describeFlowVersion({ hash: 'c49b5f39aaaa', versionId: null })).toEqual({
+      text: 'c49b5f39 — this version was not recorded',
+      to: null,
+    });
+  });
+});
 
 describe('pluginLabel', () => {
   it('reads a plugin id as words', () => {

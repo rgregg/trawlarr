@@ -11,13 +11,26 @@
  */
 
 /**
- * A hand-written copy of `@trawlarr/core`'s `WorkerClass`/`WORKER_CLASSES`,
- * for the same reason `api/events.ts` keeps its own copy of `WorkerClass`:
- * `@trawlarr/core` is not a dependency of this package, and adding one to
- * reach two literal strings would be a dependency for a type.
+ * `@trawlarr/core`'s own `WorkerClass`/`WORKER_CLASSES` — this package
+ * depends on `@trawlarr/core` now, so re-exporting these rather than keeping
+ * a second, hand-written copy is what avoids the two definitions drifting
+ * apart. (`api/events.ts` still keeps its own copy, for the reason its own
+ * comment gives.)
+ *
+ * Imported from the `./worker-class` SUBPATH, the same way
+ * `FlowCompare.tsx` reaches `diffFlowDefinitions` through `./flow-diff`
+ * rather than the bare `@trawlarr/core` — `@trawlarr/core`'s root barrel
+ * (`index.ts`) re-exports `canonical-json.ts`, which imports `node:crypto`,
+ * and Vite's browser build has no stub for that (see `vite.config.ts`'s own
+ * comment on why it avoids adding one more dependency to work around it).
+ * A bare `@trawlarr/core` import for a *type* is fine — the type is erased
+ * before bundling ever sees it — but a VALUE import of anything through the
+ * root barrel drags that whole module graph, `node:crypto` included, into
+ * the bundle and fails the build. The subpath sidesteps the barrel
+ * entirely.
  */
-export type WorkerClass = 'transcode' | 'health';
-export const WORKER_CLASSES: readonly WorkerClass[] = ['transcode', 'health'];
+export type { WorkerClass } from '@trawlarr/core/worker-class';
+export { WORKER_CLASSES } from '@trawlarr/core/worker-class';
 
 /**
  * A worker count, from the box the operator typed it into.

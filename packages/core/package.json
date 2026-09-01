@@ -12,6 +12,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./flow-diff": {
+      "types": "./dist/flow-diff.d.ts",
+      "default": "./dist/flow-diff.js"
+    },
+    "./worker-class": {
+      "types": "./dist/worker-class.d.ts",
+      "default": "./dist/worker-class.js"
     }
   },
   "files": [

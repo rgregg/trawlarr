@@ -8,6 +8,7 @@ import {
 import { createNodeCapabilityResolver } from '../flow/node-capabilities.js';
 import { createPluginRegistry } from '../plugins/registry.js';
 import type { Db } from './connection.js';
+import { createFlowVersionRepo } from './flow-version-repo.js';
 
 export interface FlowRecord {
   id: string;
@@ -27,8 +28,14 @@ export interface FlowRepo {
     tags?: string;
     definition: FlowDefinition;
     nowMs: number;
+    note?: string;
   }): FlowRecord;
-  update(input: { id: string; definition: FlowDefinition; nowMs: number }): FlowRecord;
+  update(input: {
+    id: string;
+    definition: FlowDefinition;
+    nowMs: number;
+    note?: string;
+  }): FlowRecord;
   /**
    * Returns false when no such flow existed.
    *
@@ -79,6 +86,13 @@ const toRecord = (row: FlowRow): FlowRecord => ({
  * someone tries to store it. Repairing them on read is the one thing that
  * would be worse than leaving them: it would silently change the graph a
  * library is converging against, which is the flow's identity.
+ *
+ * Both methods also append a `flow_version` row IN THE SAME TRANSACTION as
+ * the write to `flow`. That is not an optimization: a live definition whose
+ * newest version disagreed with it would make the history lie about what
+ * actually ran, which is worse than no history at all. Validation happens
+ * before the transaction opens, so a rejected definition never appends a
+ * version and never touches `flow` either.
  */
 export const createFlowRepo = (
   db: Db,
@@ -94,33 +108,108 @@ export const createFlowRepo = (
   const selectById = db.prepare(`SELECT * FROM flow WHERE id = ?`);
   const selectByName = db.prepare(`SELECT * FROM flow WHERE name = ?`);
   const selectAll = db.prepare(`SELECT * FROM flow ORDER BY name`);
+  const versionRepo = createFlowVersionRepo(db);
 
   const get = (id: string): FlowRecord | null => {
     const row = selectById.get(id) as FlowRow | undefined;
     return row === undefined ? null : toRecord(row);
   };
 
+  const insertFlow = db.prepare(
+    `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
+                       created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const updateFlow = db.prepare(
+    `UPDATE flow SET definition_json = ?, definition_hash = ?, updated_at = ? WHERE id = ?`,
+  );
+
+  // Both transactions are synchronous, as `db.transaction` requires: nothing
+  // inside may `await`, and a thrown error rolls back everything, including
+  // the version append.
+  // The read-back happens INSIDE each transaction, not after it: reading
+  // after commit would let the returned record and the version just
+  // appended (both inside the transaction) disagree if anything else wrote
+  // to this flow in between. There is a single writer, so that race is
+  // theoretical today — but "theoretical" is not a reason to let the
+  // returned value and the ledger drift, especially in the one place a
+  // reviewer will check first when the two disagree.
+  const createTx = db.transaction(
+    (input: {
+      id: string;
+      name: string;
+      description: string;
+      tags: string;
+      definition: FlowDefinition;
+      definitionHash: string;
+      nowMs: number;
+      note: string;
+    }): FlowRecord => {
+      insertFlow.run(
+        input.id,
+        input.name,
+        input.description,
+        input.tags,
+        JSON.stringify(input.definition),
+        input.definitionHash,
+        input.nowMs,
+        input.nowMs,
+      );
+      versionRepo.append({
+        flowId: input.id,
+        definitionHash: input.definitionHash,
+        definition: input.definition,
+        note: input.note,
+        nowMs: input.nowMs,
+      });
+      const created = get(input.id);
+      if (created === null) throw new Error(`Flow ${input.id} vanished immediately after insert.`);
+      return created;
+    },
+  );
+
+  const updateTx = db.transaction(
+    (input: {
+      id: string;
+      definition: FlowDefinition;
+      definitionHash: string;
+      nowMs: number;
+      note: string;
+    }): FlowRecord => {
+      const result = updateFlow.run(
+        JSON.stringify(input.definition),
+        input.definitionHash,
+        input.nowMs,
+        input.id,
+      );
+      if (result.changes === 0) throw new Error(`Unknown flow: ${input.id}`);
+      versionRepo.append({
+        flowId: input.id,
+        definitionHash: input.definitionHash,
+        definition: input.definition,
+        note: input.note,
+        nowMs: input.nowMs,
+      });
+      const updated = get(input.id);
+      if (updated === null) throw new Error(`Flow ${input.id} vanished immediately after update.`);
+      return updated;
+    },
+  );
+
   return {
     create(input) {
       assertFlowDefinitionValid(input.definition, resolveNodeCapabilities);
       const id = randomUUID();
-      db.prepare(
-        `INSERT INTO flow (id, name, description, tags, definition_json, definition_hash,
-                           created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+      return createTx({
         id,
-        input.name,
-        input.description ?? '',
-        input.tags ?? '',
-        JSON.stringify(input.definition),
-        flowDefinitionHash(input.definition),
-        input.nowMs,
-        input.nowMs,
-      );
-      const created = get(id);
-      if (created === null) throw new Error(`Flow ${id} vanished immediately after insert.`);
-      return created;
+        name: input.name,
+        description: input.description ?? '',
+        tags: input.tags ?? '',
+        definition: input.definition,
+        definitionHash: flowDefinitionHash(input.definition),
+        nowMs: input.nowMs,
+        note: input.note ?? '',
+      });
     },
 
     update(input) {
@@ -128,20 +217,13 @@ export const createFlowRepo = (
       // The hash is recomputed here rather than read back, because it IS the
       // flow's version: every file whose ledger recorded the old hash becomes
       // stale the moment this returns.
-      const result = db
-        .prepare(
-          `UPDATE flow SET definition_json = ?, definition_hash = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(
-          JSON.stringify(input.definition),
-          flowDefinitionHash(input.definition),
-          input.nowMs,
-          input.id,
-        );
-      if (result.changes === 0) throw new Error(`Unknown flow: ${input.id}`);
-      const updated = get(input.id);
-      if (updated === null) throw new Error(`Flow ${input.id} vanished immediately after update.`);
-      return updated;
+      return updateTx({
+        id: input.id,
+        definition: input.definition,
+        definitionHash: flowDefinitionHash(input.definition),
+        nowMs: input.nowMs,
+        note: input.note ?? '',
+      });
     },
 
     remove(id) {

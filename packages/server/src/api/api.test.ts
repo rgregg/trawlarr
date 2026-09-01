@@ -62,6 +62,20 @@ const flowUsing = (pluginId: string): FlowDefinition => ({
   edges: [],
 });
 
+/** A second valid definition, distinct from `VALID_FLOW` — used to publish a new version. */
+const OTHER_DEF: FlowDefinition = {
+  nodes: [
+    { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'check',
+      pluginId: 'trawlarr:checkVideoCodec',
+      pluginVersion: '1.0.0',
+      inputs: { codec: 'hevc' },
+    },
+  ],
+  edges: [{ fromNodeId: 'start', toNodeId: 'check', outputNumber: 1 }],
+};
+
 /** A supervisor that records what it was asked to do, and nothing else. */
 interface FakeSupervisor extends Supervisor {
   cancelled: string[];
@@ -193,6 +207,15 @@ const api = async (
     headers: response.headers,
     body: text === '' ? undefined : (JSON.parse(text) as unknown),
   };
+};
+
+/** Creates a flow through the API itself, the way a version-history test needs it published. */
+const createFlowViaApi = async (): Promise<ResponseBody> => {
+  const response = await api('POST', '/flows', {
+    name: `flow-${randomUUID().slice(0, 8)}`,
+    definition: VALID_FLOW,
+  });
+  return response.body;
 };
 
 const seedLibrary = (over: { name?: string; roots?: string[]; flowId?: string | null } = {}) =>
@@ -813,6 +836,113 @@ describe('flows', () => {
     const after = createLibraryRepo(db).getById(library.id)!;
     expect(after.enabled).toBe(false);
     expect(after.pausedReason).toContain('no flow attached');
+  });
+
+  it("lists a flow's versions newest first, marking the current one", async () => {
+    const flow = await createFlowViaApi();
+    await api('PUT', `/flows/${flow.id}`, { definition: OTHER_DEF, note: 'second' });
+
+    const res = await api('GET', `/flows/${flow.id}/versions`);
+
+    expect(res.status).toBe(200);
+    const body = res.body as { total: number; items: Array<{ note: string; isCurrent: boolean }> };
+    expect(body.total).toBe(2);
+    expect(body.items[0]!.note).toBe('second');
+    expect(body.items[0]!.isCurrent).toBe(true);
+    expect(body.items[1]!.isCurrent).toBe(false);
+  });
+
+  it('restores a past version by publishing it as a new one', async () => {
+    const flow = await createFlowViaApi();
+    const first = flow.definitionHash;
+    await api('PUT', `/flows/${flow.id}`, { definition: OTHER_DEF });
+    const versions = (await api('GET', `/flows/${flow.id}/versions`)).body as {
+      items: Array<{ id: string; definitionHash: string }>;
+    };
+    const original = versions.items.find((v) => v.definitionHash === first)!;
+
+    const res = await api('POST', `/flows/${flow.id}/versions/${original.id}/restore`, {});
+
+    expect(res.status).toBe(200);
+    expect((res.body as { definitionHash: string }).definitionHash).toBe(first);
+    const after = (await api('GET', `/flows/${flow.id}/versions`)).body as { total: number };
+    expect(after.total).toBe(3); // appended, never rewritten
+  });
+
+  it('resolves a hash to the definition that ran under it', async () => {
+    const flow = await createFlowViaApi();
+    const res = await api('GET', `/flows/versions/by-hash/${flow.definitionHash}`);
+
+    expect(res.status).toBe(200);
+    expect((res.body as { definition: unknown }).definition).toBeDefined();
+  });
+
+  it('says a hash was never recorded rather than answering a bare 404', async () => {
+    const res = await api('GET', '/flows/versions/by-hash/deadbeef');
+
+    expect(res.status).toBe(404);
+    expect((res.body as { error: { code: string } }).error.code).toBe('version-not-recorded');
+  });
+
+  it('scopes a by-hash lookup to the flow the caller names', async () => {
+    // Two flows built from the same definition share every hash they publish,
+    // which is what duplicating a flow for a second library produces. Without
+    // the scope, a job on the first flow resolves to the second flow's
+    // version, and Restore on that page re-queues the wrong library.
+    const mine = (await createFlowViaApi()) as { id: string; definitionHash: string };
+    const theirs = (await createFlowViaApi()) as { id: string; definitionHash: string };
+    expect(theirs.definitionHash).toBe(mine.definitionHash);
+
+    const res = await api(
+      'GET',
+      `/flows/versions/by-hash/${mine.definitionHash}?flowId=${mine.id}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect((res.body as { flowId: string }).flowId).toBe(mine.id);
+  });
+
+  it('says not-recorded when the hash exists but not on the flow that was named', async () => {
+    const flow = (await createFlowViaApi()) as { id: string; definitionHash: string };
+
+    const res = await api(
+      'GET',
+      `/flows/versions/by-hash/${flow.definitionHash}?flowId=no-such-flow`,
+    );
+
+    expect(res.status).toBe(404);
+    expect((res.body as { error: { code: string } }).error.code).toBe('version-not-recorded');
+  });
+
+  it('resolves a version by id alone, without knowing its flow', async () => {
+    const flow = await createFlowViaApi();
+    const byHash = (await api('GET', `/flows/versions/by-hash/${flow.definitionHash}`)).body as {
+      id: string;
+      flowId: string;
+    };
+
+    const res = await api('GET', `/flows/versions/${byHash.id}`);
+
+    expect(res.status).toBe(200);
+    const body = res.body as { id: string; flowId: string; definition: unknown };
+    expect(body.id).toBe(byHash.id);
+    expect(body.flowId).toBe(flow.id);
+    expect(body.definition).toBeDefined();
+  });
+
+  it('404s a version id that was never published', async () => {
+    const res = await api('GET', '/flows/versions/nope');
+
+    expect(res.status).toBe(404);
+    expect((res.body as { error: { code: string } }).error.code).toBe('flow-version-not-found');
+  });
+
+  it('omits definitions from the listing', async () => {
+    const flow = await createFlowViaApi();
+    const body = (await api('GET', `/flows/${flow.id}/versions`)).body as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(body.items[0]).not.toHaveProperty('definition');
   });
 });
 

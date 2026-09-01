@@ -22,22 +22,19 @@ export default defineConfig({
       'docker/**/*.test.ts',
     ],
     environment: 'node',
-    typecheck: {
-      // Each package's build tsconfig excludes *.test.ts so `dist/` never
-      // contains tests. That means `tsc --build` never sees test files, so
-      // structural "don't rename this field" guards written as `.test.ts`
-      // literals are inert unless something else type-checks them. This
-      // runs `tsc` over the same test files vitest executes at runtime, so
-      // a type error (e.g. an object literal assigned the wrong shape)
-      // fails `pnpm test` just like a failed assertion would.
-      enabled: true,
-      include: [
-        'packages/*/src/**/*.test.ts',
-        'packages/*/test/**/*.test.ts',
-        'test-support/**/*.test.ts',
-        'docker/**/*.test.ts',
-      ],
-      tsconfig: './tsconfig.typecheck.json',
-    },
+    // NO `typecheck` PROJECT HERE, deliberately — see the `typecheck` script
+    // in package.json.
+    //
+    // Each package's build tsconfig excludes `*.test.ts` so `dist/` never
+    // contains tests, which means `tsc --build` never sees a test file and a
+    // structural "don't rename this field" guard written as a `.test.ts`
+    // literal would be inert. That check still runs; it just runs as its own
+    // command over `tsconfig.typecheck.json` rather than as a vitest project.
+    //
+    // Why it moved: vitest's typecheck project needs an `include` glob, and
+    // pointing it at the test files meant every file was collected twice —
+    // once to run, once to type-check — so the reported totals were exactly
+    // double the real ones. That miscount was read as evidence three times
+    // across two sub-projects before anyone proved its cause.
   },
 });

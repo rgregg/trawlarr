@@ -29,6 +29,23 @@ export type Route =
   | { name: 'file'; id: string; filters: FileFilters }
   | { name: 'job'; id: string }
   | { name: 'flow'; id: string }
+  // A single entry from a flow's history, reached from the flow it belongs
+  // to — `flowId` is known because the link that opens this route always
+  // starts on that flow's page (see `FlowDetail.tsx`'s History section).
+  | { name: 'flowVersion'; flowId: string; versionId: string }
+  // The one place a version is reached WITHOUT its flow already in hand: a
+  // job row carries `flowHash`, not a flow id (`JobDetail.tsx`, via
+  // `describeFlowVersion` in `job-detail-model.ts`). `/flows/versions/:id`
+  // rather than nesting under a flow, because there is no flow id here to
+  // nest under — deliberately a second, parallel route to `flowVersion`
+  // above rather than a variant of it, since the two are reached with
+  // different information in hand and resolve it differently server-side
+  // (`GET /flows/versions/:versionId` vs `GET /flows/:id/versions/:versionId`).
+  | { name: 'flowVersionDirect'; versionId: string }
+  // `from`/`to` are nullable so `/flows/:id/compare` alone is a valid,
+  // linkable route (an empty comparison screen prompting for both sides)
+  // rather than only ever existing pre-filled.
+  | { name: 'flowCompare'; flowId: string; from: string | null; to: string | null }
   | { name: 'config'; tab: ConfigTab }
   | { name: 'notFound'; path: string };
 
@@ -61,7 +78,33 @@ export const parseRoute = (pathname: string, search: string): Route => {
   }
 
   if (segments[0] === 'jobs' && segments.length === 2) return { name: 'job', id: segments[1]! };
+
   if (segments[0] === 'flows' && segments.length === 2) return { name: 'flow', id: segments[1]! };
+
+  if (segments[0] === 'flows' && segments.length === 4 && segments[2] === 'versions') {
+    return { name: 'flowVersion', flowId: segments[1]!, versionId: segments[3]! };
+  }
+
+  // Three segments, second one literal `versions` — cannot be swallowed by
+  // `flow` (two segments, a different length entirely) or by `flowVersion`
+  // above (four segments, and its own literal falls at position 2, not 1).
+  // The one real collision is a flow whose id happens to be literally
+  // "versions" — the same class of edge case the server's own
+  // `/flows/templates` route already accepts for a flow id of "templates"
+  // (see `packages/server/src/api/routes/flows.ts`), not fixed there
+  // either.
+  if (segments[0] === 'flows' && segments.length === 3 && segments[1] === 'versions') {
+    return { name: 'flowVersionDirect', versionId: segments[2]! };
+  }
+
+  if (segments[0] === 'flows' && segments.length === 3 && segments[2] === 'compare') {
+    return {
+      name: 'flowCompare',
+      flowId: segments[1]!,
+      from: params.get('from'),
+      to: params.get('to'),
+    };
+  }
 
   return { name: 'notFound', path };
 };
@@ -87,6 +130,17 @@ export const formatRoute = (route: Route): string => {
       return `/jobs/${route.id}`;
     case 'flow':
       return `/flows/${route.id}`;
+    case 'flowVersion':
+      return `/flows/${route.flowId}/versions/${route.versionId}`;
+    case 'flowVersionDirect':
+      return `/flows/versions/${route.versionId}`;
+    case 'flowCompare': {
+      const params = new URLSearchParams();
+      if (route.from !== null) params.set('from', route.from);
+      if (route.to !== null) params.set('to', route.to);
+      const query = params.toString();
+      return `/flows/${route.flowId}/compare${query.length === 0 ? '' : `?${query}`}`;
+    }
     case 'config':
       return route.tab === 'workers' ? '/config' : `/config?tab=${route.tab}`;
     case 'notFound':

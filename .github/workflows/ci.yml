@@ -16,6 +16,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:refs
       - run: pnpm build
+      # Package build tsconfigs exclude `*.test.ts`, so neither `pnpm build` nor
+      # `pnpm test` type-checks a test file. Without this step a type error in a test
+      # is green in CI, and several tests are structural guards written as type-level
+      # literals — they only guard anything if this runs.
+      - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm audit:licenses
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg

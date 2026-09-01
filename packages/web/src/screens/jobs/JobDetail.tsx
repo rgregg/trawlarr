@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
+import { ApiClientError } from '../../api/client.js';
 import { LIVE_LOG_LINES, type LiveState } from '../../api/events.js';
 import { Link } from '../../shell/Link.js';
 import { describeFailure } from '../config/library-form-model.js';
-import { toStepRows, type ApiStep } from './job-detail-model.js';
+import { describeFlowVersion, toStepRows, type ApiStep } from './job-detail-model.js';
 
 /**
  * `GET /jobs/:id`'s shape, as the daemon actually returns it — see
  * `packages/server/src/db/job-repo.ts`'s `JobRow` and `JobStepRow`, and
- * `packages/server/src/api/routes/jobs.ts`. `flowHash` and `nodeId` are
- * fetched and shown as a link to the graph the job walked (frozen at
- * `start()`, so not necessarily the library's binding now); `nodeId` is
+ * `packages/server/src/api/routes/jobs.ts`. `flowId` is shown as a link to
+ * the LIVE flow; `flowHash` is resolved below to the exact past VERSION the
+ * job walked (frozen at `start()`, so not necessarily what `flowId` points
+ * at now — the two links can, and often will, disagree); `nodeId` is
  * fetched and unused on purpose.
  */
 interface ApiJobRow {
   id: string;
   fileId: string;
   flowId: string;
+  flowHash: string;
   state: string;
   outcome: string | null;
   workerClass: string;
@@ -91,6 +94,17 @@ export const JobDetail = (props: {
   const [logLoading, setLogLoading] = useState(false);
   const [logFailure, setLogFailure] = useState<string | null>(null);
 
+  // The job's `flowHash`, resolved through `GET /flows/versions/by-hash/:hash`.
+  // A SECONDARY fetch, same rule as the log and the silent refresh above:
+  // its failure must never blank this screen, which already has the job to
+  // show. `'resolved'` covers BOTH a real version id and a confirmed
+  // `version-not-recorded` (`versionId: null`) — the expected answer for
+  // roughly 5,500 job rows that predate migration 007's backfill, and NOT a
+  // failure; only any OTHER error lands in `'failed'`.
+  const [versionLookup, setVersionLookup] = useState<
+    { kind: 'loading' } | { kind: 'resolved'; versionId: string | null } | { kind: 'failed' }
+  >({ kind: 'loading' });
+
   const liveJob = live.jobs[id];
   const isLive = liveJob !== undefined;
 
@@ -103,6 +117,7 @@ export const JobDetail = (props: {
     setLogText(null);
     setLogRequested(false);
     setLogFailure(null);
+    setVersionLookup({ kind: 'loading' });
   }, [id]);
 
   // The PRIMARY load: on mount, on navigating to a new job id, and on an
@@ -164,6 +179,48 @@ export const JobDetail = (props: {
     };
   }, [client, id, isLive]);
 
+  // ANOTHER secondary fetch, deliberately its OWN effect with its OWN
+  // try/catch rather than joining the primary load in a `Promise.all` — the
+  // exact regression that shipped twice in earlier UI work (a dropped
+  // secondary fetch blanking the whole screen) and cost a fix round each
+  // time. Keyed on the HASH VALUE, not on `detail` itself, so the silent
+  // refresh above (which replaces `detail` with an equivalent object once a
+  // live job finishes) does not re-trigger this lookup when the hash it
+  // fetched by has not actually changed.
+  useEffect(() => {
+    const hash = detail?.job.flowHash;
+    const flowId = detail?.job.flowId;
+    if (hash === undefined || flowId === undefined) return;
+    let cancelled = false;
+    setVersionLookup({ kind: 'loading' });
+    void (async () => {
+      try {
+        // Scoped to THIS job's flow. A hash is a pure function of the
+        // definition, so two flows built from the same graph — one library
+        // duplicated for Movies and Shows — share it, and an unscoped lookup
+        // sends this link to the other flow's version, whose Restore button
+        // re-queues a library the user never opened.
+        const version = await client.get<{ id: string }>(
+          `/flows/versions/by-hash/${hash}?flowId=${encodeURIComponent(flowId)}`,
+        );
+        if (!cancelled) setVersionLookup({ kind: 'resolved', versionId: version.id });
+      } catch (error) {
+        if (cancelled) return;
+        // `version-not-recorded` is the expected answer for a job that ran
+        // before the backfill, not a failure — it resolves to "no version",
+        // same shape as a real hit. Anything else is a real failure.
+        if (error instanceof ApiClientError && error.code === 'version-not-recorded') {
+          setVersionLookup({ kind: 'resolved', versionId: null });
+        } else {
+          setVersionLookup({ kind: 'failed' });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, detail?.job.flowHash, detail?.job.flowId]);
+
   const onFetchLog = useCallback((): void => {
     setLogRequested(true);
     setLogLoading(true);
@@ -186,6 +243,11 @@ export const JobDetail = (props: {
   }, [client, id]);
 
   const rows = detail === null ? [] : toStepRows(detail.steps);
+
+  const versionLine =
+    detail === null || versionLookup.kind !== 'resolved'
+      ? null
+      : describeFlowVersion({ hash: detail.job.flowHash, versionId: versionLookup.versionId });
 
   return (
     <div className="job-page">
@@ -257,17 +319,40 @@ export const JobDetail = (props: {
 
           <dl className="job-page-meta">
             <div>
-              {/* The graph this job walked. `flowId` was fetched and
-                  deliberately unused here; but "why did this file get
-                  rewritten" is usually a question about the graph, and this
-                  screen holds the id — so it links rather than hides it.
-                  Note it is the flow the job RAN UNDER (frozen at start),
-                  which is not necessarily the library's binding now. */}
+              {/* The LIVE flow, by id — "why did this file get rewritten" is
+                  usually a question about the graph, and this screen holds
+                  the id, so it links rather than hides it. This is the
+                  flow's CURRENT binding, which may already differ from the
+                  exact definition the job ran under — that is what the
+                  "Version" row below is for. */}
               <dt>Flow</dt>
               <dd>
                 <Link to={`/flows/${detail.job.flowId}`} navigate={navigate}>
                   {detail.job.flowId}
                 </Link>
+              </dd>
+            </div>
+            <div>
+              {/* The exact definition the job ran under, frozen at
+                  `start()` — resolved from `flowHash` via
+                  `describeFlowVersion`. Most job rows on the owner's real
+                  install predate migration 007's backfill, so a plain
+                  "not recorded" sentence — not a link, not a failure box —
+                  is the common case here, and correctly so. */}
+              <dt>Version</dt>
+              <dd>
+                {versionLookup.kind === 'loading' && <span className="help">Checking…</span>}
+                {versionLookup.kind === 'failed' && (
+                  <span className="help">Could not check which version this job ran under.</span>
+                )}
+                {versionLine !== null &&
+                  (versionLine.to === null ? (
+                    <span className="verbatim">{versionLine.text}</span>
+                  ) : (
+                    <Link to={versionLine.to} navigate={navigate}>
+                      {versionLine.text}
+                    </Link>
+                  ))}
               </dd>
             </div>
             <div>

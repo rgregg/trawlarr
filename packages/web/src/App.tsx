@@ -3,7 +3,9 @@ import { Config } from './screens/config/Config.js';
 import { Diagnose } from './screens/diagnose/Diagnose.js';
 import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
+import { FlowCompare } from './screens/flows/FlowCompare.js';
 import { FlowDetail } from './screens/flows/FlowDetail.js';
+import { FlowVersion } from './screens/flows/FlowVersion.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
 import { KeyGate } from './shell/KeyGate.js';
@@ -109,6 +111,35 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
         )}
         {route.name === 'flow' && (
           <FlowDetail client={props.client} id={route.id} navigate={navigate} />
+        )}
+        {route.name === 'flowVersion' && (
+          <FlowVersion
+            client={props.client}
+            flowId={route.flowId}
+            versionId={route.versionId}
+            navigate={navigate}
+          />
+        )}
+        {route.name === 'flowVersionDirect' && (
+          // No flow id in hand — a job row's `flowHash` resolves only to a
+          // version id (`describeFlowVersion` in `job-detail-model.ts`).
+          // `FlowVersion` fetches `GET /flows/versions/:versionId` instead
+          // of the flow-scoped route when `flowId` is `null`.
+          <FlowVersion
+            client={props.client}
+            flowId={null}
+            versionId={route.versionId}
+            navigate={navigate}
+          />
+        )}
+        {route.name === 'flowCompare' && (
+          <FlowCompare
+            client={props.client}
+            flowId={route.flowId}
+            from={route.from}
+            to={route.to}
+            navigate={navigate}
+          />
         )}
         {route.name === 'config' && (
           <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />
