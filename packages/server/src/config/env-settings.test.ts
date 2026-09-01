@@ -96,4 +96,61 @@ describe('applyEnvSettings', () => {
     expect(applications[0]!.applied).toBe('invalid');
     expect(tooMany.getScan().probeConcurrency).toBe(4);
   });
+
+  it('seeds every OIDC field, and turns OIDC on in the same run without failing validation', () => {
+    const settings = repo();
+    const applications = applyEnvSettings({
+      settings,
+      env: {
+        TRAWLARR_OIDC_ISSUER: 'https://authentik.example.com/application/o/trawlarr/',
+        TRAWLARR_OIDC_CLIENT_ID: 'trawlarr',
+        TRAWLARR_OIDC_CLIENT_SECRET: 'shh',
+        TRAWLARR_OIDC_REDIRECT_URI: 'https://trawlarr.example.com/auth/oidc/callback',
+        TRAWLARR_OIDC_SCOPES: 'openid profile',
+        TRAWLARR_OIDC_DISPLAY_NAME: 'Authentik',
+        TRAWLARR_OIDC_ENABLED: 'true',
+      },
+    });
+
+    expect(applications.map((a) => a.applied)).toEqual([
+      'seeded',
+      'seeded',
+      'seeded',
+      'seeded',
+      'seeded',
+      'seeded',
+      'seeded',
+    ]);
+    expect(settings.getAuth()).toMatchObject({
+      oidcEnabled: true,
+      oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+      oidcClientId: 'trawlarr',
+      oidcClientSecret: 'shh',
+      oidcRedirectUri: 'https://trawlarr.example.com/auth/oidc/callback',
+      oidcScopes: 'openid profile',
+      oidcDisplayName: 'Authentik',
+    });
+  });
+
+  it('records TRAWLARR_OIDC_ENABLED as invalid, and leaves OIDC off, when the other fields are missing', () => {
+    const settings = repo();
+    const applications = applyEnvSettings({
+      settings,
+      env: { TRAWLARR_OIDC_ENABLED: 'true' },
+    });
+
+    expect(applications[0]!.applied).toBe('invalid');
+    expect(applications[0]!.problem).toContain('auth.oidcIssuer');
+    expect(settings.getAuth().oidcEnabled).toBe(false);
+  });
+
+  it('redacts the OIDC client secret the same way the API key is redacted', () => {
+    const settings = repo();
+    const env = { TRAWLARR_OIDC_CLIENT_SECRET: 'shh' };
+    const applications = applyEnvSettings({ settings, env });
+
+    const provenance = envProvenance({ settings, env, applications });
+    expect(provenance[0]!.envValue).toBe('(redacted)');
+    expect(provenance[0]!.currentValue).toBe('(redacted)');
+  });
 });

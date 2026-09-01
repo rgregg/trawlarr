@@ -57,7 +57,7 @@ The pnpm workspace holds six packages:
 | `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute, Verify Output, Replace Original File.                                                                                                                                                                                                                                        |
 | `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run.                                                                                                          |
 | `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the worker supervisor and its forked worker processes, the filesystem watcher and scan coordinator, the REST API and its event stream, the daemon that composes all of it, and the `trawlarr` CLI — which becomes that daemon's client whenever one is running. |
-| `@trawlarr/web`          | The React UI the daemon serves as static files: the API-key gate, the library-centric Overview, library setup and flow attachment, and a live Activity screen fed by the event stream. Built by `pnpm build`; the Docker image ships it.                                                                                                                                                       |
+| `@trawlarr/web`          | The React UI the daemon serves as static files: the login/SSO gate, the library-centric Overview, library setup and flow attachment, and a live Activity screen fed by the event stream. Built by `pnpm build`; the Docker image ships it.                                                                                                                                                     |
 
 ### Run it in Docker
 
@@ -197,7 +197,31 @@ only. After that it lives in the database (setting `daemon.apiKey`, also
 returned by `GET /api/v1/system/settings`), because a daemon that reprinted a
 live credential on every start would be spraying it into every log that
 captures stdout. Send it as `X-Api-Key`; only `GET /api/v1/system/health` is
-reachable without it, so a container health check needs no secret.
+reachable without it, so a container health check needs no secret. The key
+is for **machine clients** — the CLI, scripts, other services — that already
+have somewhere safe to keep a bearer credential.
+
+**The web UI does not use the API key.** It authenticates people instead,
+with password accounts (any number of them, all equal access — there is no
+separate admin role) and, optionally, single sign-on through an OIDC
+provider such as Authentik. The first account is created from the UI on
+first run; a session is a JWT in an httpOnly, `SameSite=Lax` cookie, so it
+never touches JavaScript and is not usable outside a browser. Password
+hashes use Argon2id; nothing is ever stored in plaintext. OIDC is off by
+default and, once turned on, provisions an account just-in-time on that
+subject's first login — there is no separate "invite a user" step.
+
+Turning OIDC on takes either the settings screen (**Configure → System →
+Single sign-on**) or the matching environment variables, seeded the same
+seed-once-then-the-UI-wins way every other setting in
+[`docs/deployment.md`](docs/deployment.md)'s §4 does:
+`TRAWLARR_OIDC_ISSUER`, `TRAWLARR_OIDC_CLIENT_ID`,
+`TRAWLARR_OIDC_CLIENT_SECRET`, `TRAWLARR_OIDC_REDIRECT_URI`, and optionally
+`TRAWLARR_OIDC_SCOPES` / `TRAWLARR_OIDC_DISPLAY_NAME`, with
+`TRAWLARR_OIDC_ENABLED=true` last once the rest are in place — enabling it
+before the provider details are filled in fails validation with a message
+naming exactly which field is still empty, rather than accepting a
+configuration every login would fail against.
 
 **It binds `127.0.0.1` by default and speaks plain HTTP.** There is no TLS
 here on purpose: put a reverse proxy in front of it if it needs to be

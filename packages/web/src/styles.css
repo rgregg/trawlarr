@@ -342,7 +342,8 @@ main {
 }
 
 .library-setup,
-.flow-picker {
+.flow-picker,
+.auth-section {
   max-width: 44rem;
   display: flex;
   flex-direction: column;
@@ -360,14 +361,16 @@ main {
 }
 
 .library-setup label,
-.flow-picker label {
+.flow-picker label,
+.auth-section label {
   font-weight: 600;
 }
 
 .library-setup input,
 .library-setup textarea,
 .flow-picker input,
-.flow-picker select {
+.flow-picker select,
+.auth-section input {
   font: inherit;
   color: var(--ink);
   background: var(--panel);

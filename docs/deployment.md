@@ -221,6 +221,13 @@ mistyped optional variable should not take a media server offline.
 | `TRAWLARR_API_KEY`           | `daemon.apiKey` (seed)           | The API key clients send as `X-Api-Key`. Set it to know it in advance; leave it unset and one is generated and printed on the first run only. Minimum 16 characters. |
 | `TRAWLARR_HARDWARE`          | `hardware.available` (seed)      | Which hardware this node **declares** it has, comma-separated (e.g. `cpu,nvenc`). See §5.                                                          |
 | `TRAWLARR_HARDWARE_CAPS`     | `hardware.caps` (seed)           | Concurrency cap per hardware type, e.g. `nvenc=2` for a consumer NVIDIA card whose NVENC session limit fails jobs rather than queueing them.        |
+| `TRAWLARR_OIDC_ISSUER`       | `auth.oidcIssuer` (seed)         | The OIDC provider's issuer URL, e.g. `https://authentik.example.com/application/o/trawlarr/`.                                                       |
+| `TRAWLARR_OIDC_CLIENT_ID`    | `auth.oidcClientId` (seed)       | The client ID this daemon registered with the OIDC provider.                                                                                        |
+| `TRAWLARR_OIDC_CLIENT_SECRET`| `auth.oidcClientSecret` (seed)   | The client secret paired with `TRAWLARR_OIDC_CLIENT_ID`.                                                                                            |
+| `TRAWLARR_OIDC_REDIRECT_URI` | `auth.oidcRedirectUri` (seed)    | This daemon's own callback URL as the OIDC provider must see it, e.g. `https://trawlarr.example.com/auth/oidc/callback`.                            |
+| `TRAWLARR_OIDC_SCOPES`       | `auth.oidcScopes` (seed)         | Space-separated OIDC scopes to request. Defaults to `openid profile email`.                                                                         |
+| `TRAWLARR_OIDC_DISPLAY_NAME` | `auth.oidcDisplayName` (seed)    | Label on the login screen's SSO button. Defaults to `Single Sign-On`.                                                                                |
+| `TRAWLARR_OIDC_ENABLED`      | `auth.oidcEnabled` (seed)        | Turns on the SSO button. Set it last, once the five fields above are already in place — enabling with any of them still empty fails validation rather than starting with a configuration every login would fail against. |
 | `TRAWLARR_PORT`              | `daemon.port` (this run only)    | Same meaning as `trawlarr daemon --port`. Not stored.                                                                                              |
 | `TRAWLARR_BIND`              | `daemon.bind` (this run only)    | Same meaning as `trawlarr daemon --bind`. Not stored. **The image sets this to `0.0.0.0`** — see §8.                                                |
 | `TRAWLARR_DATA_DIR`          | `--data-dir` (this run only)     | Default for every command's `--data-dir`. The image sets it to `/config`. Not stored.                                                              |
@@ -237,10 +244,21 @@ value still matches it:
   "currentValue": "2", "matchesEnv": true }
 ```
 
-`TRAWLARR_API_KEY` is the one exception: its `envValue` and `currentValue` are
-both reported as `(redacted)` in that list. (The live key itself is still in
-the response, under `daemon.apiKey` — that endpoint needs the key to call, so
-it is the way to recover a key you failed to write down, not a leak.)
+`TRAWLARR_API_KEY` and `TRAWLARR_OIDC_CLIENT_SECRET` are the exceptions:
+their `envValue` and `currentValue` are both reported as `(redacted)` in that
+list. (The live values themselves are still in the response, under
+`daemon.apiKey` and `auth.oidcClientSecret` — that endpoint needs the API key
+to call at all, and an OIDC client secret is no more sensitive than the
+provider config that already names it, so returning it in full there is the
+recovery path for a value you failed to write down, not a leak.)
+
+Single sign-on can also be configured entirely from the web UI, at
+**Configure → System → Single sign-on** — the same `auth` settings group
+these variables seed, read and written through `GET`/`PATCH
+/api/v1/system/settings`. `auth.sessionSecret` (the key that signs session
+cookies) is never included in that endpoint's response and cannot be set
+through it, in either direction: it has no legitimate reason to leave the
+server, unlike the API key and the OIDC client secret above.
 
 ## 5. Hardware is declared, never detected — and the declaration is checked
 
