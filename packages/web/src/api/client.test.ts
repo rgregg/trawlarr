@@ -34,7 +34,18 @@ describe('createApiClient', () => {
     expect(headersOf(calls[0]!)['X-Api-Key']).toBe('secret-key-1234567890');
   });
 
-  it('sends no cookie and asks the browser to send none', async () => {
+  it('sends no X-Api-Key header when none is given, relying on the session cookie', async () => {
+    const calls: Call[] = [];
+    const client = createApiClient({
+      fetchImpl: fetchStub({ status: 200, body: [] }, calls),
+    });
+
+    await client.get('/libraries');
+
+    expect(Object.keys(headersOf(calls[0]!))).not.toContain('X-Api-Key');
+  });
+
+  it('asks the browser to send same-origin cookies, so a session survives a page reload', async () => {
     const calls: Call[] = [];
     const client = createApiClient({
       apiKey: 'k'.repeat(20),
@@ -43,13 +54,7 @@ describe('createApiClient', () => {
 
     await client.get('/libraries');
 
-    // The whole security argument for the event socket is that there is NO
-    // AMBIENT AUTHORITY here. A `cookie` header, or a `credentials` mode
-    // that opted into sending one, would silently invalidate it.
-    expect(Object.keys(headersOf(calls[0]!)).map((name) => name.toLowerCase())).not.toContain(
-      'cookie',
-    );
-    expect(calls[0]!.init!.credentials).toBeUndefined();
+    expect(calls[0]!.init!.credentials).toBe('same-origin');
   });
 
   it('returns the parsed body a GET answered with', async () => {
@@ -173,6 +178,11 @@ describe('eventsUrl', () => {
     expect(url.protocol).toBe('ws:');
     expect(url.pathname).toBe('/api/v1/events');
     expect(url.searchParams.get('apiKey')).toBe('abc');
+  });
+
+  it('carries no query string for a cookie-authenticated browser session', () => {
+    const url = new URL(eventsUrl({ baseUrl: 'http://host:8265' }));
+    expect(url.search).toBe('');
   });
 
   it('uses wss when the page is served over https', () => {

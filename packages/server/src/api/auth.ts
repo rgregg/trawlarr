@@ -15,10 +15,12 @@ export const API_KEY_HEADER = 'x-api-key';
  * attempt that was made.
  */
 export const UNAUTHORIZED_MESSAGE =
-  `This request was not authorised. Send the daemon's API key in the "X-Api-Key" header; it is ` +
-  `stored as the "daemon.apiKey" setting and is generated on first start. Only ` +
-  `GET /api/v1/system/health is reachable without it, so a container health check needs no ` +
-  `secret.`;
+  `This request was not authorised. Machine clients (workers, the CLI) send the daemon's API ` +
+  `key in the "X-Api-Key" header; it is stored as the "daemon.apiKey" setting and is generated ` +
+  `on first start. A browser instead signs in at POST /api/v1/auth/login or via SSO at ` +
+  `GET /api/v1/auth/oidc/start, which sets a session cookie. Only GET /api/v1/system/health, ` +
+  `GET /api/v1/auth/status and the sign-in endpoints are reachable without one, so a container ` +
+  `health check needs no secret and a browser has somewhere to sign in from.`;
 
 export const unauthorized = (): ApiError => new ApiError(401, 'unauthorized', UNAUTHORIZED_MESSAGE);
 

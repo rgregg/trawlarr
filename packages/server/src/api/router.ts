@@ -1,5 +1,6 @@
 import type { Db } from '../db/connection.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
+import type { AccountRepo } from '../db/account-repo.js';
 import type { EventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
 import type { PluginSyncCoordinator } from '../plugins/sync-coordinator.js';
@@ -22,6 +23,8 @@ export interface ApiContext {
   bus: EventBus;
   supervisor: Supervisor;
   scans: ScanCoordinator;
+  /** Every signed-in operator this daemon knows — see `db/account-repo.ts`. */
+  accounts: AccountRepo;
   /**
    * Plugin-source syncs, which run HERE rather than in the CLI: the daemon is
    * the only permitted writer, and a sync fetches, unpacks and validates
@@ -61,6 +64,18 @@ export interface RouteInput {
   query: URLSearchParams;
   body: unknown;
   ctx: ApiContext;
+  /**
+   * The request's cookies, already parsed. Only the session-login routes
+   * read this — every other route authenticates by API key, which travels
+   * as a header, not a cookie.
+   */
+  cookies: Record<string, string>;
+  /**
+   * Was this request received over a secure transport? Decides whether a
+   * `Set-Cookie` this request's handler issues gets the `Secure` attribute
+   * — see `session.ts`'s `serializeSessionCookie`.
+   */
+  secure: boolean;
 }
 
 export type RouteHandler = (input: RouteInput) => Promise<unknown> | unknown;
@@ -94,16 +109,37 @@ export class ApiError extends Error {
 export class ApiResponse<T = unknown> {
   readonly status: number;
   readonly body: T;
+  /**
+   * Extra response headers — `Set-Cookie` for a login/logout, `Location`
+   * for the OIDC redirects. Absent for every ordinary JSON response, which
+   * is the overwhelming majority of routes.
+   */
+  readonly headers?: Record<string, string | string[]>;
 
-  constructor(status: number, body: T) {
+  constructor(status: number, body: T, headers?: Record<string, string | string[]>) {
     this.status = status;
     this.body = body;
+    this.headers = headers;
   }
 }
 
 export const created = <T>(body: T): ApiResponse<T> => new ApiResponse(201, body);
 export const accepted = <T>(body: T): ApiResponse<T> => new ApiResponse(202, body);
 export const noContent = (): ApiResponse<null> => new ApiResponse(204, null);
+
+/**
+ * A redirect — 302 by default, `Found`, and no body: the OIDC start
+ * endpoint sends the browser to the provider, the callback sends it back
+ * into the app. Both are navigations a browser follows, not JSON a fetch
+ * caller parses. `extraHeaders` is where a redirect also carries a
+ * `Set-Cookie` — the OIDC start/callback routes both need to set a cookie
+ * on the very response that redirects the browser away.
+ */
+export const redirectTo = (
+  location: string,
+  extraHeaders?: Record<string, string | string[]>,
+  status = 302,
+): ApiResponse<null> => new ApiResponse(status, null, { ...extraHeaders, location });
 
 export interface Route {
   method: string;
