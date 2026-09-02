@@ -43,6 +43,32 @@ export interface HardwareSettings {
   caps: Partial<Record<HardwareType, number>>;
 }
 
+/**
+ * Everything a browser session needs, and nothing an API-key client does.
+ *
+ * `sessionSecret` signs the session cookie issued after a password or OIDC
+ * login (see `api/session.ts`) — generated once, on first read, exactly the
+ * way `daemon.apiKey` is, and for the same reason: a secret that must exist
+ * before anything can use it is better minted than left for an operator to
+ * forget to set.
+ *
+ * The `oidc*` fields are ALL-OR-NOTHING in practice: `oidcEnabled` gates
+ * whether `/auth/oidc/*` does anything at all, so a half-configured issuer
+ * left over from an experiment cannot suddenly start accepting logins.
+ */
+export interface AuthSettings {
+  sessionSecret: string;
+  oidcEnabled: boolean;
+  oidcIssuer: string;
+  oidcClientId: string;
+  oidcClientSecret: string;
+  oidcRedirectUri: string;
+  /** Space-separated, as the OIDC spec requires. Always includes "openid". */
+  oidcScopes: string;
+  /** What a "Sign in with…" button says. Purely cosmetic. */
+  oidcDisplayName: string;
+}
+
 export interface SettingsRepo {
   getDaemon(): DaemonSettings;
   setDaemon(patch: Partial<DaemonSettings>): void;
@@ -54,6 +80,8 @@ export interface SettingsRepo {
   setHardware(patch: Partial<HardwareSettings>): void;
   getSchedule(): ScheduleConfig;
   setSchedule(config: ScheduleConfig): void;
+  getAuth(): AuthSettings;
+  setAuth(patch: Partial<AuthSettings>): void;
   isSet(key: string): boolean;
 }
 
@@ -77,6 +105,7 @@ const SETTING_KEYS = {
   scan: 'scan',
   hardware: 'hardware',
   schedule: 'schedule',
+  auth: 'auth',
 } as const;
 
 const DEFAULT_DAEMON: Omit<DaemonSettings, 'apiKey'> = { bind: '127.0.0.1', port: 8265 };
@@ -89,6 +118,15 @@ const DEFAULT_SCAN: ScanSettings = {
   probeConcurrency: DEFAULT_PROBE_CONCURRENCY,
 };
 const DEFAULT_HARDWARE: HardwareSettings = { available: ['cpu'], caps: {} };
+const DEFAULT_AUTH: Omit<AuthSettings, 'sessionSecret'> = {
+  oidcEnabled: false,
+  oidcIssuer: '',
+  oidcClientId: '',
+  oidcClientSecret: '',
+  oidcRedirectUri: '',
+  oidcScopes: 'openid profile email',
+  oidcDisplayName: 'Single Sign-On',
+};
 
 const requireWholeNumber = (value: unknown, label: string, min: number, max: number): number => {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
@@ -153,6 +191,48 @@ const validateScan = (value: {
   probeConcurrency: requireWholeNumber(value.probeConcurrency, 'scan.probeConcurrency', 1, 64),
 });
 
+const validateAuth = (value: {
+  sessionSecret: unknown;
+  oidcEnabled: unknown;
+  oidcIssuer: unknown;
+  oidcClientId: unknown;
+  oidcClientSecret: unknown;
+  oidcRedirectUri: unknown;
+  oidcScopes: unknown;
+  oidcDisplayName: unknown;
+}): AuthSettings => {
+  const settings: AuthSettings = {
+    sessionSecret: requireString(value.sessionSecret, 'auth.sessionSecret'),
+    oidcEnabled: requireBoolean(value.oidcEnabled, 'auth.oidcEnabled'),
+    oidcIssuer: requireString(value.oidcIssuer, 'auth.oidcIssuer'),
+    oidcClientId: requireString(value.oidcClientId, 'auth.oidcClientId'),
+    oidcClientSecret: requireString(value.oidcClientSecret, 'auth.oidcClientSecret'),
+    oidcRedirectUri: requireString(value.oidcRedirectUri, 'auth.oidcRedirectUri'),
+    oidcScopes: requireString(value.oidcScopes, 'auth.oidcScopes'),
+    oidcDisplayName: requireString(value.oidcDisplayName, 'auth.oidcDisplayName'),
+  };
+  // Enabling OIDC with an unusable configuration would fail every login
+  // attempt with a confusing runtime error from inside the callback; caught
+  // here instead, at the moment the operator turns it on, with a message
+  // that names exactly what is missing.
+  if (settings.oidcEnabled) {
+    for (const [field, label] of [
+      [settings.oidcIssuer, 'auth.oidcIssuer'],
+      [settings.oidcClientId, 'auth.oidcClientId'],
+      [settings.oidcClientSecret, 'auth.oidcClientSecret'],
+      [settings.oidcRedirectUri, 'auth.oidcRedirectUri'],
+    ] as const) {
+      if (field === '') {
+        throw new SettingValidationError(
+          `auth.oidcEnabled is true, but ${label} is empty. Every OIDC field is required before ` +
+            `single sign-on can be turned on.`,
+        );
+      }
+    }
+  }
+  return settings;
+};
+
 const validateHardware = (value: { available: unknown; caps: unknown }): HardwareSettings => {
   if (
     !Array.isArray(value.available) ||
@@ -200,9 +280,12 @@ interface SettingRow {
 export const createSettingsRepo = (input: {
   db: Db;
   generateApiKey?: () => string;
+  generateSessionSecret?: () => string;
 }): SettingsRepo => {
   const { db } = input;
   const generateApiKey = input.generateApiKey ?? (() => randomBytes(24).toString('hex'));
+  const generateSessionSecret =
+    input.generateSessionSecret ?? (() => randomBytes(32).toString('hex'));
 
   const selectStmt = db.prepare(`SELECT value FROM setting WHERE key = ?`);
   const upsertStmt = db.prepare(
@@ -297,6 +380,42 @@ export const createSettingsRepo = (input: {
     writeField(SETTING_KEYS.hardware, 'caps', next.caps);
   };
 
+  // Same "generate on first read, inside one write transaction" shape as
+  // `getDaemon`'s apiKey — see its comment for why concurrent readers can
+  // never mint two secrets.
+  const getAuth = db.transaction((): AuthSettings => {
+    let sessionSecret = readField(SETTING_KEYS.auth, 'sessionSecret');
+    if (sessionSecret === undefined) {
+      sessionSecret = generateSessionSecret();
+      writeField(SETTING_KEYS.auth, 'sessionSecret', sessionSecret);
+    }
+    return validateAuth({
+      sessionSecret,
+      oidcEnabled: readField(SETTING_KEYS.auth, 'oidcEnabled') ?? DEFAULT_AUTH.oidcEnabled,
+      oidcIssuer: readField(SETTING_KEYS.auth, 'oidcIssuer') ?? DEFAULT_AUTH.oidcIssuer,
+      oidcClientId: readField(SETTING_KEYS.auth, 'oidcClientId') ?? DEFAULT_AUTH.oidcClientId,
+      oidcClientSecret:
+        readField(SETTING_KEYS.auth, 'oidcClientSecret') ?? DEFAULT_AUTH.oidcClientSecret,
+      oidcRedirectUri:
+        readField(SETTING_KEYS.auth, 'oidcRedirectUri') ?? DEFAULT_AUTH.oidcRedirectUri,
+      oidcScopes: readField(SETTING_KEYS.auth, 'oidcScopes') ?? DEFAULT_AUTH.oidcScopes,
+      oidcDisplayName:
+        readField(SETTING_KEYS.auth, 'oidcDisplayName') ?? DEFAULT_AUTH.oidcDisplayName,
+    });
+  });
+
+  const setAuth = (patch: Partial<AuthSettings>): void => {
+    const next = validateAuth({ ...getAuth(), ...patch });
+    writeField(SETTING_KEYS.auth, 'sessionSecret', next.sessionSecret);
+    writeField(SETTING_KEYS.auth, 'oidcEnabled', next.oidcEnabled);
+    writeField(SETTING_KEYS.auth, 'oidcIssuer', next.oidcIssuer);
+    writeField(SETTING_KEYS.auth, 'oidcClientId', next.oidcClientId);
+    writeField(SETTING_KEYS.auth, 'oidcClientSecret', next.oidcClientSecret);
+    writeField(SETTING_KEYS.auth, 'oidcRedirectUri', next.oidcRedirectUri);
+    writeField(SETTING_KEYS.auth, 'oidcScopes', next.oidcScopes);
+    writeField(SETTING_KEYS.auth, 'oidcDisplayName', next.oidcDisplayName);
+  };
+
   const asScheduleValidationError = (err: unknown): SettingValidationError => {
     if (err instanceof ScheduleConfigError) {
       return new SettingValidationError((err as ScheduleConfigError).message);
@@ -340,6 +459,8 @@ export const createSettingsRepo = (input: {
     setHardware,
     getSchedule,
     setSchedule,
+    getAuth,
+    setAuth,
     isSet,
   };
 };

@@ -17,6 +17,7 @@ import { createJobRepo, MAX_LOG_EXCERPT_CHARS } from '../db/job-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { createApiContext, createApiServer } from './server.js';
+import { SESSION_COOKIE_NAME, issueSessionToken } from './session.js';
 import {
   attachWebSocket,
   SLOW_CLIENT_DROP_BYTES,
@@ -191,6 +192,7 @@ let settings: SettingsRepo;
 let bus: EventBus;
 let server: Server;
 let channel: WsChannel;
+let ctx: ReturnType<typeof createApiContext>;
 let port: number;
 let baseUrl: string;
 let openSockets: WebSocket[];
@@ -231,7 +233,7 @@ beforeEach(async () => {
   bus = createEventBus();
   openSockets = [];
 
-  const ctx = createApiContext({
+  const ctxLocal = createApiContext({
     db,
     settings,
     bus,
@@ -241,9 +243,10 @@ beforeEach(async () => {
     version: '0.0.0-test',
     dataDir: API_TEST_DATA_DIR,
   });
+  ctx = ctxLocal;
 
   server = createApiServer(ctx, { onError: () => {} });
-  channel = attachWebSocket({ server, bus, settings });
+  channel = attachWebSocket({ server, bus, settings, accounts: ctx.accounts });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
   baseUrl = `http://127.0.0.1:${String(port)}`;
@@ -279,6 +282,42 @@ describe('over a real socket', () => {
     await waitFor(() => received.length === 1, 'the header-authenticated client to receive');
 
     expect(received[0]!.type).toBe('job.started');
+  });
+
+  it('accepts a valid session cookie, for a signed-in browser with no API key', async () => {
+    const account = ctx.accounts.create({
+      username: 'root',
+      passwordHash: 'unused-in-this-test',
+      nowMs: NOW,
+    });
+    const token = await issueSessionToken({
+      accountId: account.id,
+      secret: settings.getAuth().sessionSecret,
+      nowMs: Date.now(),
+    });
+
+    const socket = await open('', { cookie: `${SESSION_COOKIE_NAME}=${token}` });
+    const received = collect(socket);
+
+    bus.emit(jobStarted('j1'));
+    await waitFor(() => received.length === 1, 'the cookie-authenticated client to receive');
+
+    expect(received[0]!.type).toBe('job.started');
+  });
+
+  it('rejects a session cookie naming an account that no longer exists', async () => {
+    const token = await issueSessionToken({
+      accountId: 'deleted-account-id',
+      secret: settings.getAuth().sessionSecret,
+      nowMs: Date.now(),
+    });
+
+    await expect(
+      connect(`ws://127.0.0.1:${String(port)}/api/v1/events`, {
+        cookie: `${SESSION_COOKIE_NAME}=${token}`,
+      }),
+    ).rejects.toMatchObject({ message: expect.stringContaining('401') });
+    expect(channel.clientCount()).toBe(0);
   });
 
   it('refuses an upgrade on any other path', async () => {

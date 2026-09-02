@@ -57,7 +57,7 @@ const RECONNECT_MS = [500, 1_000, 2_000, 5_000, 10_000];
  * the fetched half down with it.
  */
 export const useLive = (
-  apiKey: string,
+  apiKey: string | undefined,
   createSocket: LiveSocketFactory = browserSocket,
 ): { live: LiveState; connected: boolean } => {
   const [live, setLive] = useState<LiveState>(initialLiveState);

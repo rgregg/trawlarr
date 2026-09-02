@@ -347,7 +347,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
   let port: number;
   try {
-    ws = attachWebSocket({ server, bus, settings });
+    ws = attachWebSocket({ server, bus, settings, accounts: ctx.accounts });
     port = await listen(server, wantedPort, bind);
     // Only now is the recorded port a fact rather than a hope.
     lock = await acquireDaemonLock({

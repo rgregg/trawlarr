@@ -55,6 +55,16 @@ const asSettingError = (error: unknown): never => {
   throw error;
 };
 
+const publicAuth = (auth: ReturnType<ApiContext['settings']['getAuth']>) => ({
+  oidcEnabled: auth.oidcEnabled,
+  oidcIssuer: auth.oidcIssuer,
+  oidcClientId: auth.oidcClientId,
+  oidcClientSecret: auth.oidcClientSecret,
+  oidcRedirectUri: auth.oidcRedirectUri,
+  oidcScopes: auth.oidcScopes,
+  oidcDisplayName: auth.oidcDisplayName,
+});
+
 const readSettings = (ctx: ApiContext) => ({
   // The API key is returned to a caller who already proved they hold it:
   // this endpoint is not reachable without it. Withholding it here would
@@ -64,6 +74,14 @@ const readSettings = (ctx: ApiContext) => ({
   binaries: ctx.settings.getBinaries(),
   scan: ctx.settings.getScan(),
   hardware: ctx.settings.getHardware(),
+  // `oidcClientSecret` follows the same "no privileged path" reasoning as
+  // the API key above: whoever configured the OIDC provider already knows
+  // it, and an operator reviewing this daemon's config needs to see what it
+  // currently holds. `sessionSecret` is different in kind and is never
+  // included — it is this daemon's own cookie-signing key, has no
+  // legitimate reason to leave the server, and disclosing it would let any
+  // caller mint a session for any account.
+  auth: publicAuth(ctx.settings.getAuth()),
   environment: envProvenance({
     settings: ctx.settings,
     env: process.env,
@@ -141,8 +159,8 @@ export const systemRoutes: Route[] = [
         throw new ApiError(
           400,
           'invalid-body',
-          `Send an object with any of "daemon", "binaries", "scan" or "hardware"; each is a ` +
-            `partial patch of that settings group.`,
+          `Send an object with any of "daemon", "binaries", "scan", "hardware" or "auth"; each ` +
+            `is a partial patch of that settings group.`,
         );
       }
       const patch = body as Record<string, unknown>;
@@ -151,6 +169,21 @@ export const systemRoutes: Route[] = [
         if (patch.binaries !== undefined) ctx.settings.setBinaries(patch.binaries as never);
         if (patch.scan !== undefined) ctx.settings.setScan(patch.scan as never);
         if (patch.hardware !== undefined) ctx.settings.setHardware(patch.hardware as never);
+        // `sessionSecret` is not a patchable field: it is never returned by
+        // `readSettings` above, so there is nothing for a client to echo
+        // back, and accepting one here would let a caller overwrite the
+        // cookie-signing key with a value of their choosing.
+        if (patch.auth !== undefined) {
+          const authPatch = patch.auth as Record<string, unknown>;
+          if ('sessionSecret' in authPatch) {
+            throw new ApiError(
+              400,
+              'invalid-body',
+              `"auth.sessionSecret" cannot be set through this endpoint.`,
+            );
+          }
+          ctx.settings.setAuth(authPatch as never);
+        }
       } catch (error) {
         asSettingError(error);
       }

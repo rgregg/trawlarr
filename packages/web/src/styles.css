@@ -89,9 +89,9 @@ button:disabled {
   color: var(--bad);
 }
 
-/* --- the key gate ------------------------------------------------------ */
+/* --- the auth gate ------------------------------------------------------ */
 
-.key-gate {
+.auth-gate {
   max-width: 34rem;
   margin: 4rem auto;
   padding: 1.5rem;
@@ -103,16 +103,16 @@ button:disabled {
   gap: 0.75rem;
 }
 
-.key-gate h1 {
+.auth-gate h1 {
   margin: 0;
   font-size: 1.6rem;
 }
 
-.key-gate label {
+.auth-gate label {
   font-weight: 600;
 }
 
-.key-gate input {
+.auth-gate input {
   font: inherit;
   color: var(--ink);
   background: var(--bg);
@@ -121,22 +121,23 @@ button:disabled {
   padding: 0.45em 0.6em;
 }
 
-.key-gate p {
+.auth-gate p {
   margin: 0;
   color: var(--muted);
 }
 
-.key-gate button {
+.auth-gate .hint {
+  font-size: 0.85em;
+}
+
+.auth-gate button {
   align-self: flex-start;
 }
 
-.key-honesty summary {
-  cursor: pointer;
-  color: var(--muted);
-}
-
-.key-honesty p {
-  margin: 0.6rem 0 0;
+.oidc-button {
+  align-self: flex-start;
+  color: var(--ink);
+  text-decoration: underline;
 }
 
 /* --- the shell --------------------------------------------------------- */
@@ -341,7 +342,8 @@ main {
 }
 
 .library-setup,
-.flow-picker {
+.flow-picker,
+.auth-section {
   max-width: 44rem;
   display: flex;
   flex-direction: column;
@@ -359,14 +361,16 @@ main {
 }
 
 .library-setup label,
-.flow-picker label {
+.flow-picker label,
+.auth-section label {
   font-weight: 600;
 }
 
 .library-setup input,
 .library-setup textarea,
 .flow-picker input,
-.flow-picker select {
+.flow-picker select,
+.auth-section input {
   font: inherit;
   color: var(--ink);
   background: var(--panel);

@@ -21,13 +21,13 @@ export interface ApiClient {
 const PREFIX = '/api/v1';
 
 /**
- * The same API a shell script talks to, with the same key in the same header.
- *
- * NO COOKIE AND NO SESSION, deliberately. The spec's rule that the UI has no
- * privileged path only holds if the UI's credential is one a script could
- * also hold; and the event socket's security argument depends on there being
- * NO AMBIENT AUTHORITY in the browser — no cookie means a hostile page has
- * nothing to send and there is no CSRF shape to defend against.
+ * The same API a shell script talks to, with the same key in the same header
+ * — for machine clients. A signed-in browser instead sends no API key and
+ * relies on the httpOnly session cookie the daemon set at login, which
+ * `credentials: 'same-origin'` is required to attach: fetch does not send
+ * cookies by default for same-origin requests made from a module that could
+ * in principle run in a stricter embedding context, and being explicit here
+ * means this keeps working if that default ever changes upstream.
  *
  * Everything durable comes through HERE. The event socket is liveness only:
  * a client that missed every frame must still be able to reconstruct the
@@ -37,7 +37,7 @@ const PREFIX = '/api/v1';
  */
 export const createApiClient = (input: {
   baseUrl?: string;
-  apiKey: string;
+  apiKey?: string;
   fetchImpl?: typeof fetch;
 }): ApiClient => {
   const doFetch = input.fetchImpl ?? globalThis.fetch.bind(globalThis);
@@ -46,8 +46,12 @@ export const createApiClient = (input: {
   const send = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     const response = await doFetch(`${base}${PREFIX}${path}`, {
       method,
+      // Sent even for the API-key path: a machine client with no cookie to
+      // begin with is unaffected, and it is what lets a signed-in browser's
+      // session cookie ride along on every call through this one code path.
+      credentials: 'same-origin',
       headers: {
-        'X-Api-Key': input.apiKey,
+        ...(input.apiKey === undefined ? {} : { 'X-Api-Key': input.apiKey }),
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -105,16 +109,17 @@ const pageUrl = (): string => {
 /**
  * The event socket's URL.
  *
- * The key goes in the QUERY STRING here and only here, because a browser
- * cannot set headers on a WebSocket upgrade. The daemon accepts both forms
- * for exactly this reason, and a WebSocket URL is never a Referer and never
- * lands in history — which is what makes this acceptable while the REST
- * client still uses the header.
+ * `apiKey`, if given, goes in the QUERY STRING here and only here, because a
+ * browser cannot set headers on a WebSocket upgrade. A signed-in browser
+ * instead passes no `apiKey`: the upgrade request carries the same httpOnly
+ * session cookie the browser attaches to every other same-origin request,
+ * and the daemon accepts either credential on this path — see `ws.ts`'s
+ * `onUpgrade`.
  */
-export const eventsUrl = (input: { baseUrl?: string; apiKey: string }): string => {
+export const eventsUrl = (input: { baseUrl?: string; apiKey?: string }): string => {
   const base = new URL(input.baseUrl ?? pageUrl());
   base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
   base.pathname = `${PREFIX}/events`;
-  base.search = `?apiKey=${encodeURIComponent(input.apiKey)}`;
+  base.search = input.apiKey === undefined ? '' : `?apiKey=${encodeURIComponent(input.apiKey)}`;
   return base.toString();
 };

@@ -8,9 +8,9 @@ import { FlowDetail } from './screens/flows/FlowDetail.js';
 import { FlowVersion } from './screens/flows/FlowVersion.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
-import { KeyGate } from './shell/KeyGate.js';
+import { AuthGate } from './shell/AuthGate.js';
 import { Link } from './shell/Link.js';
-import { useApi } from './shell/useApi.js';
+import { useAuth } from './shell/useAuth.js';
 import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
 import { useRoute } from './shell/useRoute.js';
@@ -30,12 +30,12 @@ const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
 ];
 
 /**
- * The shell, mounted once behind the key gate.
+ * The shell, mounted once behind the auth gate.
  *
- * `useLive` is called with the KEY rather than the client because the socket
- * is a separate credential path: a browser cannot set a header on a WebSocket
- * upgrade, so the key travels in the query string there and only there. Every
- * REST call still goes through `client`, which sends `X-Api-Key`.
+ * `useLive` takes no API key: a signed-in browser authenticates the socket
+ * upgrade with the same session cookie it sends on every other request, and
+ * the daemon accepts that alongside the API key on this one path — see
+ * `ws.ts`'s `onUpgrade`.
  *
  * THE HEADER NO LONGER SHOWS AN OVERALL CONVERGENCE FIGURE. It used to come
  * from an `onOverall` callback `Watch` fired after its own libraries fetch,
@@ -46,8 +46,8 @@ const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
  * already get on the Watch screen it summarises. Not worth the duplicate
  * fetch, so it is gone rather than made global.
  */
-const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }): JSX.Element => {
-  const { live, connected } = useLive(props.apiKey);
+const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element => {
+  const { live, connected } = useLive(undefined);
   const { route, navigate } = useRoute();
   // Below 48rem the sheet sets `display: none` on the list behind the file
   // panel (`styles.css`), so mounting it there paged an entire library —
@@ -160,20 +160,26 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
 };
 
 /**
- * ONE `useApi` FOR THE WHOLE APP, deliberately: it owns the key, the client
- * built from it, and the sign-out that clears both. A second call would be a
- * second copy of that state, and a 401 clearing one of them would leave the
- * other still rendering — which is exactly the "stuck on an error screen you
- * cannot escape" failure the 401 handling exists to prevent.
+ * ONE `useAuth` FOR THE WHOLE APP, deliberately: it owns the account, the
+ * client built from its session, and the sign-out that clears both. A
+ * second call would be a second copy of that state, and a 401 clearing one
+ * of them would leave the other still rendering — which is exactly the
+ * "stuck on an error screen you cannot escape" failure the 401 handling
+ * exists to prevent.
  */
 export const App = (): JSX.Element => {
-  const { apiKey, client, urlKeyProblem, setKey, signOut } = useApi();
+  const auth = useAuth();
 
   return (
-    <KeyGate apiKey={apiKey} onKey={setKey} initialProblem={urlKeyProblem}>
-      {apiKey !== null && client !== null && (
-        <Shell apiKey={apiKey} client={client} signOut={signOut} />
+    <AuthGate auth={auth}>
+      {auth.client !== null && (
+        <Shell
+          client={auth.client}
+          signOut={() => {
+            void auth.signOut();
+          }}
+        />
       )}
-    </KeyGate>
+    </AuthGate>
   );
 };
