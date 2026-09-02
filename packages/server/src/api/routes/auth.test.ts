@@ -312,10 +312,11 @@ describe('a session cookie', () => {
     expect(session.body).toEqual({ account: null });
   });
 
-  it('401s with no cookie and no API key, same as any other authenticated route', async () => {
+  it('answers "no one" rather than 401 with no cookie and no API key — a browser asks this before it has either', async () => {
     const session = await api('GET', '/auth/session', { apiKey: null });
 
-    expect(session.status).toBe(401);
+    expect(session.status).toBe(200);
+    expect(session.body).toEqual({ account: null });
   });
 
   it('stops working the instant the account behind it is deleted', async () => {

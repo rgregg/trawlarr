@@ -90,9 +90,14 @@ export const authRoutes: Route[] = [
   {
     method: 'GET',
     path: '/auth/session',
-    // NOT anonymous: reaching this at all already proves the caller is
-    // authenticated (by cookie or API key; see server.ts), and its whole
-    // purpose is to say which account — if any — that was.
+    // Anonymous, deliberately: this is the very question a freshly loaded
+    // browser asks before it has any credential at all — "am I signed in?"
+    // — and the answer to "no" is `{ account: null }`, not a 401. The
+    // handler already never uses the API key for identity (only the
+    // session cookie), so an API-key-only caller gets exactly the same
+    // `{ account: null }` a plain anonymous caller does; nothing here
+    // depends on the request having been pre-authorised.
+    anonymous: true,
     handler: async ({ ctx, cookies }) => {
       // The API-key path has no account of its own; a machine client
       // asking "who am I" is told exactly that, rather than getting a 401
