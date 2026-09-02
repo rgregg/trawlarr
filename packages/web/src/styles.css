@@ -26,6 +26,7 @@
 
 @import './styles/screens/watch.css';
 @import './styles/screens/files.css';
+@import './styles/screens/file-detail.css';
 @import './styles/screens/jobs.css';
 @import './styles/screens/diagnose.css';
 @import './styles/screens/config.css';

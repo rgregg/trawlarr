@@ -1,73 +1,123 @@
-/* --- files --------------------------------------------------------------- */
+/* --- files ---------------------------------------------------------------
+   A windowed table of every known file. The grid template is declared ONCE,
+   as `--file-columns`, and read by both the header row and every data row:
+   they are two elements that have to agree to the pixel, and before this
+   they agreed only by both happening to say the same six values. */
+
+.files {
+  --file-columns: minmax(0, 2fr) 6rem 5rem 8rem 6rem 6rem;
+  --file-gutter: var(--space-3);
+}
 
 .files-filters {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 0.75rem;
-  margin-bottom: 0.9rem;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 .files-filters label {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  font-weight: 600;
-  font-size: 0.9rem;
+  gap: var(--space-1);
+  font-weight: 500;
+  font-size: var(--text-sm);
 }
 
-.files-filters button,
 .clear-filters {
-  min-height: 2.75rem;
+  min-height: var(--tap);
   display: inline-flex;
   align-items: center;
+  color: var(--ink-muted);
 }
 
-.clear-filters {
+/* --- the column header, which is also the sort control -------------------- */
+
+.file-head {
+  display: grid;
+  grid-template-columns: var(--file-columns);
+  gap: var(--file-gutter);
+  /* Left padding matches `.file-row`'s gutter PLUS its 4px status edge, so
+     the header's first column starts exactly where a filename does; the
+     right padding matches the scrollbar gutter reserved below, without
+     which every column drifts left by a scrollbar's width the moment the
+     list is long enough to scroll — which is always. */
+  padding: 0 calc(var(--file-gutter) + 12px) 0 calc(var(--file-gutter) + 4px);
+  border-bottom: 1px solid var(--line);
+}
+
+.file-head-sort,
+.file-head-static {
+  display: inline-flex;
+  align-items: center;
+  /* The global `button` rule centres its content, which silently pushed
+     every header label into the middle of its column while the values
+     under it stayed left-aligned. A column header has to start where its
+     column starts or it is not labelling anything. */
+  justify-content: flex-start;
+  min-height: var(--tap);
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--ink-muted);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  white-space: nowrap;
+}
+
+.file-head-sort:hover:not(:disabled) {
   color: var(--ink);
+  background: none;
+  border: 0;
 }
 
-.files-sort {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  margin-bottom: 0.6rem;
-}
-
-.files-sort button {
-  min-height: 2.75rem;
-}
-
-.files-sort button[aria-current='true'] {
-  border-color: var(--ink);
+/* The sorted column shifts weight and colour and carries an arrow naming
+   the direction — three carriers, not one, and none of them hue alone. */
+.file-head-sort[aria-current='true'] {
+  color: var(--ink);
   font-weight: 600;
 }
 
-/* The scroll container that `visibleRange` windows. A fixed height, so the
-   virtualisation math (`viewportHeight`, measured off this element) has
-   something stable to measure — a container that grew with its content
-   would just render every row anyway. */
+/* Right-aligned over the values, which are right-aligned because they are
+   quantities. */
+.file-head-size,
+.file-head-updated {
+  justify-content: flex-end;
+}
+
+/* --- the windowed list ---------------------------------------------------- */
+
+/* A fixed height, so the virtualisation math (`viewportHeight`, measured off
+   this element) has something stable to measure — a container that grew with
+   its content would just render every row anyway. */
 .file-scroll {
   height: 32rem;
   max-height: 70vh;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--surface);
 }
 
 .file-row {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) 6rem 5rem 8rem 6rem 6rem;
-  gap: 0.75rem;
+  grid-template-columns: var(--file-columns);
+  gap: var(--file-gutter);
   align-items: center;
-  padding: 0.4rem 0.75rem;
-  min-height: 2.25rem;
-  box-sizing: border-box;
+  padding: 0 var(--file-gutter);
+  height: 2.25rem;
   border-bottom: 1px solid var(--line);
   border-left: 4px solid transparent;
   color: var(--ink);
   text-decoration: none;
+}
+
+.file-row:hover {
+  background: var(--surface-hover);
 }
 
 .file-row:last-child {
@@ -98,28 +148,70 @@
 .file-codec,
 .file-size,
 .file-updated {
-  color: var(--muted);
-  font-size: 0.9rem;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* Codecs are identifiers read down the column — `hevc` against `h264`,
+   `eac3` against `aac`. Monospaced they align, and the odd one out is
+   visible without reading every row. */
+.file-codec {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
 .file-size,
 .file-updated {
   text-align: right;
-  font-variant-numeric: tabular-nums;
+  justify-self: end;
 }
 
 .files-empty {
-  padding: 1.5rem 0;
-  color: var(--muted);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  color: var(--ink-muted);
+}
+
+.files-empty p {
+  margin: 0 auto var(--space-3);
 }
 
 .files-footer {
-  margin: 0.6rem 0 0;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-5);
+  margin: var(--space-3) 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.files-footer div {
+  display: flex;
+  gap: 0.4em;
+}
+
+.files-footer dt,
+.files-footer dd {
+  margin: 0;
+}
+
+.files-footer dt {
+  color: var(--ink-faint);
+}
+
+.files-footer dd {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.files-footer-loading dd {
+  color: var(--ink-muted);
+  font-weight: 400;
 }
 
 /* Below 48rem a row becomes a stacked card: name on its own line, then
@@ -137,10 +229,43 @@
    ellipsised, not wrapped; the full path is in its `title` and on the file's
    own screen, and an ellipsis does not scroll the viewport sideways. */
 @media (max-width: 48rem) {
+  /* The header stops being a header. With no columns left to sit over it
+     reverts to what it functionally is at this width — a row of sort chips
+     — and the two static codec labels, having nothing to label, are
+     dropped: each narrow row prints its own "Video:" and "Audio:" prefix. */
+  .file-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: 0;
+    border-bottom: 0;
+    margin-bottom: var(--space-3);
+  }
+
+  .file-head-static {
+    display: none;
+  }
+
+  .file-head-sort {
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-3);
+    background: var(--surface);
+  }
+
+  .file-head-sort[aria-current='true'] {
+    border-color: var(--ink-faint);
+  }
+
+  .file-scroll {
+    border-top: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+
   .file-row {
     grid-template-columns: 1fr;
     gap: 0.15rem;
-    padding: 0.6rem 0.75rem;
+    padding: 0.6rem var(--space-3);
     height: 9.5rem;
     line-height: 1.35;
     overflow: hidden;
@@ -155,6 +280,7 @@
   .file-size,
   .file-updated {
     text-align: left;
+    justify-self: start;
   }
 
   .file-state::before {
@@ -175,244 +301,5 @@
 
   .file-updated::before {
     content: 'Updated: ';
-  }
-}
-
-/* --- file detail ----------------------------------------------------------
-   The "why is this file like this" panel. Desktop keeps the Files table
-   mounted beside it (App.tsx renders both under `.file-detail-layout` at
-   the `/files/:id` route); below 48rem there is no room for both, so the
-   list is hidden and the panel becomes the whole screen at that same URL. */
-
-.file-detail-layout {
-  display: flex;
-  align-items: flex-start;
-  gap: 1rem;
-}
-
-.file-detail-layout > .files {
-  flex: 1 1 22rem;
-  min-width: 0;
-}
-
-.file-detail-layout > .file-detail {
-  flex: 2 1 28rem;
-  min-width: 0;
-}
-
-.file-detail {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.9rem 1rem 1.2rem;
-}
-
-.file-detail-back {
-  display: inline-flex;
-  align-items: center;
-  min-height: 2.75rem;
-  color: var(--muted);
-}
-
-.file-detail-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  border-left: 4px solid transparent;
-  padding-left: 0.6rem;
-  margin-top: 0.4rem;
-}
-
-.file-detail-header h2 {
-  margin: 0;
-  font-size: 1.1rem;
-  overflow-wrap: anywhere;
-}
-
-.file-detail-state {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.file-detail-path {
-  margin: 0.3rem 0 0.8rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-  overflow-wrap: anywhere;
-}
-
-/* The answer to "why is this file like this", set apart from everything
-   else on the panel because it is the entire reason the panel exists. */
-.file-detail-explain {
-  margin: 0 0 1rem;
-  padding: 0.6rem 0.8rem;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-left: 4px solid var(--busy);
-  border-radius: 4px;
-  font-weight: 600;
-}
-
-.file-detail-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
-  gap: 0.6rem 1rem;
-  margin: 0 0 1rem;
-}
-
-.file-detail-meta div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-
-.file-detail-meta dt {
-  color: var(--muted);
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.file-detail-meta dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-.file-detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 0.6rem;
-}
-
-.file-detail-actions button {
-  min-height: 2.75rem;
-  padding: 0.4em 1em;
-}
-
-.file-detail-action-error {
-  color: var(--bad);
-  margin: 0 0 0.8rem;
-}
-
-/* The one place Dry-run admits it substituted a stale flow for the
-   library's (missing) current one — `--warn`, the same vocabulary as a
-   held file's row accent, because this is a caution rather than a failure. */
-.file-detail-flow-fallback {
-  color: var(--warn);
-  margin: 0 0 0.8rem;
-}
-
-.file-detail-dry-run {
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 0.6rem 0.8rem;
-  margin-bottom: 1rem;
-}
-
-.file-detail-dry-run ul {
-  margin: 0.4rem 0 0;
-  padding-left: 1.2rem;
-}
-
-.file-detail h3 {
-  font-size: 0.95rem;
-  margin: 1rem 0 0.4rem;
-}
-
-.stream-table-scroll {
-  overflow-x: auto;
-}
-
-.stream-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
-
-.stream-table th,
-.stream-table td {
-  text-align: left;
-  padding: 0.35rem 0.6rem;
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-.job-history {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.job-history-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 2.75rem;
-  padding: 0.4rem 0.75rem;
-  color: var(--ink);
-  text-decoration: none;
-  border-bottom: 1px solid var(--line);
-}
-
-.job-history li:last-child .job-history-row {
-  border-bottom: none;
-}
-
-.job-history-state {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: 0.85rem;
-  min-width: 5.5rem;
-}
-
-.job-history-reason {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-detail-skeleton .skeleton-row {
-  margin: 0.4rem 0;
-}
-
-.file-detail-empty {
-  color: var(--muted);
-  padding: 1rem 0;
-}
-
-@media (max-width: 48rem) {
-  .file-detail-layout {
-    display: block;
-  }
-
-  /* No room for the table behind the panel at this width — the panel IS
-     the screen, same URL, same route; see the file-level comment above. */
-  .file-detail-layout > .files {
-    display: none;
-  }
-
-  .file-detail-layout > .file-detail {
-    flex: unset;
-  }
-
-  .job-history-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.15rem;
-  }
-
-  .job-history-reason {
-    white-space: normal;
-    overflow-wrap: anywhere;
   }
 }

@@ -518,7 +518,11 @@ export const Watch = (props: {
         {workerStatus === null ? (
           runtimeFailure === null && <p>Loading…</p>
         ) : (
-          <>
+          // Three facts about the daemon itself, on one surface. They were
+          // three bare paragraphs under a heading while every other section
+          // of this screen sat on a card, which made the bottom of the
+          // screen read as leftovers rather than as a section.
+          <div className="runtime-panel">
             <p className="worker-target">
               {String(workerStatus.active)} running
               {workerStatus.paused ? ', pool paused' : ''} — target{' '}
@@ -537,7 +541,7 @@ export const Watch = (props: {
                 {schedule.windows.length === 1 ? '' : 's'} configured
               </p>
             )}
-          </>
+          </div>
         )}
       </section>
     </div>

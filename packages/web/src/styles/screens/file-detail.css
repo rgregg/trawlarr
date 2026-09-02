@@ -1,0 +1,350 @@
+/* --- file detail ----------------------------------------------------------
+   The "why is this file like this" panel. Desktop keeps the Files table
+   mounted beside it (App.tsx renders both under `.file-detail-layout` at
+   the `/files/:id` route); below 48rem there is no room for both, so the
+   list is hidden and the panel becomes the whole screen at that same URL. */
+
+.file-detail-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+/* Beside the panel the table gets about 26rem, and the full six-column
+   template's FIXED columns alone want more than that — so the name column,
+   the only flexible one, collapsed to zero and the filenames disappeared
+   entirely, leaving a table of codecs with nothing to identify a row by.
+   Here it drops to the three columns that identify a file; the codecs and
+   the timestamp are on the panel to the right anyway. */
+.file-detail-layout > .files {
+  flex: 1 1 22rem;
+  min-width: 0;
+  --file-columns: minmax(0, 1fr) 5rem 5rem;
+}
+
+/* `display: none` removes a grid item from the flow entirely, so the header
+   and the rows both fall back to three columns and stay aligned. */
+.file-detail-layout > .files .file-codec,
+.file-detail-layout > .files .file-updated,
+.file-detail-layout > .files .file-head-static,
+.file-detail-layout > .files .file-head-updated {
+  display: none;
+}
+
+.file-detail-layout > .file-detail {
+  flex: 2 1 28rem;
+  min-width: 0;
+}
+
+/* Raised, not merely bordered. On desktop this panel sits over the list it
+   was opened from, and the shadow is what says "on top of" rather than
+   "beside" — the click is meant to feel like opening a drawer over the
+   table, not like leaving it. */
+.file-detail {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.file-detail-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  min-height: var(--tap);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.file-detail-back:hover {
+  color: var(--ink);
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-left: 4px solid transparent;
+  padding-left: var(--space-3);
+  margin-top: var(--space-1);
+}
+
+/* The status edge, restated at higher specificity ON PURPOSE.
+   `FileDetail.tsx` puts `file-row-state-<state>` on this element to colour
+   the edge, but `.file-detail-header`'s own `border-left` SHORTHAND resets
+   the colour to transparent, and being the later rule of equal specificity
+   it won — so the edge has never once shown a state. Two classes beat one;
+   restating the colours here is what makes the markup's intent true. */
+.file-detail-header.file-row-state-failed,
+.file-detail-header.file-row-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.file-detail-header.file-row-state-held {
+  border-left-color: var(--warn);
+}
+
+.file-detail-header.file-row-state-running {
+  border-left-color: var(--busy);
+}
+
+.file-detail-header.file-row-state-good {
+  border-left-color: var(--good);
+}
+
+.file-detail-header h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  overflow-wrap: anywhere;
+}
+
+/* Sentence case, not the tracked-out caps this used to be: it is the file's
+   state in the same words the table and the API use, and shouting it made
+   it look like a category label rather than a value. */
+.file-detail-state {
+  flex-shrink: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  padding: 0.15em 0.6em;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-pill);
+}
+
+/* The pill takes the state's colour too, so the header states it twice —
+   once as a word, once as an edge — and tints to match. Never colour
+   alone: the word is always there, whatever the hue does. */
+.file-row-state-failed .file-detail-state,
+.file-row-state-not_converging .file-detail-state {
+  color: var(--bad);
+  background: var(--bad-soft);
+}
+
+.file-row-state-held .file-detail-state {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.file-row-state-running .file-detail-state {
+  color: var(--busy);
+  background: var(--busy-soft);
+}
+
+.file-row-state-good .file-detail-state {
+  color: var(--good);
+  background: var(--good-soft);
+}
+
+.file-detail-path {
+  margin: var(--space-2) 0 var(--space-4);
+  padding-left: calc(var(--space-3) + 4px);
+  color: var(--ink-muted);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* THE ANSWER TO "why is this file like this", set apart from everything else
+   on the panel because it is the entire reason the panel exists. */
+.file-detail-explain {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--busy-soft);
+  border: 1px solid color-mix(in srgb, var(--busy) 30%, transparent);
+  border-left: 3px solid var(--busy);
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  max-width: none;
+}
+
+.file-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-md);
+}
+
+.file-detail-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.file-detail-meta dt {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.file-detail-meta dd {
+  margin: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.file-detail-action-error {
+  color: var(--bad);
+  margin: 0 0 var(--space-3);
+}
+
+.file-detail-flow-link {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+/* The one place Dry-run admits it substituted a stale flow for the
+   library's (missing) current one — `--warn`, the same vocabulary as a held
+   file's row accent, because this is a caution rather than a failure. */
+.file-detail-flow-fallback {
+  color: var(--warn);
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.file-detail-dry-run {
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.file-detail-dry-run ul {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.2rem;
+}
+
+/* Section headings inside the panel. Quieter than the panel's own title and
+   separated by a rule, so the panel reads as a stack of labelled sections
+   rather than one undifferentiated column. */
+.file-detail h3 {
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+  margin: var(--space-5) 0 var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.stream-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.stream-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.stream-table th,
+.stream-table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.stream-table th {
+  color: var(--ink-muted);
+  font-weight: 500;
+  background: var(--surface-sunken);
+}
+
+.stream-table td {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+.stream-table tr:last-child td {
+  border-bottom: none;
+}
+
+.job-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.job-history-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap);
+  padding: var(--space-2) var(--space-3);
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.job-history-row:hover {
+  background: var(--surface-hover);
+}
+
+.job-history li:last-child .job-history-row {
+  border-bottom: none;
+}
+
+.job-history-state {
+  flex-shrink: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  min-width: 5.5rem;
+}
+
+.job-history-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-detail-skeleton .skeleton-row {
+  margin: var(--space-2) 0;
+}
+
+.file-detail-empty {
+  color: var(--ink-muted);
+  padding: var(--space-4) 0;
+}
+
+@media (max-width: 48rem) {
+  .file-detail-layout {
+    display: block;
+  }
+
+  /* No room for the table behind the panel at this width — the panel IS
+     the screen, same URL, same route; see the file-level comment above. */
+  .file-detail-layout > .files {
+    display: none;
+  }
+
+  .file-detail-layout > .file-detail {
+    flex: unset;
+  }
+
+  .job-history-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+
+  .job-history-reason {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}

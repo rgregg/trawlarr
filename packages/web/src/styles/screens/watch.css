@@ -150,6 +150,11 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
   gap: var(--space-4);
+  /* Each card is as tall as its own content. Stretched to a common height,
+     the one library with a pause explanation or a wrapped row of actions
+     left every other card with a hand's width of empty surface below its
+     last line, which reads as content that failed to load. */
+  align-items: start;
 }
 
 /* The card name is the link to that library's filtered file list — the only
@@ -243,11 +248,22 @@
   letter-spacing: -0.02em;
 }
 
+.runtime-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* The one line here that is about the work rather than the build. */
 .worker-target {
   margin: 0;
-  color: var(--ink-muted);
+  color: var(--ink);
+  font-weight: 500;
 }
 
 .watch-runtime .detail {
   margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
 }

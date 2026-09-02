@@ -208,10 +208,22 @@ legend {
   background: var(--surface-sunken);
 }
 
-.badge::before {
-  content: '○';
+/* The marker belongs to STATUS, not to the pill. A bare `.badge` is also
+   used for labels that have no status at all — a flow node's branch label,
+   "current" on a version, "attached" on a library's flow — and a status
+   glyph on those would assert a state none of them has. So the marker is
+   attached to each `.status-*` context and nowhere else. */
+.status-converged .badge::before,
+.status-working .badge::before,
+.status-attention .badge::before,
+.status-paused .badge::before,
+.status-idle .badge::before {
   font-size: 0.9em;
   line-height: 1;
+}
+
+.status-idle .badge::before {
+  content: '○';
 }
 
 .status-converged .badge {

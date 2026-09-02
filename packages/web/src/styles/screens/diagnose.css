@@ -9,26 +9,46 @@
   margin: 0.4rem 0;
 }
 
+/* THE EMPTY STATE IS THE NORMAL STATE on a converged install, so it is
+   drawn as an answer rather than as an absence: a tinted panel in the
+   good/converged colour, the same one a converged library card uses. A
+   dashed "nothing here" outline would say the screen failed to load. */
 .problem-empty {
-  padding: 2.5rem 1rem;
+  padding: var(--space-7) var(--space-4);
   text-align: center;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  background: var(--good-soft);
+  border: 1px solid color-mix(in srgb, var(--good) 28%, transparent);
+  border-radius: var(--radius-lg);
 }
 
 .problem-empty-headline {
-  margin: 0 0 0.6rem;
-  font-size: 1.05rem;
+  margin: 0 auto var(--space-3);
+  font-size: var(--text-md);
   font-weight: 600;
   color: var(--good);
+}
+
+.problem-empty-headline::before {
+  /* The tick is redundant with the sentence beside it, deliberately: the
+     panel has to read as "good" at a glance and before any colour. */
+  content: '✓ ';
 }
 
 .problem-empty a {
   display: inline-flex;
   align-items: center;
-  min-height: 2.75rem;
+  min-height: var(--tap);
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
   color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.problem-empty a:hover {
+  background: var(--surface-hover);
 }
 
 .problem-list {
@@ -37,15 +57,16 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
+  gap: var(--space-4);
 }
 
 .problem-card {
-  background: var(--panel);
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-left: 4px solid transparent;
-  border-radius: 6px;
-  padding: 0.8rem 1rem 1rem;
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-4) var(--space-4) var(--space-4) var(--space-5);
 }
 
 /* Same vocabulary as `.file-row-state-*`: `--bad` for a failure that is not
@@ -65,18 +86,17 @@
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.5rem 1rem;
+  gap: var(--space-2) var(--space-4);
 }
 
 .problem-card-head h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--text-base);
 }
 
 .problem-card-count {
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
   white-space: nowrap;
 }
 
@@ -89,17 +109,17 @@
   max-height: 8rem;
   overflow-y: auto;
   overflow-x: auto;
-  margin: 0.5rem 0;
-  background: var(--bg);
+  margin: var(--space-2) 0;
+  background: var(--surface-sunken);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .problem-reason {
   margin: 0;
-  padding: 0.5rem 0.7rem;
-  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
-  font-size: 0.85rem;
+  padding: var(--space-2) 0.7rem;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -111,7 +131,7 @@
 .problem-reason-note {
   margin: 0.4rem 0 0.7rem;
   color: var(--warn);
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
 }
 
 .problem-files {
@@ -120,11 +140,11 @@
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem 1rem;
+  gap: 0.4rem var(--space-4);
 }
 
 .problem-files li {
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
 }
 
 .problem-files a {
@@ -132,48 +152,54 @@
 }
 
 .problem-files-more {
-  color: var(--muted);
+  color: var(--ink-muted);
 }
 
 .problem-card-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.6rem 1rem;
+  gap: 0.6rem var(--space-4);
 }
 
 .problem-inspect {
   display: inline-flex;
   align-items: center;
-  min-height: 2.75rem;
-  padding: 0.4em 1em;
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  min-height: var(--tap);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
   color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.problem-inspect:hover {
+  background: var(--surface-hover);
 }
 
 .problem-requeue {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.8rem;
+  gap: var(--space-2) 0.8rem;
 }
 
 .problem-requeue button {
-  min-height: 2.75rem;
+  min-height: var(--tap);
   padding: 0.4em 1em;
 }
 
 .problem-requeue-ok {
   margin: 0;
   color: var(--good);
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
 }
 
 .problem-requeue-fail {
   margin: 0;
   color: var(--bad);
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 48rem) {

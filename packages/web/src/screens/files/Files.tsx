@@ -42,13 +42,6 @@ const PAGE_SIZE = 200;
 // hand-maintained against the `FileState` union.
 const STATES = ['unknown', 'queued', 'running', 'good', 'failed', 'not_converging', 'held'];
 
-const SORTS: Array<{ column: SortColumn; label: string }> = [
-  { column: 'name', label: 'Name' },
-  { column: 'state', label: 'State' },
-  { column: 'size', label: 'Size' },
-  { column: 'updated', label: 'Updated' },
-];
-
 /**
  * A file row's own line: whole-row a `<Link>` so the row itself is what is
  * clickable, keyboard-focusable and middle-click-able — see `shell/Link.tsx`
@@ -300,27 +293,54 @@ export const Files = (props: {
     </form>
   );
 
-  const sortControls = (
-    <div className="files-sort" role="group" aria-label="Sort files">
-      {SORTS.map((entry) => {
-        const active = sort.column === entry.column;
-        return (
-          <button
-            key={entry.column}
-            type="button"
-            aria-current={active ? 'true' : undefined}
-            onClick={() => {
-              setSort({
-                column: entry.column,
-                direction: active && sort.direction === 'asc' ? 'desc' : 'asc',
-              });
-            }}
-          >
-            {entry.label}
-            {active ? (sort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
-          </button>
-        );
-      })}
+  const sortButton = (column: SortColumn, label: string): JSX.Element => {
+    const active = sort.column === column;
+    return (
+      <button
+        type="button"
+        className={`file-head-sort file-head-${column}`}
+        aria-current={active ? 'true' : undefined}
+        onClick={() => {
+          setSort({
+            column,
+            direction: active && sort.direction === 'asc' ? 'desc' : 'asc',
+          });
+        }}
+      >
+        {label}
+        {active ? (sort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+      </button>
+    );
+  };
+
+  /**
+   * The column headers, which are also the sort control.
+   *
+   * They used to be a row of four chips floating above the table with
+   * nothing tying them to the columns they sorted, and the two codec
+   * columns were unlabelled entirely — the operator had to infer from the
+   * values which of `hevc` and `eac3` was video.
+   *
+   * OUTSIDE THE SCROLL CONTAINER, deliberately. `.file-scroll` has a fixed
+   * height that `attachContainer` measures to drive the windowing maths; a
+   * sticky header inside it would overlay the first rows while still
+   * counting toward that measurement, and the window would be short by a
+   * row. Above it, sharing the same grid template, the two line up and the
+   * virtualisation never learns it exists. `scrollbar-gutter: stable` on
+   * the container is what keeps the columns aligned once a scrollbar
+   * appears.
+   *
+   * Below 48rem the sheet turns this back into a wrapped row of chips,
+   * because the rows themselves stop being a grid there.
+   */
+  const columnHeader = (
+    <div className="file-head" role="group" aria-label="Sort files">
+      {sortButton('name', 'Name')}
+      {sortButton('state', 'State')}
+      <span className="file-head-static">Video</span>
+      <span className="file-head-static">Audio</span>
+      {sortButton('size', 'Size')}
+      {sortButton('updated', 'Updated')}
     </div>
   );
 
@@ -365,7 +385,7 @@ export const Files = (props: {
 
       {failure === null && !loading && total > 0 && (
         <>
-          {sortControls}
+          {columnHeader}
           <div
             className="file-scroll"
             ref={attachContainer}
@@ -379,10 +399,30 @@ export const Files = (props: {
             ))}
             <div style={{ height: `${String((sorted.length - range.end) * rowHeight)}px` }} />
           </div>
-          <p className="files-footer">
-            {String(total)} files · {formatBytes(sumBytes)} · {String(percent)}% converged
-            {loadingMore ? ' (still loading…)' : ''}
-          </p>
+          {/* Labelled fields rather than three values strung together with
+              middle dots: "4,625 · 8.2 TB · 63%" needs the reader to work
+              out what each number counts, and the percentage in particular
+              is meaningless without the word beside it. */}
+          <dl className="files-footer">
+            <div>
+              <dt>Files</dt>
+              <dd>{String(total)}</dd>
+            </div>
+            <div>
+              <dt>Total size</dt>
+              <dd>{formatBytes(sumBytes)}</dd>
+            </div>
+            <div>
+              <dt>Converged</dt>
+              <dd>{String(percent)}%</dd>
+            </div>
+            {loadingMore && (
+              <div className="files-footer-loading">
+                <dt>Loading</dt>
+                <dd>still fetching pages…</dd>
+              </div>
+            )}
+          </dl>
         </>
       )}
     </div>
