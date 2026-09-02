@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { filtersToQuery, formatBytes, formatUpdated, sortRows, toFileRows } from './files-model.js';
+import {
+  filtersToQuery,
+  formatBytes,
+  formatTimestamp,
+  formatUpdated,
+  sortRows,
+  toFileRows,
+} from './files-model.js';
 
 const apiFile = {
   id: 'f1',
@@ -97,5 +104,51 @@ describe('formatUpdated', () => {
   it('says nothing rather than 1970 for a row with no timestamp', () => {
     expect(formatUpdated(0)).toBe('—');
     expect(formatUpdated(Number.NaN)).toBe('—');
+  });
+
+  // The same range `formatTimestamp` refuses, for the same reason: this one
+  // is reached with `updatedAt`, but both end at `Date.prototype.toISOString`.
+  it('says nothing for a value outside the range a Date can represent', () => {
+    expect(formatUpdated(8.64e15 + 1)).toBe('—');
+  });
+});
+
+describe('formatTimestamp', () => {
+  it('renders the whole instant, since the file screen has room for it', () => {
+    expect(formatTimestamp(Date.UTC(2026, 7, 27, 13, 45))).toBe('2026-08-27T13:45:00.000Z');
+  });
+
+  /**
+   * THE REASON THIS FUNCTION EXISTS.
+   *
+   * `mtimeMs` is not a clock reading the daemon took — it is whatever
+   * `fs.stat()` reported for the file, stored verbatim (`mtime_ms INTEGER
+   * NOT NULL`, written unvalidated by the scanner). A share that reports a
+   * garbage inode timestamp therefore puts a garbage number in the row, and
+   * `new Date(that).toISOString()` throws `RangeError: Invalid time value`
+   * for anything beyond ±8.64e15 ms.
+   *
+   * Thrown DURING RENDER, that unmounted the entire React tree: one
+   * unreadable timestamp on one file blanked the whole application, with no
+   * error, no retry, and no way out but editing the URL by hand.
+   */
+  it('never throws on a timestamp the filesystem made up', () => {
+    expect(formatTimestamp(8.64e15 + 1)).toBe('—');
+    expect(formatTimestamp(-8.64e15 - 1)).toBe('—');
+    expect(formatTimestamp(1.8e19)).toBe('—');
+    expect(formatTimestamp(Number.NaN)).toBe('—');
+    expect(formatTimestamp(Number.POSITIVE_INFINITY)).toBe('—');
+    // The field is typed `number`, but the type is a claim about a JSON
+    // payload rather than a guarantee about one.
+    expect(formatTimestamp(undefined as unknown as number)).toBe('—');
+  });
+
+  it('accepts the largest instant a Date can represent', () => {
+    expect(formatTimestamp(8.64e15)).toBe('+275760-09-13T00:00:00.000Z');
+  });
+
+  it('says nothing for the unset timestamp rather than claiming 1970', () => {
+    expect(formatTimestamp(0)).toBe('—');
+    expect(formatTimestamp(-1)).toBe('—');
   });
 });
