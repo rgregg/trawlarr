@@ -252,8 +252,6 @@ export const Diagnose = (props: {
 
   return (
     <div className="diagnose">
-      <h2>Diagnose</h2>
-
       {failure !== null && (
         <div role="alert" className="failure">
           <strong>{failure.title}</strong>

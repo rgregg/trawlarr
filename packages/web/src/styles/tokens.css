@@ -1,0 +1,177 @@
+/*
+ * The palette is one object seen in four states, not a set of unrelated
+ * hues: verdigris, marine blue, iron oxide and brass — the colours of
+ * weathered marine hardware. Verdigris doubles as the accent because
+ * "converged" is the state the whole product exists to reach, so the colour
+ * that marks the primary action and the colour that means on-target are
+ * deliberately the same one.
+ *
+ * Light is the base and dark is the override, in three layers, because a
+ * viewer has three states and only two of them are a media query:
+ *   :root                                     — light, always defined
+ *   prefers-color-scheme: dark, un-overridden — the system default
+ *   [data-theme='dark']                       — an explicit choice
+ * Every colour is defined at :root first. A colour whose ONLY definition
+ * lives inside a media query is invisible to the explicit-light path.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Grounds and surfaces. `sunken` is for wells the eye should read as
+     *below* the page — inputs, log panels, code — and is the one surface
+     that is darker than the page in light mode and darker again in dark. */
+  --bg: #f4f7f5;
+  --surface: #ffffff;
+  --surface-sunken: #eaefec;
+  --surface-hover: #eef3f0;
+  --line: #dce4e0;
+  --line-strong: #bcc8c3;
+
+  /* Ink. Three steps is enough; a fourth always ends up illegible. */
+  --ink: #17231f;
+  --ink-muted: #576862;
+  --ink-faint: #7d8d87;
+
+  /* Verdigris. */
+  --accent: #1a7566;
+  --accent-hover: #14604f;
+  --accent-ink: #ffffff;
+  --accent-soft: #ddefea;
+
+  /* The four states. Each has a `-soft` tint used for pill backgrounds; the
+     bare hue is only ever used where it clears 4.5:1 on --surface. */
+  --good: #1a7566;
+  --good-soft: #ddefea;
+  --busy: #1a6699;
+  --busy-soft: #dfecf6;
+  --bad: #a8433a;
+  --bad-soft: #f7e4e1;
+  --warn: #7d5a10;
+  --warn-soft: #f5ecd6;
+
+  /* Elevation. Two steps, tinted with the ink hue rather than pure black —
+     a neutral-black shadow over a green-cast ground reads as grime. */
+  --shadow-sm: 0 1px 2px rgba(23, 35, 31, 0.05), 0 1px 3px rgba(23, 35, 31, 0.04);
+  --shadow-md: 0 1px 2px rgba(23, 35, 31, 0.04), 0 8px 20px -8px rgba(23, 35, 31, 0.16);
+
+  --focus-ring: #1a7566;
+
+  /* Space. A 4px base, named by use rather than by number so a rule reads
+     as intent: gutters between fields, gaps between sections. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Type. 15px base — the density this screen needs — on a restrained
+     scale; the meter step exists for exactly one element (see the note in
+     components.css) and must not spread. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md: 1.0625rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-meter: 2.25rem;
+
+  --radius-sm: 5px;
+  --radius-md: 9px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* The touch-target floor. It appears in a dozen rules across this sheet;
+     it is a requirement (2.75rem ≈ 44px), so it is named once. */
+  --tap: 2.75rem;
+
+  --content-max: 78rem;
+
+  --sans:
+    'IBM Plex Sans Variable', 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+/* The system default: dark unless the viewer has explicitly chosen light. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg: #101614;
+    --surface: #18201d;
+    --surface-sunken: #0b100e;
+    --surface-hover: #1e2724;
+    --line: #27322e;
+    --line-strong: #3c4a45;
+
+    --ink: #e6edea;
+    --ink-muted: #9aa9a3;
+    --ink-faint: #74847e;
+
+    --accent: #4fc3ae;
+    --accent-hover: #6fd3c1;
+    --accent-ink: #06211b;
+    --accent-soft: #16322c;
+
+    --good: #4fc3ae;
+    --good-soft: #16322c;
+    --busy: #5aa9e0;
+    --busy-soft: #13283a;
+    --bad: #e8857a;
+    --bad-soft: #381d19;
+    --warn: #e0b24d;
+    --warn-soft: #32270f;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 20px -8px rgba(0, 0, 0, 0.55);
+
+    --focus-ring: #4fc3ae;
+  }
+}
+
+/* The explicit choice, which must win in BOTH directions — a viewer on a
+   light system who picks dark gets nothing from the media query above. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #101614;
+  --surface: #18201d;
+  --surface-sunken: #0b100e;
+  --surface-hover: #1e2724;
+  --line: #27322e;
+  --line-strong: #3c4a45;
+
+  --ink: #e6edea;
+  --ink-muted: #9aa9a3;
+  --ink-faint: #74847e;
+
+  --accent: #4fc3ae;
+  --accent-hover: #6fd3c1;
+  --accent-ink: #06211b;
+  --accent-soft: #16322c;
+
+  --good: #4fc3ae;
+  --good-soft: #16322c;
+  --busy: #5aa9e0;
+  --busy-soft: #13283a;
+  --bad: #e8857a;
+  --bad-soft: #381d19;
+  --warn: #e0b24d;
+  --warn-soft: #32270f;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 20px -8px rgba(0, 0, 0, 0.55);
+
+  --focus-ring: #4fc3ae;
+}
+
+/* Names the pre-overhaul sheet used. Kept as aliases rather than renamed
+   across 1,500 lines of screen rules in one commit: every existing rule
+   re-themes for free, and the ones worth rewriting get rewritten on their
+   own terms. New rules should use the semantic names above. */
+:root {
+  --panel: var(--surface);
+  --muted: var(--ink-muted);
+}

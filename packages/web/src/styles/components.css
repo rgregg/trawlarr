@@ -1,0 +1,436 @@
+/*
+ * The shared vocabulary: controls, surfaces, status, meters, and the three
+ * honest non-content states (loading, empty, failed).
+ *
+ * Everything here is element- or single-class-scoped so a screen rule can
+ * still override it without an id or an `!important`. Where a screen sheet
+ * used to restate a control's chrome (`.files-filters input { … }` and half
+ * a dozen like it), that restatement has been deleted rather than left to
+ * fight with these rules — specificity ties resolved by source order are
+ * how a sheet ends up with two looks for one control.
+ */
+
+/* --- controls ------------------------------------------------------------ */
+
+button,
+.button {
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-3);
+  /* The 2.75rem floor is global now. The old sheet applied it per screen
+     and kept finding another screen that had been missed — the Retry button
+     inside a failure box, three times. A floor that has to be remembered is
+     not a floor. */
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+button:hover:not(:disabled),
+.button:hover {
+  background: var(--surface-hover);
+  border-color: var(--ink-faint);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+button:disabled {
+  color: var(--ink-faint);
+  background: var(--surface-sunken);
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
+/* The one action a screen most wants you to take. Applied by hand, never by
+   position — a form's first button is not automatically its primary one. */
+.btn-primary {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* Destructive actions: purge, delete, force-requeue. Outlined rather than
+   filled, so the eye does not land on it first in a row of actions. */
+.btn-danger {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--bad-soft);
+  border-color: var(--bad);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--line);
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-3);
+  min-height: var(--tap);
+  max-width: 100%;
+}
+
+textarea {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  padding: var(--space-2) var(--space-3);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--ink-faint);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ink-faint);
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  min-height: 0;
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--accent);
+}
+
+select {
+  /* A select with no explicit padding-right collides its text with the
+     platform arrow on Firefox. */
+  padding-right: var(--space-2);
+}
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin: 0;
+}
+
+legend {
+  padding: 0 var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+/* Help text is ALWAYS VISIBLE, never a hover tooltip: a plugin template's
+   help is the documentation for that setting, and hover reaches neither a
+   keyboard nor a touch user. */
+.help {
+  margin: 0 0 var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.detail {
+  color: var(--ink-muted);
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.switch label {
+  font-weight: 400;
+}
+
+/* --- surfaces ------------------------------------------------------------ */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-4);
+  /* The status edge. It is thinner than the old 4px because it now sits
+     next to a real border rather than carrying the card on its own, but it
+     is still a SHAPE difference and not only a hue — see `.badge`. */
+  border-left: 3px solid var(--line);
+}
+
+.card h3 {
+  margin: 0;
+}
+
+/* --- status -------------------------------------------------------------- */
+
+/* Colour is the third carrier here, never the first. The word is always
+   printed; the marker glyph differs per status; only then does the hue
+   differ. Drop all colour and every status is still distinguishable. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  margin: var(--space-2) 0 0;
+  padding: 0.15em 0.6em;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  color: var(--ink-muted);
+  background: var(--surface-sunken);
+}
+
+.badge::before {
+  content: '○';
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.status-converged .badge {
+  color: var(--good);
+  background: var(--good-soft);
+  border-color: color-mix(in srgb, var(--good) 30%, transparent);
+}
+
+.status-converged .badge::before {
+  content: '●';
+}
+
+.status-working .badge {
+  color: var(--busy);
+  background: var(--busy-soft);
+  border-color: color-mix(in srgb, var(--busy) 30%, transparent);
+}
+
+.status-working .badge::before {
+  content: '◐';
+}
+
+.status-attention .badge {
+  color: var(--bad);
+  background: var(--bad-soft);
+  border-color: color-mix(in srgb, var(--bad) 30%, transparent);
+}
+
+.status-attention .badge::before {
+  content: '▲';
+}
+
+.status-paused .badge {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.status-paused .badge::before {
+  content: '❙❙';
+  letter-spacing: -0.1em;
+}
+
+.status-converged {
+  border-left-color: var(--good);
+}
+
+.status-working {
+  border-left-color: var(--busy);
+}
+
+.status-attention {
+  border-left-color: var(--bad);
+}
+
+/* A paused library is what a solid, unmissable edge is FOR: with no jobs
+   and no errors it otherwise looks identical to a finished one. */
+.status-paused {
+  border-left-color: var(--warn);
+}
+
+.status-idle {
+  border-left-color: var(--line-strong);
+}
+
+/* --- meters -------------------------------------------------------------- */
+
+/* Job progress: thin, blue, unruled. It REPEATS what the text beside it
+   already says and is never the only statement of progress. */
+.bar {
+  height: 5px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  margin-top: var(--space-2);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  background: var(--busy);
+  border-radius: var(--radius-pill);
+  transition: width 0.3s ease;
+}
+
+/* Convergence: the one measure this whole product exists to move, so it is
+   the one element allowed to look like an instrument rather than a widget.
+   The track carries hairline ticks at every tenth and a heavier one at each
+   quarter; the fill gets a bright leading edge so the current reading has a
+   definite position rather than a fading end. Everything else on the card
+   stays quiet — that is what pays for this. */
+.card .bar {
+  height: 10px;
+  margin-top: var(--space-3);
+  /* Quarters only, hairline. Ticks at every tenth chopped the empty part of
+     the track into segments that read as a broken bar rather than a scale —
+     the marks have to be quieter than the thing being measured. */
+  background:
+    repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px 25%),
+    var(--surface-sunken);
+}
+
+.card .bar-fill {
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+  background: var(--accent);
+}
+
+.status-attention .bar-fill {
+  background: var(--bad);
+  box-shadow: none;
+}
+
+.status-paused .bar-fill {
+  background: var(--warn);
+  box-shadow: none;
+}
+
+/* --- the honest non-content states --------------------------------------- */
+
+/* An alert is bordered and marked as well as coloured — the same rule the
+   cards follow: colour is never the only carrier. */
+.failure {
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--line));
+  border-left: 3px solid var(--bad);
+  border-radius: var(--radius-md);
+  background: var(--bad-soft);
+  color: var(--ink);
+  padding: var(--space-3) var(--space-4);
+  margin: var(--space-3) 0 0;
+}
+
+.failure strong {
+  color: var(--bad);
+}
+
+.failure p {
+  margin: var(--space-2) 0 0;
+}
+
+.failure button {
+  margin-top: var(--space-3);
+}
+
+[role='alert'],
+.problem {
+  color: var(--bad);
+}
+
+.problems {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.2rem;
+  color: var(--bad);
+}
+
+/* The daemon's refusals are multi-sentence and are shown whole, wrapped
+   rather than truncated: an elided message is a lost diagnosis. */
+.verbatim {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.pause-reason {
+  margin: var(--space-2) 0 0;
+  color: var(--warn);
+}
+
+/* An empty screen says what would fill it and how to make that happen; a
+   fresh install must never be mistaken for a broken one. */
+.empty-state {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  color: var(--ink-muted);
+}
+
+.empty-state p {
+  margin: 0 auto;
+}
+
+.skeleton-row {
+  height: 2.25rem;
+  margin: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--surface-sunken) 25%,
+    var(--line) 37%,
+    var(--surface-sunken) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+/* --- log and code panels -------------------------------------------------- */
+
+.job-log {
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

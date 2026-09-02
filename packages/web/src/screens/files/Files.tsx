@@ -326,7 +326,6 @@ export const Files = (props: {
 
   return (
     <div className="files">
-      <h2>Files</h2>
       {filterForm}
 
       {failure !== null && (

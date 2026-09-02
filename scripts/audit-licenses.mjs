@@ -13,6 +13,12 @@ const ALLOWED = new Set([
   'Unlicense',
   'BlueOak-1.0.0',
   'Python-2.0',
+  // The bundled typefaces (@fontsource* / IBM Plex). The OFL permits
+  // redistribution inside a larger work; what it forbids is selling the
+  // fonts on their own and shipping a MODIFIED font under the reserved
+  // name. Neither applies here — the woff2 files are passed through the
+  // Vite build byte for byte.
+  'OFL-1.1',
 ]);
 
 const normalise = (l) => {

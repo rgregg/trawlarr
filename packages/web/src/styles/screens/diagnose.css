@@ -1,0 +1,190 @@
+/* --- diagnose -------------------------------------------------------------
+   Problems, grouped by cause, not a list of failed rows — see
+   `diagnose-model.ts` for why. The empty state (`.problem-empty`) is the
+   normal one: both real libraries are fully converged most of the time, and
+   it has to read as calm and deliberate, never like `.failure` below it in
+   this file, which is what an operator should worry about instead. */
+
+.diagnose-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.problem-empty {
+  padding: 2.5rem 1rem;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.problem-empty-headline {
+  margin: 0 0 0.6rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--good);
+}
+
+.problem-empty a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--ink);
+}
+
+.problem-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.problem-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid transparent;
+  border-radius: 6px;
+  padding: 0.8rem 1rem 1rem;
+}
+
+/* Same vocabulary as `.file-row-state-*`: `--bad` for a failure that is not
+   improving on its own, `--warn` for one that is being held rather than
+   retried forever. */
+.problem-card-state-failed,
+.problem-card-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.problem-card-state-held {
+  border-left-color: var(--warn);
+}
+
+.problem-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.problem-card-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.problem-card-count {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The engine's own sentence, shown verbatim. Wrapped, not truncated — an
+   elided reason is a lost diagnosis, the same rule `.failure p` follows for
+   the daemon's refusals — and given its own horizontal scroll as a fallback
+   for a single unbroken token a wrap cannot break, so a long reason can
+   never force the page itself to scroll sideways. */
+.problem-reason-scroll {
+  max-height: 8rem;
+  overflow-y: auto;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.problem-reason {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Same vocabulary as `.file-detail-flow-fallback`: `--warn` for a caution
+   rather than a failure — this card's grouping may have merged causes that
+   only look alike with their numbers stripped (`exit code 1` vs `exit code
+   137`), and this is where that gets said. */
+.problem-reason-note {
+  margin: 0.4rem 0 0.7rem;
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
+.problem-files {
+  list-style: none;
+  margin: 0 0 0.7rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+}
+
+.problem-files li {
+  font-size: 0.9rem;
+}
+
+.problem-files a {
+  color: var(--ink);
+}
+
+.problem-files-more {
+  color: var(--muted);
+}
+
+.problem-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+}
+
+.problem-inspect {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.problem-requeue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.8rem;
+}
+
+.problem-requeue button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.problem-requeue-ok {
+  margin: 0;
+  color: var(--good);
+  font-size: 0.9rem;
+}
+
+.problem-requeue-fail {
+  margin: 0;
+  color: var(--bad);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 48rem) {
+  .problem-card-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .problem-inspect,
+  .problem-requeue button {
+    width: 100%;
+    justify-content: center;
+  }
+}

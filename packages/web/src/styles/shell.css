@@ -1,0 +1,288 @@
+/*
+ * The frame every screen sits in: a sticky masthead of two rows — identity
+ * and connection state above, navigation below — then a width-limited
+ * content column with a page header at its top.
+ *
+ * Two rows rather than one, at every width. Cramming four tabs, a wordmark,
+ * a liveness statement, a theme control and Sign out onto one line works at
+ * 1400px and falls apart everywhere else; splitting by ROLE instead ("who
+ * and how am I connected" / "where am I") means the same structure holds
+ * from 320px up and there is no width at which the layout re-arranges into
+ * something the operator has to re-learn.
+ */
+
+.app {
+  min-height: 100vh;
+}
+
+.app-masthead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-5) var(--space-2);
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink);
+  text-decoration: none;
+  margin-right: auto;
+}
+
+.app-brand svg {
+  display: block;
+  color: var(--accent);
+}
+
+/* Lowercase, because the product is written lowercase everywhere else it
+   appears — the CLI, the daemon's logs, the Docker image. A wordmark that
+   disagrees with the command you type is a small lie about what this is. */
+.app-brand .product {
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* Connection state is TEXT ("Live" / "Reconnecting…"); the dot and the
+   colour only reinforce what the word already says. */
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 0.2em 0.7em;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+}
+
+.link::before {
+  content: '';
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.link-up {
+  color: var(--good);
+  background: var(--good-soft);
+  border-color: color-mix(in srgb, var(--good) 28%, transparent);
+}
+
+.link-down {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 28%, transparent);
+}
+
+/* A ring rather than a disc while the socket is down: the state is legible
+   with the colour removed, same rule as every badge. */
+.link-down::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px currentcolor;
+}
+
+.app-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--space-5);
+}
+
+/* Real anchors, not buttons, so middle-click and "copy link address" work
+   (see `shell/Link.tsx`); the tab chrome is therefore written out here
+   rather than inherited from an element-type selector. */
+.app-nav .nav-link {
+  position: relative;
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink-muted);
+  padding: 0 var(--space-3);
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.app-nav .nav-link:hover {
+  color: var(--ink);
+  background: var(--surface-hover);
+}
+
+/* The active tab shifts WEIGHT, COLOUR and gains an underline rail. It has
+   to hold with no `:hover` involved — `aria-current` is set from the route
+   on every render, keyboard and touch included. */
+.app-nav .nav-link[aria-current='page'] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.app-nav .nav-link[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  left: var(--space-2);
+  right: var(--space-2);
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+
+/* --- the theme control ---------------------------------------------------- */
+
+.theme-toggle {
+  padding: 0;
+  width: var(--tap);
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-muted);
+}
+
+.theme-toggle:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-hover);
+  border-color: var(--line);
+}
+
+/* --- the content column --------------------------------------------------- */
+
+main {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-5) var(--space-7);
+}
+
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.page-header h1 {
+  margin: 0;
+}
+
+.page-header .page-subtitle {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.page-header .page-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.not-found {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-6);
+  text-align: center;
+}
+
+/* An error state with no way out of it is a dead end; every other failure
+   on this screen offers one. */
+.not-found-home {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+}
+
+@media (max-width: 40rem) {
+  .app-header,
+  .app-nav,
+  main {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+}
+
+/* --- the key gate ---------------------------------------------------------- */
+
+.key-gate {
+  max-width: 30rem;
+  margin: 12vh auto;
+  padding: var(--space-6);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.key-gate .app-brand {
+  margin: 0 0 var(--space-2);
+}
+
+.key-gate h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+
+.key-gate label {
+  font-weight: 500;
+  font-size: var(--text-sm);
+}
+
+.key-gate input {
+  font-family: var(--mono);
+  width: 100%;
+}
+
+.key-gate p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.key-gate button[type='submit'] {
+  align-self: stretch;
+}
+
+.key-honesty {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+}
+
+.key-honesty summary {
+  cursor: pointer;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+}
+
+.key-honesty p {
+  margin: var(--space-2) 0 0;
+}

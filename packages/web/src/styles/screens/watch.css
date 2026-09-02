@@ -1,0 +1,253 @@
+/*
+ * Watch — the default route: what is running now, and, on a healthy
+ * install, the far more common case of why nothing is.
+ *
+ * Sections stack in a fixed order (Running, Libraries, Last 24 hours,
+ * Runtime) rather than a two-column layout, which is what keeps that order
+ * identical on a phone and a desktop with no extra breakpoint rule.
+ */
+
+.watch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.watch h2 {
+  margin: 0 0 var(--space-3);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+
+/* --- running jobs --------------------------------------------------------- */
+
+/* Rows are `<li>`s of `<Link>`s, not buttons — middle-click and "copy link
+   address" have to work on a job the operator wants to open beside this
+   screen rather than instead of it. */
+.job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.job-list .job {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--busy);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-3) var(--space-4);
+}
+
+.job-file {
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
+.job-progress {
+  margin-left: auto;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.watch-running-head {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.watch-running-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+}
+
+.watch-running-meta .detail {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* Both links are the actual tap targets on a running row — `min-height`
+   keeps each at least 2.75rem regardless of how short the label is. */
+.watch-running-head .job-file,
+.watch-job-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+}
+
+.watch-running-head .job-file {
+  color: var(--ink);
+}
+
+/* --- the idle box ---------------------------------------------------------
+   THIS IS THE POINT OF THIS SCREEN: the steady state of a healthy install is
+   "nothing running", and this is what tells the operator whether that is
+   fine or something they have to act on. Border weight carries the
+   distinction as well as hue, the same rule every status badge follows. */
+
+.idle-box {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-4) var(--space-5);
+}
+
+.idle-box h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.idle-box p {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-muted);
+}
+
+.idle-ok {
+  border-left-color: var(--good);
+}
+
+.idle-attention {
+  border-left-color: var(--warn);
+}
+
+.idle-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  margin-top: var(--space-3);
+  padding: 0 var(--space-3);
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.idle-action:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* --- library cards --------------------------------------------------------- */
+
+.library-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: var(--space-4);
+}
+
+/* The card name is the link to that library's filtered file list — the only
+   place in this UI that emits `?library=`, and without it the Files library
+   filter can only be reached by typing a uuid by hand. */
+.library-card-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+  color: inherit;
+  text-decoration: none;
+}
+
+.library-card-link h3 {
+  font-size: var(--text-md);
+}
+
+.library-card-link:hover h3,
+.library-card-link:focus-visible h3 {
+  color: var(--accent);
+}
+
+/* The convergence reading. Set once, in one weight — a large numeral on
+   each of six cards is six bold things, so the emphasis lives in the ruled
+   meter below it instead (see `.card .bar` in components.css). */
+.card .headline {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.card .detail {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+}
+
+/* Also used directly on a `<dl class="card dl">` — the System tab's
+   hardware and binary listing — for the definition-list layout a plain
+   `.card` does not itself provide. */
+.card dl {
+  margin: var(--space-3) 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+}
+
+.card dl div {
+  display: flex;
+  gap: 0.35em;
+}
+
+.card dt,
+.card dd {
+  margin: 0;
+}
+
+.card dt {
+  color: var(--ink-faint);
+}
+
+/* --- last 24 hours and runtime ---------------------------------------------- */
+
+.watch-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.watch-stats div {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-3) var(--space-4);
+}
+
+.watch-stats dt {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.watch-stats dd {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.worker-target {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.watch-runtime .detail {
+  margin: var(--space-2) 0 0;
+}

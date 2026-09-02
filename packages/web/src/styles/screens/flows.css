@@ -1,0 +1,358 @@
+/* --- flow detail ------------------------------------------------------------
+   Read-only, deliberately: no edit control lives here (see FlowDetail.tsx's
+   doc comment). The graph gets its own scroll container because a deep
+   nested flow indents further than a phone is wide, and primary content on
+   this screen must never force the PAGE to scroll sideways. */
+
+.flow-page {
+  max-width: 56rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.flow-page-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.flow-page-header {
+  margin-top: 0.4rem;
+}
+
+.flow-page-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.flow-page-description {
+  margin: 0.4rem 0 0.8rem;
+  color: var(--muted);
+}
+
+.flow-page-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.flow-page-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.flow-page-meta dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-page-libraries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* `--warn`, not `--bad`: this is not an error, it is the one sentence on the
+   screen that matters most — that this view cannot edit the flow and why —
+   so it gets the same visual weight the rest of this app reserves for a
+   caution rather than a neutral `.help` aside. */
+.flow-page-notice {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.flow-page-actions {
+  margin: 0 0 1rem;
+}
+
+.flow-page h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.flow-page-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.flow-page-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+/* Its own horizontal scroll container: a deep flow indents by
+   `depth * 1.25rem` (see FlowDetail.tsx's `GraphNode`), which on a phone can
+   exceed the viewport long before the page itself needs to move. */
+.flow-graph-scroll {
+  overflow-x: auto;
+}
+
+.flow-graph {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+  min-width: 22rem;
+}
+
+.flow-graph-row {
+  border-left: 2px solid var(--line);
+  padding-top: 0.2rem;
+  padding-bottom: 0.2rem;
+}
+
+.flow-graph-node {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+}
+
+.flow-graph-node-id {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* A node no path from the start reaches. Both the edge and the badge carry
+   it — colour is never the only signal — because a node that is in the flow
+   but never runs is exactly the kind of thing this screen exists to show. */
+.flow-graph-row-unreachable {
+  border-left-color: var(--bad);
+}
+
+.flow-graph .badge-bad {
+  color: var(--bad);
+}
+
+/* The OTHER branches that reach a node drawn once. */
+.flow-graph-also {
+  margin: 0 0 0 0.2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Same pill `.card .badge` uses, scoped rather than bare: this is the one
+   element on the whole screen that must not read as prose. `branchLabel` is
+   the reason this screen exists — the muxqueue defect was a node on the
+   wrong side of exactly this label. `flex-shrink: 0` keeps it from being the
+   thing that gives when the row wraps at narrow widths, so it stays a whole
+   pill rather than breaking across two lines. */
+.flow-graph .badge {
+  flex-shrink: 0;
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--busy);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.55em;
+  white-space: nowrap;
+}
+
+.flow-graph-inputs {
+  margin: 0 0 0 0.2rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.2rem 0.8rem;
+}
+
+.flow-graph-inputs dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  display: inline;
+}
+
+.flow-graph-inputs dt::after {
+  content: ': ';
+}
+
+.flow-graph-inputs dd {
+  margin: 0;
+  display: inline;
+  overflow-wrap: anywhere;
+}
+
+.flow-graph-inputs div {
+  overflow-wrap: anywhere;
+}
+
+/* History: one row per published version, newest first (the API's own
+   order). A row is a link to the whole version — hash, note and date read
+   together as one target — with "Compare with current" as a second,
+   separate touch target rather than nested inside the first. */
+.flow-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.flow-history-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.flow-history-link {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 1 1 auto;
+  min-height: 2.75rem;
+  color: var(--ink);
+}
+
+.flow-history-note {
+  color: var(--muted);
+}
+
+.flow-history-when {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Same pill as `.flow-graph .badge`, scoped here instead of shared — this
+   is the only place on this screen a badge means "current" rather than
+   "branch" or "unreachable", so it earns its own color rather than
+   borrowing `--busy` off the graph's rule. */
+.flow-history .badge {
+  flex-shrink: 0;
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--good);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  padding: 0 0.55em;
+  white-space: nowrap;
+}
+
+.flow-history-compare {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
+/* Scoped rule, same pattern `.config button` uses: every control on this
+   screen (Retry, Copy JSON) meets the touch-target floor without touching
+   the global `button` rule every other screen also relies on. */
+.flow-page button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+/* --- flow compare -----------------------------------------------------------
+   Two versions, diffed as a graph rather than as text — see
+   `flow-diff.ts`'s doc comment for why: the `-max_muxing_queue_size` defect
+   was one removed edge and one added edge, invisible in a JSON diff and
+   obvious once rendered this way. */
+
+.flow-compare-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.flow-compare-side dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.flow-compare-side dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.flow-diff {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.flow-diff-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 0.4rem;
+  border-left: 2px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+/* The prefix carries the same meaning as the colour, so a reader who cannot
+   distinguish `--bad` from `--good` still sees a removal, an addition, or a
+   change as three different characters — colour is never the only signal. */
+.flow-diff-prefix {
+  flex-shrink: 0;
+  font-family: monospace;
+  font-weight: 700;
+}
+
+.flow-diff-line-removed {
+  color: var(--bad);
+  border-left-color: var(--bad);
+}
+
+.flow-diff-line-added {
+  color: var(--good);
+  border-left-color: var(--good);
+}
+
+.flow-diff-line-changed {
+  color: var(--warn);
+  border-left-color: var(--warn);
+}
+
+@media (max-width: 48rem) {
+  .flow-graph-inputs {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The link from a file to the graph that decides what happens to it. */
+.file-detail-flow-link {
+  margin: 0.5rem 0 0;
+}
+
+.file-detail-flow-link a,
+.not-found-home {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
+/* An unknown URL is an error state like any other, and an error state with
+   no way out of it is a dead end. */
+.not-found {
+  padding: 1rem 0;
+}

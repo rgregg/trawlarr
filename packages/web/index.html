@@ -4,6 +4,32 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>trawlarr</title>
+    <!--
+      The stored theme, applied BEFORE first paint.
+
+      Without this, a viewer who has chosen dark on a light system gets a
+      white page for one frame every single navigation — React cannot set the
+      attribute until it has mounted, and by then the browser has painted.
+      It is inline for the same reason: an external file would be a second
+      round trip, and the flash is exactly one round trip long.
+
+      It shares one vocabulary with `shell/theme.ts`: the same key, the same
+      three values, and the same rule that anything unrecognised means
+      "follow the system" — which is what writing no attribute at all does.
+      Deliberately trivial: nothing that runs before the app renders should
+      be able to fail in a way that stops it rendering.
+    -->
+    <script>
+      try {
+        var choice = localStorage.getItem('trawlarr.theme');
+        if (choice === 'light' || choice === 'dark') {
+          document.documentElement.setAttribute('data-theme', choice);
+        }
+      } catch (e) {
+        /* Storage can throw outright when the browser is set to block site
+           data. The app still works; it just starts on the system theme. */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

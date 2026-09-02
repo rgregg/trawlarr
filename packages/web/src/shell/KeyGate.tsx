@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { createApiClient } from '../api/client.js';
+import { BrandMark } from './BrandMark.js';
 
 /**
  * Where the operator pastes the key.
@@ -57,7 +58,10 @@ export const KeyGate = (props: {
 
   return (
     <form onSubmit={(event) => void submit(event)} className="key-gate">
-      <h1>trawlarr</h1>
+      <span className="app-brand">
+        <BrandMark />
+      </span>
+      <h1>Connect to trawlarr</h1>
       <label htmlFor="api-key">API key</label>
       <input
         id="api-key"
@@ -76,8 +80,8 @@ export const KeyGate = (props: {
           {problem}
         </p>
       )}
-      <button type="submit" disabled={checking || value === ''}>
-        {checking ? 'Checking…' : 'Save'}
+      <button type="submit" className="btn-primary" disabled={checking || value === ''}>
+        {checking ? 'Checking…' : 'Connect'}
       </button>
       <details className="key-honesty">
         <summary>What this key protects, and what it does not</summary>

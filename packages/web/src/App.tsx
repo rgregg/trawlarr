@@ -8,8 +8,11 @@ import { FlowDetail } from './screens/flows/FlowDetail.js';
 import { FlowVersion } from './screens/flows/FlowVersion.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
+import { BrandMark } from './shell/BrandMark.js';
 import { KeyGate } from './shell/KeyGate.js';
 import { Link } from './shell/Link.js';
+import { PageHeader } from './shell/PageHeader.js';
+import { ThemeToggle } from './shell/ThemeToggle.js';
 import { useApi } from './shell/useApi.js';
 import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
@@ -21,12 +24,38 @@ import './styles.css';
  * The four modes, as nav entries. Each is a real path `useRoute` already
  * knows how to parse — the nav is not a second source of truth about what
  * screens exist, just labels over `route.ts`'s table.
+ *
+ * `subtitle` is the screen's one-line answer to "what am I looking at",
+ * rendered by the shell's `PageHeader`. It says what the screen shows, in
+ * the operator's words rather than the daemon's — and it must stay true of
+ * an install with nothing configured, which is exactly when someone is
+ * reading it.
  */
-const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
-  { to: '/', label: 'Watch', matches: 'watch' },
-  { to: '/diagnose', label: 'Diagnose', matches: 'diagnose' },
-  { to: '/files', label: 'Files', matches: 'files' },
-  { to: '/config', label: 'Configure', matches: 'config' },
+const NAV: Array<{ to: string; label: string; matches: Route['name']; subtitle: string }> = [
+  {
+    to: '/',
+    label: 'Watch',
+    matches: 'watch',
+    subtitle: 'What the workers are doing, and how close each library is to converged.',
+  },
+  {
+    to: '/diagnose',
+    label: 'Diagnose',
+    matches: 'diagnose',
+    subtitle: 'Files that are failed, held or stuck, grouped by what went wrong.',
+  },
+  {
+    to: '/files',
+    label: 'Files',
+    matches: 'files',
+    subtitle: 'Every known file, its codecs, and the state the ledger has it in.',
+  },
+  {
+    to: '/config',
+    label: 'Configure',
+    matches: 'config',
+    subtitle: 'Libraries, workers, plugin sources and the schedule.',
+  },
 ];
 
 /**
@@ -53,37 +82,60 @@ const Shell = (props: { apiKey: string; client: ApiClient; signOut: () => void }
   // panel (`styles.css`), so mounting it there paged an entire library —
   // ~24 sequential requests on 4,625 files — to render nothing at all.
   const narrow = useMedia(FILES_NARROW);
+  // The four top-level screens get their title from the same table the nav
+  // is built from, so a screen cannot end up with a tab called one thing
+  // and a heading called another. Detail screens are absent from it and
+  // render their own header, because only they know the thing's name.
+  const page = NAV.find((entry) => entry.matches === route.name);
 
   return (
     <div className="app">
-      <header className="app-header">
-        <span className="product">trawlarr</span>
-        {/* Text, not a coloured dot: a disconnected socket is a liveness
-            statement the operator has to be able to read, and the screens
-            stay correct while it is down because they re-fetch. */}
-        <span className={connected ? 'link link-up' : 'link link-down'}>
-          {connected ? 'Live' : 'Reconnecting…'}
-        </span>
-        <button type="button" onClick={props.signOut}>
-          Sign out
-        </button>
-      </header>
+      {/* Identity and connection above, navigation below. Splitting the two
+          rows by role rather than by fit is what lets the same structure
+          hold from 320px up, with no width at which it re-arranges into
+          something the operator has to re-learn. */}
+      <div className="app-masthead">
+        <header className="app-header">
+          <span className="app-brand">
+            <BrandMark />
+            <span className="product">trawlarr</span>
+          </span>
+          {/* One group, so that at 390px the three of them wrap onto a
+              second line TOGETHER rather than leaving Sign out stranded on
+              a row of its own, which reads as a layout accident. */}
+          <div className="app-header-actions">
+            {/* Text, not a coloured dot alone: a disconnected socket is a
+                liveness statement the operator has to be able to read, and
+                the screens stay correct while it is down because they
+                re-fetch. */}
+            <span className={connected ? 'link link-up' : 'link link-down'}>
+              {connected ? 'Live' : 'Reconnecting…'}
+            </span>
+            <ThemeToggle />
+            <button type="button" onClick={props.signOut}>
+              Sign out
+            </button>
+          </div>
+        </header>
 
-      <nav className="app-nav" aria-label="Screens">
-        {NAV.map((entry) => (
-          <Link
-            key={entry.to}
-            to={entry.to}
-            navigate={navigate}
-            className="nav-link"
-            aria-current={route.name === entry.matches ? 'page' : undefined}
-          >
-            {entry.label}
-          </Link>
-        ))}
-      </nav>
+        <nav className="app-nav" aria-label="Screens">
+          {NAV.map((entry) => (
+            <Link
+              key={entry.to}
+              to={entry.to}
+              navigate={navigate}
+              className="nav-link"
+              aria-current={route.name === entry.matches ? 'page' : undefined}
+            >
+              {entry.label}
+            </Link>
+          ))}
+        </nav>
+      </div>
 
       <main>
+        {page !== undefined && <PageHeader title={page.label} subtitle={page.subtitle} />}
+
         {route.name === 'watch' && <Watch client={props.client} live={live} navigate={navigate} />}
         {route.name === 'diagnose' && <Diagnose client={props.client} navigate={navigate} />}
         {route.name === 'files' && (

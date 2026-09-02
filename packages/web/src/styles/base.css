@@ -1,0 +1,146 @@
+/*
+ * Element defaults and the rules that must hold everywhere.
+ *
+ * The three requirements from the original sheet are unchanged and are the
+ * reason several of these rules look heavier than they need to:
+ *
+ * - Every control has a visible label and a visible focus ring. `outline:
+ *   none` appears nowhere in this directory.
+ * - COLOUR IS NEVER THE ONLY CARRIER OF STATUS. Every badge renders its
+ *   status as text, and shape or border weight differs as well as the hue,
+ *   so the screen still reads on a monochrome display or to a colour-blind
+ *   operator.
+ * - Loading and error states are rendered honestly rather than as an empty
+ *   list, so a fresh install never looks like a broken one.
+ *
+ * The typefaces are IBM Plex Sans and IBM Plex Mono, bundled through
+ * `@fontsource*` and served from this origin. NOTHING HERE MAY BE FETCHED
+ * FROM A THIRD-PARTY ORIGIN: this page holds an API key, and a font request
+ * to a CDN leaks the fact of its use along with the referrer. The pair is
+ * one superfamily on purpose — roughly half of this UI is file paths,
+ * hashes and ffmpeg argv, and a mono that shares its skeleton with the sans
+ * stops all of that from reading as pasted-in foreign matter.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--text-base);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Every number in this app is one an operator watches change: percentages,
+   file counts, byte sizes, elapsed times. Proportional digits make a
+   ticking counter jitter sideways, so figures are tabular globally rather
+   than opted into per rule (which is how the old sheet missed several). */
+body {
+  font-variant-numeric: tabular-nums;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.011em;
+  color: var(--ink);
+}
+
+h1 {
+  font-size: var(--text-xl);
+  letter-spacing: -0.018em;
+}
+
+h2 {
+  font-size: var(--text-md);
+}
+
+h3 {
+  font-size: var(--text-base);
+}
+
+p {
+  /* Under 80 characters, per the usual reading-length guidance. Prose in
+     this app is help text and failure messages — both are read once, under
+     pressure, and both get worse the wider they run. */
+  max-width: 68ch;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-color: currentcolor;
+}
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+code {
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.35em;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: var(--space-5) 0;
+}
+
+/* Off-screen but present to assistive technology — the standard clip-based
+   pattern, not `display: none` (which screen readers skip) and not
+   `visibility: hidden`. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ONE RULE, applied to everything focusable, so nothing can lose it. The
+   ring is the accent rather than a fixed blue so it stays visible against
+   both grounds; the 2px offset keeps it clear of the control's own border
+   on a pill-shaped target. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Motion in this UI answers an action — a panel opening, a value settling —
+   and one loading shimmer. All of it is optional. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

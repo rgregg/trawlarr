@@ -1,0 +1,295 @@
+/* --- libraries, setup and the flow picker ------------------------------- */
+
+.libraries .row-actions,
+.library-setup .row-actions,
+.flow-picker .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.8rem 0 0;
+}
+
+.library-setup,
+.flow-picker {
+  max-width: 44rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.library-setup h2,
+.flow-picker h2 {
+  margin: 0.5rem 0 0;
+}
+
+.flow-picker h3 {
+  margin: 1.2rem 0 0.2rem;
+  font-size: 1rem;
+}
+
+.library-setup label,
+.flow-picker label {
+  font-weight: 600;
+}
+
+.flow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.flow-list label {
+  font-weight: 400;
+}
+
+.template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.6rem;
+}
+
+.parameter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.6rem;
+}
+
+.parameter input,
+.parameter select {
+  align-self: flex-start;
+  min-width: 14rem;
+}
+
+.template-form > button {
+  align-self: flex-start;
+  margin-top: 0.6rem;
+}
+
+/* --- configure --------------------------------------------------------------
+   Four tabs behind one `?tab=` route (`Config.tsx`). The worker-count control
+   here is the start/stop button for every transcode this daemon runs, so it
+   gets its own emphasis; trash purge is the one irreversible action on the
+   screen, so it is set apart with `--bad` rather than sharing a card with
+   anything routine. */
+
+/* Every button this task's four tabs add — Save worker counts, the
+   Retry buttons on a failed section fetch, Sync, Add window, Remove,
+   Purge now…, Cancel, and the purge confirm itself — is a plain
+   `<button>`, and the global `button` rule (above) sets no `min-height`.
+   One rule here, rather than repeating `min-height: 2.75rem` on every
+   button class in this section: the confirm button on an irreversible
+   233 GB delete is the worst place in this screen to have a target
+   under 44px, so nothing in `.config` is allowed to fall under the
+   touch-target minimum every other interactive element here already
+   meets. Scoped to `.config` rather than the global `button` rule,
+   which would change every screen in the app. */
+.config button {
+  min-height: 2.75rem;
+}
+
+/* A SEGMENTED CONTROL, not a second row of tabs. These sit directly under
+   the app's primary nav, and when both were drawn the same way the screen
+   appeared to have two navigations of equal rank — the operator had to read
+   the labels to work out which one moved them between screens. One frame
+   holding four segments reads as "a control on this screen" at a glance,
+   which is what it is. */
+.config-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 0 0 var(--space-5);
+  padding: 3px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.config-tab-link {
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-md) - 4px);
+  padding: 0 var(--space-4);
+  min-height: calc(var(--tap) - 0.5rem);
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.config-tab-link:hover {
+  color: var(--ink);
+}
+
+/* The selected segment is RAISED as well as recoloured — it is the one that
+   sits on the surface while the others stay in the well. */
+.config-tab-link[aria-current='page'] {
+  color: var(--ink);
+  font-weight: 600;
+  background: var(--surface);
+  border-color: var(--line);
+  box-shadow: var(--shadow-sm);
+}
+
+.config-section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+  margin-bottom: 1.2rem;
+}
+
+.config-section h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.config-section h4 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+.stale-note {
+  color: var(--warn);
+}
+
+/* --- workers tab --------------------------------------------------------- */
+
+.worker-count-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.6rem 0;
+}
+
+.worker-count-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.worker-count-field label {
+  font-weight: 600;
+}
+
+.worker-count-field input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+  min-height: 2.75rem;
+  width: 8rem;
+}
+
+/* The measured warning from the brief: a caution, same vocabulary as every
+   other `--warn` note in this sheet, never hidden behind a tooltip. */
+.worker-count-warning {
+  color: var(--warn);
+  max-width: 34rem;
+}
+
+/* --- schedule -------------------------------------------------------------- */
+
+.schedule-windows {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.schedule-add {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-width: 28rem;
+}
+
+.schedule-add legend {
+  padding: 0;
+}
+
+.schedule-add label {
+  font-weight: 600;
+}
+
+.schedule-add input {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.45em 0.6em;
+  min-height: 2.75rem;
+}
+
+.schedule-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+
+.schedule-days label {
+  font-weight: 400;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/* --- trash purge ------------------------------------------------------------
+   `--bad`, not `--panel`: this is the one destructive action on the screen
+   and it must never read as just another settings card. */
+
+.trash-section {
+  border-color: var(--bad);
+  border-left-width: 4px;
+}
+
+.trash-total {
+  margin: 0.4rem 0 0.8rem;
+}
+
+.trash-confirm {
+  margin-top: 0.6rem;
+}
+
+.trash-confirm .row-actions {
+  margin-top: 0.6rem;
+}
+
+@media (max-width: 48rem) {
+  .config-tabs {
+    display: flex;
+    width: 100%;
+  }
+
+  .config-tab-link {
+    flex: 1 1 auto;
+    justify-content: center;
+    padding: 0 var(--space-2);
+  }
+
+  .worker-count-fields {
+    flex-direction: column;
+  }
+
+  .worker-count-field input {
+    width: 100%;
+  }
+
+  .schedule-add {
+    max-width: none;
+  }
+}

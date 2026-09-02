@@ -1,0 +1,418 @@
+/* --- files --------------------------------------------------------------- */
+
+.files-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.files-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.files-filters button,
+.clear-filters {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.clear-filters {
+  color: var(--ink);
+}
+
+.files-sort {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.files-sort button {
+  min-height: 2.75rem;
+}
+
+.files-sort button[aria-current='true'] {
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+/* The scroll container that `visibleRange` windows. A fixed height, so the
+   virtualisation math (`viewportHeight`, measured off this element) has
+   something stable to measure — a container that grew with its content
+   would just render every row anyway. */
+.file-scroll {
+  height: 32rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) 6rem 5rem 8rem 6rem 6rem;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  min-height: 2.25rem;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--line);
+  border-left: 4px solid transparent;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.file-row:last-child {
+  border-bottom: none;
+}
+
+/* A converging library still has some rows in every state; `good` is left
+   with no accent (it is the expected case), and the states worth noticing
+   at a glance each get a left edge in the same two colours the rest of the
+   sheet already uses for trouble — colour is never the only carrier, since
+   the state name is always printed in `.file-state` beside it. */
+.file-row-state-failed,
+.file-row-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.file-row-state-held {
+  border-left-color: var(--warn);
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-state,
+.file-codec,
+.file-size,
+.file-updated {
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size,
+.file-updated {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.files-empty {
+  padding: 1.5rem 0;
+  color: var(--muted);
+}
+
+.files-footer {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Below 48rem a row becomes a stacked card: name on its own line, then
+   state/codecs/size — never a grid the viewport has to scroll sideways to
+   read. Primary content must never scroll horizontally at this width.
+
+   THE CARD'S HEIGHT IS EXACT, not a minimum, and that is load-bearing:
+   `Files.tsx` windows 4,625 rows on a constant row height, so a card whose
+   height depends on how long the filename happens to be would put the
+   scrollbar and the scroll position at odds with the content. Six lines
+   at `line-height: 1.35` (1.35rem for the name, 1.215rem each for the five
+   labelled lines), five 0.15rem gaps and 1.2rem of padding come to just
+   under 9.5rem, which is `NARROW_ROW_HEIGHT_PX = 152` there. Change one and
+   change the other. The name stays on ONE line here for the same reason —
+   ellipsised, not wrapped; the full path is in its `title` and on the file's
+   own screen, and an ellipsis does not scroll the viewport sideways. */
+@media (max-width: 48rem) {
+  .file-row {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+    padding: 0.6rem 0.75rem;
+    height: 9.5rem;
+    line-height: 1.35;
+    overflow: hidden;
+  }
+
+  .file-name {
+    font-weight: 600;
+  }
+
+  .file-state,
+  .file-codec,
+  .file-size,
+  .file-updated {
+    text-align: left;
+  }
+
+  .file-state::before {
+    content: 'State: ';
+  }
+
+  .file-codec:nth-of-type(3)::before {
+    content: 'Video: ';
+  }
+
+  .file-codec:nth-of-type(4)::before {
+    content: 'Audio: ';
+  }
+
+  .file-size::before {
+    content: 'Size: ';
+  }
+
+  .file-updated::before {
+    content: 'Updated: ';
+  }
+}
+
+/* --- file detail ----------------------------------------------------------
+   The "why is this file like this" panel. Desktop keeps the Files table
+   mounted beside it (App.tsx renders both under `.file-detail-layout` at
+   the `/files/:id` route); below 48rem there is no room for both, so the
+   list is hidden and the panel becomes the whole screen at that same URL. */
+
+.file-detail-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.file-detail-layout > .files {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.file-detail-layout > .file-detail {
+  flex: 2 1 28rem;
+  min-width: 0;
+}
+
+.file-detail {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.9rem 1rem 1.2rem;
+}
+
+.file-detail-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--muted);
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-left: 4px solid transparent;
+  padding-left: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.file-detail-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.file-detail-path {
+  margin: 0.3rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+/* The answer to "why is this file like this", set apart from everything
+   else on the panel because it is the entire reason the panel exists. */
+.file-detail-explain {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--busy);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.file-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.file-detail-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.file-detail-meta dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.file-detail-meta dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.file-detail-actions button {
+  min-height: 2.75rem;
+  padding: 0.4em 1em;
+}
+
+.file-detail-action-error {
+  color: var(--bad);
+  margin: 0 0 0.8rem;
+}
+
+/* The one place Dry-run admits it substituted a stale flow for the
+   library's (missing) current one — `--warn`, the same vocabulary as a
+   held file's row accent, because this is a caution rather than a failure. */
+.file-detail-flow-fallback {
+  color: var(--warn);
+  margin: 0 0 0.8rem;
+}
+
+.file-detail-dry-run {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.file-detail-dry-run ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.file-detail h3 {
+  font-size: 0.95rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.stream-table-scroll {
+  overflow-x: auto;
+}
+
+.stream-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.stream-table th,
+.stream-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.job-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.job-history-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.75rem;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.job-history li:last-child .job-history-row {
+  border-bottom: none;
+}
+
+.job-history-state {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-width: 5.5rem;
+}
+
+.job-history-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-detail-skeleton .skeleton-row {
+  margin: 0.4rem 0;
+}
+
+.file-detail-empty {
+  color: var(--muted);
+  padding: 1rem 0;
+}
+
+@media (max-width: 48rem) {
+  .file-detail-layout {
+    display: block;
+  }
+
+  /* No room for the table behind the panel at this width — the panel IS
+     the screen, same URL, same route; see the file-level comment above. */
+  .file-detail-layout > .files {
+    display: none;
+  }
+
+  .file-detail-layout > .file-detail {
+    flex: unset;
+  }
+
+  .job-history-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+
+  .job-history-reason {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
