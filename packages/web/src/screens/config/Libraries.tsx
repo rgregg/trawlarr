@@ -26,6 +26,8 @@ type View =
 const Row = (props: {
   client: ApiClient;
   library: LibraryRow;
+  /** The attached flow's name, when the flow listing has arrived. */
+  flowName?: string;
   live: LiveState;
   navigate: (to: string) => void;
   onEdit: () => void;
@@ -53,11 +55,25 @@ const Row = (props: {
   const scanning = props.live.scanning[library.id];
 
   return (
-    <li className={`card status-${library.paused ? 'paused' : 'idle'}`}>
-      <h3>{library.name}</h3>
-      <p className="detail">{library.roots.join(', ')}</p>
-      {/* Status as TEXT, not only as an edge colour. */}
-      <p className="badge">{library.paused ? 'paused' : 'running'}</p>
+    <li className={`card library-card status-${library.paused ? 'paused' : 'idle'}`}>
+      <div className="library-card-head">
+        <h3>{library.name}</h3>
+        {/* Status as TEXT, not only as an edge colour. "Active" rather than
+            "running", which read as "a job is running right now" — it only
+            ever meant "not paused". */}
+        <p className="badge">{library.paused ? 'paused' : 'active'}</p>
+      </div>
+
+      {/* One root per line, monospaced. Joined with commas they ran together
+          into a single wrapped paragraph, and a media root is a path an
+          operator checks character by character. */}
+      <ul className="library-roots">
+        {library.roots.map((root) => (
+          <li key={root} title={root}>
+            {root}
+          </li>
+        ))}
+      </ul>
 
       {library.paused && (
         // The daemon's own words. When a flow names a plugin that is not
@@ -70,14 +86,18 @@ const Row = (props: {
       )}
 
       {library.flowId === null ? (
-        <p className="detail">
+        <p className="detail library-no-flow">
           No flow attached, so nothing in this library can converge. Attach one below.
         </p>
       ) : (
         <p className="detail">
           Flow{' '}
           <Link to={formatRoute({ name: 'flow', id: library.flowId })} navigate={props.navigate}>
-            {library.flowId}
+            {/* The NAME when it is known. The uuid was the only thing here,
+                and it wrapped across two lines of a card while telling the
+                operator nothing they could recognise. It stays as the link's
+                title, since it is what the API and the CLI both speak. */}
+            <span title={library.flowId}>{props.flowName ?? library.flowId}</span>
           </Link>
         </p>
       )}
@@ -156,6 +176,10 @@ export const Libraries = (props: {
   navigate: (to: string) => void;
 }): JSX.Element => {
   const [libraries, setLibraries] = useState<LibraryRow[] | null>(null);
+  // id → name, so a card can say which flow is attached rather than printing
+  // the uuid. A library resource carries only `flowId`, and a bare uuid is
+  // not something an operator can recognise, compare, or repeat back.
+  const [flowNames, setFlowNames] = useState<Record<string, string>>({});
   const [problem, setProblem] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'list' });
   const { client } = props;
@@ -179,6 +203,26 @@ export const Libraries = (props: {
     // Re-fetched when the socket says a library changed — a pause, a resume,
     // a finished scan — and never on a timer.
   }, [client, stale, view]);
+
+  // Flow names, fetched ONCE and separately from the libraries above. It is
+  // a refinement, not a dependency: a card renders correctly without it (it
+  // falls back to the id), so this must never be able to fail the list. A
+  // `Promise.all` with the libraries fetch would have done exactly that.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const flows = await client.get<Array<{ id: string; name: string }>>('/flows');
+        if (cancelled) return;
+        setFlowNames(Object.fromEntries(flows.map((flow) => [flow.id, flow.name])));
+      } catch {
+        // Nothing to say and nothing to retry: the cards keep the ids.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
   const replace = (library: LibraryRow): void => {
     setLibraries((current) =>
@@ -220,9 +264,18 @@ export const Libraries = (props: {
 
   return (
     <section className="libraries">
-      <div className="row-actions">
+      {/* A toolbar rather than a lone button above the grid: the count says
+          what is being looked at, and the one action that adds to the page
+          is the primary one, set apart from the per-card actions below. */}
+      <div className="libraries-toolbar">
+        <p className="detail">
+          {libraries === null
+            ? 'Loading…'
+            : `${String(libraries.length)} ${libraries.length === 1 ? 'library' : 'libraries'}`}
+        </p>
         <button
           type="button"
+          className="btn-primary"
           onClick={() => {
             setView({ kind: 'setup', library: null });
           }}
@@ -234,7 +287,21 @@ export const Libraries = (props: {
       {libraries === null ? (
         <p>Loading libraries…</p>
       ) : libraries.length === 0 ? (
-        <p>No libraries yet. Add one to start converging something.</p>
+        <div className="empty-state">
+          <p>
+            No libraries yet. A library is a set of roots trawlarr scans, plus the flow every file
+            under them is driven toward.
+          </p>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => {
+              setView({ kind: 'setup', library: null });
+            }}
+          >
+            Add your first library
+          </button>
+        </div>
       ) : (
         <ul className="library-cards">
           {libraries.map((library) => (
@@ -242,6 +309,7 @@ export const Libraries = (props: {
               key={library.id}
               client={client}
               library={library}
+              flowName={library.flowId === null ? undefined : flowNames[library.flowId]}
               live={props.live}
               navigate={props.navigate}
               onEdit={() => {
