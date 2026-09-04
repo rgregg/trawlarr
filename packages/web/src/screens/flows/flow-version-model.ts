@@ -12,6 +12,8 @@
 
 import type { FlowDiff } from '@trawlarr/core';
 
+import { toIsoInstant } from '../../shell/time.js';
+
 /** `GET /flows/:id/versions`'s per-item shape — see `flows.ts`'s handler. */
 export interface ApiVersionSummary {
   id: string;
@@ -48,11 +50,14 @@ const describeNote = (note: string): string => (note === '' ? 'Published' : note
  * reads as more stale than it is.
  */
 export const formatWhen = (createdAtMs: number, nowMs: number): string => {
-  if (!Number.isFinite(createdAtMs) || createdAtMs <= 0) return '—';
-  const created = new Date(createdAtMs).toISOString();
-  const now = new Date(nowMs).toISOString();
+  const created = toIsoInstant(createdAtMs);
+  if (created === null) return '—';
   const day = created.slice(0, 10);
-  return day === now.slice(0, 10) ? `Today, ${created.slice(11, 16)} UTC` : day;
+  // An unreadable `nowMs` costs the "Today" shortcut and nothing else — the
+  // date is still the truth about when this version was published, so it is
+  // rendered rather than withheld.
+  const now = toIsoInstant(nowMs);
+  return now !== null && day === now.slice(0, 10) ? `Today, ${created.slice(11, 16)} UTC` : day;
 };
 
 export const toVersionRows = (items: ApiVersionSummary[], nowMs: number): VersionRow[] =>

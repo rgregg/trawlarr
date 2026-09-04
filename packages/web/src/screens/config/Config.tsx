@@ -3,6 +3,7 @@ import type { ApiClient } from '../../api/client.js';
 import type { LiveState } from '../../api/events.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute, type ConfigTab } from '../../shell/route.js';
+import { formatTimestamp } from '../../shell/time.js';
 import { formatBytes } from '../files/files-model.js';
 import {
   formatWindow,
@@ -234,8 +235,9 @@ interface PluginSourceResource {
   };
 }
 
-const formatWhen = (ms: number | null): string =>
-  ms === null ? 'never' : new Date(ms).toISOString();
+/* `never` and "a timestamp that isn't one" are different answers, so the
+   null branch stays and only the rendering goes through the shared guard. */
+const formatWhen = (ms: number | null): string => (ms === null ? 'never' : formatTimestamp(ms));
 
 const PluginSourceRow = (props: {
   client: ApiClient;

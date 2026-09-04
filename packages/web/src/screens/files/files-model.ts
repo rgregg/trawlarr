@@ -8,6 +8,7 @@
  * it directly, and the component stays a thin renderer over it.
  */
 import type { FileFilters } from '../../shell/route.js';
+import { toIsoInstant } from '../../shell/time.js';
 
 export interface ApiFile {
   id: string;
@@ -111,41 +112,5 @@ export const filtersToQuery = (filters: FileFilters, limit: number, offset: numb
  * scanned by eye, so it has to be fixed-width and unambiguous, and the exact
  * timestamp is one click away on the file's own screen.
  */
-export const formatUpdated = (updatedAt: number): string => formatTimestamp(updatedAt).slice(0, 10);
-
-/**
- * The largest magnitude a `Date` can represent, in milliseconds.
- *
- * `Date.prototype.toISOString()` does not return something unhelpful beyond
- * this — it THROWS `RangeError: Invalid time value`. ECMA-262 fixes the
- * bound at ±8.64e15 ms (±100,000,000 days), so it is a constant rather than
- * a guess.
- */
-const MAX_TIME_VALUE = 8.64e15;
-
-/**
- * An instant, in full, or an em dash when there isn't one.
- *
- * THIS FUNCTION EXISTS BECAUSE ONE FILE COULD BLANK THE WHOLE APPLICATION.
- * `mtimeMs` is not a clock reading the daemon took: it is whatever
- * `fs.stat()` said about the file, stored verbatim (`mtime_ms INTEGER NOT
- * NULL`, written unvalidated by the scanner), so a share that reports a
- * nonsense inode timestamp puts a nonsense number straight in the row. The
- * file screen rendered it with a bare `new Date(ms).toISOString()`, which
- * throws for anything out of range — and a throw DURING RENDER unmounts the
- * entire React tree. One unreadable timestamp on one file, and the operator
- * got a white page: no message, no retry, no way out but editing the URL.
- *
- * So the guard is not politeness about a rare value; it is the difference
- * between a dash in one cell and losing the application. Anything that
- * reaches `toISOString` from a timestamp this UI did not generate itself
- * goes through here.
- *
- * Zero and negative values read as "unset" rather than as 1970 and 1969:
- * that is what an absent timestamp looks like in this schema, and a media
- * file predating the epoch does not exist.
- */
-export const formatTimestamp = (ms: number): string => {
-  if (!Number.isFinite(ms) || ms <= 0 || Math.abs(ms) > MAX_TIME_VALUE) return '—';
-  return new Date(ms).toISOString();
-};
+export const formatUpdated = (updatedAt: number): string =>
+  toIsoInstant(updatedAt)?.slice(0, 10) ?? '—';

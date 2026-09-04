@@ -4,7 +4,8 @@ import { Link } from '../../shell/Link.js';
 import { formatRoute, type FileFilters } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { explainState, resolveFlowBinding, toStreamRows } from './file-detail-model.js';
-import { formatBytes, formatTimestamp, type ApiFile } from './files-model.js';
+import { formatTimestamp } from '../../shell/time.js';
+import { formatBytes, type ApiFile } from './files-model.js';
 
 /**
  * `GET /files/:id` returns every column the listing leaves out, plus the
