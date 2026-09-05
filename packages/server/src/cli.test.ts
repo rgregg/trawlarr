@@ -7,7 +7,20 @@ import { openDatabase } from './db/connection.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo } from './db/library-repo.js';
 import { createFlowRepo } from './db/flow-repo.js';
+import { createAccountRepo } from './db/account-repo.js';
+import { hashPassword, verifyPassword } from './api/password.js';
 import { createPluginRepo } from './plugins/plugin-repo.js';
+/**
+ * The new password is read from `cli-secret.ts` rather than from argv, so a
+ * password never lands in shell history or in another user's `ps` output.
+ * That makes it the one input these tests cannot pass as an argument, so
+ * the module supplying it is mocked — the same shape `auth.test.ts` uses
+ * for the one network call it cannot make for real.
+ */
+const readNewPassword = vi.fn();
+vi.mock('./cli-secret.js', () => ({
+  readNewPassword: () => readNewPassword(),
+}));
 import { main } from './cli.js';
 import { toolAvailableSync } from '../../../test-support/tool-availability.js';
 
@@ -1435,5 +1448,135 @@ describe('cli: plugin list / show', () => {
     const dataDir = newDataDir();
     expect(await main(['plugin', 'show', '--data-dir', dataDir])).not.toBe(0);
     expect(stderr()).toContain('--id is required');
+  });
+});
+
+describe('account set-password', () => {
+  /** Creates `dataDir` with one password account in it. */
+  const withAccount = async (dataDir: string, username: string): Promise<string> => {
+    mkdirSync(dataDir, { recursive: true });
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    const accounts = createAccountRepo(db);
+    const account = accounts.create({
+      username,
+      passwordHash: await hashPassword('the-old-password'),
+      nowMs: Date.now(),
+    });
+    db.close();
+    return account.id;
+  };
+
+  const storedHash = (dataDir: string, id: string): string | null => {
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    const hash = createAccountRepo(db).getById(id)?.passwordHash ?? null;
+    db.close();
+    return hash;
+  };
+
+  beforeEach(() => {
+    readNewPassword.mockReset();
+  });
+
+  /**
+   * THE POINT OF THE COMMAND: today a forgotten sole password has no
+   * recovery path at all, because `DELETE /auth/accounts/:id` refuses to
+   * remove the last account and no endpoint sets a password without the old
+   * one. This is the way back in, and it works precisely because it does not
+   * need to authenticate — it owns the data directory instead.
+   */
+  it('replaces the password, so the old one no longer verifies', async () => {
+    const dataDir = newDataDir();
+    const id = await withAccount(dataDir, 'ryan');
+    readNewPassword.mockResolvedValue('a-brand-new-secret');
+
+    const code = await main([
+      'account',
+      'set-password',
+      '--username',
+      'ryan',
+      '--data-dir',
+      dataDir,
+    ]);
+
+    expect(code).toBe(0);
+    const hash = storedHash(dataDir, id)!;
+    expect(await verifyPassword({ password: 'a-brand-new-secret', hash })).toBe(true);
+    expect(await verifyPassword({ password: 'the-old-password', hash })).toBe(false);
+  });
+
+  it('names the username it could not find, rather than failing anonymously', async () => {
+    const dataDir = newDataDir();
+    await withAccount(dataDir, 'ryan');
+    readNewPassword.mockResolvedValue('a-brand-new-secret');
+
+    const code = await main([
+      'account',
+      'set-password',
+      '--username',
+      'nobody',
+      '--data-dir',
+      dataDir,
+    ]);
+
+    expect(code).not.toBe(0);
+    expect(stderr()).toContain('nobody');
+  });
+
+  // The same floor the API applies, enforced here too: a recovery path that
+  // let a weaker password through than the browser would is a hole, not a
+  // convenience.
+  it('refuses a new password under eight characters, leaving the old one in place', async () => {
+    const dataDir = newDataDir();
+    const id = await withAccount(dataDir, 'ryan');
+    readNewPassword.mockResolvedValue('short');
+
+    const code = await main([
+      'account',
+      'set-password',
+      '--username',
+      'ryan',
+      '--data-dir',
+      dataDir,
+    ]);
+
+    expect(code).not.toBe(0);
+    // Named, so the assertion cannot be satisfied by any old failure.
+    expect(stderr()).toContain('8 characters');
+    expect(
+      await verifyPassword({ password: 'the-old-password', hash: storedHash(dataDir, id)! }),
+    ).toBe(true);
+  });
+
+  /**
+   * An account created through SSO has no local password — `passwordHash` is
+   * null — so setting one would invent a second way in that the provider
+   * never authorised.
+   */
+  it('refuses an account that signs in through single sign-on', async () => {
+    const dataDir = newDataDir();
+    mkdirSync(dataDir, { recursive: true });
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    createAccountRepo(db).createFromOidc({
+      oidcIssuer: 'https://issuer.example.com/',
+      oidcSubject: 'subject-1',
+      displayName: 'sso-user',
+      nowMs: Date.now(),
+    });
+    db.close();
+    readNewPassword.mockResolvedValue('a-brand-new-secret');
+
+    const code = await main([
+      'account',
+      'set-password',
+      '--username',
+      'sso-user',
+      '--data-dir',
+      dataDir,
+    ]);
+
+    expect(code).not.toBe(0);
+    expect(stderr()).toContain('single sign-on');
   });
 });
