@@ -125,3 +125,29 @@ export const summarizePurge = (
     }),
     { files: 0, bytes: 0, failed: 0 },
   );
+
+/**
+ * Flow id → flow name, from `GET /flows`.
+ *
+ * A library resource carries only `flowId`, and the Libraries tab printed
+ * that uuid on the card — the one line an operator most needs to recognise,
+ * rendered as the one thing nobody can. This is the lookup that fixes it.
+ */
+export const toFlowNames = (flows: Array<{ id: string; name: string }>): Record<string, string> =>
+  Object.fromEntries(flows.map((flow) => [flow.id, flow.name]));
+
+/**
+ * What to print for a library's attached flow.
+ *
+ * THE FALLBACK IS THE POINT. The name comes from a SECOND request, made
+ * separately so a flow-listing blip cannot blank the libraries list — which
+ * means every caller renders at least once before the names arrive, and will
+ * render forever without them if that request failed or if the flow has since
+ * been deleted. Returning the id in that window keeps the card identifying a
+ * real flow; reading a missing key straight out of the map would print
+ * "undefined" on the card instead.
+ */
+export const flowLabel = (flowId: string, names: Record<string, string>): string => {
+  const name = names[flowId];
+  return name === undefined || name === '' ? flowId : name;
+};

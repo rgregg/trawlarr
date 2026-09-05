@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  flowLabel,
   formatWindow,
   parseWindow,
   parseWorkerCount,
   summarizePurge,
+  toFlowNames,
   type PurgeSweep,
 } from './config-model.js';
 
@@ -106,5 +108,49 @@ describe('summarizePurge', () => {
 
   it('is zero for an empty sweep list', () => {
     expect(summarizePurge([])).toEqual({ files: 0, bytes: 0, failed: 0 });
+  });
+});
+
+describe('toFlowNames', () => {
+  it('indexes the flow listing by id', () => {
+    expect(
+      toFlowNames([
+        { id: 'f1', name: 'Transcode to HEVC' },
+        { id: 'f2', name: 'Conform library' },
+      ]),
+    ).toEqual({ f1: 'Transcode to HEVC', f2: 'Conform library' });
+  });
+
+  it('is empty for an empty listing rather than undefined', () => {
+    expect(toFlowNames([])).toEqual({});
+  });
+});
+
+describe('flowLabel', () => {
+  it('prefers the name, which is the whole reason the lookup exists', () => {
+    expect(flowLabel('f1', { f1: 'Transcode to HEVC' })).toBe('Transcode to HEVC');
+  });
+
+  /**
+   * The names arrive from a second request, deliberately separate so that a
+   * failed flow listing cannot blank the libraries list. Every card therefore
+   * renders at least once before they land — and forever without them if that
+   * request failed, or if the flow has since been deleted.
+   *
+   * The id is not a nice label, but it identifies a real flow and it is what
+   * the API and the CLI both speak. Printing "undefined" there would be worse
+   * than the uuid this whole lookup replaced.
+   */
+  it('falls back to the id, never to "undefined"', () => {
+    expect(flowLabel('f1', {})).toBe('f1');
+    expect(flowLabel('f1', { f2: 'Some other flow' })).toBe('f1');
+    expect(flowLabel('f1', { f1: '' })).toBe('f1');
+  });
+
+  it('never returns an empty string, whatever the map holds', () => {
+    const cases: Array<Record<string, string>> = [{}, { f1: '' }, { f1: 'Named' }];
+    for (const names of cases) {
+      expect(flowLabel('f1', names)).not.toBe('');
+    }
   });
 });

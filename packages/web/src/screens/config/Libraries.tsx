@@ -5,6 +5,7 @@ import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
 import type { LibraryResource } from '../watch/watch-model.js';
 import { FlowPicker } from './FlowPicker.js';
+import { flowLabel, toFlowNames } from './config-model.js';
 import { describeFailure } from './library-form-model.js';
 import { LibrarySetup } from './LibrarySetup.js';
 
@@ -26,8 +27,8 @@ type View =
 const Row = (props: {
   client: ApiClient;
   library: LibraryRow;
-  /** The attached flow's name, when the flow listing has arrived. */
-  flowName?: string;
+  /** Flow id → name, empty until (or unless) the flow listing arrives. */
+  flowNames: Record<string, string>;
   live: LiveState;
   navigate: (to: string) => void;
   onEdit: () => void;
@@ -97,7 +98,7 @@ const Row = (props: {
                 and it wrapped across two lines of a card while telling the
                 operator nothing they could recognise. It stays as the link's
                 title, since it is what the API and the CLI both speak. */}
-            <span title={library.flowId}>{props.flowName ?? library.flowId}</span>
+            <span title={library.flowId}>{flowLabel(library.flowId, props.flowNames)}</span>
           </Link>
         </p>
       )}
@@ -214,7 +215,7 @@ export const Libraries = (props: {
       try {
         const flows = await client.get<Array<{ id: string; name: string }>>('/flows');
         if (cancelled) return;
-        setFlowNames(Object.fromEntries(flows.map((flow) => [flow.id, flow.name])));
+        setFlowNames(toFlowNames(flows));
       } catch {
         // Nothing to say and nothing to retry: the cards keep the ids.
       }
@@ -309,7 +310,7 @@ export const Libraries = (props: {
               key={library.id}
               client={client}
               library={library}
-              flowName={library.flowId === null ? undefined : flowNames[library.flowId]}
+              flowNames={flowNames}
               live={props.live}
               navigate={props.navigate}
               onEdit={() => {
