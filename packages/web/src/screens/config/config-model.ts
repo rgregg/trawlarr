@@ -184,3 +184,27 @@ export const validateOidcDraft = (draft: PublicAuthSettings): string | null => {
     return 'Set a redirect URI before enabling single sign-on.';
   return null;
 };
+
+/**
+ * What to say about stored SSO settings while the section is collapsed.
+ *
+ * The fields are hidden when single sign-on is off, which risks a worse
+ * problem than the clutter it fixes: an operator who configured SSO, turned
+ * it off, and came back later would see an empty section and conclude their
+ * settings were gone. They are not — disabling keeps them, so that
+ * re-enabling does not mean re-typing a client secret.
+ *
+ * `null` when there is genuinely nothing stored, so a daemon that has never
+ * had SSO configured says nothing at all rather than "nothing is saved",
+ * which is noise on the overwhelmingly common install.
+ *
+ * The issuer is printed whole rather than reduced to a host: it is the field
+ * an operator compares against their provider, and parsing it here would
+ * mean deciding what to do with a value the provider has not accepted yet.
+ */
+export const oidcSummary = (settings: PublicAuthSettings): string | null => {
+  if (settings.oidcEnabled) return null;
+  const issuer = settings.oidcIssuer.trim();
+  if (issuer === '') return null;
+  return `Settings are saved for ${issuer}, but single sign-on is off.`;
+};

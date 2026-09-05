@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   flowLabel,
   formatWindow,
+  oidcSummary,
   parseWindow,
   parseWorkerCount,
   summarizePurge,
@@ -207,5 +208,46 @@ describe('flowLabel', () => {
     for (const names of cases) {
       expect(flowLabel('f1', names)).not.toBe('');
     }
+  });
+});
+
+describe('oidcSummary', () => {
+  /**
+   * The section hides its fields when SSO is off, which risks a worse
+   * problem than the clutter it fixes: someone who configured SSO, turned it
+   * off, and came back would see an empty section and conclude their
+   * settings were lost. Disabling keeps them — so the collapsed state says
+   * so, rather than looking identical to never-configured.
+   */
+  it('says settings survive being switched off', () => {
+    expect(
+      oidcSummary({
+        ...DISABLED_AUTH,
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+      }),
+    ).toBe(
+      'Settings are saved for https://authentik.example.com/application/o/trawlarr/, but single sign-on is off.',
+    );
+  });
+
+  /**
+   * Silence, not "nothing is saved". The overwhelmingly common install has
+   * never touched SSO, and a line reporting the absence of something nobody
+   * configured is noise on every one of them.
+   */
+  it('says nothing at all when nothing was ever configured', () => {
+    expect(oidcSummary(DISABLED_AUTH)).toBeNull();
+    expect(oidcSummary({ ...DISABLED_AUTH, oidcIssuer: '   ' })).toBeNull();
+  });
+
+  // While it is on, the fields are on screen and speak for themselves.
+  it('says nothing while single sign-on is enabled', () => {
+    expect(
+      oidcSummary({
+        ...DISABLED_AUTH,
+        oidcEnabled: true,
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+      }),
+    ).toBeNull();
   });
 });
