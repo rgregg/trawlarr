@@ -49,12 +49,16 @@ const stallAttempt = (input: {
   const mediaFileRepo = createMediaFileRepo(input.db);
   const ledger = mediaFileRepo.getLedger(input.fileId) ?? newLedgerRecord();
   const stalled = applyStall({ record: ledger, nowMs: input.nowMs() });
+  if (ledger.reviewReason != null) {
+    stalled.reviewReason = `${ledger.reviewReason}\n${input.reason}`;
+  }
 
   mediaFileRepo.setLedger({ fileId: input.fileId, record: stalled, lastRunId: input.jobId });
   createJobRepo(input.db).finish({
     jobId: input.jobId,
     state: 'failed',
-    outcome: input.reason,
+    outcome:
+      stalled.reviewReason == null ? input.reason : `Held for review: ${stalled.reviewReason}`,
     nowMs: input.nowMs(),
   });
 
@@ -89,6 +93,16 @@ export const applyJobReport = (input: {
   const mediaFileRepo = createMediaFileRepo(db);
   const jobRepo = createJobRepo(db);
   const row = requireRow(db, payload.fileId);
+  if (report.held === true) {
+    // Remember the human decision before probing/identity reconciliation can
+    // throw. A failed reconciliation (or a crash) must not turn it into retry
+    // backoff, and the replacement's new path must remain blocked as well.
+    mediaFileRepo.rememberReviewIntent({
+      fileId: row.id,
+      reason: report.reviewReason?.trim() || 'Review requested by the flow.',
+      path: report.replaced?.path ?? row.path,
+    });
+  }
 
   // Whether the LIBRARY FILE actually changed — decided from identity
   // (inode, content hash), never from the replace step's output number and
@@ -120,7 +134,7 @@ export const applyJobReport = (input: {
       // is the split state this whole mechanism exists to prevent. Stall
       // instead, with the real reason attached.
       throw new Error(
-        `The replacement for "${row.path}" could not be probed: ` +
+        `The replacement at "${replaced.path}" for "${row.path}" could not be probed: ` +
           `${replaced.probeError ?? 'no probe was produced'}.`,
       );
     }
@@ -176,7 +190,7 @@ export const applyJobReport = (input: {
         // duplicate (delete or requeue one of the two rows) before this file
         // can converge, and retrying on its own will not fix that.
         throw new Error(
-          `The replacement for "${row.path}" produced content that already matches ` +
+          `The replacement at "${replaced.path}" for "${row.path}" produced content that already matches ` +
             `another tracked file in this library (${error.message}). Two files in the ` +
             `library now hold byte-identical content — most often a genuine duplicate ` +
             `(the same title present twice) that a deterministic re-encode has made ` +
@@ -197,6 +211,8 @@ export const applyJobReport = (input: {
 
   const outcome: RunOutcome = {
     success: report.success,
+    held: report.held,
+    reviewReason: report.reviewReason,
     claimedModified,
     preFacts: report.preFacts,
     postFacts,
@@ -219,7 +235,7 @@ export const applyJobReport = (input: {
 
   jobRepo.finish({
     jobId: payload.jobId,
-    state: report.success ? 'succeeded' : 'failed',
+    state: report.success && report.held !== true ? 'succeeded' : 'failed',
     outcome: report.outcome,
     nowMs: input.nowMs(),
   });

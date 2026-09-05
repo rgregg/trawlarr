@@ -74,6 +74,17 @@ ALTER TABLE flow ADD COLUMN draft_updated_at INTEGER;
 hashed, never read by the engine, and never affects convergence. A flow with a
 draft is still running its published definition.
 
+**Layout persistence (updated 2026-09-04).** Node coordinates are stored
+separately as `flow.layout_json` (migration 010), a map of node IDs to finite
+`{x, y}` positions. `GET /flows` and `GET /flows/:id` expose `layout`;
+`PUT /flows/:id/layout` accepts and returns `{layout}`. This endpoint changes
+only presentation metadata: no definition, draft, signature, version-history,
+library-health or scan changes. Positions for draft nodes are allowed, and
+publishing or discarding a draft preserves layout independently of the graph.
+The canvas autosaves completed moves, auto-layout and layout undo/redo through
+a serialized, coalescing queue. Failures retain pending positions and expose
+a retry action; layout-only edits cannot publish a new flow version.
+
 ## API
 
 Two additions; everything else already exists.

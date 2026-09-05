@@ -266,6 +266,7 @@ export const libraryRoutes: Route[] = [
         libraryId: library.id,
         total,
         byState,
+        reviewHeld: repo.reviewHeldCount(library.id),
         good: byState.good,
         missing,
         convergedPercent,

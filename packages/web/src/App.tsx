@@ -5,6 +5,9 @@ import { FileDetail } from './screens/files/FileDetail.js';
 import { Files } from './screens/files/Files.js';
 import { FlowCompare } from './screens/flows/FlowCompare.js';
 import { FlowDetail } from './screens/flows/FlowDetail.js';
+import { FlowEditor } from './screens/flows/FlowEditor.js';
+import { editorBuffers } from './screens/flows/flow-editor-model.js';
+import { hasPendingLayouts } from './screens/flows/flow-layout-model.js';
 import { FlowVersion } from './screens/flows/FlowVersion.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
@@ -18,7 +21,7 @@ import { useAttention } from './shell/useAttention.js';
 import { useAuth } from './shell/useAuth.js';
 import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
-import { useRoute } from './shell/useRoute.js';
+import { confirmNavigation, useNavigationGuard, useRoute } from './shell/useRoute.js';
 import type { Route } from './shell/route.js';
 import './styles.css';
 
@@ -60,7 +63,7 @@ const NAV: Array<{ to: string; label: string; matches: Route['name']; subtitle: 
     to: '/config',
     label: 'Configure',
     matches: 'config',
-    subtitle: 'Libraries, workers, plugin sources and the schedule.',
+    subtitle: 'Libraries, flows, workers, plugin sources and the schedule.',
   },
 ];
 
@@ -121,7 +124,12 @@ const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element =
               {connected ? 'Live' : 'Reconnecting…'}
             </span>
             <ThemeToggle />
-            <button type="button" onClick={props.signOut}>
+            <button
+              type="button"
+              onClick={() => {
+                if (confirmNavigation()) props.signOut();
+              }}
+            >
               Sign out
             </button>
           </div>
@@ -192,6 +200,9 @@ const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element =
         {route.name === 'flow' && (
           <FlowDetail client={props.client} id={route.id} navigate={navigate} />
         )}
+        {route.name === 'flowEdit' && (
+          <FlowEditor key={route.id} client={props.client} id={route.id} navigate={navigate} />
+        )}
         {route.name === 'flowVersion' && (
           <FlowVersion
             client={props.client}
@@ -249,6 +260,7 @@ const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element =
  */
 export const App = (): JSX.Element => {
   const auth = useAuth();
+  useNavigationGuard(auth.client === null && (editorBuffers.size > 0 || hasPendingLayouts()));
 
   return (
     <AuthGate auth={auth}>

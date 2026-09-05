@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { FlowDefinition } from '@trawlarr/core';
+import { flowDefinitionHash, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createEventBus, type TrawlarrEvent } from '../daemon/events.js';
@@ -355,6 +355,32 @@ describe('over a real socket', () => {
 });
 
 describe('libraries', () => {
+  it('counts only present manual-review holds in library stats', async () => {
+    const library = seedLibrary();
+    const other = seedLibrary();
+    const repo = createMediaFileRepo(db);
+    for (const [path, libraryId, missing] of [
+      ['/media/review.mkv', library.id, false],
+      ['/media/missing.mkv', library.id, true],
+      ['/elsewhere/review.mkv', other.id, false],
+    ] as const) {
+      const fileId = seedFile({ libraryId, path, state: 'held' });
+      repo.setLedger({
+        fileId,
+        record: { ...repo.getLedger(fileId)!, reviewReason: 'Inspect quality.' },
+      });
+      if (missing) repo.markMissing({ fileId, expectPath: path, nowMs: NOW });
+    }
+    seedFile({ libraryId: library.id, path: '/media/retry.mkv', state: 'held' });
+    const response = await api('GET', `/libraries/${library.id}/stats`);
+    expect(response.body).toMatchObject({
+      total: 2,
+      missing: 1,
+      reviewHeld: 1,
+      byState: { held: 2 },
+    });
+  });
+
   it('creates a library and reports stats for it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'trawlarr-api-'));
     const created = await api('POST', '/libraries', { name: 'Movies', roots: [root] });
@@ -569,6 +595,22 @@ describe('a paused library says why, in terms of what it costs', () => {
 });
 
 describe('files', () => {
+  it('exposes the review reason in lists and detail, and clears it only on requeue', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/review.mkv', state: 'held' });
+    const repo = createMediaFileRepo(db);
+    repo.setLedger({
+      fileId,
+      record: { ...repo.getLedger(fileId)!, reviewReason: 'Inspect quality.' },
+    });
+    const list = await api('GET', `/files?libraryId=${library.id}`);
+    expect(list.body.items[0].reviewReason).toBe('Inspect quality.');
+    const detail = await api('GET', `/files/${fileId}`);
+    expect(detail.body.file.reviewReason).toBe('Inspect quality.');
+    const requeued = await api('POST', `/files/${fileId}/requeue`);
+    expect(requeued.body.file).toMatchObject({ state: 'queued', reviewReason: null });
+  });
+
   it('pages and filters rather than returning the whole library', async () => {
     const library = seedLibrary();
     seedFile({ libraryId: library.id, path: '/media/a.mkv', state: 'good' });
@@ -703,12 +745,48 @@ describe('files', () => {
 });
 
 describe('flows', () => {
+  it('previews the authoritative hash without changing the live flow, draft or history', async () => {
+    const flow = await createFlowViaApi();
+    const library = seedLibrary({ flowId: flow.id });
+    const saved = createFlowRepo(db).saveDraft({
+      id: flow.id,
+      draft: FLOW_WITH_TWO_PROBLEMS,
+      baseHash: flow.definitionHash,
+      nowMs: NOW,
+    });
+    const response = await api('POST', '/flows/validate', { definition: OTHER_DEF });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      ok: true,
+      problems: [],
+      stored: false,
+      definitionHash: flowDefinitionHash(OTHER_DEF),
+    });
+    expect(response.body.definitionHash).not.toBe(flow.definitionHash);
+    expect(createFlowRepo(db).getById(flow.id)).toEqual(saved);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body.total).toBe(1);
+    expect(createLibraryRepo(db).getById(library.id)).toEqual(library);
+    expect(scans.requests).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
   it('validates a flow and returns one message per problem, without storing it', async () => {
     const response = await api('POST', '/flows/validate', { definition: FLOW_WITH_TWO_PROBLEMS });
 
     expect(response.status).toBe(200);
     expect(response.body.ok).toBe(false);
+    expect(response.body.definitionHash).toBeNull();
     expect(response.body.problems).toHaveLength(2);
+    expect(response.body.problems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'multiple-start-nodes', nodeId: 'start-a' }),
+        expect.objectContaining({
+          code: 'edge-unknown-node',
+          edge: { fromNodeId: 'start-a', outputNumber: 1, toNodeId: 'ghost' },
+        }),
+      ]),
+    );
     expect(createFlowRepo(db).list()).toHaveLength(0);
   });
 
@@ -860,11 +938,16 @@ describe('flows', () => {
       items: Array<{ id: string; definitionHash: string }>;
     };
     const original = versions.items.find((v) => v.definitionHash === first)!;
+    await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: FLOW_WITH_TWO_PROBLEMS,
+      baseHash: first,
+    });
 
     const res = await api('POST', `/flows/${flow.id}/versions/${original.id}/restore`, {});
 
     expect(res.status).toBe(200);
     expect((res.body as { definitionHash: string }).definitionHash).toBe(first);
+    expect(res.body.draft).toBeNull();
     const after = (await api('GET', `/flows/${flow.id}/versions`)).body as { total: number };
     expect(after.total).toBe(3); // appended, never rewritten
   });
@@ -1056,6 +1139,88 @@ const installCustomArgsPlugin = async (): Promise<string> => {
 };
 
 describe('dry run', () => {
+  it.each([false, true])(
+    'previews explicit On Error recovery policy: %s',
+    async (recoverAsSuccess) => {
+      const flow = createFlowRepo(db).create({
+        name: 'error-preview',
+        definition: {
+          nodes: [
+            ...VALID_FLOW.nodes,
+            {
+              id: 'fail',
+              pluginId: 'trawlarr:failFile',
+              pluginVersion: '1',
+              inputs: { message: 'Rejected input.' },
+            },
+            {
+              id: 'error',
+              pluginId: 'trawlarr:onError',
+              pluginVersion: '1',
+              inputs: { recoverAsSuccess },
+            },
+            {
+              id: 'log',
+              pluginId: 'trawlarr:writeToLog',
+              pluginVersion: '1',
+              inputs: { message: '{{error.message}}', interpolate: true },
+            },
+          ],
+          edges: [
+            { fromNodeId: 'start', outputNumber: 1, toNodeId: 'fail' },
+            { fromNodeId: 'error', outputNumber: 1, toNodeId: 'log' },
+          ],
+        },
+        nowMs: NOW,
+      });
+      const library = seedLibrary({ flowId: flow.id });
+      const fileId = await seedProbedFile(library.id);
+      const before = createMediaFileRepo(db).getLedger(fileId);
+      const response = await api('POST', `/flows/${flow.id}/dry-run`, { fileId });
+      expect(response.body).toMatchObject({
+        complete: recoverAsSuccess,
+        failed: !recoverAsSuccess,
+        stopReason: 'end-of-flow',
+        error: recoverAsSuccess ? null : 'Rejected input.',
+      });
+      if (!recoverAsSuccess) {
+        expect(response.body.partialWalkWarning).toContain('would not mark the file converged');
+      }
+      expect(createMediaFileRepo(db).getLedger(fileId)).toEqual(before);
+    },
+  );
+
+  it('previews a review hold and its reason without holding the real file', async () => {
+    const flow = createFlowRepo(db).create({
+      name: 'review-preview',
+      definition: {
+        nodes: [
+          ...VALID_FLOW.nodes,
+          {
+            id: 'review',
+            pluginId: 'trawlarr:holdForReview',
+            pluginVersion: '1.0.0',
+            inputs: { reason: 'Inspect quality.' },
+          },
+        ],
+        edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'review' }],
+      },
+      nowMs: NOW,
+    });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id);
+    const before = createMediaFileRepo(db).getLedger(fileId);
+    const response = await api('POST', `/flows/${flow.id}/dry-run`, { fileId });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      complete: false,
+      stopReason: 'held-for-review',
+      reviewReason: 'Inspect quality.',
+    });
+    expect(response.body.partialWalkWarning).toContain('did not hold or change');
+    expect(createMediaFileRepo(db).getLedger(fileId)).toEqual(before);
+  });
+
   it('walks a vouched-for flow to the end and reports it complete', async () => {
     const flow = createFlowRepo(db).create({ name: 'ok', definition: VALID_FLOW, nowMs: NOW });
     const library = seedLibrary({ flowId: flow.id });
@@ -1208,6 +1373,234 @@ describe('dry run', () => {
   });
 });
 
+describe('flow layouts', () => {
+  it('remembers positions without publishing, touching drafts, or requeueing any file', async () => {
+    const flow = await createFlowViaApi();
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = seedFile({ libraryId: library.id, path: '/media/good.mkv', state: 'good' });
+    const file = db.prepare('SELECT * FROM media_file WHERE id = ?').get(fileId);
+    await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: FLOW_WITH_TWO_PROBLEMS,
+      baseHash: flow.definitionHash,
+    });
+    const before = (await api('GET', `/flows/${flow.id}`)).body;
+    const versions = (await api('GET', `/flows/${flow.id}/versions`)).body;
+    scans.requests.length = 0;
+    events.length = 0;
+    const layout = { start: { x: 40, y: 50 }, unsavedNode: { x: -10.5, y: 200 } };
+    const saved = await api('PUT', `/flows/${flow.id}/layout`, { layout });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toEqual({ layout });
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual({ ...before, layout });
+    expect((await api('GET', '/flows')).body).toEqual([{ ...before, layout }]);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body).toEqual(versions);
+    expect(createLibraryRepo(db).getById(library.id)).toEqual(library);
+    expect(db.prepare('SELECT * FROM media_file WHERE id = ?').get(fileId)).toEqual(file);
+    expect(scans.requests).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it.each([
+    {},
+    { layout: null },
+    { layout: [] },
+    { layout: { start: { x: '1', y: 0 } } },
+    { layout: { start: { x: 0 } } },
+  ])('refuses malformed layout requests without losing saved positions: %j', async (body) => {
+    const flow = await createFlowViaApi();
+    const layout = { start: { x: 50, y: 100 } };
+    await api('PUT', `/flows/${flow.id}/layout`, { layout });
+    const rejected = await api('PUT', `/flows/${flow.id}/layout`, body);
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error.code).toBe('invalid-layout');
+    expect((await api('GET', `/flows/${flow.id}`)).body.layout).toEqual(layout);
+  });
+
+  it('returns 404 for a missing flow rather than creating layout metadata for it', async () => {
+    expect((await api('PUT', '/flows/missing/layout', { layout: {} })).status).toBe(404);
+  });
+});
+
+describe('flow drafts', () => {
+  it('saves invalid work and returns problems without changing any live state', async () => {
+    const flow = await createFlowViaApi();
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = seedFile({ libraryId: library.id, path: '/media/good.mkv', state: 'good' });
+    const file = db.prepare('SELECT * FROM media_file WHERE id = ?').get(fileId);
+    const versions = (await api('GET', `/flows/${flow.id}/versions`)).body;
+    const validation = await api('POST', '/flows/validate', {
+      definition: FLOW_WITH_TWO_PROBLEMS,
+    });
+    scans.requests.length = 0;
+    events.length = 0;
+
+    const saved = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: FLOW_WITH_TWO_PROBLEMS,
+      baseHash: flow.definitionHash,
+    });
+
+    expect(saved.status).toBe(200);
+    expect(saved.body).toEqual({
+      flow: {
+        ...flow,
+        draft: FLOW_WITH_TWO_PROBLEMS,
+        draftBaseHash: flow.definitionHash,
+        draftUpdatedAt: NOW,
+      },
+      ok: false,
+      problems: validation.body.problems,
+      definitionHash: null,
+    });
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(saved.body.flow);
+    expect((await api('GET', '/flows')).body).toEqual([saved.body.flow]);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body).toEqual(versions);
+    expect(createLibraryRepo(db).getById(library.id)).toEqual(library);
+    expect(db.prepare('SELECT * FROM media_file WHERE id = ?').get(fileId)).toEqual(file);
+    expect(scans.requests).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('discards only the draft, with no scans or health changes', async () => {
+    const flow = await createFlowViaApi();
+    const library = seedLibrary({ flowId: flow.id });
+    const saved = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: OTHER_DEF,
+      baseHash: flow.definitionHash,
+    });
+    expect(saved.body.ok).toBe(true);
+    expect(saved.body.problems).toEqual([]);
+    expect(saved.body.definitionHash).toBe(flowDefinitionHash(OTHER_DEF));
+    expect(saved.body.flow.definitionHash).toBe(flow.definitionHash);
+    expect(saved.body.definitionHash).not.toBe(saved.body.flow.definitionHash);
+    const discarded = await api('DELETE', `/flows/${flow.id}/draft`);
+    expect(discarded.status).toBe(204);
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(flow);
+    expect((await api('DELETE', `/flows/${flow.id}/draft`)).status).toBe(204);
+    expect(createLibraryRepo(db).getById(library.id)).toEqual(library);
+    expect(scans.requests).toEqual([]);
+    expect(events).toEqual([]);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body.total).toBe(1);
+  });
+
+  it.each([
+    {},
+    { definition: null, baseHash: 'hash' },
+    { definition: {}, baseHash: 'hash' },
+    { definition: { nodes: [null], edges: [] }, baseHash: 'hash' },
+    { definition: VALID_FLOW },
+    { definition: VALID_FLOW, baseHash: 123 },
+    { definition: VALID_FLOW, baseHash: '' },
+    {
+      definition: { nodes: [{ ...VALID_FLOW.nodes[0], inputs: [] }], edges: [] },
+      baseHash: 'hash',
+    },
+  ])('rejects malformed draft requests without losing saved work: %j', async (body) => {
+    const flow = await createFlowViaApi();
+    const saved = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: OTHER_DEF,
+      baseHash: flow.definitionHash,
+    });
+    const rejected = await api('PUT', `/flows/${flow.id}/draft`, body);
+    expect(rejected.status).toBe(400);
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(saved.body.flow);
+  });
+
+  it('returns 404 for saving or discarding an unknown flow draft', async () => {
+    expect(
+      (await api('PUT', '/flows/missing/draft', { definition: VALID_FLOW, baseHash: 'hash' }))
+        .status,
+    ).toBe(404);
+    expect((await api('DELETE', '/flows/missing/draft')).status).toBe(404);
+  });
+
+  it('refuses stale publication and preserves the draft and newer live definition', async () => {
+    const flow = await createFlowViaApi();
+    await api('PUT', `/flows/${flow.id}`, { definition: OTHER_DEF });
+    const saved = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: VALID_FLOW,
+      baseHash: flow.definitionHash,
+    });
+    scans.requests.length = 0;
+    events.length = 0;
+    const rejected = await api('PUT', `/flows/${flow.id}`, {
+      definition: VALID_FLOW,
+      baseHash: flow.definitionHash,
+    });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.error.code).toBe('flow-changed');
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(saved.body.flow);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body.total).toBe(2);
+    expect(scans.requests).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('preserves the draft when publication is invalid or persistence fails', async () => {
+    const flow = await createFlowViaApi();
+    const saved = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: OTHER_DEF,
+      baseHash: flow.definitionHash,
+    });
+    const invalid = await api('PUT', `/flows/${flow.id}`, {
+      definition: FLOW_WITH_TWO_PROBLEMS,
+      baseHash: flow.definitionHash,
+    });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error.code).toBe('flow-invalid');
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(saved.body.flow);
+
+    db.exec(
+      `CREATE TRIGGER boom BEFORE INSERT ON flow_version BEGIN SELECT RAISE(ABORT, 'boom'); END;`,
+    );
+    const failed = await api('PUT', `/flows/${flow.id}`, {
+      definition: OTHER_DEF,
+      baseHash: flow.definitionHash,
+    });
+    expect(failed.status).toBe(500);
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(saved.body.flow);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body.total).toBe(1);
+    expect(scans.requests).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('publishes a matching draft, clears it, appends history and scans attached libraries', async () => {
+    const flow = await createFlowViaApi();
+    const library = seedLibrary({ flowId: flow.id });
+    seedLibrary();
+    const validation = await api('POST', '/flows/validate', { definition: OTHER_DEF });
+    const draft = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition: OTHER_DEF,
+      baseHash: flow.definitionHash,
+    });
+    const published = await api('PUT', `/flows/${flow.id}`, {
+      definition: OTHER_DEF,
+      baseHash: flow.definitionHash,
+      note: 'canvas edit',
+    });
+    expect(published.status).toBe(200);
+    expect(published.body).toMatchObject({
+      definition: OTHER_DEF,
+      draft: null,
+      draftBaseHash: null,
+      draftUpdatedAt: null,
+    });
+    expect(published.body.definitionHash).not.toBe(flow.definitionHash);
+    expect(published.body.definitionHash).toBe(validation.body.definitionHash);
+    expect(published.body.definitionHash).toBe(draft.body.definitionHash);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body.total).toBe(2);
+    expect(scans.requests).toEqual([{ libraryId: library.id, reason: 'manual' }]);
+  });
+
+  it('rejects a malformed publish base hash instead of silently bypassing concurrency', async () => {
+    const flow = await createFlowViaApi();
+    const rejected = await api('PUT', `/flows/${flow.id}`, {
+      definition: OTHER_DEF,
+      baseHash: null,
+    });
+    expect(rejected.status).toBe(400);
+    expect((await api('GET', `/flows/${flow.id}`)).body).toEqual(flow);
+  });
+});
+
 /**
  * A real, loadable CommonJS flow plugin, installed as `fx:myPlugin`. Real
  * because `/flows/validate` resolves an installed id by LOADING the file the
@@ -1252,6 +1645,68 @@ const installFixturePlugin = async (): Promise<string> => {
 };
 
 describe('plugins', () => {
+  it('exposes logging and failure components with editable messages and accurate ports', async () => {
+    const response = await api('GET', '/plugins');
+    expect(response.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'trawlarr:writeToLog',
+          name: 'Write to Log',
+          enabled: true,
+          sideEffects: 'inert',
+          details: expect.objectContaining({
+            inputs: expect.arrayContaining([
+              expect.objectContaining({ name: 'message', inputUI: { type: 'textarea' } }),
+              expect.objectContaining({ name: 'interpolate', inputUI: { type: 'switch' } }),
+            ]),
+            outputs: [expect.objectContaining({ number: 1 })],
+          }),
+        }),
+        expect.objectContaining({
+          id: 'trawlarr:failFile',
+          name: 'Fail File',
+          enabled: true,
+          sideEffects: 'inert',
+          details: expect.objectContaining({
+            inputs: [expect.objectContaining({ name: 'message', inputUI: { type: 'textarea' } })],
+            outputs: [],
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('accepts a log-to-failure flow but rejects wiring out of Fail File', async () => {
+    const definition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'log',
+          pluginId: 'trawlarr:writeToLog',
+          pluginVersion: '1.0.0',
+          inputs: { message: 'Unsupported file' },
+        },
+        {
+          id: 'fail',
+          pluginId: 'trawlarr:failFile',
+          pluginVersion: '1.0.0',
+          inputs: { message: 'Rejected' },
+        },
+      ],
+      edges: [
+        { fromNodeId: 'start', outputNumber: 1, toNodeId: 'log' },
+        { fromNodeId: 'log', outputNumber: 1, toNodeId: 'fail' },
+      ],
+    };
+    expect((await api('POST', '/flows/validate', { definition })).body.ok).toBe(true);
+    definition.edges.push({ fromNodeId: 'fail', outputNumber: 1, toNodeId: 'log' });
+    const invalid = await api('POST', '/flows/validate', { definition });
+    expect(invalid.body.ok).toBe(false);
+    expect(invalid.body.problems).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'edge-from-terminal-node' })]),
+    );
+  });
+
   it('lists the installed first-party plugins with what a dry run can promise about each', async () => {
     const response = await api('GET', '/plugins');
 
@@ -1284,6 +1739,15 @@ describe('plugins', () => {
     expect(installed.name).toBe('Fixture Plugin');
     // Nothing trawlarr wrote: a dry run must stop at it rather than promise.
     expect(installed.sideEffects).toBe('unknown');
+    expect(installed.details).toMatchObject({
+      inputs: [],
+      outputs: [{ number: 1, tooltip: 'ok' }],
+      style: { borderColor: '#fff' },
+      icon: '',
+      tags: 'fixture',
+      sidebarPosition: 1,
+      isStartPlugin: true,
+    });
 
     const one = await api('GET', `/plugins/${pluginId}`);
     expect(one.status).toBe(200);
@@ -1320,6 +1784,26 @@ describe('plugins', () => {
     });
     expect(badOutput.body.ok).toBe(false);
     expect(JSON.stringify(badOutput.body.problems)).toContain('7');
+  });
+
+  it('uses installed-plugin capabilities when reporting draft validation problems', async () => {
+    const pluginId = await installFixturePlugin();
+    const flow = await createFlowViaApi();
+    const definition = {
+      ...flowUsing(pluginId),
+      edges: [{ fromNodeId: 'n1', toNodeId: 'n1', outputNumber: 7 }],
+    };
+    const validated = await api('POST', '/flows/validate', { definition });
+    const saved = await api('PUT', `/flows/${flow.id}/draft`, {
+      definition,
+      baseHash: flow.definitionHash,
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body.ok).toBe(false);
+    expect(saved.body.problems).toEqual(validated.body.problems);
+    expect(saved.body.problems).toContainEqual(
+      expect.objectContaining({ code: 'edge-undeclared-output', nodeId: 'n1' }),
+    );
   });
 });
 

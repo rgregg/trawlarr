@@ -10,10 +10,14 @@ export interface LedgerRecord {
   attemptCount: number;
   consecutiveNoopCount: number;
   holdUntilMs: number | null;
+  /** Non-null only for an indefinite hold requiring explicit requeue. */
+  reviewReason?: string | null;
 }
 
 export interface RunOutcome {
   success: boolean;
+  held?: boolean;
+  reviewReason?: string | null;
   /** Whether the flow reports having modified the file. */
   claimedModified: boolean;
   preFacts: FactSet;
@@ -44,6 +48,9 @@ const backoffFor = (attemptCount: number): number => {
 };
 
 const recordFailedAttempt = (record: LedgerRecord, nowMs: number): LedgerRecord => {
+  if (record.reviewReason != null) {
+    return { ...record, state: 'held', holdUntilMs: null };
+  }
   const attemptCount = record.attemptCount + 1;
   if (attemptCount >= MAX_ATTEMPTS) {
     return { ...record, state: 'failed', attemptCount, holdUntilMs: null };
@@ -87,6 +94,15 @@ export const applyRunOutcome = (input: {
 }): LedgerRecord => {
   const { record, outcome, currentSignature, nowMs } = input;
 
+  if (outcome.held === true) {
+    return {
+      ...record,
+      state: 'held',
+      holdUntilMs: null,
+      reviewReason: outcome.reviewReason?.trim() || 'Review requested by the flow.',
+    };
+  }
+
   if (!outcome.success) return recordFailedAttempt(record, nowMs);
 
   const wasNoop =
@@ -115,9 +131,11 @@ export const applyRequeue = (record: LedgerRecord): LedgerRecord => ({
   attemptCount: 0,
   consecutiveNoopCount: 0,
   holdUntilMs: null,
+  reviewReason: null,
 });
 
 export const isEligible = (record: LedgerRecord, nowMs: number): boolean => {
+  if (record.reviewReason != null) return false;
   if (record.state === 'queued') return record.holdUntilMs === null || nowMs > record.holdUntilMs;
   if (record.state === 'held') return record.holdUntilMs === null || nowMs > record.holdUntilMs;
   return false;

@@ -1,6 +1,5 @@
 /* --- flow detail ------------------------------------------------------------
-   Read-only, deliberately: no edit control lives here (see FlowDetail.tsx's
-   doc comment). The graph gets its own scroll container because a deep
+   The published graph gets its own scroll container because a deep
    nested flow indents further than a phone is wide, and primary content on
    this screen must never force the PAGE to scroll sideways. */
 
@@ -69,7 +68,7 @@
 }
 
 /* `--warn`, not `--bad`: this is not an error, it is the one sentence on the
-   screen that matters most — that this view cannot edit the flow and why —
+   screen that matters most — that publishing changes what runs —
    so it gets the same visual weight the rest of this app reserves for a
    caution rather than a neutral `.help` aside. */
 .flow-page-notice {

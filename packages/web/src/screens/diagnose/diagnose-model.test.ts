@@ -27,6 +27,21 @@ describe('normaliseReason', () => {
 });
 
 describe('groupProblems', () => {
+  it('uses the persisted review reason and keeps manual holds apart from retry failures', () => {
+    const groups = groupProblems({
+      files: [
+        { ...file('review', 'held', 100), reviewReason: 'Inspect quality.' },
+        file('retry', 'held', 200),
+      ],
+      reasons: { review: 'A stale failed job.', retry: 'Inspect quality.' },
+    });
+    expect(groups).toHaveLength(2);
+    expect(groups.find((group) => group.title === 'Held for review')).toMatchObject({
+      reason: 'Inspect quality.',
+      files: [expect.objectContaining({ id: 'review' })],
+    });
+  });
+
   it('makes three files failing for one reason ONE problem', () => {
     const groups = groupProblems({
       files: [file('a', 'failed', 100), file('b', 'failed', 200), file('c', 'failed', 300)],

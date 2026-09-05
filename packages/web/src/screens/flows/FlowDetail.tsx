@@ -79,17 +79,8 @@ export const GraphNode = (props: { row: GraphRow }): JSX.Element => {
 };
 
 /**
- * The flow detail screen: a flow, drawn — nothing to edit.
- *
- * READ-ONLY IS DELIBERATE, not a gap this task ran out of time for. Flow
- * editing needs its own design (what happens to a running job mid-edit, how
- * a partially-built graph is validated as you go) and is explicitly out of
- * scope for this whole redesign. What this screen owes an operator instead
- * is the one thing the JSON view never gave them: the graph, drawn with
- * branch labels, so a node hanging off the wrong output of a check is
- * visible rather than requiring someone to trace `edges` by hand — which is
- * exactly how the `-max_muxing_queue_size` node sat on both branches of a
- * codec check, undetected, while it queued ~9.2 TB of pointless rewrites.
+ * The published flow and its history stay separate from the editor's draft.
+ * Opening this page always shows what runs, never a half-finished edit.
  *
  * Deliberately untested, the same split every other detail screen in this
  * app uses (`JobDetail.tsx`, `FileDetail.tsx`): `flow-graph-model.ts` is
@@ -217,8 +208,8 @@ export const FlowDetail = (props: {
 
   return (
     <div className="flow-page">
-      <Link to="/config?tab=libraries" navigate={props.navigate} className="flow-page-back">
-        ← Configure
+      <Link to="/config?tab=flows" navigate={props.navigate} className="flow-page-back">
+        ← Flows
       </Link>
 
       {failure !== null && (
@@ -289,11 +280,18 @@ export const FlowDetail = (props: {
           </dl>
 
           <div role="note" className="flow-page-notice">
-            Changing this flow changes its hash and re-queues every file that uses it. Flows are
-            edited over the API or CLI, deliberately.
+            This is the published flow. Editor drafts do not affect processing; publishing a changed
+            definition invalidates its signatures and requests a rescan of attached libraries.
           </div>
 
           <div className="flow-page-actions">
+            <Link
+              to={formatRoute({ name: 'flowEdit', id })}
+              navigate={props.navigate}
+              className="button btn-primary"
+            >
+              Edit flow
+            </Link>
             <button type="button" onClick={onCopy}>
               {copied ? 'Copied' : 'Copy JSON'}
             </button>
