@@ -21,6 +21,8 @@ interface SeedBinding extends EnvBinding {
   settingKey: string;
   apply: (settings: SettingsRepo, raw: string) => void;
   read: (settings: SettingsRepo) => string;
+  /** True for a credential that must never be echoed back over the API or shown in the UI. */
+  secret?: boolean;
 }
 
 const parseWholeNumber = (raw: string, label: string): number => {
@@ -160,6 +162,7 @@ const SEEDS: SeedBinding[] = [
     },
     // Never returned to a caller — see envProvenance's redaction.
     read: (settings) => settings.getDaemon().apiKey,
+    secret: true,
   },
   {
     name: 'TRAWLARR_HARDWARE',
@@ -188,6 +191,79 @@ const SEEDS: SeedBinding[] = [
       Object.entries(settings.getHardware().caps)
         .map(([key, value]) => `${key}=${String(value)}`)
         .join(','),
+  },
+  // The six OIDC fields are seeded before TRAWLARR_OIDC_ENABLED itself, so
+  // that when "enabled" is applied last, setAuth()'s validation (every field
+  // required once oidcEnabled is true) already sees this run's other values
+  // rather than failing on ones a later seed in this same array would have
+  // supplied. `applyEnvSettings`'s "already set" snapshot is taken once,
+  // before any seed in this file runs, so this ordering does not affect
+  // whether a field seeds on a second run — only whether a first run that
+  // sets every OIDC var at once succeeds instead of racing itself.
+  {
+    name: 'TRAWLARR_OIDC_ISSUER',
+    target: 'auth.oidcIssuer',
+    settingKey: 'auth.oidcIssuer',
+    describe:
+      'The OIDC provider’s issuer URL (e.g. https://authentik.example.com/application/o/trawlarr/).',
+    apply: (settings, raw) => settings.setAuth({ oidcIssuer: raw }),
+    read: (settings) => settings.getAuth().oidcIssuer,
+  },
+  {
+    name: 'TRAWLARR_OIDC_CLIENT_ID',
+    target: 'auth.oidcClientId',
+    settingKey: 'auth.oidcClientId',
+    describe: 'The client ID this daemon registered with the OIDC provider.',
+    apply: (settings, raw) => settings.setAuth({ oidcClientId: raw }),
+    read: (settings) => settings.getAuth().oidcClientId,
+  },
+  {
+    name: 'TRAWLARR_OIDC_CLIENT_SECRET',
+    target: 'auth.oidcClientSecret',
+    settingKey: 'auth.oidcClientSecret',
+    describe: 'The client secret paired with TRAWLARR_OIDC_CLIENT_ID. Never echoed back.',
+    apply: (settings, raw) => settings.setAuth({ oidcClientSecret: raw }),
+    // Never returned to a caller — see envProvenance's redaction.
+    read: (settings) => settings.getAuth().oidcClientSecret,
+    secret: true,
+  },
+  {
+    name: 'TRAWLARR_OIDC_REDIRECT_URI',
+    target: 'auth.oidcRedirectUri',
+    settingKey: 'auth.oidcRedirectUri',
+    describe:
+      'This daemon’s own callback URL as the OIDC provider must see it (e.g. ' +
+      'https://trawlarr.example.com/auth/oidc/callback).',
+    apply: (settings, raw) => settings.setAuth({ oidcRedirectUri: raw }),
+    read: (settings) => settings.getAuth().oidcRedirectUri,
+  },
+  {
+    name: 'TRAWLARR_OIDC_SCOPES',
+    target: 'auth.oidcScopes',
+    settingKey: 'auth.oidcScopes',
+    describe: 'Space-separated OIDC scopes to request. Defaults to "openid profile email".',
+    apply: (settings, raw) => settings.setAuth({ oidcScopes: raw }),
+    read: (settings) => settings.getAuth().oidcScopes,
+  },
+  {
+    name: 'TRAWLARR_OIDC_DISPLAY_NAME',
+    target: 'auth.oidcDisplayName',
+    settingKey: 'auth.oidcDisplayName',
+    describe: 'Label on the login screen’s SSO button. Defaults to "Single Sign-On".',
+    apply: (settings, raw) => settings.setAuth({ oidcDisplayName: raw }),
+    read: (settings) => settings.getAuth().oidcDisplayName,
+  },
+  {
+    name: 'TRAWLARR_OIDC_ENABLED',
+    target: 'auth.oidcEnabled',
+    settingKey: 'auth.oidcEnabled',
+    describe:
+      'Turns on the OIDC login button. Requires issuer, client ID, client secret and redirect ' +
+      'URI to already be set (by env var or the settings UI), or this seed fails validation ' +
+      'and is recorded as a problem rather than applied.',
+    apply: (settings, raw) =>
+      settings.setAuth({ oidcEnabled: parseBoolean(raw, 'TRAWLARR_OIDC_ENABLED') }),
+    read: (settings) => String(settings.getAuth().oidcEnabled),
   },
 ];
 
@@ -293,7 +369,7 @@ export const envProvenance = (input: {
 }): Array<EnvApplication & { currentValue: string; matchesEnv: boolean }> =>
   input.applications.map((application) => {
     const seed = SEEDS.find((candidate) => candidate.name === application.name)!;
-    const secret = seed.settingKey === 'daemon.apiKey';
+    const secret = seed.secret === true;
     const current = seed.read(input.settings);
     return {
       ...application,

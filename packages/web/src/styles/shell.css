@@ -225,10 +225,13 @@ main {
   }
 }
 
-/* --- the key gate ---------------------------------------------------------- */
+/* --- the auth gate ----------------------------------------------------------
+   The first screen anyone sees, and the only one shown to someone who is not
+   signed in yet. `AuthGate.tsx` renders three states through it: first-run
+   setup, username/password, and SSO. */
 
-.key-gate {
-  max-width: 30rem;
+.auth-gate {
+  max-width: 26rem;
   margin: 12vh auto;
   padding: var(--space-6);
   background: var(--surface);
@@ -237,52 +240,74 @@ main {
   box-shadow: var(--shadow-md);
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
-.key-gate .app-brand {
+/* The pre-answer state: the gate renders an empty shell while the session
+   round trip is still out, rather than flashing a login form that a live
+   session is about to replace. It still needs a height, or the page jumps
+   the moment the answer lands. */
+.auth-gate-loading {
+  min-height: 18rem;
+}
+
+.auth-gate .app-brand {
+  margin: 0 0 var(--space-3);
+}
+
+.auth-gate h1 {
   margin: 0 0 var(--space-2);
-}
-
-.key-gate h1 {
-  margin: 0;
   font-size: var(--text-xl);
 }
 
-.key-gate label {
+.auth-gate label {
   font-weight: 500;
   font-size: var(--text-sm);
+  margin-top: var(--space-2);
 }
 
-.key-gate input {
-  font-family: var(--mono);
+.auth-gate input {
   width: 100%;
 }
 
-.key-gate p {
+.auth-gate p {
   margin: 0;
   color: var(--ink-muted);
   font-size: var(--text-sm);
 }
 
-.key-gate button[type='submit'] {
+/* A password rule is only useful BEFORE the password is rejected, so it sits
+   under the field rather than waiting to become an error message. */
+.auth-gate .hint {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+}
+
+.auth-gate button[type='submit'] {
   align-self: stretch;
+  margin-top: var(--space-3);
 }
 
-.key-honesty {
-  border-top: 1px solid var(--line);
-  padding-top: var(--space-3);
-}
-
-.key-honesty summary {
-  cursor: pointer;
-  color: var(--ink-muted);
-  font-size: var(--text-sm);
-  min-height: var(--tap);
-  display: flex;
+/* SSO is a real alternative to the form above it, not a footnote — it was an
+   underlined link, which read as help text. A second, quieter button says
+   "either of these signs you in" without competing with the primary one. */
+.oidc-button {
+  align-self: stretch;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-height: var(--tap);
+  margin-top: var(--space-3);
+  padding: 0 var(--space-3);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  text-decoration: none;
 }
 
-.key-honesty p {
-  margin: var(--space-2) 0 0;
+.oidc-button:hover {
+  background: var(--surface-hover);
+  border-color: var(--ink-faint);
 }

@@ -1884,6 +1884,56 @@ describe('system', () => {
     expect(createSettingsRepo({ db }).getDaemon().port).toBe(8265);
   });
 
+  it('reads the auth group without ever returning the session-signing secret', async () => {
+    const response = await api('GET', '/system/settings');
+
+    expect(response.status).toBe(200);
+    expect(response.body.auth).toMatchObject({
+      oidcEnabled: false,
+      oidcIssuer: '',
+      oidcClientId: '',
+      oidcClientSecret: '',
+      oidcRedirectUri: '',
+    });
+    expect(response.body.auth.sessionSecret).toBeUndefined();
+  });
+
+  it('patches the OIDC settings, and the stored value really changes', async () => {
+    const response = await api('PATCH', '/system/settings', {
+      auth: {
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+        oidcClientId: 'trawlarr',
+        oidcClientSecret: 'shh',
+        oidcRedirectUri: 'https://trawlarr.example.com/auth/oidc/callback',
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.auth.oidcClientSecret).toBe('shh');
+    expect(createSettingsRepo({ db }).getAuth().oidcIssuer).toBe(
+      'https://authentik.example.com/application/o/trawlarr/',
+    );
+  });
+
+  it('rejects enabling OIDC when the other fields are still empty', async () => {
+    const response = await api('PATCH', '/system/settings', { auth: { oidcEnabled: true } });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('invalid-setting');
+    expect(createSettingsRepo({ db }).getAuth().oidcEnabled).toBe(false);
+  });
+
+  it('refuses to let a caller set the session-signing secret through this endpoint', async () => {
+    const before = createSettingsRepo({ db }).getAuth().sessionSecret;
+    const response = await api('PATCH', '/system/settings', {
+      auth: { sessionSecret: 'attacker-chosen' },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('invalid-body');
+    expect(createSettingsRepo({ db }).getAuth().sessionSecret).toBe(before);
+  });
+
   it('reads and writes the schedule', async () => {
     const response = await api('PUT', '/system/schedule', {
       timezone: 'UTC',

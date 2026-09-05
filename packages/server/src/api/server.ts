@@ -12,6 +12,9 @@ import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
+import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from './session.js';
+import { createAccountRepo, type AccountRepo } from '../db/account-repo.js';
+import { authRoutes } from './routes/auth.js';
 import { createStaticHandler, resolveWebRoot } from './static-files.js';
 import { fileRoutes } from './routes/files.js';
 import { flowRoutes } from './routes/flows.js';
@@ -37,6 +40,7 @@ import {
  */
 export const ALL_ROUTES: Route[] = [
   ...systemRoutes,
+  ...authRoutes,
   ...libraryRoutes,
   ...fileRoutes,
   ...flowRoutes,
@@ -142,7 +146,15 @@ export const createApiHandler = (
     root: options?.webRoot === undefined ? resolveWebRoot() : options.webRoot,
   });
 
-  const send = (res: ServerResponse, status: number, payload: string | null): void => {
+  const send = (
+    res: ServerResponse,
+    status: number,
+    payload: string | null,
+    headers?: Record<string, string | string[]>,
+  ): void => {
+    if (headers !== undefined) {
+      for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+    }
     if (payload === null) {
       res.writeHead(status);
       res.end();
@@ -155,12 +167,41 @@ export const createApiHandler = (
     res.end(payload);
   };
 
+  const isSecureRequest = (req: IncomingMessage): boolean => {
+    if ((req.socket as { encrypted?: boolean } | undefined)?.encrypted === true) return true;
+    const forwarded = req.headers['x-forwarded-proto'];
+    const proto = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+    return proto?.split(',')[0]?.trim().toLowerCase() === 'https';
+  };
+
+  /**
+   * Is this browser signed in? A valid session cookie is not enough on its
+   * own: the account it names must still exist, so that deleting an account
+   * ends every session it ever issued, immediately — a JWT with no
+   * server-side session store has no other way to be revoked.
+   */
+  const isSessionAuthorised = async (input: {
+    cookies: Record<string, string>;
+    ctx: ApiContext;
+  }): Promise<boolean> => {
+    const token = input.cookies[SESSION_COOKIE_NAME];
+    if (token === undefined) return false;
+    const accountId = await verifySessionToken({
+      token,
+      secret: input.ctx.settings.getAuth().sessionSecret,
+    });
+    if (accountId === null) return false;
+    return input.ctx.accounts.getById(accountId) !== null;
+  };
+
   return (req, res) => {
     if (serveStatic(req, res)) return;
     void (async () => {
       const method = req.method ?? 'GET';
       const url = new URL(req.url ?? '/', 'http://localhost');
       const pathname = url.pathname;
+      const cookies = parseCookies(req.headers.cookie);
+      const secure = isSecureRequest(req);
 
       try {
         const matched = router.match(method, pathname);
@@ -195,7 +236,9 @@ export const createApiHandler = (
         if (matched.route.anonymous !== true) {
           const header = req.headers[API_KEY_HEADER];
           const provided = Array.isArray(header) ? header[0] : header;
-          if (!isAuthorised({ provided, expected: ctx.settings.getDaemon().apiKey })) {
+          const apiKeyOk = isAuthorised({ provided, expected: ctx.settings.getDaemon().apiKey });
+          const sessionOk = apiKeyOk ? false : await isSessionAuthorised({ cookies, ctx });
+          if (!apiKeyOk && !sessionOk) {
             const error = unauthorized();
             send(res, error.status, errorBody(error.code, error.message));
             return;
@@ -226,10 +269,17 @@ export const createApiHandler = (
           query: url.searchParams,
           body,
           ctx,
+          cookies,
+          secure,
         });
 
         if (result instanceof ApiResponse) {
-          send(res, result.status, result.status === 204 ? null : JSON.stringify(result.body));
+          send(
+            res,
+            result.status,
+            result.body === null ? null : JSON.stringify(result.body),
+            result.headers,
+          );
           return;
         }
         send(res, 200, JSON.stringify(result ?? null));
@@ -283,6 +333,8 @@ export interface CreateApiContextInput {
   hardwareFindings?: HardwareFinding[];
   /** Seam for tests; production always gets the real coordinator built here. */
   pluginSyncs?: PluginSyncCoordinator;
+  /** Seam for tests; production always gets the real repo built here. */
+  accounts?: AccountRepo;
 }
 
 /**
@@ -301,6 +353,7 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     bus: input.bus,
     supervisor: input.supervisor,
     scans: input.scans,
+    accounts: input.accounts ?? createAccountRepo(input.db),
     pluginSyncs:
       input.pluginSyncs ??
       createPluginSyncCoordinator({

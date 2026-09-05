@@ -3,8 +3,10 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { EventBus, TrawlarrEvent } from '../daemon/events.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
+import type { AccountRepo } from '../db/account-repo.js';
 import { MAX_LOG_EXCERPT_CHARS } from '../db/job-repo.js';
 import { API_KEY_HEADER, isAuthorised } from './auth.js';
+import { SESSION_COOKIE_NAME, parseCookies, verifySessionToken } from './session.js';
 
 /** Where the socket lives, on the SAME port as the REST API (spec 3.5). */
 export const DEFAULT_WS_PATH = '/api/v1/events';
@@ -55,7 +57,9 @@ export const WS_UNAUTHORIZED_MESSAGE =
   `This WebSocket upgrade was not authorised. Send the daemon's API key either in the ` +
   `"X-Api-Key" header or as an "apiKey" query parameter on the URL — a browser's WebSocket ` +
   `constructor cannot set headers, so the query parameter is the browser's only option. The key ` +
-  `is stored as the "daemon.apiKey" setting and is generated on first start.`;
+  `is stored as the "daemon.apiKey" setting and is generated on first start. A signed-in ` +
+  `browser may instead rely on its session cookie, which travels on the upgrade request the ` +
+  `same as any other request to this origin.`;
 
 /**
  * The minimum a socket has to be for this channel to push to it.
@@ -93,6 +97,8 @@ export interface AttachWebSocketInput {
   server: Server;
   bus: EventBus;
   settings: SettingsRepo;
+  /** Every signed-in operator this daemon knows — checked for a cookie upgrade. */
+  accounts: AccountRepo;
   /** Defaults to `/api/v1/events`. */
   path?: string;
 }
@@ -226,45 +232,66 @@ export const attachWebSocket = (input: AttachWebSocketInput): WsChannel => {
       return;
     }
 
-    const header = req.headers[API_KEY_HEADER];
-    const fromHeader = Array.isArray(header) ? header[0] : header;
-    // The query parameter is not a weaker door, it is the SAME door: a
-    // browser's `new WebSocket(url)` cannot set a header, so without it the
-    // UI could not authenticate at all. It is safe here because the key
-    // grants no ambient authority — a cross-origin page cannot read it, and
-    // nothing about this connection is authenticated by a cookie, so a
-    // hostile page opening this URL has nothing to send. Rejecting BEFORE
-    // the handshake keeps a rejected client from ever seeing an open
-    // socket, which is the difference between a 401 it can report and a
-    // mystery disconnect it will retry forever.
-    const provided = fromHeader ?? url.searchParams.get('apiKey') ?? undefined;
-    if (!isAuthorised({ provided, expected: input.settings.getDaemon().apiKey })) {
-      denyUpgrade(socket, 401, 'unauthorized', WS_UNAUTHORIZED_MESSAGE);
-      return;
-    }
+    void (async () => {
+      const header = req.headers[API_KEY_HEADER];
+      const fromHeader = Array.isArray(header) ? header[0] : header;
+      // The query parameter is not a weaker door, it is the SAME door: a
+      // browser's `new WebSocket(url)` cannot set a header, so without it the
+      // UI could not authenticate at all. It is safe here because the key
+      // grants no ambient authority — a cross-origin page cannot read it, and
+      // nothing about this connection is authenticated by a cookie, so a
+      // hostile page opening this URL has nothing to send. Rejecting BEFORE
+      // the handshake keeps a rejected client from ever seeing an open
+      // socket, which is the difference between a 401 it can report and a
+      // mystery disconnect it will retry forever.
+      const provided = fromHeader ?? url.searchParams.get('apiKey') ?? undefined;
+      const apiKeyOk = isAuthorised({ provided, expected: input.settings.getDaemon().apiKey });
+      // A signed-in browser has no API key at all (see `App.tsx`/`useApi.ts`
+      // once they move to session cookies), so the upgrade also accepts the
+      // same session cookie ordinary requests do — a browser's WebSocket
+      // constructor cannot set a header, but it DOES send this origin's
+      // cookies on the upgrade request, same as any other fetch.
+      const sessionOk = apiKeyOk
+        ? false
+        : await (async () => {
+            const cookies = parseCookies(req.headers.cookie);
+            const token = cookies[SESSION_COOKIE_NAME];
+            if (token === undefined) return false;
+            const accountId = await verifySessionToken({
+              token,
+              secret: input.settings.getAuth().sessionSecret,
+            });
+            if (accountId === null) return false;
+            return input.accounts.getById(accountId) !== null;
+          })();
+      if (!apiKeyOk && !sessionOk) {
+        denyUpgrade(socket, 401, 'unauthorized', WS_UNAUTHORIZED_MESSAGE);
+        return;
+      }
 
-    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-      accept({
-        send: (data) => {
-          ws.send(data);
-        },
-        close: (code, reason) => {
-          ws.close(code, reason);
-        },
-        terminate: () => {
-          ws.terminate();
-        },
-        get bufferedAmount() {
-          return ws.bufferedAmount;
-        },
-        get readyState() {
-          return ws.readyState;
-        },
-        on: (event, listener) => {
-          ws.on(event, listener);
-        },
+      wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+        accept({
+          send: (data) => {
+            ws.send(data);
+          },
+          close: (code, reason) => {
+            ws.close(code, reason);
+          },
+          terminate: () => {
+            ws.terminate();
+          },
+          get bufferedAmount() {
+            return ws.bufferedAmount;
+          },
+          get readyState() {
+            return ws.readyState;
+          },
+          on: (event, listener) => {
+            ws.on(event, listener);
+          },
+        });
       });
-    });
+    })();
   };
 
   input.server.on('upgrade', onUpgrade);

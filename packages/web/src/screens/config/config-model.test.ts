@@ -6,8 +6,63 @@ import {
   parseWorkerCount,
   summarizePurge,
   toFlowNames,
+  validateOidcDraft,
+  type PublicAuthSettings,
   type PurgeSweep,
 } from './config-model.js';
+
+const DISABLED_AUTH: PublicAuthSettings = {
+  oidcEnabled: false,
+  oidcIssuer: '',
+  oidcClientId: '',
+  oidcClientSecret: '',
+  oidcRedirectUri: '',
+  oidcScopes: 'openid profile email',
+  oidcDisplayName: 'Single Sign-On',
+};
+
+describe('validateOidcDraft', () => {
+  it('allows OIDC to stay off with every field blank', () => {
+    expect(validateOidcDraft(DISABLED_AUTH)).toBeNull();
+  });
+
+  it('allows enabling once every required field is filled in', () => {
+    expect(
+      validateOidcDraft({
+        ...DISABLED_AUTH,
+        oidcEnabled: true,
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+        oidcClientId: 'trawlarr',
+        oidcClientSecret: 'shh',
+        oidcRedirectUri: 'https://trawlarr.example.com/auth/oidc/callback',
+      }),
+    ).toBeNull();
+  });
+
+  it('names the first missing field rather than a generic complaint', () => {
+    expect(validateOidcDraft({ ...DISABLED_AUTH, oidcEnabled: true })).toContain('issuer URL');
+    expect(
+      validateOidcDraft({
+        ...DISABLED_AUTH,
+        oidcEnabled: true,
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+      }),
+    ).toContain('client ID');
+  });
+
+  it('treats a whitespace-only field the same as an empty one', () => {
+    expect(
+      validateOidcDraft({
+        ...DISABLED_AUTH,
+        oidcEnabled: true,
+        oidcIssuer: '   ',
+        oidcClientId: 'trawlarr',
+        oidcClientSecret: 'shh',
+        oidcRedirectUri: 'https://trawlarr.example.com/auth/oidc/callback',
+      }),
+    ).toContain('issuer URL');
+  });
+});
 
 describe('parseWorkerCount', () => {
   it('accepts zero, which is how work is stopped', () => {

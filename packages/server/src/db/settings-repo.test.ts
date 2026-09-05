@@ -79,4 +79,45 @@ describe('settings repo', () => {
     expect(() => repo.setHardware({ caps: { nvenc: -1 } })).toThrow(SettingValidationError);
     expect(() => repo.setHardware({ caps: { nvenc: 1.5 } })).toThrow(SettingValidationError);
   });
+
+  it('generates a session secret once and then keeps returning the same one', () => {
+    const db = freshDb();
+    let calls = 0;
+    const repo = createSettingsRepo({
+      db,
+      generateSessionSecret: () => {
+        calls += 1;
+        return `secret-${calls}`;
+      },
+    });
+    expect(repo.getAuth().sessionSecret).toBe('secret-1');
+    expect(repo.getAuth().sessionSecret).toBe('secret-1');
+    expect(calls).toBe(1);
+    expect(createSettingsRepo({ db }).getAuth().sessionSecret).toBe('secret-1');
+  });
+
+  it('defaults OIDC to disabled and empty', () => {
+    const repo = createSettingsRepo({ db: freshDb() });
+    expect(repo.getAuth()).toMatchObject({
+      oidcEnabled: false,
+      oidcIssuer: '',
+      oidcClientId: '',
+      oidcClientSecret: '',
+      oidcRedirectUri: '',
+    });
+  });
+
+  it('refuses to enable OIDC without every required field', () => {
+    const repo = createSettingsRepo({ db: freshDb() });
+    expect(() => repo.setAuth({ oidcEnabled: true })).toThrow(SettingValidationError);
+    expect(() =>
+      repo.setAuth({
+        oidcEnabled: true,
+        oidcIssuer: 'https://auth.example.com',
+        oidcClientId: 'client',
+        oidcClientSecret: 'secret',
+        oidcRedirectUri: 'https://trawlarr.example.com/api/v1/auth/oidc/callback',
+      }),
+    ).not.toThrow();
+  });
 });

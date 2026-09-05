@@ -9,6 +9,7 @@ import type { Supervisor } from '../daemon/supervisor.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import { ApiError, created, noContent, type ApiContext, type Route } from './router.js';
 import { createApiHandler } from './server.js';
+import type { AccountRepo } from '../db/account-repo.js';
 
 const API_KEY = 'a-test-api-key-0123456789';
 
@@ -23,6 +24,7 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   bus: createEventBus(),
   supervisor: {} as Supervisor,
   scans: {} as ScanCoordinator,
+  accounts: {} as AccountRepo,
   pluginSyncs: {} as PluginSyncCoordinator,
   dataDir: '/nonexistent-data-dir',
   nowMs: () => 1_700_000_000_000,

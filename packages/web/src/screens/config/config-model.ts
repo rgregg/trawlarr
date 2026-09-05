@@ -151,3 +151,36 @@ export const flowLabel = (flowId: string, names: Record<string, string>): string
   const name = names[flowId];
   return name === undefined || name === '' ? flowId : name;
 };
+
+/**
+ * `GET /system/settings`'s `auth` field, exactly as `routes/system.ts`
+ * reports it — `sessionSecret` is never included in that response (see its
+ * own comment there), so it has no place in this type either.
+ */
+export interface PublicAuthSettings {
+  oidcEnabled: boolean;
+  oidcIssuer: string;
+  oidcClientId: string;
+  oidcClientSecret: string;
+  oidcRedirectUri: string;
+  oidcScopes: string;
+  oidcDisplayName: string;
+}
+
+/**
+ * The same "every field required once enabled" rule `settings-repo.ts`'s
+ * `validateAuth` enforces server-side, checked here first so flipping the
+ * toggle with blank fields fails on the spot with a message naming exactly
+ * what is missing, rather than round-tripping to the API to learn the same
+ * thing a beat later.
+ */
+export const validateOidcDraft = (draft: PublicAuthSettings): string | null => {
+  if (!draft.oidcEnabled) return null;
+  if (draft.oidcIssuer.trim() === '') return 'Set an issuer URL before enabling single sign-on.';
+  if (draft.oidcClientId.trim() === '') return 'Set a client ID before enabling single sign-on.';
+  if (draft.oidcClientSecret.trim() === '')
+    return 'Set a client secret before enabling single sign-on.';
+  if (draft.oidcRedirectUri.trim() === '')
+    return 'Set a redirect URI before enabling single sign-on.';
+  return null;
+};

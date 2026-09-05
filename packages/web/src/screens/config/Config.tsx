@@ -10,7 +10,9 @@ import {
   parseWindow,
   parseWorkerCount,
   summarizePurge,
+  validateOidcDraft,
   WORKER_CLASSES,
+  type PublicAuthSettings,
   type PurgeSweep,
   type WorkerClass,
 } from './config-model.js';
@@ -924,11 +926,220 @@ const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
   );
 };
 
+/**
+ * `GET /system/settings`'s response wraps `auth` alongside `daemon` /
+ * `binaries` / `scan` / `hardware` and the rest — declared narrowly here
+ * (only the field this section reads) rather than importing the server's
+ * full settings-response shape, the same way `VersionResource` above does
+ * for `/system/version`.
+ */
+interface SettingsResource {
+  auth: PublicAuthSettings;
+}
+
+const AuthSection = (props: { client: ApiClient }): JSX.Element => {
+  const { client } = props;
+  const [auth, setAuth] = useState<PublicAuthSettings | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
+
+  // The form's own draft, separate from the last-saved `auth` above — typing
+  // into the issuer box must not save on every keystroke, and Save must send
+  // exactly what is on screen rather than whatever last round-tripped.
+  const [draft, setDraft] = useState<PublicAuthSettings | null>(null);
+  const [draftProblem, setDraftProblem] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const next = await client.get<SettingsResource>('/system/settings');
+        if (cancelled) return;
+        setProblem(null);
+        setAuth(next.auth);
+        setDraft(next.auth);
+      } catch (error) {
+        if (!cancelled) setProblem(error instanceof Error ? error.message : String(error));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, attempt]);
+
+  const save = async (): Promise<void> => {
+    if (draft === null) return;
+    const message = validateOidcDraft(draft);
+    if (message !== null) {
+      setDraftProblem(message);
+      return;
+    }
+    setDraftProblem(null);
+    setSaving(true);
+    setFailure(null);
+    try {
+      const saved = await client.patch<SettingsResource>('/system/settings', { auth: draft });
+      setAuth(saved.auth);
+      setDraft(saved.auth);
+    } catch (error) {
+      setFailure(describeFailure(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (problem !== null && auth === null) {
+    return (
+      <div role="alert" className="failure">
+        <strong>Could not load single sign-on settings</strong>
+        <p className="verbatim">{problem}</p>
+        <button
+          type="button"
+          onClick={() => {
+            setAttempt((n) => n + 1);
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (auth === null || draft === null) return <p>Loading single sign-on settings…</p>;
+
+  const dirty =
+    draft.oidcEnabled !== auth.oidcEnabled ||
+    draft.oidcIssuer !== auth.oidcIssuer ||
+    draft.oidcClientId !== auth.oidcClientId ||
+    draft.oidcClientSecret !== auth.oidcClientSecret ||
+    draft.oidcRedirectUri !== auth.oidcRedirectUri ||
+    draft.oidcScopes !== auth.oidcScopes ||
+    draft.oidcDisplayName !== auth.oidcDisplayName;
+
+  return (
+    <div className="config-section auth-section">
+      <h3>Single sign-on (OIDC)</h3>
+      <p className="help">
+        Password accounts always work. Filling this in and enabling it adds an SSO button to the
+        login screen, so Authentik or another OIDC provider can sign accounts in too — the first
+        login by a given subject creates that account here automatically.
+      </p>
+
+      <label className="switch">
+        <input
+          type="checkbox"
+          checked={draft.oidcEnabled}
+          onChange={(event) => {
+            setDraft({ ...draft, oidcEnabled: event.target.checked });
+          }}
+        />
+        Enable single sign-on
+      </label>
+
+      <label htmlFor="oidc-issuer">Issuer URL</label>
+      <input
+        id="oidc-issuer"
+        type="text"
+        value={draft.oidcIssuer}
+        placeholder="https://authentik.example.com/application/o/trawlarr/"
+        onChange={(event) => {
+          setDraft({ ...draft, oidcIssuer: event.target.value });
+        }}
+      />
+
+      <label htmlFor="oidc-client-id">Client ID</label>
+      <input
+        id="oidc-client-id"
+        type="text"
+        value={draft.oidcClientId}
+        onChange={(event) => {
+          setDraft({ ...draft, oidcClientId: event.target.value });
+        }}
+      />
+
+      <label htmlFor="oidc-client-secret">Client secret</label>
+      <input
+        id="oidc-client-secret"
+        type="password"
+        value={draft.oidcClientSecret}
+        onChange={(event) => {
+          setDraft({ ...draft, oidcClientSecret: event.target.value });
+        }}
+      />
+
+      <label htmlFor="oidc-redirect-uri">Redirect URI</label>
+      <input
+        id="oidc-redirect-uri"
+        type="text"
+        value={draft.oidcRedirectUri}
+        placeholder="https://trawlarr.example.com/auth/oidc/callback"
+        onChange={(event) => {
+          setDraft({ ...draft, oidcRedirectUri: event.target.value });
+        }}
+      />
+
+      <label htmlFor="oidc-scopes">Scopes</label>
+      <input
+        id="oidc-scopes"
+        type="text"
+        value={draft.oidcScopes}
+        onChange={(event) => {
+          setDraft({ ...draft, oidcScopes: event.target.value });
+        }}
+      />
+
+      <label htmlFor="oidc-display-name">Login button label</label>
+      <input
+        id="oidc-display-name"
+        type="text"
+        value={draft.oidcDisplayName}
+        onChange={(event) => {
+          setDraft({ ...draft, oidcDisplayName: event.target.value });
+        }}
+      />
+
+      {draftProblem !== null && (
+        <p role="alert" className="detail">
+          {draftProblem}
+        </p>
+      )}
+
+      <div className="row-actions">
+        <button type="button" disabled={saving || !dirty} onClick={() => void save()}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {dirty && (
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => {
+              setDraft(auth);
+              setDraftProblem(null);
+            }}
+          >
+            Discard changes
+          </button>
+        )}
+      </div>
+
+      {failure !== null && (
+        <div role="alert" className="failure">
+          <strong>{failure.title}</strong>
+          <p className="verbatim">{failure.message}</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const SystemTab = (props: { client: ApiClient }): JSX.Element => (
   <section className="system-tab">
     <ScheduleSection client={props.client} />
     <TrashSection client={props.client} />
     <HardwareSection client={props.client} />
+    <AuthSection client={props.client} />
   </section>
 );
 

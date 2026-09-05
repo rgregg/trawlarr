@@ -10,7 +10,8 @@
 }
 
 .library-setup,
-.flow-picker {
+.flow-picker,
+.auth-section {
   max-width: 44rem;
   display: flex;
   flex-direction: column;
@@ -29,16 +30,23 @@
 }
 
 .library-setup label,
-.flow-picker label {
+.flow-picker label,
+.auth-section label {
   font-weight: 500;
   font-size: var(--text-sm);
 }
 
-/* A media root or a library name is read back to be checked, so the field
-   is as wide as the form column — the browser default truncates a typical
-   root at about half its length. */
-.library-setup input,
-.library-setup textarea {
+/* A media root, a library name or an OIDC issuer URL is read back to be
+   checked, so the field is as wide as the form column — the browser default
+   truncates a typical root at about half its length.
+
+   NOT the checkboxes. `width: 100%` on a checkbox makes it eat its own
+   row, and the label beside it collapses to min-content — "Enable single
+   sign-on" came out stacked one word per line. Only fields that hold text
+   want the full width. */
+.library-setup input:not([type='checkbox']),
+.library-setup textarea,
+.auth-section input:not([type='checkbox']) {
   width: 100%;
 }
 
