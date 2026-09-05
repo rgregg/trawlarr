@@ -1,4 +1,5 @@
 import type { ApiClient } from './api/client.js';
+import type { AccountResource } from './api/session.js';
 import { Config } from './screens/config/Config.js';
 import { Diagnose } from './screens/diagnose/Diagnose.js';
 import { FileDetail } from './screens/files/FileDetail.js';
@@ -81,7 +82,11 @@ const NAV: Array<{ to: string; label: string; matches: Route['name']; subtitle: 
  * already get on the Watch screen it summarises. Not worth the duplicate
  * fetch, so it is gone rather than made global.
  */
-const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element => {
+const Shell = (props: {
+  client: ApiClient;
+  account: AccountResource;
+  signOut: () => void;
+}): JSX.Element => {
   const { live, connected } = useLive(undefined);
   const { route, navigate } = useRoute();
   // Below 48rem the sheet sets `display: none` on the list behind the file
@@ -222,7 +227,13 @@ const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element =
           />
         )}
         {route.name === 'config' && (
-          <Config client={props.client} live={live} tab={route.tab} navigate={navigate} />
+          <Config
+            client={props.client}
+            live={live}
+            tab={route.tab}
+            account={props.account}
+            navigate={navigate}
+          />
         )}
         {route.name === 'notFound' && (
           <div className="not-found">
@@ -252,9 +263,10 @@ export const App = (): JSX.Element => {
 
   return (
     <AuthGate auth={auth}>
-      {auth.client !== null && (
+      {auth.client !== null && auth.account !== null && auth.account !== undefined && (
         <Shell
           client={auth.client}
+          account={auth.account}
           signOut={() => {
             void auth.signOut();
           }}
