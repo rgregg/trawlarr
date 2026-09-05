@@ -9,10 +9,12 @@ import { FlowVersion } from './screens/flows/FlowVersion.js';
 import { JobDetail } from './screens/jobs/JobDetail.js';
 import { Watch } from './screens/watch/Watch.js';
 import { AuthGate } from './shell/AuthGate.js';
+import { attentionBadge, attentionLabel } from './shell/attention.js';
 import { BrandMark } from './shell/BrandMark.js';
 import { Link } from './shell/Link.js';
 import { PageHeader } from './shell/PageHeader.js';
 import { ThemeToggle } from './shell/ThemeToggle.js';
+import { useAttention } from './shell/useAttention.js';
 import { useAuth } from './shell/useAuth.js';
 import { FILES_NARROW, useMedia } from './shell/useMedia.js';
 import { useLive } from './shell/useLive.js';
@@ -33,8 +35,12 @@ import './styles.css';
  */
 const NAV: Array<{ to: string; label: string; matches: Route['name']; subtitle: string }> = [
   {
+    // "Status", but `Route['name']` is still `watch` — renaming the route
+    // name, `Watch.tsx`, `watch-model.ts` and the `.watch-*` class names
+    // would be a large diff for a label change, so the divergence is here,
+    // in one place, said out loud.
     to: '/',
-    label: 'Watch',
+    label: 'Status',
     matches: 'watch',
     subtitle: 'What the workers are doing, and how close each library is to converged.',
   },
@@ -82,6 +88,9 @@ const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element =
   // panel (`styles.css`), so mounting it there paged an entire library —
   // ~24 sequential requests on 4,625 files — to render nothing at all.
   const narrow = useMedia(FILES_NARROW);
+  // Re-counted when a job ends (the only way a file enters `failed` or
+  // `held`) or a library changes (a scan can bring new files in).
+  const attention = useAttention(props.client, live.staleness.jobs + live.staleness.libraries);
   // The four top-level screens get their title from the same table the nav
   // is built from, so a screen cannot end up with a tab called one thing
   // and a heading called another. Detail screens are absent from it and
@@ -119,17 +128,36 @@ const Shell = (props: { client: ApiClient; signOut: () => void }): JSX.Element =
         </header>
 
         <nav className="app-nav" aria-label="Screens">
-          {NAV.map((entry) => (
-            <Link
-              key={entry.to}
-              to={entry.to}
-              navigate={navigate}
-              className="nav-link"
-              aria-current={route.name === entry.matches ? 'page' : undefined}
-            >
-              {entry.label}
-            </Link>
-          ))}
+          {NAV.map((entry) => {
+            // Only Diagnose carries a count, and only when it is not zero:
+            // a badge reading "0" is a permanent mark on a tab that has
+            // nothing to say, which is how a badge stops being read at all.
+            const badge =
+              entry.matches === 'diagnose' && attention !== null && attention > 0
+                ? attention
+                : null;
+            return (
+              <Link
+                key={entry.to}
+                to={entry.to}
+                navigate={navigate}
+                className="nav-link"
+                aria-current={route.name === entry.matches ? 'page' : undefined}
+                aria-label={badge === null ? undefined : attentionLabel(badge)}
+              >
+                {entry.label}
+                {badge !== null && (
+                  // `aria-hidden`, because `aria-label` above already says
+                  // what this number means in a sentence. Left visible it
+                  // would be announced twice, the second time as a bare
+                  // digit with no noun attached.
+                  <span className="nav-badge" aria-hidden="true">
+                    {attentionBadge(badge)}
+                  </span>
+                )}
+              </Link>
+            );
+          })}
         </nav>
       </div>
 

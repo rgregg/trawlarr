@@ -13,6 +13,16 @@ import type { ApiFile } from '../files/files-model.js';
  * exactly what differs between files that share a cause, and nothing else
  * does.
  */
+/**
+ * What counts as a problem: a file in one of these states needs a human.
+ *
+ * Exported because the shell's Diagnose badge counts the SAME set
+ * (`shell/useAttention.ts`). Two lists would drift, and a badge counting a
+ * different set than the screen shows sends the operator to a tab that then
+ * says nothing is wrong — after which they stop believing the badge.
+ */
+export const PROBLEM_STATES = ['failed', 'held', 'not_converging'];
+
 export interface ProblemGroup {
   key: string;
   title: string;

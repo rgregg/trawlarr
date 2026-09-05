@@ -152,6 +152,42 @@
   border-radius: 2px 2px 0 0;
 }
 
+/* The Diagnose count. Sits ON the tab rather than beside it, because it is
+   about that screen and nothing else — and it is a shape (a filled pill) as
+   well as a colour, so it still reads as "something is wrong here" with the
+   hue removed, which is the same rule every status in this app follows.
+
+   Only ever rendered non-zero (see `App.tsx`): a badge showing "0" is a
+   permanent mark on a tab with nothing to say, and a permanent mark is one
+   nobody looks at. */
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  margin-left: 0.4rem;
+  padding: 0 0.35em;
+  border-radius: var(--radius-pill);
+  background: var(--bad);
+  color: var(--surface);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* In dark mode `--bad` is a light salmon, so white on it fails contrast; the
+   ink flips to the dark ground instead of the surface. */
+:root[data-theme='dark'] .nav-badge {
+  color: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .nav-badge {
+    color: var(--bg);
+  }
+}
+
 /* --- the theme control ---------------------------------------------------- */
 
 .theme-toggle {
