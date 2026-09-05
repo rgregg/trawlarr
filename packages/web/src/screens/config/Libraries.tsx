@@ -274,15 +274,21 @@ export const Libraries = (props: {
             ? 'Loading…'
             : `${String(libraries.length)} ${libraries.length === 1 ? 'library' : 'libraries'}`}
         </p>
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={() => {
-            setView({ kind: 'setup', library: null });
-          }}
-        >
-          Add a library
-        </button>
+        {/* Hidden while the list is empty: the empty state below owns that
+            action there, and two primary buttons asking for the same thing
+            is a choice the operator has to read twice to discover isn't
+            one. */}
+        {libraries !== null && libraries.length > 0 && (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => {
+              setView({ kind: 'setup', library: null });
+            }}
+          >
+            Add a library
+          </button>
+        )}
       </div>
       {problem !== null && <p role="alert">{problem}</p>}
       {libraries === null ? (
