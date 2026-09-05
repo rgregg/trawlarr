@@ -241,6 +241,76 @@ export const authRoutes: Route[] = [
   },
 
   {
+    method: 'PATCH',
+    path: '/auth/accounts/:id/password',
+    // Anonymous at the router, authorised in the handler: this endpoint's
+    // rule is not "a valid credential" but "the account itself", and only
+    // the session cookie names an account. An API key authorises a script
+    // against the whole API without saying WHO is asking, so it cannot
+    // satisfy this and is refused below rather than silently accepted.
+    anonymous: true,
+    handler: async ({ params, body, cookies, ctx }) => {
+      const token = cookies[SESSION_COOKIE_NAME];
+      const callerId =
+        token === undefined
+          ? null
+          : await verifySessionToken({
+              token,
+              secret: ctx.settings.getAuth().sessionSecret,
+            });
+
+      // 403 rather than 401 for a caller who is signed in as someone else:
+      // the credential was fine, the account was not, and re-authenticating
+      // would not help. An unauthenticated caller gets the same answer
+      // because from here the two are the same statement — this is not your
+      // password to change.
+      if (callerId === null || callerId !== params.id) {
+        throw new ApiError(
+          403,
+          'not-your-account',
+          `A password can only be changed by the account it belongs to, signed in as that ` +
+            `account. To reset one nobody can sign in to, stop the daemon and use ` +
+            `"trawlarr account set-password".`,
+        );
+      }
+
+      const currentPassword = requireString(body, 'currentPassword');
+      const newPassword = requireString(body, 'newPassword');
+      if (newPassword.length < 8) {
+        throw new ApiError(400, 'invalid-body', `"newPassword" must be at least 8 characters.`);
+      }
+
+      const account = ctx.accounts.getById(callerId);
+      if (account === null) {
+        throw new ApiError(404, 'account-not-found', `No account with id "${params.id}".`);
+      }
+      // An OIDC account's credential lives at the provider; there is no
+      // local password to replace, and `passwordHash` is null rather than
+      // empty precisely so this is a distinguishable case.
+      if (account.passwordHash === null) {
+        throw new ApiError(
+          409,
+          'not-a-password-account',
+          `This account signs in through single sign-on, so its password is held by that ` +
+            `provider and cannot be changed here.`,
+        );
+      }
+      if (!(await verifyPassword({ password: currentPassword, hash: account.passwordHash }))) {
+        // The same code and wording `POST /auth/login` uses for a bad
+        // password, because it is the same statement about the same secret.
+        throw new ApiError(400, 'invalid-credentials', `That password was not accepted.`);
+      }
+
+      ctx.accounts.setPassword(account.id, await hashPassword(newPassword));
+      // NOTE: sessions already issued for this account STAY VALID — they
+      // are stateless JWTs with no server-side store, so nothing here can
+      // end them, and a stolen cookie outlives the password it was obtained
+      // with by up to `SESSION_TTL_MS`. Tracked in #10.
+      return noContent();
+    },
+  },
+
+  {
     method: 'GET',
     path: '/auth/oidc/start',
     anonymous: true,

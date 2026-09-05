@@ -6,6 +6,7 @@ import {
   parseWindow,
   parseWorkerCount,
   summarizePurge,
+  validatePasswordChange,
   toFlowNames,
   validateOidcDraft,
   type PublicAuthSettings,
@@ -249,5 +250,56 @@ describe('oidcSummary', () => {
         oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
       }),
     ).toBeNull();
+  });
+});
+
+describe('validatePasswordChange', () => {
+  const draft = {
+    currentPassword: 'the-old-password',
+    newPassword: 'a-brand-new-secret',
+    confirmPassword: 'a-brand-new-secret',
+  };
+
+  it('accepts a change that satisfies every rule', () => {
+    expect(validatePasswordChange(draft)).toBeNull();
+  });
+
+  /**
+   * Caught here rather than by the API, which cannot see it: the two boxes
+   * are masked, so a typo in the second is invisible, and the server is only
+   * ever sent one of them. Getting this wrong means setting a password
+   * nobody knows.
+   */
+  it('refuses when the confirmation does not match', () => {
+    expect(validatePasswordChange({ ...draft, confirmPassword: 'a-brand-new-secrft' })).toContain(
+      'do not match',
+    );
+  });
+
+  // The same floor the API and the CLI apply, said before a round trip
+  // rather than after one.
+  it('refuses a new password under eight characters', () => {
+    expect(
+      validatePasswordChange({ ...draft, newPassword: 'short', confirmPassword: 'short' }),
+    ).toContain('8 characters');
+  });
+
+  it('asks for the current password rather than sending a blank one', () => {
+    expect(validatePasswordChange({ ...draft, currentPassword: '' })).toContain('current password');
+    expect(validatePasswordChange({ ...draft, currentPassword: '   ' })).toContain(
+      'current password',
+    );
+  });
+
+  // A no-op the server would accept and the operator would misread as
+  // "changed", so it is refused where the difference is still visible.
+  it('refuses a new password identical to the current one', () => {
+    expect(
+      validatePasswordChange({
+        currentPassword: 'the-old-password',
+        newPassword: 'the-old-password',
+        confirmPassword: 'the-old-password',
+      }),
+    ).toContain('already');
   });
 });
