@@ -7,6 +7,7 @@ export * from './flow-validate.js';
 export * from './flow-diff.js';
 export * from './signature.js';
 export * from './ledger.js';
+export * from './flow-control.js';
 export * from './ffmpeg-command.js';
 export * from './ffmpeg-compile.js';
 export * from './ffmpeg-noop.js';

@@ -6,6 +6,7 @@ import { FILES_NARROW, useMedia } from '../../shell/useMedia.js';
 import { visibleRange } from '../../shell/virtual.js';
 import { describeFailure } from '../config/library-form-model.js';
 import {
+  fileStateLabel,
   filtersToQuery,
   formatBytes,
   formatUpdated,
@@ -66,7 +67,9 @@ const FileRowLine = (props: {
       <span className="file-name" title={row.path}>
         {row.name}
       </span>
-      <span className="file-state">{row.state}</span>
+      <span className="file-state" title={row.reviewReason ?? undefined}>
+        {fileStateLabel(row)}
+      </span>
       <span className="file-codec">{row.video}</span>
       <span className="file-codec">{row.audio}</span>
       <span className="file-size">{formatBytes(row.sizeBytes)}</span>

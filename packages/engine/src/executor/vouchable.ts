@@ -16,12 +16,20 @@ export type SideEffectClass = 'inert' | 'engine-controlled' | 'unknown';
  * classifies an unimplemented node as vouched-for, when the correct answer is
  * `unknown` — which is what makes a dry run stop rather than quietly pretend.
  */
-/** First-party nodes that only read and decide. */
+/** No media I/O: decisions, command building, control signals, and host diagnostics. */
 export const FIRST_PARTY_INERT = new Set([
   'trawlarr:start',
   'trawlarr:checkVideoCodec',
   'trawlarr:beginCommand',
   'trawlarr:setVideoEncoder',
+  'trawlarr:writeToLog',
+  'trawlarr:failFile',
+  'trawlarr:checkCondition',
+  'trawlarr:audioTracks',
+  'trawlarr:subtitleTracks',
+  'trawlarr:setContainer',
+  'trawlarr:onError',
+  'trawlarr:holdForReview',
 ]);
 
 /** First-party nodes whose effects the engine performs, so it can withhold them. */

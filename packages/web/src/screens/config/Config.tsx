@@ -18,11 +18,13 @@ import {
   type WorkerClass,
 } from './config-model.js';
 import { Libraries } from './Libraries.js';
+import { Flows } from '../flows/Flows.js';
 import { describeFailure } from './library-form-model.js';
 
 const TABS: Array<{ tab: ConfigTab; label: string }> = [
   { tab: 'workers', label: 'Workers' },
   { tab: 'libraries', label: 'Libraries' },
+  { tab: 'flows', label: 'Flows' },
   { tab: 'plugins', label: 'Plugins' },
   { tab: 'system', label: 'System' },
 ];
@@ -1171,7 +1173,7 @@ const SystemTab = (props: { client: ApiClient }): JSX.Element => (
 /* --- shell ------------------------------------------------------------------ */
 
 /**
- * The Configure screen: four tabs behind one `?tab=` route.
+ * The Configure screen: tabs behind one `?tab=` route.
  *
  * Deliberately untested, the same split every other screen in this package
  * uses: `config-model.ts` holds the parsing and the arithmetic a test can
@@ -1203,6 +1205,7 @@ export const Config = (props: {
       <Libraries client={props.client} live={props.live} navigate={props.navigate} />
     )}
     {props.tab === 'plugins' && <PluginsTab client={props.client} />}
+    {props.tab === 'flows' && <Flows client={props.client} navigate={props.navigate} />}
     {props.tab === 'system' && <SystemTab client={props.client} />}
   </section>
 );

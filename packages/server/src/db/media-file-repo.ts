@@ -54,6 +54,8 @@ export interface MediaFileRow {
   attempt_count: number;
   consecutive_noop_count: number;
   hold_until_ms: number | null;
+  review_reason: string | null;
+  review_path: string | null;
   pre_facts_json: string | null;
   post_facts_json: string | null;
   original_size_bytes: number | null;
@@ -120,6 +122,8 @@ export interface UpdateAfterRunInput {
 export interface MediaFileRepo {
   identityLookup(libraryId: string): IdentityLookup;
   upsertScanned(input: UpsertScannedInput): string;
+  findReviewHoldAtPath(libraryId: string, path: string): MediaFileRow | null;
+  rememberReviewIntent(input: { fileId: string; reason: string; path: string }): void;
   claimNext(input: {
     workerClass: string;
     nowMs: number;
@@ -233,6 +237,7 @@ export interface MediaFileRepo {
    * deleted. `missingCount` reports those separately.
    */
   countsByState(libraryId: string): Record<FileState, number>;
+  reviewHeldCount(libraryId: string): number;
   /** How many of this library's rows are currently marked missing on disk. */
   missingCount(libraryId: string): number;
   listMissing(libraryId: string): MediaFileRow[];
@@ -322,6 +327,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
   const runningPaths = db.prepare(
     `SELECT path FROM media_file WHERE library_id = ? AND state = 'running'`,
   );
+  const reviewAtPath = db.prepare(
+    `SELECT * FROM media_file WHERE library_id = ? AND review_reason IS NOT NULL
+       AND (path = ? OR review_path = ?) ORDER BY discovered_at, id LIMIT 1`,
+  );
 
   const insertFile = db.prepare(
     `INSERT INTO media_file (
@@ -361,7 +370,7 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     `UPDATE media_file
         SET state = 'running', updated_at = :nowMs
       WHERE id = (
-        SELECT id FROM media_file
+        SELECT id FROM media_file AS candidate
          WHERE state IN ('queued', 'held')
            -- A file the scanner has confirmed gone is not work: claiming it
            -- would spend an attempt (and a backoff, and eventually a
@@ -369,6 +378,12 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
            -- cleared the moment the file comes back, and the row's ledger
            -- state is untouched meanwhile, so it resumes exactly here.
            AND missing_since_ms IS NULL
+           AND review_reason IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM media_file AS review
+             WHERE review.library_id = candidate.library_id AND review.review_reason IS NOT NULL
+               AND (review.path = candidate.path OR review.review_path = candidate.path)
+           )
            AND (hold_until_ms IS NULL OR hold_until_ms < :nowMs)
            AND (:filterLibraries = 0 OR library_id IN (SELECT value FROM json_each(:libraryIds)))
          ORDER BY priority DESC, discovered_at ASC
@@ -386,7 +401,52 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
   return {
     identityLookup,
 
+    findReviewHoldAtPath(libraryId, path) {
+      return (reviewAtPath.get(libraryId, path, path) as MediaFileRow | undefined) ?? null;
+    },
+
+    rememberReviewIntent(input) {
+      // Keep a running row running until reconciliation finishes, but protect
+      // the reported replacement path even if its identity cannot be recorded.
+      const result = db
+        .prepare('UPDATE media_file SET review_reason = ?, review_path = ? WHERE id = ?')
+        .run(input.reason, input.path, input.fileId);
+      if (result.changes === 0) throw new Error(`Unknown media file: ${input.fileId}`);
+    },
+
     upsertScanned(input) {
+      const held = reviewAtPath.get(input.libraryId, input.path, input.path) as
+        MediaFileRow | undefined;
+      if (held !== undefined) {
+        try {
+          db.transaction(() => {
+            updateScanned.run(
+              input.identity.inodeKey,
+              input.identity.contentKey,
+              input.path,
+              input.nlink,
+              input.sizeBytes,
+              input.mtimeMs,
+              input.ctimeMs,
+              input.container,
+              input.nowMs,
+              held.id,
+            );
+            if (held.content_key !== input.identity.contentKey) {
+              // Re-probe changed held content instead of presenting old codecs
+              // as facts about its replacement if the next probe fails.
+              db.prepare(
+                `UPDATE media_file SET probe_json = NULL, video_codec = NULL,
+                audio_codec = NULL, resolution = NULL, duration_ms = NULL, bitrate = NULL
+                WHERE id = ?`,
+              ).run(held.id);
+            }
+          })();
+        } catch (error) {
+          throw toIdentityConflictError(error, input.libraryId, input.identity.contentKey);
+        }
+        return held.id;
+      }
       const lookup = identityLookup(input.libraryId);
       const inodeMatch =
         input.identity.inodeKey !== null ? lookup.byInodeKey(input.identity.inodeKey) : null;
@@ -595,7 +655,7 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       db.prepare(
         `UPDATE media_file
             SET state = ?, signature = ?, attempt_count = ?,
-                consecutive_noop_count = ?, hold_until_ms = ?,
+                consecutive_noop_count = ?, hold_until_ms = ?, review_reason = ?, review_path = ?,
                 pre_facts_json = ?, post_facts_json = ?, last_run_id = ?
           WHERE id = ?`,
       ).run(
@@ -604,6 +664,8 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         input.record.attemptCount,
         input.record.consecutiveNoopCount,
         input.record.holdUntilMs,
+        input.record.reviewReason ?? null,
+        input.record.reviewReason == null ? null : (current.review_path ?? current.path),
         input.preFacts === undefined
           ? current.pre_facts_json
           : input.preFacts === null
@@ -628,6 +690,7 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         attemptCount: row.attempt_count,
         consecutiveNoopCount: row.consecutive_noop_count,
         holdUntilMs: row.hold_until_ms,
+        reviewReason: row.review_reason,
       };
     },
 
@@ -687,11 +750,12 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         attemptCount: current.attempt_count,
         consecutiveNoopCount: current.consecutive_noop_count,
         holdUntilMs: current.hold_until_ms,
+        reviewReason: current.review_reason,
       };
       const requeued = applyRequeue(record);
       db.prepare(
         `UPDATE media_file
-            SET state = ?, attempt_count = ?, consecutive_noop_count = ?, hold_until_ms = ?
+            SET state = ?, attempt_count = ?, consecutive_noop_count = ?, hold_until_ms = ?, review_reason = NULL, review_path = NULL
           WHERE id = ?`,
       ).run(
         requeued.state,
@@ -700,6 +764,18 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         requeued.holdUntilMs,
         fileId,
       );
+    },
+
+    reviewHeldCount(libraryId) {
+      return (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS count FROM media_file
+           WHERE library_id = ? AND state = 'held'
+             AND review_reason IS NOT NULL AND missing_since_ms IS NULL`,
+          )
+          .get(libraryId) as { count: number }
+      ).count;
     },
 
     countsByState(libraryId) {

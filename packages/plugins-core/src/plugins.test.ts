@@ -29,9 +29,105 @@ describe('every first-party plugin', () => {
       const details = entry.module.details();
       expect(typeof entry.module.plugin, id).toBe('function');
       expect(Array.isArray(details.inputs), id).toBe(true);
-      expect(details.outputs.length, id).toBeGreaterThan(0);
+      // Terminal nodes intentionally declare no outgoing connections.
+      expect(Array.isArray(details.outputs), id).toBe(true);
+      for (const output of details.outputs) {
+        expect(Number.isInteger(output.number), id).toBe(true);
+        expect(output.number, id).toBeGreaterThan(0);
+      }
       expect(details.name, id).toBeTruthy();
     }
+  });
+});
+
+describe('trawlarr:failFile', () => {
+  const plugin = FIRST_PARTY_PLUGINS['trawlarr:failFile']!.module;
+
+  it('has no outgoing ports and records the configured reason before failing', () => {
+    const lines: string[] = [];
+    const args = argsFor({
+      inputs: { message: 'Video quality rejected.' },
+      jobLog: (text) => lines.push(text),
+    });
+    expect(plugin.details().outputs).toEqual([]);
+    expect(() => plugin.plugin(args)).toThrow('Video quality rejected.');
+    expect(lines).toEqual(['Video quality rejected.']);
+    expect(args.inputFileObj._id).toBe('/media/movie.mkv');
+    expect(args.variables.flowFailed).toBe(false);
+  });
+
+  it.each([undefined, '', '  '])('provides a useful failure reason for message %s', (message) => {
+    expect(() => plugin.plugin(argsFor({ inputs: { message } }))).toThrow(
+      'File rejected by this flow.',
+    );
+  });
+});
+
+describe('trawlarr:writeToLog', () => {
+  const plugin = FIRST_PARTY_PLUGINS['trawlarr:writeToLog']!.module;
+
+  it('logs multiline text verbatim and preserves the file and all run variables', async () => {
+    const lines: string[] = [];
+    const args = argsFor({
+      inputs: { message: 'First line\nSecond line' },
+      jobLog: (text) => lines.push(text),
+    });
+    const output = await plugin.plugin(args);
+    expect(lines).toEqual(['First line\nSecond line']);
+    expect(output.outputNumber).toBe(1);
+    expect(output.outputFileObj._id).toBe(args.inputFileObj._id);
+    expect(output.variables).toBe(args.variables);
+    expect(output.variables.ffmpegCommand.init).toBe(false);
+  });
+
+  it('uses the metadata default when the message input is absent', async () => {
+    const lines: string[] = [];
+    await plugin.plugin(argsFor({ jobLog: (text) => lines.push(text) }));
+    expect(lines).toEqual([plugin.details().inputs[0]!.defaultValue]);
+  });
+
+  it('expands placeholders only when opted in, preserving existing literal messages', async () => {
+    const lines: string[] = [];
+    const input = argsFor({
+      inputs: { message: 'Processing {{file.path}}' },
+      jobLog: (text) => lines.push(text),
+    });
+    await plugin.plugin(input);
+    await plugin.plugin({ ...input, inputs: { ...input.inputs, interpolate: true } });
+    expect(lines).toEqual(['Processing {{file.path}}', 'Processing /media/movie.mkv']);
+    expect(() => plugin.plugin({ ...input, inputs: { interpolate: 'yes' } })).toThrow(
+      'must be true or false',
+    );
+  });
+
+  it('does not pretend to succeed when the job logger throws', () => {
+    expect(() =>
+      plugin.plugin(
+        argsFor({
+          jobLog: () => {
+            throw new Error('Log unavailable');
+          },
+        }),
+      ),
+    ).toThrow('Log unavailable');
+  });
+
+  describe('trawlarr:checkCondition', () => {
+    it('routes matching and non-matching files without altering their path or variables', async () => {
+      const plugin = FIRST_PARTY_PLUGINS['trawlarr:checkCondition']!.module;
+      const lines: string[] = [];
+      const input = argsFor({
+        inputs: { field1: 'video.codec', value1: 'h264' },
+        jobLog: (text) => lines.push(text),
+      });
+      const yes = await plugin.plugin(input);
+      const no = await plugin.plugin({ ...input, inputs: { value1: 'hevc' } });
+      expect(yes.outputNumber).toBe(1);
+      expect(no.outputNumber).toBe(2);
+      expect(yes.outputFileObj._id).toBe(input.inputFileObj._id);
+      expect(yes.variables).toBe(input.variables);
+      expect(lines[0]).toContain('"h264"');
+    });
   });
 });
 

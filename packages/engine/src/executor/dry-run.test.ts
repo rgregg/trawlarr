@@ -3,6 +3,7 @@ import type { FlowDefinition, FlowNode } from '@trawlarr/core';
 import type { PluginDetails, PluginInputArgs, PluginModule } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
 import { beginFfmpegCommand } from '@trawlarr/core';
+import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 import { classifySideEffects } from './vouchable.js';
 import { runDryFlow } from './dry-run.js';
 
@@ -145,6 +146,11 @@ const base = { initialPath: '/in.mkv', startNodeId: 'a', buildArgs, outputPathFo
 const discovering = { initialPath: '/in.mkv', buildArgs, outputPathFor };
 
 describe('classifySideEffects', () => {
+  it.each(['trawlarr:writeToLog', 'trawlarr:failFile'])('can run %s during a dry run', (id) => {
+    const entry = FIRST_PARTY_PLUGINS[id]!;
+    expect(classifySideEffects(loaded(id, entry.module, entry.module.details()))).toBe('inert');
+  });
+
   it('knows first-party filters are inert', () => {
     expect(classifySideEffects(loaded('trawlarr:checkVideoCodec', pass))).toBe('inert');
   });
@@ -166,6 +172,43 @@ describe('classifySideEffects', () => {
 });
 
 describe('runDryFlow', () => {
+  it.each([false, true])('runs diagnostics without media side effects (fail=%s)', async (fail) => {
+    const logs: string[] = [];
+    const nodes = [node('start', 'trawlarr:start'), node('log', 'trawlarr:writeToLog')];
+    const edges = [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'log' }];
+    nodes[1]!.inputs = { message: 'Diagnostic message' };
+    if (fail) {
+      nodes.push({
+        ...node('fail', 'trawlarr:failFile'),
+        inputs: { message: 'Rejected by policy' },
+      });
+      edges.push({ fromNodeId: 'log', outputNumber: 1, toNodeId: 'fail' });
+    }
+    const result = await runDryFlow({
+      ...discovering,
+      flow: flow(nodes, edges),
+      loadPlugin: (n) => {
+        const entry = FIRST_PARTY_PLUGINS[n.pluginId]!;
+        return loaded(entry.id, entry.module, entry.module.details());
+      },
+      buildArgs: (invocation) => ({
+        ...buildArgs(invocation),
+        inputs: invocation.node.inputs,
+        jobLog: (text) => logs.push(text),
+      }),
+    });
+    expect(result.failed).toBe(fail);
+    expect(result.complete).toBe(!fail);
+    expect(result.error).toBe(fail ? 'Rejected by policy' : null);
+    expect(result.stoppedAtNodeId).toBeNull();
+    expect(result.plannedCommands).toEqual([]);
+    expect(result.currentPath).toBe('/in.mkv');
+    expect(logs).toEqual(
+      fail ? ['Diagnostic message', 'Rejected by policy'] : ['Diagnostic message'],
+    );
+    expect(result.steps[1]!.logExcerpt).toBe('Diagnostic message');
+  });
+
   it('completes a flow built only from first-party nodes', async () => {
     const result = await runDryFlow({
       ...base,

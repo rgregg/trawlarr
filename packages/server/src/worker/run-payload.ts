@@ -116,6 +116,8 @@ export interface JobReport {
   failed: boolean;
   error: string | null;
   success: boolean;
+  held?: boolean;
+  reviewReason?: string | null;
   outcome: string;
   /** Present only when the LIBRARY FILE on disk actually changed. */
   replaced: ReplacedFile | null;
@@ -682,12 +684,15 @@ export const runPayload = async (input: {
         }
       }
 
-      const outcome = success
-        ? `Flow finished: ${result.stopReason}.`
-        : endedOnUnroutedFailure
-          ? `Flow finished, but "${lastStep?.pluginName ?? lastStep?.pluginId}" reported failure ` +
-            `on output ${String(lastStep?.outputNumber)}, which this flow routes nowhere.`
-          : `Flow failed: ${result.error ?? result.stopReason}`;
+      const held = result.stopReason === 'held-for-review';
+      const outcome = held
+        ? `Held for review: ${result.reviewReason ?? 'Review requested by the flow.'}`
+        : success
+          ? `Flow finished: ${result.stopReason}.`
+          : endedOnUnroutedFailure
+            ? `Flow finished, but "${lastStep?.pluginName ?? lastStep?.pluginId}" reported failure ` +
+              `on output ${String(lastStep?.outputNumber)}, which this flow routes nowhere.`
+            : `Flow failed: ${result.error ?? result.stopReason}`;
 
       return {
         jobId: payload.jobId,
@@ -697,6 +702,8 @@ export const runPayload = async (input: {
         failed: result.failed,
         error: result.error,
         success,
+        held,
+        reviewReason: result.reviewReason ?? null,
         outcome,
         replaced,
         preFacts,

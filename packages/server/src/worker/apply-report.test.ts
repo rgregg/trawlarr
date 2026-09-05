@@ -15,7 +15,7 @@ import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { buildJobPayload, type JobPayload } from './job-payload.js';
 import type { JobReport } from './run-payload.js';
-import { applyJobFailure, applyJobReport } from './apply-report.js';
+import { applyJobFailure, applyJobReport, applyThrownFailure } from './apply-report.js';
 
 const NOW = 1_700_000_000_000;
 
@@ -138,6 +138,115 @@ const reportWithReplacement = (payload: JobPayload): JobReport => ({
 });
 
 describe('applyJobReport', () => {
+  it.each(['probe failure', 'identity conflict'])(
+    'keeps a requested hold and replacement path blocked after %s',
+    (failure) => {
+      const { payload } = seeded();
+      const repo = createMediaFileRepo(db);
+      repo.setState({ fileId: payload.fileId, state: 'running', attemptCount: 2 });
+      const original = repo.getById(payload.fileId)!;
+      const replacement = reportWithReplacement(payload);
+      if (failure === 'identity conflict') {
+        const otherId = repo.upsertScanned({
+          libraryId: payload.libraryId,
+          identity: NEW_IDENTITY,
+          path: replacement.replaced!.path,
+          nlink: 1,
+          sizeBytes: 2048,
+          mtimeMs: NOW,
+          ctimeMs: NOW,
+          container: 'mp4',
+          nowMs: NOW,
+        });
+        repo.setState({ fileId: otherId, state: 'queued' });
+      } else {
+        replacement.replaced = {
+          ...replacement.replaced!,
+          probe: null,
+          probeError: 'ffprobe failed: EIO',
+        };
+        replacement.postFacts = null;
+      }
+      const report: JobReport = {
+        ...replacement,
+        held: true,
+        reviewReason: 'Inspect output.',
+        success: false,
+        stopReason: 'held-for-review',
+        outcome: 'Held for review: Inspect output.',
+      };
+      let reconciliationError: unknown;
+      try {
+        applyJobReport({ db, payload, report, nowMs: () => NOW });
+      } catch (error) {
+        reconciliationError = error;
+      }
+      expect(reconciliationError).toBeInstanceOf(Error);
+      applyThrownFailure({
+        db,
+        row: original,
+        payload,
+        error: reconciliationError,
+        nowMs: () => NOW,
+      });
+      const held = repo.getById(payload.fileId)!;
+      expect(held).toMatchObject({
+        state: 'held',
+        attempt_count: 2,
+        hold_until_ms: null,
+        review_path: '/lib/movie.mp4',
+        content_key: OLD_IDENTITY.contentKey,
+      });
+      expect(held.review_reason).toContain('Inspect output.');
+      expect(held.review_reason).toContain(
+        failure === 'probe failure' ? 'EIO' : 'another tracked file',
+      );
+      expect(repo.findReviewHoldAtPath(payload.libraryId, '/lib/movie.mp4')?.id).toBe(
+        payload.fileId,
+      );
+      expect(
+        repo.claimNext({ workerClass: 'transcode', nowMs: Number.MAX_SAFE_INTEGER }),
+      ).toBeNull();
+      expect(createJobRepo(db).listForFile(payload.fileId)[0]?.outcome).toContain(
+        'Held for review',
+      );
+    },
+  );
+
+  it('reconciles a replacement before persisting an unpenalised indefinite review hold', () => {
+    const { payload } = seeded();
+    const repo = createMediaFileRepo(db);
+    repo.setState({ fileId: payload.fileId, state: 'running', attemptCount: 2 });
+    const report = JSON.parse(
+      JSON.stringify({
+        ...reportWithReplacement(payload),
+        held: true,
+        reviewReason: 'Inspect the replacement.',
+        stopReason: 'held-for-review',
+        failed: true,
+        success: false,
+        outcome: 'Held for review: Inspect the replacement.',
+      }),
+    ) as JobReport;
+    applyJobReport({ db, payload, report, nowMs: () => NOW });
+    const row = repo.getById(payload.fileId)!;
+    expect(row).toMatchObject({
+      path: '/lib/movie.mp4',
+      content_key: NEW_CONTENT_KEY,
+      video_codec: 'hevc',
+      state: 'held',
+      review_reason: 'Inspect the replacement.',
+      hold_until_ms: null,
+      attempt_count: 2,
+      signature: null,
+    });
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: Number.MAX_SAFE_INTEGER })).toBeNull();
+    expect(createJobRepo(db).listForFile(payload.fileId)[0]).toMatchObject({
+      state: 'failed',
+      outcome: 'Held for review: Inspect the replacement.',
+    });
+  });
+
   it('writes the new identity when the report says the library file changed', () => {
     const { payload } = seeded();
 

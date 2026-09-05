@@ -1,0 +1,1 @@
+ALTER TABLE flow ADD COLUMN layout_json TEXT NOT NULL DEFAULT '{}';

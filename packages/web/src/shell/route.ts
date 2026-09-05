@@ -13,7 +13,7 @@ export interface FileFilters {
   q: string | null;
 }
 
-export type ConfigTab = 'workers' | 'libraries' | 'plugins' | 'system';
+export type ConfigTab = 'workers' | 'libraries' | 'flows' | 'plugins' | 'system';
 
 export type Route =
   | { name: 'watch' }
@@ -29,6 +29,7 @@ export type Route =
   | { name: 'file'; id: string; filters: FileFilters }
   | { name: 'job'; id: string }
   | { name: 'flow'; id: string }
+  | { name: 'flowEdit'; id: string }
   // A single entry from a flow's history, reached from the flow it belongs
   // to — `flowId` is known because the link that opens this route always
   // starts on that flow's page (see `FlowDetail.tsx`'s History section).
@@ -49,7 +50,7 @@ export type Route =
   | { name: 'config'; tab: ConfigTab }
   | { name: 'notFound'; path: string };
 
-const CONFIG_TABS: ConfigTab[] = ['workers', 'libraries', 'plugins', 'system'];
+const CONFIG_TABS: ConfigTab[] = ['workers', 'libraries', 'flows', 'plugins', 'system'];
 
 const isConfigTab = (raw: string | null): raw is ConfigTab =>
   raw !== null && (CONFIG_TABS as string[]).includes(raw);
@@ -80,6 +81,10 @@ export const parseRoute = (pathname: string, search: string): Route => {
   if (segments[0] === 'jobs' && segments.length === 2) return { name: 'job', id: segments[1]! };
 
   if (segments[0] === 'flows' && segments.length === 2) return { name: 'flow', id: segments[1]! };
+
+  if (segments[0] === 'flows' && segments.length === 3 && segments[2] === 'edit') {
+    return { name: 'flowEdit', id: segments[1]! };
+  }
 
   if (segments[0] === 'flows' && segments.length === 4 && segments[2] === 'versions') {
     return { name: 'flowVersion', flowId: segments[1]!, versionId: segments[3]! };
@@ -130,6 +135,8 @@ export const formatRoute = (route: Route): string => {
       return `/jobs/${route.id}`;
     case 'flow':
       return `/flows/${route.id}`;
+    case 'flowEdit':
+      return `/flows/${route.id}/edit`;
     case 'flowVersion':
       return `/flows/${route.flowId}/versions/${route.versionId}`;
     case 'flowVersionDirect':

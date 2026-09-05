@@ -5,7 +5,7 @@ import { formatRoute, type FileFilters } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { explainState, resolveFlowBinding, toStreamRows } from './file-detail-model.js';
 import { formatTimestamp } from '../../shell/time.js';
-import { formatBytes, type ApiFile } from './files-model.js';
+import { fileStateLabel, formatBytes, type ApiFile } from './files-model.js';
 
 /**
  * `GET /files/:id` returns every column the listing leaves out, plus the
@@ -46,6 +46,7 @@ interface DryRunExecuteDecision {
 
 interface DryRunResult {
   complete: boolean;
+  reviewReason?: string | null;
   stoppedBecause: string | null;
   wouldRunFfmpeg: boolean;
   executeDecisions: DryRunExecuteDecision[];
@@ -226,6 +227,7 @@ export const FileDetail = (props: {
           attemptCount: file.attemptCount,
           lastJobReason: jobs[0]?.outcome ?? null,
           holdUntilMs: file.holdUntilMs,
+          reviewReason: file.reviewReason,
           nowMs: Date.now(),
         });
 
@@ -279,7 +281,7 @@ export const FileDetail = (props: {
         <>
           <div className={`file-detail-header file-row-state-${file.state}`}>
             <h2 title={file.path}>{basename(file.path)}</h2>
-            <span className="file-detail-state">{file.state}</span>
+            <span className="file-detail-state">{fileStateLabel(file)}</span>
           </div>
           <p className="file-detail-path">{file.path}</p>
 
@@ -363,13 +365,15 @@ export const FileDetail = (props: {
           {dryRun !== null && (
             <div className="file-detail-dry-run">
               <p>
-                {dryRun.complete
-                  ? dryRun.wouldRunFfmpeg
-                    ? 'The flow would run ffmpeg on this file.'
-                    : 'The flow would leave this file alone.'
-                  : `The walk stopped before finishing${
-                      dryRun.stoppedBecause === null ? '.' : `: ${dryRun.stoppedBecause}`
-                    }`}
+                {dryRun.reviewReason != null
+                  ? `A real run would hold this file for review: ${dryRun.reviewReason} No hold was applied.`
+                  : dryRun.complete
+                    ? dryRun.wouldRunFfmpeg
+                      ? 'The flow would run ffmpeg on this file.'
+                      : 'The flow would leave this file alone.'
+                    : `The walk stopped before finishing${
+                        dryRun.stoppedBecause === null ? '.' : `: ${dryRun.stoppedBecause}`
+                      }`}
               </p>
               {dryRun.executeDecisions.length > 0 && (
                 <ul>

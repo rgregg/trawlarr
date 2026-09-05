@@ -15,6 +15,7 @@ export interface ApiFile {
   libraryId: string;
   path: string;
   state: string;
+  reviewReason?: string | null;
   videoCodec: string | null;
   audioCodec: string | null;
   sizeBytes: number;
@@ -26,6 +27,7 @@ export interface FileRow {
   path: string;
   name: string;
   state: string;
+  reviewReason?: string | null;
   video: string;
   audio: string;
   sizeBytes: number;
@@ -42,6 +44,7 @@ export const toFileRows = (items: ApiFile[]): FileRow[] =>
     path: item.path,
     name: basename(item.path),
     state: item.state,
+    reviewReason: item.reviewReason,
     // A codec the daemon has not probed yet is `null`, not the string
     // "null" — a dash says "not known" without inventing a fact.
     video: item.videoCodec ?? '—',
@@ -49,6 +52,9 @@ export const toFileRows = (items: ApiFile[]): FileRow[] =>
     sizeBytes: item.sizeBytes,
     updatedAt: item.updatedAt,
   }));
+
+export const fileStateLabel = (file: { state: string; reviewReason?: string | null }): string =>
+  file.state === 'held' && file.reviewReason != null ? 'Held for review' : file.state;
 
 export const sortRows = (
   rows: FileRow[],
