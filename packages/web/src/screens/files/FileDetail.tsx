@@ -4,6 +4,7 @@ import { Link } from '../../shell/Link.js';
 import { formatRoute, type FileFilters } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { explainState, resolveFlowBinding, toStreamRows } from './file-detail-model.js';
+import { formatTimestamp } from '../../shell/time.js';
 import { formatBytes, type ApiFile } from './files-model.js';
 
 /**
@@ -291,7 +292,7 @@ export const FileDetail = (props: {
             </div>
             <div>
               <dt>Modified</dt>
-              <dd>{new Date(file.mtimeMs).toISOString()}</dd>
+              <dd>{formatTimestamp(file.mtimeMs)}</dd>
             </div>
             <div>
               <dt>Video</dt>

@@ -13,11 +13,14 @@ export const Link = (props: {
   className?: string;
   navigate: (to: string) => void;
   'aria-current'?: 'page' | undefined;
+  /** Replaces the link's whole accessible name — see `attentionLabel`. */
+  'aria-label'?: string | undefined;
 }): JSX.Element => (
   <a
     href={props.to}
     className={props.className}
     aria-current={props['aria-current']}
+    aria-label={props['aria-label']}
     onClick={(event) => {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
       event.preventDefault();

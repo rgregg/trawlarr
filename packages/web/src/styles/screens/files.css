@@ -1,0 +1,305 @@
+/* --- files ---------------------------------------------------------------
+   A windowed table of every known file. The grid template is declared ONCE,
+   as `--file-columns`, and read by both the header row and every data row:
+   they are two elements that have to agree to the pixel, and before this
+   they agreed only by both happening to say the same six values. */
+
+.files {
+  --file-columns: minmax(0, 2fr) 6rem 5rem 8rem 6rem 6rem;
+  --file-gutter: var(--space-3);
+}
+
+.files-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.files-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-weight: 500;
+  font-size: var(--text-sm);
+}
+
+.clear-filters {
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-muted);
+}
+
+/* --- the column header, which is also the sort control -------------------- */
+
+.file-head {
+  display: grid;
+  grid-template-columns: var(--file-columns);
+  gap: var(--file-gutter);
+  /* Left padding matches `.file-row`'s gutter PLUS its 4px status edge, so
+     the header's first column starts exactly where a filename does; the
+     right padding matches the scrollbar gutter reserved below, without
+     which every column drifts left by a scrollbar's width the moment the
+     list is long enough to scroll — which is always. */
+  padding: 0 calc(var(--file-gutter) + 12px) 0 calc(var(--file-gutter) + 4px);
+  border-bottom: 1px solid var(--line);
+}
+
+.file-head-sort,
+.file-head-static {
+  display: inline-flex;
+  align-items: center;
+  /* The global `button` rule centres its content, which silently pushed
+     every header label into the middle of its column while the values
+     under it stayed left-aligned. A column header has to start where its
+     column starts or it is not labelling anything. */
+  justify-content: flex-start;
+  min-height: var(--tap);
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--ink-muted);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  white-space: nowrap;
+}
+
+.file-head-sort:hover:not(:disabled) {
+  color: var(--ink);
+  background: none;
+  border: 0;
+}
+
+/* The sorted column shifts weight and colour and carries an arrow naming
+   the direction — three carriers, not one, and none of them hue alone. */
+.file-head-sort[aria-current='true'] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Right-aligned over the values, which are right-aligned because they are
+   quantities. */
+.file-head-size,
+.file-head-updated {
+  justify-content: flex-end;
+}
+
+/* --- the windowed list ---------------------------------------------------- */
+
+/* A fixed height, so the virtualisation math (`viewportHeight`, measured off
+   this element) has something stable to measure — a container that grew with
+   its content would just render every row anyway. */
+.file-scroll {
+  height: 32rem;
+  max-height: 70vh;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--surface);
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: var(--file-columns);
+  gap: var(--file-gutter);
+  align-items: center;
+  padding: 0 var(--file-gutter);
+  height: 2.25rem;
+  border-bottom: 1px solid var(--line);
+  border-left: 4px solid transparent;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.file-row:hover {
+  background: var(--surface-hover);
+}
+
+.file-row:last-child {
+  border-bottom: none;
+}
+
+/* A converging library still has some rows in every state; `good` is left
+   with no accent (it is the expected case), and the states worth noticing
+   at a glance each get a left edge in the same two colours the rest of the
+   sheet already uses for trouble — colour is never the only carrier, since
+   the state name is always printed in `.file-state` beside it. */
+.file-row-state-failed,
+.file-row-state-not_converging {
+  border-left-color: var(--bad);
+}
+
+.file-row-state-held {
+  border-left-color: var(--warn);
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-state,
+.file-codec,
+.file-size,
+.file-updated {
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Codecs are identifiers read down the column — `hevc` against `h264`,
+   `eac3` against `aac`. Monospaced they align, and the odd one out is
+   visible without reading every row. */
+.file-codec {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+}
+
+.file-size,
+.file-updated {
+  text-align: right;
+  justify-self: end;
+}
+
+.files-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  color: var(--ink-muted);
+}
+
+.files-empty p {
+  margin: 0 auto var(--space-3);
+}
+
+.files-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-5);
+  margin: var(--space-3) 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.files-footer div {
+  display: flex;
+  gap: 0.4em;
+}
+
+.files-footer dt,
+.files-footer dd {
+  margin: 0;
+}
+
+.files-footer dt {
+  color: var(--ink-faint);
+}
+
+.files-footer dd {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.files-footer-loading dd {
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+/* Below 48rem a row becomes a stacked card: name on its own line, then
+   state/codecs/size — never a grid the viewport has to scroll sideways to
+   read. Primary content must never scroll horizontally at this width.
+
+   THE CARD'S HEIGHT IS EXACT, not a minimum, and that is load-bearing:
+   `Files.tsx` windows 4,625 rows on a constant row height, so a card whose
+   height depends on how long the filename happens to be would put the
+   scrollbar and the scroll position at odds with the content. Six lines
+   at `line-height: 1.35` (1.35rem for the name, 1.215rem each for the five
+   labelled lines), five 0.15rem gaps and 1.2rem of padding come to just
+   under 9.5rem, which is `NARROW_ROW_HEIGHT_PX = 152` there. Change one and
+   change the other. The name stays on ONE line here for the same reason —
+   ellipsised, not wrapped; the full path is in its `title` and on the file's
+   own screen, and an ellipsis does not scroll the viewport sideways. */
+@media (max-width: 48rem) {
+  /* The header stops being a header. With no columns left to sit over it
+     reverts to what it functionally is at this width — a row of sort chips
+     — and the two static codec labels, having nothing to label, are
+     dropped: each narrow row prints its own "Video:" and "Audio:" prefix. */
+  .file-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: 0;
+    border-bottom: 0;
+    margin-bottom: var(--space-3);
+  }
+
+  .file-head-static {
+    display: none;
+  }
+
+  .file-head-sort {
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: 0 var(--space-3);
+    background: var(--surface);
+  }
+
+  .file-head-sort[aria-current='true'] {
+    border-color: var(--ink-faint);
+  }
+
+  .file-scroll {
+    border-top: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+
+  .file-row {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+    padding: 0.6rem var(--space-3);
+    height: 9.5rem;
+    line-height: 1.35;
+    overflow: hidden;
+  }
+
+  .file-name {
+    font-weight: 600;
+  }
+
+  .file-state,
+  .file-codec,
+  .file-size,
+  .file-updated {
+    text-align: left;
+    justify-self: start;
+  }
+
+  .file-state::before {
+    content: 'State: ';
+  }
+
+  .file-codec:nth-of-type(3)::before {
+    content: 'Video: ';
+  }
+
+  .file-codec:nth-of-type(4)::before {
+    content: 'Audio: ';
+  }
+
+  .file-size::before {
+    content: 'Size: ';
+  }
+
+  .file-updated::before {
+    content: 'Updated: ';
+  }
+}

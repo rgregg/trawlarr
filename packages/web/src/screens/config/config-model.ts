@@ -127,6 +127,32 @@ export const summarizePurge = (
   );
 
 /**
+ * Flow id → flow name, from `GET /flows`.
+ *
+ * A library resource carries only `flowId`, and the Libraries tab printed
+ * that uuid on the card — the one line an operator most needs to recognise,
+ * rendered as the one thing nobody can. This is the lookup that fixes it.
+ */
+export const toFlowNames = (flows: Array<{ id: string; name: string }>): Record<string, string> =>
+  Object.fromEntries(flows.map((flow) => [flow.id, flow.name]));
+
+/**
+ * What to print for a library's attached flow.
+ *
+ * THE FALLBACK IS THE POINT. The name comes from a SECOND request, made
+ * separately so a flow-listing blip cannot blank the libraries list — which
+ * means every caller renders at least once before the names arrive, and will
+ * render forever without them if that request failed or if the flow has since
+ * been deleted. Returning the id in that window keeps the card identifying a
+ * real flow; reading a missing key straight out of the map would print
+ * "undefined" on the card instead.
+ */
+export const flowLabel = (flowId: string, names: Record<string, string>): string => {
+  const name = names[flowId];
+  return name === undefined || name === '' ? flowId : name;
+};
+
+/**
  * `GET /system/settings`'s `auth` field, exactly as `routes/system.ts`
  * reports it — `sessionSecret` is never included in that response (see its
  * own comment there), so it has no place in this type either.
@@ -157,4 +183,28 @@ export const validateOidcDraft = (draft: PublicAuthSettings): string | null => {
   if (draft.oidcRedirectUri.trim() === '')
     return 'Set a redirect URI before enabling single sign-on.';
   return null;
+};
+
+/**
+ * What to say about stored SSO settings while the section is collapsed.
+ *
+ * The fields are hidden when single sign-on is off, which risks a worse
+ * problem than the clutter it fixes: an operator who configured SSO, turned
+ * it off, and came back later would see an empty section and conclude their
+ * settings were gone. They are not — disabling keeps them, so that
+ * re-enabling does not mean re-typing a client secret.
+ *
+ * `null` when there is genuinely nothing stored, so a daemon that has never
+ * had SSO configured says nothing at all rather than "nothing is saved",
+ * which is noise on the overwhelmingly common install.
+ *
+ * The issuer is printed whole rather than reduced to a host: it is the field
+ * an operator compares against their provider, and parsing it here would
+ * mean deciding what to do with a value the provider has not accepted yet.
+ */
+export const oidcSummary = (settings: PublicAuthSettings): string | null => {
+  if (settings.oidcEnabled) return null;
+  const issuer = settings.oidcIssuer.trim();
+  if (issuer === '') return null;
+  return `Settings are saved for ${issuer}, but single sign-on is off.`;
 };

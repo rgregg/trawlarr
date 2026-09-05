@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  flowLabel,
   formatWindow,
+  oidcSummary,
   parseWindow,
   parseWorkerCount,
   summarizePurge,
+  toFlowNames,
   validateOidcDraft,
   type PublicAuthSettings,
   type PurgeSweep,
@@ -161,5 +164,90 @@ describe('summarizePurge', () => {
 
   it('is zero for an empty sweep list', () => {
     expect(summarizePurge([])).toEqual({ files: 0, bytes: 0, failed: 0 });
+  });
+});
+
+describe('toFlowNames', () => {
+  it('indexes the flow listing by id', () => {
+    expect(
+      toFlowNames([
+        { id: 'f1', name: 'Transcode to HEVC' },
+        { id: 'f2', name: 'Conform library' },
+      ]),
+    ).toEqual({ f1: 'Transcode to HEVC', f2: 'Conform library' });
+  });
+
+  it('is empty for an empty listing rather than undefined', () => {
+    expect(toFlowNames([])).toEqual({});
+  });
+});
+
+describe('flowLabel', () => {
+  it('prefers the name, which is the whole reason the lookup exists', () => {
+    expect(flowLabel('f1', { f1: 'Transcode to HEVC' })).toBe('Transcode to HEVC');
+  });
+
+  /**
+   * The names arrive from a second request, deliberately separate so that a
+   * failed flow listing cannot blank the libraries list. Every card therefore
+   * renders at least once before they land — and forever without them if that
+   * request failed, or if the flow has since been deleted.
+   *
+   * The id is not a nice label, but it identifies a real flow and it is what
+   * the API and the CLI both speak. Printing "undefined" there would be worse
+   * than the uuid this whole lookup replaced.
+   */
+  it('falls back to the id, never to "undefined"', () => {
+    expect(flowLabel('f1', {})).toBe('f1');
+    expect(flowLabel('f1', { f2: 'Some other flow' })).toBe('f1');
+    expect(flowLabel('f1', { f1: '' })).toBe('f1');
+  });
+
+  it('never returns an empty string, whatever the map holds', () => {
+    const cases: Array<Record<string, string>> = [{}, { f1: '' }, { f1: 'Named' }];
+    for (const names of cases) {
+      expect(flowLabel('f1', names)).not.toBe('');
+    }
+  });
+});
+
+describe('oidcSummary', () => {
+  /**
+   * The section hides its fields when SSO is off, which risks a worse
+   * problem than the clutter it fixes: someone who configured SSO, turned it
+   * off, and came back would see an empty section and conclude their
+   * settings were lost. Disabling keeps them — so the collapsed state says
+   * so, rather than looking identical to never-configured.
+   */
+  it('says settings survive being switched off', () => {
+    expect(
+      oidcSummary({
+        ...DISABLED_AUTH,
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+      }),
+    ).toBe(
+      'Settings are saved for https://authentik.example.com/application/o/trawlarr/, but single sign-on is off.',
+    );
+  });
+
+  /**
+   * Silence, not "nothing is saved". The overwhelmingly common install has
+   * never touched SSO, and a line reporting the absence of something nobody
+   * configured is noise on every one of them.
+   */
+  it('says nothing at all when nothing was ever configured', () => {
+    expect(oidcSummary(DISABLED_AUTH)).toBeNull();
+    expect(oidcSummary({ ...DISABLED_AUTH, oidcIssuer: '   ' })).toBeNull();
+  });
+
+  // While it is on, the fields are on screen and speak for themselves.
+  it('says nothing while single sign-on is enabled', () => {
+    expect(
+      oidcSummary({
+        ...DISABLED_AUTH,
+        oidcEnabled: true,
+        oidcIssuer: 'https://authentik.example.com/application/o/trawlarr/',
+      }),
+    ).toBeNull();
   });
 });

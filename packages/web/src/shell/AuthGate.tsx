@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { oidcStartUrl } from '../api/session.js';
+import { BrandMark } from './BrandMark.js';
 import type { AuthState } from './useAuth.js';
 
 /**
@@ -54,7 +55,10 @@ const SetupForm = (props: { auth: AuthState }): JSX.Element => {
 
   return (
     <form onSubmit={(event) => void submit(event)} className="auth-gate">
-      <h1>trawlarr</h1>
+      <span className="app-brand">
+        <BrandMark />
+      </span>
+      <h1>Set up trawlarr</h1>
       <p>This daemon has no accounts yet. Create the first one to sign in.</p>
       <label htmlFor="setup-username">Username</label>
       <input
@@ -77,7 +81,11 @@ const SetupForm = (props: { auth: AuthState }): JSX.Element => {
           {props.auth.error}
         </p>
       )}
-      <button type="submit" disabled={submitting || username === '' || password === ''}>
+      <button
+        type="submit"
+        className="btn-primary"
+        disabled={submitting || username === '' || password === ''}
+      >
         {submitting ? 'Creating…' : 'Create account'}
       </button>
     </form>
@@ -106,7 +114,10 @@ const LoginForm = (props: {
 
   return (
     <form onSubmit={(event) => void submit(event)} className="auth-gate">
-      <h1>trawlarr</h1>
+      <span className="app-brand">
+        <BrandMark />
+      </span>
+      <h1>Sign in to trawlarr</h1>
       <label htmlFor="login-username">Username</label>
       <input
         id="login-username"
@@ -127,7 +138,11 @@ const LoginForm = (props: {
           {props.auth.error}
         </p>
       )}
-      <button type="submit" disabled={submitting || username === '' || password === ''}>
+      <button
+        type="submit"
+        className="btn-primary"
+        disabled={submitting || username === '' || password === ''}
+      >
         {submitting ? 'Signing in…' : 'Sign in'}
       </button>
       {props.oidc !== null && (

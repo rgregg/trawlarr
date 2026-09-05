@@ -98,4 +98,10 @@ describe('formatUpdated', () => {
     expect(formatUpdated(0)).toBe('—');
     expect(formatUpdated(Number.NaN)).toBe('—');
   });
+
+  // The same range `formatTimestamp` refuses, for the same reason: this one
+  // is reached with `updatedAt`, but both end at `Date.prototype.toISOString`.
+  it('says nothing for a value outside the range a Date can represent', () => {
+    expect(formatUpdated(8.64e15 + 1)).toBe('—');
+  });
 });

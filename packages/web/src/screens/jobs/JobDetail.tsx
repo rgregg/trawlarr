@@ -3,6 +3,7 @@ import type { ApiClient } from '../../api/client.js';
 import { ApiClientError } from '../../api/client.js';
 import { LIVE_LOG_LINES, type LiveState } from '../../api/events.js';
 import { Link } from '../../shell/Link.js';
+import { formatTimestamp } from '../../shell/time.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { describeFlowVersion, toStepRows, type ApiStep } from './job-detail-model.js';
 
@@ -361,7 +362,7 @@ export const JobDetail = (props: {
             </div>
             <div>
               <dt>Started</dt>
-              <dd>{new Date(detail.job.startedAt).toISOString()}</dd>
+              <dd>{formatTimestamp(detail.job.startedAt)}</dd>
             </div>
             <div>
               <dt>Duration</dt>

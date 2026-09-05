@@ -8,6 +8,7 @@
  * it directly, and the component stays a thin renderer over it.
  */
 import type { FileFilters } from '../../shell/route.js';
+import { toIsoInstant } from '../../shell/time.js';
 
 export interface ApiFile {
   id: string;
@@ -111,7 +112,5 @@ export const filtersToQuery = (filters: FileFilters, limit: number, offset: numb
  * scanned by eye, so it has to be fixed-width and unambiguous, and the exact
  * timestamp is one click away on the file's own screen.
  */
-export const formatUpdated = (updatedAt: number): string => {
-  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return '—';
-  return new Date(updatedAt).toISOString().slice(0, 10);
-};
+export const formatUpdated = (updatedAt: number): string =>
+  toIsoInstant(updatedAt)?.slice(0, 10) ?? '—';

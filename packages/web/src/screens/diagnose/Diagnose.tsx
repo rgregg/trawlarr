@@ -4,13 +4,12 @@ import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { formatBytes, type ApiFile } from '../files/files-model.js';
-import { groupProblems, type ProblemGroup } from './diagnose-model.js';
+import { groupProblems, PROBLEM_STATES, type ProblemGroup } from './diagnose-model.js';
 
 // The three states worth diagnosing. `unknown`, `queued` and `running` are
 // not problems — they are work still ahead of the queue — so they never
 // appear here; see `Files.tsx`'s `STATES` for the full seven the Files
 // screen filters on.
-const PROBLEM_STATES = ['failed', 'held', 'not_converging'];
 
 const PAGE_SIZE = 200;
 const MAX_FILES_SHOWN = 5;
@@ -252,8 +251,6 @@ export const Diagnose = (props: {
 
   return (
     <div className="diagnose">
-      <h2>Diagnose</h2>
-
       {failure !== null && (
         <div role="alert" className="failure">
           <strong>{failure.title}</strong>

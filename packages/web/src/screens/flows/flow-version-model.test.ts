@@ -60,6 +60,19 @@ describe('formatWhen', () => {
   it('renders a missing timestamp as a dash rather than "Invalid Date"', () => {
     expect(formatWhen(0, 1000)).toBe('—');
   });
+
+  // Its own guard caught NaN and zero but not a magnitude out of Date's
+  // range, which throws from toISOString and — during render — unmounts the
+  // whole tree. Shared with every other timestamp this UI shows.
+  it('renders a dash for a timestamp outside the range a Date can represent', () => {
+    expect(formatWhen(8.64e15 + 1, 1000)).toBe('—');
+  });
+
+  // An unreadable clock reading costs the "Today" shortcut and nothing more:
+  // the publish date is still the truth, so it is shown rather than withheld.
+  it('still dates the version when now itself is unreadable', () => {
+    expect(formatWhen(Date.parse('2026-08-27T03:15:00.000Z'), Number.NaN)).toBe('2026-08-27');
+  });
 });
 
 describe('resolveVersionStatus', () => {

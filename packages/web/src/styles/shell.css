@@ -1,0 +1,349 @@
+/*
+ * The frame every screen sits in: a sticky masthead of two rows — identity
+ * and connection state above, navigation below — then a width-limited
+ * content column with a page header at its top.
+ *
+ * Two rows rather than one, at every width. Cramming four tabs, a wordmark,
+ * a liveness statement, a theme control and Sign out onto one line works at
+ * 1400px and falls apart everywhere else; splitting by ROLE instead ("who
+ * and how am I connected" / "where am I") means the same structure holds
+ * from 320px up and there is no width at which the layout re-arranges into
+ * something the operator has to re-learn.
+ */
+
+.app {
+  min-height: 100vh;
+}
+
+.app-masthead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-5) var(--space-2);
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink);
+  text-decoration: none;
+  margin-right: auto;
+}
+
+.app-brand svg {
+  display: block;
+  color: var(--accent);
+}
+
+/* Lowercase, because the product is written lowercase everywhere else it
+   appears — the CLI, the daemon's logs, the Docker image. A wordmark that
+   disagrees with the command you type is a small lie about what this is. */
+.app-brand .product {
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+/* Connection state is TEXT ("Live" / "Reconnecting…"); the dot and the
+   colour only reinforce what the word already says. */
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 0.2em 0.7em;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+}
+
+.link::before {
+  content: '';
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.link-up {
+  color: var(--good);
+  background: var(--good-soft);
+  border-color: color-mix(in srgb, var(--good) 28%, transparent);
+}
+
+.link-down {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 28%, transparent);
+}
+
+/* A ring rather than a disc while the socket is down: the state is legible
+   with the colour removed, same rule as every badge. */
+.link-down::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px currentcolor;
+}
+
+.app-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--space-5);
+}
+
+/* Real anchors, not buttons, so middle-click and "copy link address" work
+   (see `shell/Link.tsx`); the tab chrome is therefore written out here
+   rather than inherited from an element-type selector. */
+.app-nav .nav-link {
+  position: relative;
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink-muted);
+  padding: 0 var(--space-3);
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.app-nav .nav-link:hover {
+  color: var(--ink);
+  background: var(--surface-hover);
+}
+
+/* The active tab shifts WEIGHT, COLOUR and gains an underline rail. It has
+   to hold with no `:hover` involved — `aria-current` is set from the route
+   on every render, keyboard and touch included. */
+.app-nav .nav-link[aria-current='page'] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.app-nav .nav-link[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  left: var(--space-2);
+  right: var(--space-2);
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+
+/* The Diagnose count. Sits ON the tab rather than beside it, because it is
+   about that screen and nothing else — and it is a shape (a filled pill) as
+   well as a colour, so it still reads as "something is wrong here" with the
+   hue removed, which is the same rule every status in this app follows.
+
+   Only ever rendered non-zero (see `App.tsx`): a badge showing "0" is a
+   permanent mark on a tab with nothing to say, and a permanent mark is one
+   nobody looks at. */
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  margin-left: 0.4rem;
+  padding: 0 0.35em;
+  border-radius: var(--radius-pill);
+  background: var(--bad);
+  color: var(--surface);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* In dark mode `--bad` is a light salmon, so white on it fails contrast; the
+   ink flips to the dark ground instead of the surface. */
+:root[data-theme='dark'] .nav-badge {
+  color: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .nav-badge {
+    color: var(--bg);
+  }
+}
+
+/* --- the theme control ---------------------------------------------------- */
+
+.theme-toggle {
+  padding: 0;
+  width: var(--tap);
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-muted);
+}
+
+.theme-toggle:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-hover);
+  border-color: var(--line);
+}
+
+/* --- the content column --------------------------------------------------- */
+
+main {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-5) var(--space-7);
+}
+
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.page-header h1 {
+  margin: 0;
+}
+
+.page-header .page-subtitle {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.page-header .page-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.not-found {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-6);
+  text-align: center;
+}
+
+/* An error state with no way out of it is a dead end; every other failure
+   on this screen offers one. */
+.not-found-home {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap);
+}
+
+@media (max-width: 40rem) {
+  .app-header,
+  .app-nav,
+  main {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+}
+
+/* --- the auth gate ----------------------------------------------------------
+   The first screen anyone sees, and the only one shown to someone who is not
+   signed in yet. `AuthGate.tsx` renders three states through it: first-run
+   setup, username/password, and SSO. */
+
+.auth-gate {
+  max-width: 26rem;
+  margin: 12vh auto;
+  padding: var(--space-6);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The pre-answer state: the gate renders an empty shell while the session
+   round trip is still out, rather than flashing a login form that a live
+   session is about to replace. It still needs a height, or the page jumps
+   the moment the answer lands. */
+.auth-gate-loading {
+  min-height: 18rem;
+}
+
+.auth-gate .app-brand {
+  margin: 0 0 var(--space-3);
+}
+
+.auth-gate h1 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xl);
+}
+
+.auth-gate label {
+  font-weight: 500;
+  font-size: var(--text-sm);
+  margin-top: var(--space-2);
+}
+
+.auth-gate input {
+  width: 100%;
+}
+
+.auth-gate p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+/* A password rule is only useful BEFORE the password is rejected, so it sits
+   under the field rather than waiting to become an error message. */
+.auth-gate .hint {
+  color: var(--ink-faint);
+  font-size: var(--text-xs);
+}
+
+.auth-gate button[type='submit'] {
+  align-self: stretch;
+  margin-top: var(--space-3);
+}
+
+/* SSO is a real alternative to the form above it, not a footnote — it was an
+   underlined link, which read as help text. A second, quieter button says
+   "either of these signs you in" without competing with the primary one. */
+.oidc-button {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--tap);
+  margin-top: var(--space-3);
+  padding: 0 var(--space-3);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.oidc-button:hover {
+  background: var(--surface-hover);
+  border-color: var(--ink-faint);
+}

@@ -3,11 +3,13 @@ import type { ApiClient } from '../../api/client.js';
 import type { LiveState } from '../../api/events.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute, type ConfigTab } from '../../shell/route.js';
+import { formatTimestamp } from '../../shell/time.js';
 import { formatBytes } from '../files/files-model.js';
 import {
   formatWindow,
   parseWindow,
   parseWorkerCount,
+  oidcSummary,
   summarizePurge,
   validateOidcDraft,
   WORKER_CLASSES,
@@ -236,8 +238,9 @@ interface PluginSourceResource {
   };
 }
 
-const formatWhen = (ms: number | null): string =>
-  ms === null ? 'never' : new Date(ms).toISOString();
+/* `never` and "a timestamp that isn't one" are different answers, so the
+   null branch stays and only the rendering goes through the shared guard. */
+const formatWhen = (ms: number | null): string => (ms === null ? 'never' : formatTimestamp(ms));
 
 const PluginSourceRow = (props: {
   client: ApiClient;
@@ -558,73 +561,97 @@ const ScheduleSection = (props: { client: ApiClient }): JSX.Element => {
       )}
 
       <h4>Add a window</h4>
-      <fieldset className="schedule-add">
-        <legend className="help">Days (none selected means every day)</legend>
-        <div className="schedule-days">
-          {DAY_LABELS.map((label, index) => (
-            <label key={label} className="switch">
-              <input
-                type="checkbox"
-                checked={days.includes(index)}
-                onChange={(event) => {
-                  setDays((current) =>
-                    event.target.checked
-                      ? [...current, index].sort()
-                      : current.filter((d) => d !== index),
-                  );
-                }}
-              />
-              {label}
-            </label>
-          ))}
+      <div className="schedule-add">
+        {/* THE DAYS GET THEIR OWN FIELDSET. One fieldset wrapped every field
+            on this form while its legend read "Days (none selected means
+            every day)", so a screen reader announced that sentence before
+            "Start (HH:MM)" and before both worker counts — the legend named
+            a group it did not describe. A fieldset's legend applies to
+            everything inside it, so the group has to be the seven
+            checkboxes and nothing else. */}
+        <fieldset className="schedule-days-group">
+          <legend>Days</legend>
+          <p className="help">None selected means every day.</p>
+          <div className="schedule-days">
+            {DAY_LABELS.map((label, index) => (
+              <label key={label} className="switch">
+                <input
+                  type="checkbox"
+                  checked={days.includes(index)}
+                  onChange={(event) => {
+                    setDays((current) =>
+                      event.target.checked
+                        ? [...current, index].sort()
+                        : current.filter((d) => d !== index),
+                    );
+                  }}
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <div className="schedule-fields">
+          <div className="schedule-field schedule-field-time">
+            <label htmlFor="schedule-start">Start (HH:MM)</label>
+            <input
+              id="schedule-start"
+              inputMode="numeric"
+              value={start}
+              onChange={(event) => {
+                setStart(event.target.value);
+              }}
+            />
+          </div>
+
+          <div className="schedule-field schedule-field-time">
+            <label htmlFor="schedule-end">End (HH:MM)</label>
+            <input
+              id="schedule-end"
+              inputMode="numeric"
+              value={end}
+              onChange={(event) => {
+                setEnd(event.target.value);
+              }}
+            />
+          </div>
+
+          <div className="schedule-field">
+            <label htmlFor="schedule-transcode">Transcode workers</label>
+            <input
+              id="schedule-transcode"
+              inputMode="numeric"
+              placeholder="unchanged"
+              value={transcodeOverride}
+              onChange={(event) => {
+                setTranscodeOverride(event.target.value);
+              }}
+            />
+          </div>
+
+          <div className="schedule-field">
+            <label htmlFor="schedule-health">Health-check workers</label>
+            <input
+              id="schedule-health"
+              inputMode="numeric"
+              placeholder="unchanged"
+              value={healthOverride}
+              onChange={(event) => {
+                setHealthOverride(event.target.value);
+              }}
+            />
+          </div>
         </div>
-
-        <label htmlFor="schedule-start">Start (HH:MM)</label>
-        <input
-          id="schedule-start"
-          value={start}
-          onChange={(event) => {
-            setStart(event.target.value);
-          }}
-        />
-
-        <label htmlFor="schedule-end">End (HH:MM)</label>
-        <input
-          id="schedule-end"
-          value={end}
-          onChange={(event) => {
-            setEnd(event.target.value);
-          }}
-        />
-
-        <label htmlFor="schedule-transcode">Transcode workers during this window</label>
-        <input
-          id="schedule-transcode"
-          placeholder="unchanged"
-          value={transcodeOverride}
-          onChange={(event) => {
-            setTranscodeOverride(event.target.value);
-          }}
-        />
-
-        <label htmlFor="schedule-health">Health-check workers during this window</label>
-        <input
-          id="schedule-health"
-          placeholder="unchanged"
-          value={healthOverride}
-          onChange={(event) => {
-            setHealthOverride(event.target.value);
-          }}
-        />
 
         {draftProblem !== null && <p className="problems">{draftProblem}</p>}
 
         <div className="row-actions">
-          <button type="button" disabled={saving} onClick={addWindow}>
+          <button type="button" className="btn-primary" disabled={saving} onClick={addWindow}>
             {saving ? 'Saving…' : 'Add window'}
           </button>
         </div>
-      </fieldset>
+      </div>
 
       {failure !== null && (
         <div role="alert" className="failure">
@@ -865,16 +892,21 @@ const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
         Read-only. Hardware here is DECLARED, never detected — this is what the startup preflight
         found when it checked that declaration against what the configured ffmpeg can really do.
       </p>
-      <dl className="card dl">
+      {/* Name, the path it is configured as, and whether that path resolves.
+          This was a `dt`/`dd` pair reading "ffmpeg" above "ffmpeg — resolves",
+          which on the common setup (both binaries found on PATH) printed the
+          name twice and buried the one fact worth reading. The status is a
+          word and a shape as well as a colour, the same rule every other
+          status in this app follows. */}
+      <ul className="binary-list">
         {Object.entries(version.binaries).map(([name, info]) => (
-          <div key={name}>
-            <dt>{name}</dt>
-            <dd>
-              {info.path} — {info.resolved ? 'resolves' : 'does not resolve'}
-            </dd>
-          </div>
+          <li key={name} className={info.resolved ? 'binary-ok' : 'binary-missing'}>
+            <span className="binary-name">{name}</span>
+            <code className="binary-path">{info.path}</code>
+            <span className="binary-status">{info.resolved ? 'resolves' : 'not found'}</span>
+          </li>
         ))}
-      </dl>
+      </ul>
       {version.hardware.length === 0 ? (
         <p className="detail">No hardware findings — every declared type checked out.</p>
       ) : (
@@ -978,6 +1010,11 @@ const AuthSection = (props: { client: ApiClient }): JSX.Element => {
 
   if (auth === null || draft === null) return <p>Loading single sign-on settings…</p>;
 
+  // Read off the LAST SAVED settings, not the draft: it exists to reassure
+  // someone that switching sign-on off did not throw their provider details
+  // away, which is a fact about what is stored, not about what is typed.
+  const summary = oidcSummary(auth);
+
   const dirty =
     draft.oidcEnabled !== auth.oidcEnabled ||
     draft.oidcIssuer !== auth.oidcIssuer ||
@@ -1007,74 +1044,93 @@ const AuthSection = (props: { client: ApiClient }): JSX.Element => {
         Enable single sign-on
       </label>
 
-      <label htmlFor="oidc-issuer">Issuer URL</label>
-      <input
-        id="oidc-issuer"
-        type="text"
-        value={draft.oidcIssuer}
-        placeholder="https://authentik.example.com/application/o/trawlarr/"
-        onChange={(event) => {
-          setDraft({ ...draft, oidcIssuer: event.target.value });
-        }}
-      />
+      {/* THE CHECKBOX IS ALSO THE DISCLOSURE. Six provider fields on a
+          screen nobody has enabled SSO on is clutter, but they cannot simply
+          be hidden while it is off: filling them in is HOW it gets turned
+          on, so hiding them whenever `oidcEnabled` is false would make SSO
+          impossible to configure. Ticking the box reveals them; Save then
+          validates that they are all filled in.
 
-      <label htmlFor="oidc-client-id">Client ID</label>
-      <input
-        id="oidc-client-id"
-        type="text"
-        value={draft.oidcClientId}
-        onChange={(event) => {
-          setDraft({ ...draft, oidcClientId: event.target.value });
-        }}
-      />
+          Nothing commits until Save, so ticking to look and unticking again
+          costs nothing. */}
+      {!draft.oidcEnabled && summary !== null && <p className="detail">{summary}</p>}
 
-      <label htmlFor="oidc-client-secret">Client secret</label>
-      <input
-        id="oidc-client-secret"
-        type="password"
-        value={draft.oidcClientSecret}
-        onChange={(event) => {
-          setDraft({ ...draft, oidcClientSecret: event.target.value });
-        }}
-      />
+      {draft.oidcEnabled && (
+        <>
+          <label htmlFor="oidc-issuer">Issuer URL</label>
+          <input
+            id="oidc-issuer"
+            type="text"
+            value={draft.oidcIssuer}
+            placeholder="https://authentik.example.com/application/o/trawlarr/"
+            onChange={(event) => {
+              setDraft({ ...draft, oidcIssuer: event.target.value });
+            }}
+          />
 
-      <label htmlFor="oidc-redirect-uri">Redirect URI</label>
-      <input
-        id="oidc-redirect-uri"
-        type="text"
-        value={draft.oidcRedirectUri}
-        placeholder="https://trawlarr.example.com/auth/oidc/callback"
-        onChange={(event) => {
-          setDraft({ ...draft, oidcRedirectUri: event.target.value });
-        }}
-      />
+          <label htmlFor="oidc-client-id">Client ID</label>
+          <input
+            id="oidc-client-id"
+            type="text"
+            value={draft.oidcClientId}
+            onChange={(event) => {
+              setDraft({ ...draft, oidcClientId: event.target.value });
+            }}
+          />
 
-      <label htmlFor="oidc-scopes">Scopes</label>
-      <input
-        id="oidc-scopes"
-        type="text"
-        value={draft.oidcScopes}
-        onChange={(event) => {
-          setDraft({ ...draft, oidcScopes: event.target.value });
-        }}
-      />
+          <label htmlFor="oidc-client-secret">Client secret</label>
+          <input
+            id="oidc-client-secret"
+            type="password"
+            value={draft.oidcClientSecret}
+            onChange={(event) => {
+              setDraft({ ...draft, oidcClientSecret: event.target.value });
+            }}
+          />
 
-      <label htmlFor="oidc-display-name">Login button label</label>
-      <input
-        id="oidc-display-name"
-        type="text"
-        value={draft.oidcDisplayName}
-        onChange={(event) => {
-          setDraft({ ...draft, oidcDisplayName: event.target.value });
-        }}
-      />
+          <label htmlFor="oidc-redirect-uri">Redirect URI</label>
+          <input
+            id="oidc-redirect-uri"
+            type="text"
+            value={draft.oidcRedirectUri}
+            placeholder="https://trawlarr.example.com/auth/oidc/callback"
+            onChange={(event) => {
+              setDraft({ ...draft, oidcRedirectUri: event.target.value });
+            }}
+          />
 
-      {draftProblem !== null && (
-        <p role="alert" className="detail">
-          {draftProblem}
-        </p>
+          <label htmlFor="oidc-scopes">Scopes</label>
+          <input
+            id="oidc-scopes"
+            type="text"
+            value={draft.oidcScopes}
+            onChange={(event) => {
+              setDraft({ ...draft, oidcScopes: event.target.value });
+            }}
+          />
+
+          <label htmlFor="oidc-display-name">Login button label</label>
+          <input
+            id="oidc-display-name"
+            type="text"
+            value={draft.oidcDisplayName}
+            onChange={(event) => {
+              setDraft({ ...draft, oidcDisplayName: event.target.value });
+            }}
+          />
+
+          {draftProblem !== null && (
+            <p role="alert" className="detail">
+              {draftProblem}
+            </p>
+          )}
+        </>
       )}
 
+      {/* OUTSIDE the collapsed region, deliberately: turning single sign-on
+          OFF is unticking the box and pressing Save, and a Save button that
+          disappeared along with the fields would leave that change with no
+          way to commit it. */}
       <div className="row-actions">
         <button type="button" disabled={saving || !dirty} onClick={() => void save()}>
           {saving ? 'Saving…' : 'Save'}
