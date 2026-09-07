@@ -13,7 +13,7 @@ export interface FileFilters {
   q: string | null;
 }
 
-export type ConfigTab = 'workers' | 'libraries' | 'plugins' | 'system';
+export type ConfigTab = 'workers' | 'libraries' | 'plugins' | 'system' | 'account';
 
 export type Route =
   | { name: 'watch' }
@@ -49,7 +49,7 @@ export type Route =
   | { name: 'config'; tab: ConfigTab }
   | { name: 'notFound'; path: string };
 
-const CONFIG_TABS: ConfigTab[] = ['workers', 'libraries', 'plugins', 'system'];
+const CONFIG_TABS: ConfigTab[] = ['workers', 'libraries', 'plugins', 'system', 'account'];
 
 const isConfigTab = (raw: string | null): raw is ConfigTab =>
   raw !== null && (CONFIG_TABS as string[]).includes(raw);

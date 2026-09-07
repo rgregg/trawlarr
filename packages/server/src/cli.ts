@@ -9,6 +9,9 @@ import { createPluginLoader } from '@trawlarr/engine';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 import type { PluginDetails } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from './db/connection.js';
+import { createAccountRepo } from './db/account-repo.js';
+import { hashPassword } from './api/password.js';
+import { readNewPassword } from './cli-secret.js';
 import { migrate } from './db/migrate.js';
 import { createLibraryRepo, DEFAULT_EXTENSIONS } from './db/library-repo.js';
 import { sweepLibraryTrash as sweepTrashForLibrary } from './library/trash-sweep.js';
@@ -2219,6 +2222,8 @@ const USAGE = `Usage:
   trawlarr plugin source remove --name <name>
   trawlarr plugin list [--source <name>]
   trawlarr plugin show --id <plugin id>
+  trawlarr account list
+  trawlarr account set-password --username <name>
   trawlarr trash purge [--library <name>] [--days <n>] [--dry-run]
   trawlarr reap [--library <name>] [--stale-after-hours <n>] [--dry-run]
   trawlarr forget --missing [--library <name>] [--include-terminal] [--dry-run]
@@ -2235,6 +2240,104 @@ Installing a plugin runs its author's code as the user trawlarr runs as.
 All commands accept --data-dir <path> (default ./trawlarr-data).
 While a daemon owns that directory, every command talks to it over its API
 instead of opening the database — the daemon is the only writer.`;
+
+/**
+ * `trawlarr account set-password --username <name>`
+ *
+ * THE WAY BACK IN. Every other route to a password needs an account to
+ * already be reachable: the API refuses to change one without the current
+ * password, and refuses to delete the last account at all. So an operator
+ * who forgets the only password has, without this, no supported recovery
+ * short of editing SQLite by hand.
+ *
+ * It works by owning the data directory rather than by authenticating,
+ * which is the only thing that can work when nobody can sign in — and is
+ * why `openDb` refusing while a daemon holds the lock is exactly right
+ * here rather than an inconvenience. Physical access to the data directory
+ * is the credential, which is the same one `--data-dir` has always been.
+ */
+const cmdAccountSetPassword = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      username: { type: 'string' },
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
+    },
+  });
+  if (values.username === undefined) {
+    throw new CliError('account set-password: --username is required.');
+  }
+  const username = values.username;
+  const db = await openDb(values['data-dir']!);
+  try {
+    const accounts = createAccountRepo(db);
+    const account = accounts.getByUsername(username);
+    if (account === null) {
+      // An account created through SSO has NO USERNAME — the provider owns
+      // its identity, and the repo stores `username: null` — so it is shown
+      // in the UI (and by "account list") under its display name and can
+      // never be found by the lookup above. Without this, asking for one by
+      // the only name its operator has ever seen answers "no such account",
+      // which is both untrue and unhelpful.
+      const sso = accounts
+        .list()
+        .find((row) => row.passwordHash === null && row.displayName === username);
+      if (sso !== undefined) {
+        throw new CliError(
+          `"${username}" signs in through single sign-on, so its password is held by that ` +
+            `provider and there is nothing here to change.`,
+        );
+      }
+      throw new CliError(
+        `No account named "${username}". "trawlarr account list" shows the ones that exist.`,
+      );
+    }
+
+    const password = await readNewPassword();
+    if (password.length < 8) {
+      throw new CliError(`A password must be at least 8 characters. Nothing was changed.`);
+    }
+
+    accounts.setPassword(account.id, await hashPassword(password));
+    console.log(`Password changed for "${username}".`);
+    // Sessions already issued for this account stay valid — they are
+    // stateless JWTs with no server-side store. See #10.
+    return 0;
+  } finally {
+    db.close();
+  }
+};
+
+/**
+ * `trawlarr account list` — who can sign in, and how.
+ *
+ * Here because `set-password` needs a username and the operator reaching
+ * for it has, by definition, lost their way into the UI that would show
+ * them one.
+ */
+const cmdAccountList = async (argv: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      'data-dir': { type: 'string', default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-data' },
+    },
+  });
+  const db = await openDb(values['data-dir']!);
+  try {
+    const accounts = createAccountRepo(db).list();
+    if (accounts.length === 0) {
+      console.log('No accounts yet. The first one is created on first sign-in in the web UI.');
+      return 0;
+    }
+    for (const account of accounts) {
+      const how = account.passwordHash === null ? 'single sign-on' : 'password';
+      console.log(`${account.username ?? account.displayName ?? account.id} — ${how}`);
+    }
+    return 0;
+  } finally {
+    db.close();
+  }
+};
 
 const dispatch = async (argv: string[]): Promise<number> => {
   const [cmd, ...rest] = argv;
@@ -2267,6 +2370,12 @@ const dispatch = async (argv: string[]): Promise<number> => {
     if (sub === 'list') return cmdPluginList(subRest);
     if (sub === 'show') return cmdPluginShow(subRest);
     throw new CliError(`Unknown command: "plugin ${sub ?? ''}".\n\n${USAGE}`);
+  }
+  if (cmd === 'account') {
+    const [sub, ...subRest] = rest;
+    if (sub === 'set-password') return cmdAccountSetPassword(subRest);
+    if (sub === 'list') return cmdAccountList(subRest);
+    throw new CliError(`Unknown command: "account ${sub ?? ''}".\n\n${USAGE}`);
   }
   if (cmd === 'trash') {
     const [sub, ...subRest] = rest;

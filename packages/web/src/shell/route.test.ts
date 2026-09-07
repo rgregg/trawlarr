@@ -122,3 +122,18 @@ describe('parseRoute', () => {
     );
   });
 });
+
+describe('the account tab', () => {
+  // A fifth Configure tab. Parsed like every other, and — the part worth a
+  // test — an unknown `?tab=` still falls back to workers rather than
+  // rendering nothing, which is the rule that keeps a stale bookmark or a
+  // hand-typed URL from landing on a blank screen.
+  it('parses ?tab=account and still falls back for an unknown tab', () => {
+    expect(parseRoute('/config', 'tab=account')).toEqual({ name: 'config', tab: 'account' });
+    expect(parseRoute('/config', 'tab=nonsense')).toEqual({ name: 'config', tab: 'workers' });
+  });
+
+  it('round-trips through formatRoute', () => {
+    expect(formatRoute({ name: 'config', tab: 'account' })).toBe('/config?tab=account');
+  });
+});

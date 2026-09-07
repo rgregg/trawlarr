@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import type { LiveState } from '../../api/events.js';
+import type { AccountResource } from '../../api/session.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute, type ConfigTab } from '../../shell/route.js';
 import { formatTimestamp } from '../../shell/time.js';
@@ -10,10 +11,12 @@ import {
   parseWindow,
   parseWorkerCount,
   oidcSummary,
+  validatePasswordChange,
   summarizePurge,
   validateOidcDraft,
   WORKER_CLASSES,
   type PublicAuthSettings,
+  type PasswordChangeDraft,
   type PurgeSweep,
   type WorkerClass,
 } from './config-model.js';
@@ -25,6 +28,7 @@ const TABS: Array<{ tab: ConfigTab; label: string }> = [
   { tab: 'libraries', label: 'Libraries' },
   { tab: 'plugins', label: 'Plugins' },
   { tab: 'system', label: 'System' },
+  { tab: 'account', label: 'Account' },
 ];
 
 const WORKER_CLASS_LABELS: Record<WorkerClass, string> = {
@@ -1159,6 +1163,169 @@ const AuthSection = (props: { client: ApiClient }): JSX.Element => {
   );
 };
 
+/* --- account ---------------------------------------------------------------- */
+
+/**
+ * Who you are signed in as, and the one thing you can change about it.
+ *
+ * Read-only apart from the password: usernames, display names and other
+ * accounts are #9's remaining half, over endpoints that already exist.
+ */
+const AccountTab = (props: { client: ApiClient; account: AccountResource }): JSX.Element => {
+  const { client, account } = props;
+  const [draft, setDraft] = useState<PasswordChangeDraft>({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
+  const [problem, setProblem] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
+
+  const submit = async (): Promise<void> => {
+    const message = validatePasswordChange(draft);
+    if (message !== null) {
+      setProblem(message);
+      return;
+    }
+    setProblem(null);
+    setFailure(null);
+    setSaving(true);
+    try {
+      await client.patch(`/auth/accounts/${account.id}/password`, {
+        currentPassword: draft.currentPassword,
+        newPassword: draft.newPassword,
+      });
+      // CLEARED ON SUCCESS. Three filled password boxes left on screen after
+      // a change are the old password and the new one, in plain reach of
+      // whoever walks up to the machine next.
+      setDraft({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setDone(true);
+    } catch (error) {
+      setFailure(describeFailure(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="account-tab">
+      <div className="config-section">
+        <h3>Signed in as {account.username ?? account.displayName ?? 'this account'}</h3>
+        <dl className="account-facts">
+          <div>
+            <dt>Sign-in method</dt>
+            <dd>{account.loginMethod === 'oidc' ? 'Single sign-on' : 'Password'}</dd>
+          </div>
+          <div>
+            <dt>Account created</dt>
+            <dd>{formatTimestamp(account.createdAt)}</dd>
+          </div>
+          <div>
+            <dt>Last signed in</dt>
+            <dd>{account.lastLoginAt === null ? '—' : formatTimestamp(account.lastLoginAt)}</dd>
+          </div>
+        </dl>
+      </div>
+
+      {account.loginMethod === 'oidc' ? (
+        <div className="config-section">
+          <h3>Password</h3>
+          {/* Not a disabled form. There is no password here to change — the
+              provider holds this account's credential — so the honest thing
+              is to say where it lives, not to show a form that would be
+              refused. */}
+          <p className="help">
+            This account signs in through single sign-on, so its password is held by that provider
+            and is changed there.
+          </p>
+        </div>
+      ) : (
+        <form
+          className="config-section auth-section"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          <h3>Change password</h3>
+
+          <label htmlFor="current-password">Current password</label>
+          <input
+            id="current-password"
+            type="password"
+            autoComplete="current-password"
+            value={draft.currentPassword}
+            onChange={(event) => {
+              setDone(false);
+              setDraft({ ...draft, currentPassword: event.target.value });
+            }}
+          />
+
+          <label htmlFor="new-password">New password</label>
+          <input
+            id="new-password"
+            type="password"
+            autoComplete="new-password"
+            value={draft.newPassword}
+            onChange={(event) => {
+              setDone(false);
+              setDraft({ ...draft, newPassword: event.target.value });
+            }}
+          />
+          <p className="help">At least 8 characters.</p>
+
+          <label htmlFor="confirm-password">Confirm new password</label>
+          <input
+            id="confirm-password"
+            type="password"
+            autoComplete="new-password"
+            value={draft.confirmPassword}
+            onChange={(event) => {
+              setDone(false);
+              setDraft({ ...draft, confirmPassword: event.target.value });
+            }}
+          />
+
+          {problem !== null && (
+            <p role="alert" className="problems">
+              {problem}
+            </p>
+          )}
+          {failure !== null && (
+            <div role="alert" className="failure">
+              <strong>{failure.title}</strong>
+              <p className="verbatim">{failure.message}</p>
+            </div>
+          )}
+          {done && (
+            <p role="status" className="account-changed">
+              Password changed.
+            </p>
+          )}
+
+          {/* Says what it does not do. Sessions are stateless tokens with no
+              server-side store, so a change cannot end the ones already
+              issued — including one an attacker holds, for up to 30 days.
+              Tracked in #10; until then the operator deserves to know rather
+              than to assume otherwise. */}
+          <p className="help">
+            Changing your password does not sign other browsers out. Sessions already signed in stay
+            signed in until they expire.
+          </p>
+
+          <div className="row-actions">
+            <button type="submit" className="btn-primary" disabled={saving}>
+              {saving ? 'Changing…' : 'Change password'}
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+};
+
 const SystemTab = (props: { client: ApiClient }): JSX.Element => (
   <section className="system-tab">
     <ScheduleSection client={props.client} />
@@ -1181,6 +1348,7 @@ export const Config = (props: {
   client: ApiClient;
   live: LiveState;
   tab: ConfigTab;
+  account: AccountResource;
   navigate: (to: string) => void;
 }): JSX.Element => (
   <section className="config">
@@ -1204,5 +1372,6 @@ export const Config = (props: {
     )}
     {props.tab === 'plugins' && <PluginsTab client={props.client} />}
     {props.tab === 'system' && <SystemTab client={props.client} />}
+    {props.tab === 'account' && <AccountTab client={props.client} account={props.account} />}
   </section>
 );

@@ -481,3 +481,45 @@
     max-width: none;
   }
 }
+
+/* --- the account tab ---------------------------------------------------- */
+
+.account-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-md);
+}
+
+.account-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.account-facts dt {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.account-facts dd {
+  margin: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* The success line. A word and a tick, not a colour alone — and it is a
+   `role="status"`, so it is announced rather than only seen. */
+.account-changed {
+  margin: var(--space-2) 0 0;
+  color: var(--good);
+  font-weight: 500;
+}
+
+.account-changed::before {
+  content: '✓ ';
+}
