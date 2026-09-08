@@ -11,6 +11,7 @@ import {
   fromCanvas,
   insertNodeOnEdge,
   nextNodeId,
+  nodeLabels,
   pushHistory,
   reachableNodeIds,
   redoHistory,
@@ -492,5 +493,27 @@ describe('session-local undo and redo', () => {
       });
     }
     expect(history.past).toHaveLength(100);
+  });
+});
+
+describe('node labels', () => {
+  // "node-2" is an id in a JSON file; it is not what the step IS. Numbering
+  // appears only where a name would otherwise be ambiguous.
+  it('names a node after its plugin, numbering only repeats', () => {
+    const definition: FlowDefinition = {
+      nodes: [
+        node('a', 'start'),
+        node('b', 'check'),
+        node('c', 'check'),
+        node('d', 'community:missing'),
+      ],
+      edges: [],
+    };
+    expect(nodeLabels(definition, [plugin('start', [1], true), plugin('check')])).toEqual({
+      a: 'start',
+      b: 'check 1',
+      c: 'check 2',
+      d: 'community:missing',
+    });
   });
 });

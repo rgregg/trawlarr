@@ -71,7 +71,7 @@ const conditionFields = (index: number): PluginInput[] => [
     defaultValue: 'hevc',
     tooltip:
       'Text, a number, true/false, or a {{property}} placeholder. For lists use contains with one exact item, such as eng.',
-    inputUI: { type: 'text', displayConditions: visible(index, true) },
+    inputUI: { type: 'text', acceptsFlowFields: true, displayConditions: visible(index, true) },
   },
 ];
 

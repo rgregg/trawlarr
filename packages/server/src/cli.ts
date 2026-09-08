@@ -119,6 +119,8 @@ interface LibraryResource {
   name: string;
   roots: string[];
   extensions: string[];
+  stagingDir?: string | null;
+  trashDir?: string | null;
   flowId: string | null;
   enabled: boolean;
   paused: boolean;
@@ -281,6 +283,8 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
       root: { type: 'string', multiple: true },
       extensions: { type: 'string' },
       'allow-hardlinked': { type: 'boolean', default: false },
+      'staging-dir': { type: 'string' },
+      'trash-dir': { type: 'string' },
     },
   });
 
@@ -317,6 +321,8 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
           roots: values.root,
           extensions,
           allowHardlinked: values['allow-hardlinked'],
+          ...(values['staging-dir'] !== undefined ? { stagingDir: values['staging-dir'] } : {}),
+          ...(values['trash-dir'] !== undefined ? { trashDir: values['trash-dir'] } : {}),
         }),
       );
     } catch (error) {
@@ -331,15 +337,24 @@ const cmdLibraryAdd = async (args: string[]): Promise<number> => {
     name: values.name,
   });
 
-  return announce(
-    createLibraryRepo(db).create({
-      name: values.name,
-      roots: values.root,
-      extensions,
-      allowHardlinked: values['allow-hardlinked'],
-      nowMs: Date.now(),
-    }),
-  );
+  try {
+    return announce(
+      createLibraryRepo(db).create({
+        name: values.name,
+        roots: values.root,
+        extensions,
+        allowHardlinked: values['allow-hardlinked'],
+        stagingDir: values['staging-dir'] ?? null,
+        trashDir: values['trash-dir'] ?? null,
+        nowMs: Date.now(),
+      }),
+    );
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new CliError(`library add: ${error.message}`);
+    }
+    throw error;
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -2207,7 +2222,7 @@ const cmdPluginSource = async (argv: string[]): Promise<number> => {
 
 const USAGE = `Usage:
   trawlarr daemon [--port <n>] [--bind <addr>]
-  trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked]
+  trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked] [--staging-dir <dir>] [--trash-dir <dir>]
   trawlarr flow add --name <name> --file <flow.json>
   trawlarr flow add --name <name> --template <id> [--set key=value...]
   trawlarr library set-flow --library <name> --flow <name>

@@ -17,33 +17,69 @@ export interface FlowValueArgs {
 
 export type FlowValue = string | number | boolean | string[];
 
-export const FLOW_FIELDS = [
-  'file.path',
-  'file.name',
-  'file.id',
-  'file.container',
-  'file.sizeMb',
-  'file.sizeBytes',
-  'file.durationSeconds',
-  'file.bitrate',
-  'video.codec',
-  'video.width',
-  'video.height',
-  'video.hdr',
-  'audio.count',
-  'audio.languages',
-  'audio.codecs',
-  'audio.maxChannels',
-  'subtitle.count',
-  'subtitle.languages',
-  'subtitle.codecs',
-  'original.path',
-  'job.id',
-  'error.message',
-  'error.nodeId',
-  'error.pluginId',
-  'error.pluginName',
+/**
+ * Every property `readFlowValue` can answer, each with the sentence the flow
+ * editor shows beside it.
+ *
+ * Documented here rather than in the UI because this list and `readFlowValue`
+ * must not be able to disagree: a property the editor offers but the engine
+ * cannot read fails the file at run time, which is the worst place to find
+ * out. `FLOW_FIELDS` is derived from it for the same reason.
+ */
+export const FLOW_FIELD_DOCS: { name: string; description: string }[] = [
+  { name: 'file.path', description: 'Absolute path of the file this step is working on.' },
+  { name: 'file.name', description: 'File name with extension, without any directories.' },
+  { name: 'file.id', description: "The file's id in this daemon's database." },
+  { name: 'file.container', description: 'Container as probed, lowercase and without a dot.' },
+  {
+    name: 'file.sizeMb',
+    description: 'Size in decimal megabytes, as the plugin contract reports it.',
+  },
+  { name: 'file.sizeBytes', description: 'Size in bytes, rounded from the reported megabytes.' },
+  { name: 'file.durationSeconds', description: 'Container duration in seconds.' },
+  { name: 'file.bitrate', description: 'Overall container bitrate in bits per second.' },
+  { name: 'video.codec', description: 'Codec of the first video stream that is not cover art.' },
+  { name: 'video.width', description: 'Width of that video stream in pixels.' },
+  { name: 'video.height', description: 'Height of that video stream in pixels.' },
+  {
+    name: 'video.hdr',
+    description: 'True for PQ or HLG transfer metadata; missing when the file does not say.',
+  },
+  { name: 'audio.count', description: 'Number of audio streams.' },
+  {
+    name: 'audio.languages',
+    description: 'Normalized language tags of the audio streams, without duplicates.',
+  },
+  { name: 'audio.codecs', description: 'Codecs of the audio streams, without duplicates.' },
+  { name: 'audio.maxChannels', description: 'Highest channel count across the audio streams.' },
+  { name: 'subtitle.count', description: 'Number of subtitle streams.' },
+  { name: 'subtitle.languages', description: 'Normalized language tags of the subtitle streams.' },
+  { name: 'subtitle.codecs', description: 'Codecs of the subtitle streams, without duplicates.' },
+  {
+    name: 'original.path',
+    description: 'Path of the library file this run started from, before any staging copy.',
+  },
+  { name: 'job.id', description: 'Id of the job running this flow.' },
+  { name: 'error.message', description: 'Failure message. Only available on an On Error branch.' },
+  { name: 'error.nodeId', description: 'Id of the node that failed. Only on an On Error branch.' },
+  {
+    name: 'error.pluginId',
+    description: 'Plugin id of the node that failed. Only on an On Error branch.',
+  },
+  {
+    name: 'error.pluginName',
+    description: 'Name of the plugin that failed. Only on an On Error branch.',
+  },
 ];
+
+/** Variable namespaces that take any name the operator chose, so they cannot be listed. */
+export const FLOW_FIELD_NAMESPACES: { prefix: string; description: string }[] = [
+  { prefix: 'user.', description: 'A variable set earlier in this run by a node that writes one.' },
+  { prefix: 'library.', description: 'A user variable configured on the library being processed.' },
+  { prefix: 'global.', description: 'A user variable configured for this daemon.' },
+];
+
+export const FLOW_FIELDS = FLOW_FIELD_DOCS.map((field) => field.name);
 
 const finite = (value: unknown): number | undefined => {
   if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === ''))

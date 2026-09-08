@@ -152,3 +152,50 @@ export function parseInputObject(text: string): Record<string, unknown> {
   }
   return value as Record<string, unknown>;
 }
+
+/**
+ * The property catalogue the daemon serves at `GET /flows/fields`, which is
+ * where it must come from: the list an operator inserts from has to be the
+ * one the daemon that will run the flow can actually answer, not a copy
+ * compiled into whichever web bundle happens to be loaded.
+ */
+export interface FlowFieldCatalogue {
+  syntax: string;
+  fields: { name: string; description: string }[];
+  namespaces: { prefix: string; description: string }[];
+}
+
+/**
+ * Whether this input's node expands `{{property}}` placeholders in it.
+ *
+ * Opt-in per input (see `PluginInputUi.acceptsFlowFields`): offering
+ * insertion on an input nothing expands would write literal braces into a
+ * path or an ffmpeg argument, which looks like a feature right up to the
+ * moment a file is written with it.
+ */
+export const acceptsFlowFields = (field: PluginInput): boolean =>
+  field.inputUI.acceptsFlowFields === true;
+
+/** True when this plugin has any input worth showing the catalogue for. */
+export const hasFlowFieldInputs = (fields: PluginInput[]): boolean =>
+  fields.some((field) => acceptsFlowFields(field));
+
+/**
+ * Inserts `{{property}}` at the caret, replacing whatever is selected, and
+ * says where the caret goes afterwards — after the placeholder, so a second
+ * insertion does not land inside the first.
+ */
+export function insertFlowField(input: {
+  text: string;
+  selectionStart: number;
+  selectionEnd: number;
+  field: string;
+}): { text: string; cursor: number } {
+  const token = `{{${input.field}}}`;
+  const start = Math.max(0, Math.min(input.selectionStart, input.text.length));
+  const end = Math.max(start, Math.min(input.selectionEnd, input.text.length));
+  return {
+    text: `${input.text.slice(0, start)}${token}${input.text.slice(end)}`,
+    cursor: start + token.length,
+  };
+}

@@ -15,6 +15,7 @@ const draftFrom = (library: LibraryRow | null): LibraryDraft => ({
   roots: (library?.roots ?? []).join('\n'),
   extensions: (library?.extensions ?? []).join(', '),
   allowHardlinked: library?.allowHardlinked ?? false,
+  stagingDir: library?.stagingDir ?? '',
 });
 
 /**
@@ -132,10 +133,22 @@ export const LibrarySetup = (props: {
         library was seeded by a torrent client and trawlarr reports nothing to do, this is why.
       </p>
 
-      <p className="help">
-        Staging and trash live under each root&rsquo;s <code>.trawlarr</code> directory and are not
-        settable here on purpose: staging must sit on the same filesystem as the library, or
-        replacing a file degrades from an atomic rename into a full copy of every file it touches.
+      <label htmlFor="library-staging-dir">Staging directory</label>
+      <input
+        id="library-staging-dir"
+        value={draft.stagingDir}
+        aria-describedby="library-staging-dir-help"
+        placeholder="Default: <root>/.trawlarr/staging"
+        onChange={(event) => {
+          patch({ stagingDir: event.target.value });
+        }}
+      />
+      <p id="library-staging-dir-help" className="help">
+        Optional absolute path. Leave empty to stage inside each root&rsquo;s{' '}
+        <code>.trawlarr/staging</code> directory, enabling instant atomic renames on completion.
+        Pointing to a separate filesystem (such as a local SSD cache in front of an NFS library)
+        requires <code>allowCrossDevice</code> on Replace Original File in your flow, falling back
+        to copy-then-atomic-rename.
       </p>
 
       {problems.length > 0 && (

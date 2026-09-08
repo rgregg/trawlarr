@@ -18,6 +18,29 @@ export const switchInput = (value: unknown, name: string): boolean => {
   throw new Error(`${name} must be true or false.`);
 };
 
+export const stereoActionInput = (value: unknown): 'add' | 'convert' => {
+  if (value === undefined || value === null || value === '') return 'add';
+  if (typeof value !== 'string') throw new Error('Stereo action must be "add" or "convert".');
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'add' || normalized === 'convert') return normalized;
+  throw new Error('Stereo action must be "add" or "convert".');
+};
+
+export const cleanAudioFilter = (value: unknown): string => {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new Error('Downmix filter must be text.');
+  let str = value.trim();
+  if (str === '') return '';
+  const flagMatch = /^(?:-(?:filter(?::a)?|af))\s+(.*)$/i.exec(str);
+  if (flagMatch) {
+    str = flagMatch[1]!.trim();
+  }
+  if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+    str = str.slice(1, -1).trim();
+  }
+  return str;
+};
+
 export const languageKey = (value: string): string =>
   normalizeLanguageTag(value.trim().toLowerCase()).toLowerCase();
 

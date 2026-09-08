@@ -4,15 +4,18 @@ import type { PluginInput } from '@trawlarr/plugin-api';
 import { useNavigationGuard } from '../../shell/useRoute.js';
 import type { EditorPlugin } from './flow-canvas-model.js';
 import {
+  acceptsFlowFields,
   effectiveInputs,
   inputText,
+  hasFlowFieldInputs,
+  insertFlowField,
   isInputVisible,
   parseInputObject,
   pluginInputBufferKey,
   recoverPluginInputBuffer,
   updatePluginInput,
 } from './plugin-input-model.js';
-import type { PluginInputBuffer } from './plugin-input-model.js';
+import type { FlowFieldCatalogue, PluginInputBuffer } from './plugin-input-model.js';
 
 // A 401 can unmount the entire auth tree without navigation. Keep unapplied
 // configuration in this tab's memory, never browser storage or a server draft.
@@ -21,6 +24,10 @@ const inputBuffers = new Map<string, PluginInputBuffer>();
 interface Props {
   node: FlowNode;
   plugin?: EditorPlugin;
+  /** What the canvas calls this node — its plugin's name, not its id. */
+  label: string;
+  /** The daemon's property catalogue; null while loading or unavailable. */
+  fields: FlowFieldCatalogue | null;
   disabled?: boolean;
   onSave: (node: FlowNode) => void;
   onClose: () => void;
@@ -114,7 +121,49 @@ function InputField({
   }
 }
 
-export function NodeConfig({ node, plugin, disabled, onSave, onClose }: Props): JSX.Element {
+/**
+ * The properties this daemon can substitute, offered where — and only where —
+ * the node reading the input actually expands them.
+ */
+function FlowFieldPicker({
+  catalogue,
+  onInsert,
+  id,
+}: {
+  catalogue: FlowFieldCatalogue;
+  onInsert: (field: string) => void;
+  id: string;
+}): JSX.Element {
+  return (
+    <div className="flow-config-fields-picker">
+      <label htmlFor={id}>Insert a property</label>
+      <select
+        id={id}
+        value=""
+        onChange={(event) => {
+          if (event.target.value !== '') onInsert(event.target.value);
+        }}
+      >
+        <option value="">Choose a property…</option>
+        {catalogue.fields.map((field) => (
+          <option key={field.name} value={field.name} title={field.description}>
+            {field.name}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+export function NodeConfig({
+  node,
+  plugin,
+  label,
+  fields: catalogue,
+  disabled,
+  onSave,
+  onClose,
+}: Props): JSX.Element {
   const dialog = useRef<HTMLDialogElement>(null);
   const prefix = useId();
   const bufferKey = pluginInputBufferKey(window.location.pathname, node);
@@ -156,6 +205,31 @@ export function NodeConfig({ node, plugin, disabled, onSave, onClose }: Props): 
       if (previousFocus instanceof HTMLElement) previousFocus.focus();
     };
   }, []);
+
+  /**
+   * Inserts `{{property}}` where the caret is, then puts the caret back after
+   * it: React re-renders the field from state, which would otherwise drop the
+   * caret to the end and make a second insertion land somewhere else.
+   */
+  const insert = (fieldName: string, elementId: string, property: string): void => {
+    const element = document.getElementById(elementId);
+    const editable =
+      element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? element
+        : null;
+    const current = inputText(effective[fieldName]);
+    const { text, cursor } = insertFlowField({
+      text: current,
+      selectionStart: editable?.selectionStart ?? current.length,
+      selectionEnd: editable?.selectionEnd ?? current.length,
+      field: property,
+    });
+    update(fieldName, text);
+    window.requestAnimationFrame(() => {
+      editable?.focus();
+      editable?.setSelectionRange(cursor, cursor);
+    });
+  };
 
   const update = (name: string, value: unknown): void => {
     const next = updatePluginInput(fields, inputs, name, value);
@@ -199,9 +273,9 @@ export function NodeConfig({ node, plugin, disabled, onSave, onClose }: Props): 
       >
         <header className="flow-config-header">
           <div>
-            <h2 id={`${prefix}-title`}>Configure {plugin?.name ?? node.pluginId}</h2>
-            <p className="detail">
-              {node.id} · Version {node.pluginVersion}
+            <h2 id={`${prefix}-title`}>Configure {label}</h2>
+            <p className="detail" title={node.id}>
+              {plugin?.name ?? node.pluginId} · Version {node.pluginVersion}
             </p>
           </div>
           <button type="button" onClick={requestClose} aria-label="Close configuration">
@@ -250,9 +324,47 @@ export function NodeConfig({ node, plugin, disabled, onSave, onClose }: Props): 
                     {field.inputUI.type === 'directory' &&
                       ' Enter a path on the daemon filesystem.'}
                   </p>
+                  {acceptsFlowFields(field) && catalogue !== null && (
+                    <FlowFieldPicker
+                      catalogue={catalogue}
+                      id={`${id}-insert`}
+                      onInsert={(property) => insert(field.name, id, property)}
+                    />
+                  )}
                 </div>
               );
             })}
+          {hasFlowFieldInputs(fields) && catalogue !== null && (
+            <details className="flow-config-catalogue">
+              <summary>
+                Data fields available here ({catalogue.fields.length}), written{' '}
+                <code>{catalogue.syntax}</code>
+              </summary>
+              <p className="help">
+                Read from the file this step is working on, at the moment it runs. A property this
+                file does not have — HDR metadata it never carried, an error field outside an On
+                Error branch — fails the step rather than expanding to nothing.
+              </p>
+              <dl className="flow-config-fields-list">
+                {catalogue.fields.map((field) => (
+                  <div key={field.name}>
+                    <dt>
+                      <code>{`{{${field.name}}}`}</code>
+                    </dt>
+                    <dd>{field.description}</dd>
+                  </div>
+                ))}
+                {catalogue.namespaces.map((namespace) => (
+                  <div key={namespace.prefix}>
+                    <dt>
+                      <code>{`{{${namespace.prefix}yourName}}`}</code>
+                    </dt>
+                    <dd>{namespace.description}</dd>
+                  </div>
+                ))}
+              </dl>
+            </details>
+          )}
           <details open={!plugin}>
             <summary>All inputs as JSON (including hidden and unrecognized values)</summary>
             <p className="help">

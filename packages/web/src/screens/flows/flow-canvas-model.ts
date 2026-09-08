@@ -10,7 +10,10 @@ export type EditorPlugin = {
   version: string;
   enabled: boolean;
   isStartPlugin: boolean;
+  /** 'first-party', 'installed' or 'path' — what kind of thing installed it. */
   source: string;
+  /** The plugin source it was installed from; absent for first-party nodes. */
+  sourceId?: string;
   details: PluginDetails;
 };
 
@@ -30,6 +33,7 @@ export type CanvasNodeData = {
   protectedStart: boolean;
   errorEntry: boolean;
   unreachable: boolean;
+  label: string;
   outputs: Array<{ number: number; tooltip: string; missing: boolean }>;
   problems: string[];
 };
@@ -131,6 +135,36 @@ export function autoLayout(definition: FlowDefinition, plugins: EditorPlugin[]):
   );
 }
 
+/**
+ * What to CALL each node on screen and in messages about it.
+ *
+ * Its plugin's name, numbered only when the flow contains more than one node
+ * of that plugin — a node id ("node-7") is an implementation detail of the
+ * definition file that means nothing to the person reading the canvas, and
+ * numbering every node teaches an ordering the graph does not have. A node
+ * whose plugin is not installed falls back to the plugin id, which is the
+ * only name anyone can act on.
+ */
+export function nodeLabels(
+  definition: FlowDefinition,
+  plugins: EditorPlugin[],
+): Record<string, string> {
+  const seen = new Map<string, number>();
+  const total = new Map<string, number>();
+  for (const node of definition.nodes) {
+    total.set(node.pluginId, (total.get(node.pluginId) ?? 0) + 1);
+  }
+  return Object.fromEntries(
+    definition.nodes.map((node) => {
+      const name =
+        plugins.find((candidate) => candidate.id === node.pluginId)?.name ?? node.pluginId;
+      const ordinal = (seen.get(node.pluginId) ?? 0) + 1;
+      seen.set(node.pluginId, ordinal);
+      return [node.id, total.get(node.pluginId)! > 1 ? `${name} ${String(ordinal)}` : name];
+    }),
+  );
+}
+
 export function toCanvas(
   definition: FlowDefinition,
   plugins: EditorPlugin[],
@@ -144,6 +178,7 @@ export function toCanvas(
     for (const id of reachableNodeIds(definition, entry)) reachable.add(id);
   }
   const fallback = autoLayout(definition, plugins);
+  const labels = nodeLabels(definition, plugins);
   return {
     nodes: definition.nodes.map((node) => {
       const plugin = plugins.find((candidate) => candidate.id === node.pluginId);
@@ -173,6 +208,7 @@ export function toCanvas(
           protectedStart: node.id === start,
           errorEntry: errorEntries.includes(node.id),
           unreachable: !reachable.has(node.id),
+          label: labels[node.id]!,
           outputs,
           problems: problems
             .filter(

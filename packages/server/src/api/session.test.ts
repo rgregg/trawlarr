@@ -24,15 +24,15 @@ describe('issueSessionToken/verifySessionToken', () => {
     const token = await issueSessionToken({
       accountId: 'acc-1',
       secret: 'top-secret',
-      nowMs: NOW,
-      ttlMs: 1000,
+      nowMs: Date.now(),
+      ttlMs: 60_000,
     });
     // jose checks `exp` against the real clock, not an injected one, so an
     // already-past expiry (negative ttl) is what proves the check runs.
     const expired = await issueSessionToken({
       accountId: 'acc-1',
       secret: 'top-secret',
-      nowMs: NOW,
+      nowMs: Date.now(),
       ttlMs: -1000,
     });
     expect(await verifySessionToken({ token: expired, secret: 'top-secret' })).toBeNull();

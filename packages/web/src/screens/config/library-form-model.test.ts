@@ -12,6 +12,7 @@ const draft = (patch: Partial<LibraryDraft> = {}): LibraryDraft => ({
   roots: '/library/movies',
   extensions: 'mkv, mp4',
   allowHardlinked: false,
+  stagingDir: '',
   ...patch,
 });
 
@@ -36,6 +37,13 @@ describe('draftProblems', () => {
         'path inside the container, e.g. /library/movies, not the host path.',
     );
   });
+
+  it('rejects a relative staging directory before the request is sent', () => {
+    expect(draftProblems(draft({ stagingDir: 'cache/staging' }))).toContain(
+      'Staging directory must be an absolute path as the trawlarr process sees it — in Docker ' +
+        'that is the path inside the container, e.g. /cache/staging, not the host path.',
+    );
+  });
 });
 
 describe('toCreateBody', () => {
@@ -45,7 +53,14 @@ describe('toCreateBody', () => {
       roots: ['/a', '/b'],
       extensions: ['mkv', 'mp4'],
       allowHardlinked: false,
+      stagingDir: null,
     });
+  });
+
+  it('includes trimmed stagingDir when provided', () => {
+    expect(toCreateBody(draft({ stagingDir: '  /cache/ssd-staging  ' })).stagingDir).toBe(
+      '/cache/ssd-staging',
+    );
   });
 
   it('omits extensions entirely when the field is blank, rather than sending []', () => {

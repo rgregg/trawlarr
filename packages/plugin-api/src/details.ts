@@ -20,6 +20,18 @@ export interface PluginInputUi {
   /** Choosing a value may rewrite sibling input values: value -> { inputName: newValue }. */
   onSelect?: Record<string, Record<string, string>>;
   displayConditions?: { logic: 'AND' | 'OR'; sets: InputDisplayConditionSet[] };
+  /**
+   * trawlarr extension, absent from every Tdarr plugin and ignored when
+   * absent: this input's text is expanded with `{{property}}` placeholders by
+   * the node that reads it, so the editor may offer the property catalogue
+   * for insertion.
+   *
+   * Declared per input rather than inferred from the field's type, because
+   * offering insertion on an input nobody expands writes literal braces into
+   * a filename or an ffmpeg argument — a wrong value that looks like a
+   * feature until a file is written with it.
+   */
+  acceptsFlowFields?: boolean;
 }
 
 export interface PluginInput {

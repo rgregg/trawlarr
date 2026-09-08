@@ -1,13 +1,13 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { FlowDefinition } from '@trawlarr/core';
 import { ApiClientError, type ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
-import { PageHeader } from '../../shell/PageHeader.js';
 import { useNavigationGuard } from '../../shell/useRoute.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { FlowCanvas } from './FlowCanvas.js';
 import type { EditorPlugin, ValidationProblem } from './flow-canvas-model.js';
 import { hasUnsavedLayout, layoutStoreFor, saveFlowLayout } from './flow-layout-model.js';
+import type { FlowFieldCatalogue } from './plugin-input-model.js';
 import {
   editorBuffers,
   hasDefinitionChanges,
@@ -31,8 +31,185 @@ interface EditorProps {
   navigate: (to: string) => void;
 }
 
+/**
+ * Renaming, in place in the editor's title.
+ *
+ * A separate request from publishing (`PATCH` rather than `PUT`) because a
+ * name is not part of the definition: it is outside the signature hash, so
+ * fixing a typo must not create a flow version or re-queue a library.
+ */
+function FlowTitle({
+  name,
+  disabled,
+  onRename,
+}: {
+  name: string;
+  disabled: boolean;
+  onRename: (name: string) => Promise<void>;
+}): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setDraft(name);
+  }, [name]);
+  if (!editing) {
+    return (
+      <div className="editor-title">
+        <h1 title={name}>{name}</h1>
+        <button type="button" disabled={disabled} onClick={() => setEditing(true)}>
+          Rename
+        </button>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="editor-title"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const next = draft.trim();
+        if (next === '' || next === name) {
+          setEditing(false);
+          setDraft(name);
+          return;
+        }
+        setBusy(true);
+        void onRename(next).then(
+          () => {
+            setBusy(false);
+            setEditing(false);
+          },
+          () => {
+            // The failure itself is reported by the page; keep the field open
+            // with what was typed so a duplicate name can be corrected.
+            setBusy(false);
+          },
+        );
+      }}
+    >
+      <label htmlFor="flow-name">Flow name</label>
+      <input
+        id="flow-name"
+        value={draft}
+        autoFocus
+        disabled={busy}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      <button type="submit" className="btn-primary" disabled={busy || draft.trim() === ''}>
+        {busy ? 'Saving…' : 'Save name'}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          setDraft(name);
+          setEditing(false);
+        }}
+      >
+        Cancel
+      </button>
+    </form>
+  );
+}
+
+/**
+ * The publish confirmation, as a modal.
+ *
+ * It used to be a panel above the canvas, which on a laptop pushed the canvas
+ * and its controls off screen exactly when an operator wanted to look at the
+ * graph they were about to publish. A modal takes focus, states the
+ * consequence, and gives the page back unchanged when dismissed.
+ */
+function PublishDialog({
+  preview,
+  fromHash,
+  toHash,
+  note,
+  busy,
+  canPublish,
+  onNote,
+  onPublish,
+  onCancel,
+}: {
+  preview: NonNullable<ReturnType<typeof summarizePublish>>;
+  fromHash: string | null;
+  toHash: string | null;
+  note: string;
+  busy: boolean;
+  canPublish: boolean;
+  onNote: (note: string) => void;
+  onPublish: () => void;
+  onCancel: () => void;
+}): JSX.Element {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+  return (
+    <dialog
+      className="editor-publish-dialog"
+      ref={dialog}
+      aria-labelledby="publish-heading"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onCancel();
+      }}
+    >
+      <section className="editor-publish">
+        <h2 id="publish-heading">Publish this flow?</h2>
+        <p>
+          {preview.unchanged
+            ? 'The definition is unchanged. Publishing records a version but does not invalidate any file signatures.'
+            : `${String(preview.eligible)} non-terminal file(s) across ${String(preview.libraries.length)} libraries are eligible for re-evaluation. Publishing requests a rescan; how many files will actually re-encode is not known.`}
+        </p>
+        {preview.terminal > 0 && (
+          <p>
+            {String(preview.terminal)} failed, not-converging, or held-for-review file(s) are
+            excluded and need manual requeue.
+          </p>
+        )}
+        {preview.libraries.length === 0 && <p>No library currently uses this flow.</p>}
+        <ul>
+          {preview.libraries.map((library) => (
+            <li key={library.id}>
+              {library.name}: {String(library.total)} non-missing file(s)
+            </li>
+          ))}
+        </ul>
+        <p className="editor-hash">
+          Hash: <code>{fromHash}</code> to <code>{toHash}</code>
+        </p>
+        <label className="editor-note">
+          Version note (optional)
+          <input value={note} disabled={busy} onChange={(event) => onNote(event.target.value)} />
+        </label>
+        <div className="row-actions">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={busy || !canPublish}
+            onClick={onPublish}
+          >
+            {busy ? 'Publishing...' : 'Confirm publish'}
+          </button>
+          <button type="button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </section>
+    </dialog>
+  );
+}
+
 const Editor = (
-  props: EditorProps & { initial: EditorFlow; plugins: EditorPlugin[] },
+  props: EditorProps & {
+    initial: EditorFlow;
+    plugins: EditorPlugin[];
+    fields: FlowFieldCatalogue | null;
+  },
 ): JSX.Element => {
   const { client, id } = props;
   const [initial] = useState(() => initialEditorBuffer(props.initial, editorBuffers.get(id)));
@@ -98,6 +275,20 @@ const Editor = (
     setFailure(describeFailure(error));
     if (error instanceof ApiClientError && error.code === 'flow-changed') {
       setPreview(null);
+    }
+  };
+
+  const rename = async (name: string): Promise<void> => {
+    setFailure(null);
+    try {
+      const next = await client.patch<EditorFlow>(`/flows/${id}`, { name });
+      // Only the name: the definition being edited is this tab's business,
+      // and a rename must not reach in and replace an unsaved graph.
+      setFlow((current) => ({ ...current, name: next.name }));
+      setMessage(`Renamed to “${next.name}”. The flow definition is unchanged.`);
+    } catch (error) {
+      report(error);
+      throw error;
     }
   };
 
@@ -212,14 +403,16 @@ const Editor = (
 
   return (
     <section className="flow-editor-page" aria-busy={busy}>
-      <Link to={`/flows/${id}`} navigate={props.navigate}>
-        Back to flow and history
-      </Link>
-      <PageHeader
-        title={flow.name}
-        subtitle="Flow editor - Draft changes do not affect the running flow."
-      />
+      {/*
+       * One command bar, and it never scrolls away: the page itself does not
+       * scroll (the canvas pans instead), so Save draft and Review & publish
+       * stay reachable no matter where the graph has been dragged to.
+       */}
       <div className="editor-toolbar">
+        <Link to={`/flows/${id}`} navigate={props.navigate}>
+          ← Flow and history
+        </Link>
+        <FlowTitle name={flow.name} disabled={busy} onRename={rename} />
         <span role="status" className="badge">
           {dirty ? 'Unsaved changes' : flow.draft !== null ? 'Draft saved' : 'No unpublished draft'}
         </span>
@@ -268,6 +461,8 @@ const Editor = (
             Review &amp; publish
           </button>
         </div>
+      </div>
+      <div className="editor-messages">
         {layoutState.error !== null && (
           <div role="alert" className="failure">
             <strong>Could not save the layout</strong>
@@ -280,84 +475,54 @@ const Editor = (
             </button>
           </div>
         )}
-      </div>
-      {message !== null && (
-        <p role="status" className="detail">
-          {message}
-        </p>
-      )}
-      {stale && (
-        <p role="alert" className="failure">
-          This draft is based on an older published version. Publishing is blocked to avoid
-          overwriting another change. Your draft can still be saved; discard it to load the latest
-          published flow.
-        </p>
-      )}
-      {failure !== null && (
-        <div role="alert" className="failure">
-          <strong>{failure.title}</strong>
-          <p>{failure.message}</p>
-        </div>
-      )}
-      {validationFailure !== null && (
-        <div role="alert" className="failure">
-          <p>
-            Could not validate with the daemon: {validationFailure}. You can still save a draft, but
-            cannot publish until validation succeeds.
+        {message !== null && (
+          <p role="status" className="detail">
+            {message}
           </p>
-          <button type="button" onClick={() => setValidationAttempt((value) => value + 1)}>
-            Retry validation
-          </button>
-        </div>
-      )}
-      {preview !== null && (
-        <section className="editor-publish" aria-labelledby="publish-heading">
-          <h2 id="publish-heading">Publish this flow?</h2>
-          <p>
-            {preview.unchanged
-              ? 'The definition is unchanged. Publishing records a version but does not invalidate any file signatures.'
-              : `${String(preview.eligible)} non-terminal file(s) across ${String(preview.libraries.length)} libraries are eligible for re-evaluation. Publishing requests a rescan; how many files will actually re-encode is not known.`}
+        )}
+        {stale && (
+          <p role="alert" className="failure">
+            This draft is based on an older published version. Publishing is blocked to avoid
+            overwriting another change. Your draft can still be saved; discard it to load the latest
+            published flow.
           </p>
-          {preview.terminal > 0 && (
+        )}
+        {failure !== null && (
+          <div role="alert" className="failure">
+            <strong>{failure.title}</strong>
+            <p>{failure.message}</p>
+          </div>
+        )}
+        {validationFailure !== null && (
+          <div role="alert" className="failure">
             <p>
-              {String(preview.terminal)} failed, not-converging, or held-for-review file(s) are
-              excluded and need manual requeue.
+              Could not validate with the daemon: {validationFailure}. You can still save a draft,
+              but cannot publish until validation succeeds.
             </p>
-          )}
-          {preview.libraries.length === 0 && <p>No library currently uses this flow.</p>}
-          <ul>
-            {preview.libraries.map((library) => (
-              <li key={library.id}>
-                {library.name}: {String(library.total)} non-missing file(s)
-              </li>
-            ))}
-          </ul>
-          <p className="editor-hash">
-            Hash: <code>{liveHash}</code> to <code>{hash}</code>
-          </p>
-          <label className="editor-note">
-            Version note (optional)
-            <input value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />
-          </label>
-          <div className="row-actions">
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={busy || !valid || stale}
-              onClick={() => void publish()}
-            >
-              {busy ? 'Publishing...' : 'Confirm publish'}
-            </button>
-            <button type="button" disabled={busy} onClick={() => setPreview(null)}>
-              Cancel
+            <button type="button" onClick={() => setValidationAttempt((value) => value + 1)}>
+              Retry validation
             </button>
           </div>
-        </section>
+        )}
+      </div>
+      {preview !== null && (
+        <PublishDialog
+          preview={preview}
+          fromHash={liveHash}
+          toHash={hash}
+          note={note}
+          busy={busy}
+          canPublish={valid && !stale}
+          onNote={setNote}
+          onPublish={() => void publish()}
+          onCancel={() => setPreview(null)}
+        />
       )}
       <FlowCanvas
         key={canvasKey}
         definition={definition}
         plugins={props.plugins}
+        fields={props.fields}
         problems={validated ? validation.result.problems : []}
         onChange={change}
         initialLayout={layoutState.layout}
@@ -369,7 +534,11 @@ const Editor = (
 };
 
 export const FlowEditor = (props: EditorProps): JSX.Element => {
-  const [loaded, setLoaded] = useState<{ flow: EditorFlow; plugins: EditorPlugin[] } | null>(null);
+  const [loaded, setLoaded] = useState<{
+    flow: EditorFlow;
+    plugins: EditorPlugin[];
+    fields: FlowFieldCatalogue | null;
+  } | null>(null);
   const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -378,9 +547,13 @@ export const FlowEditor = (props: EditorProps): JSX.Element => {
     void Promise.all([
       props.client.get<EditorFlow>(`/flows/${props.id}`),
       props.client.get<EditorPlugin[]>('/plugins'),
+      // The property catalogue is a convenience, not a prerequisite: a daemon
+      // too old to serve it must still open its own editor, with the
+      // insertion helper simply absent.
+      props.client.get<FlowFieldCatalogue>('/flows/fields').catch(() => null),
     ]).then(
-      ([flow, plugins]) => {
-        if (!cancelled) setLoaded({ flow, plugins });
+      ([flow, plugins, fields]) => {
+        if (!cancelled) setLoaded({ flow, plugins, fields });
       },
       (error: unknown) => {
         if (!cancelled) setFailure(describeFailure(error));
@@ -390,7 +563,11 @@ export const FlowEditor = (props: EditorProps): JSX.Element => {
       cancelled = true;
     };
   }, [props.client, props.id, attempt]);
-  if (loaded !== null) return <Editor {...props} initial={loaded.flow} plugins={loaded.plugins} />;
+  if (loaded !== null) {
+    return (
+      <Editor {...props} initial={loaded.flow} plugins={loaded.plugins} fields={loaded.fields} />
+    );
+  }
   return (
     <section className="flow-editor-page">
       <Link to="/config?tab=flows" navigate={props.navigate}>

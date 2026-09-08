@@ -415,6 +415,120 @@ describe('Audio Tracks', () => {
     expect(kept(args, 'audio')[0]!.outputArgs.at(-1)).toBe('+default');
   });
 
+  it('converts multichannel audio to stereo AAC in-place with stereoAction: convert', async () => {
+    const args = argsFor(
+      [
+        video,
+        track(1, 'audio', 'eng', {
+          codec_name: 'ac3',
+          channels: 6,
+          bit_rate: 640000,
+          disposition: { default: 1 },
+          tags: { language: 'eng', title: 'Surround 5.1' },
+        }),
+      ],
+      {
+        ensureStereo: true,
+        stereoAction: 'convert',
+        stereoBitrate: 224,
+      },
+    );
+    await audio.plugin(args);
+    const audioStreams = kept(args, 'audio');
+    expect(audioStreams).toHaveLength(1);
+    const converted = audioStreams[0]!;
+    expect(converted.codec_name).toBe('aac');
+    expect(converted.channels).toBe(2);
+    expect(converted.bit_rate).toBe(224000);
+    expect(converted.outputArgs).toEqual([
+      '-c:{outputIndex}',
+      'aac',
+      '-ac:{outputIndex}',
+      '2',
+      '-b:{outputIndex}',
+      '224k',
+    ]);
+    expect((converted.disposition as Record<string, unknown>).default).toBe(1);
+    expect(converted.tags?.title).toBe('Surround 5.1');
+
+    // On repeat with the transformed stream, it is a no-op
+    const repeatArgs = argsFor(
+      [
+        video,
+        track(1, 'audio', 'eng', {
+          codec_name: 'aac',
+          channels: 2,
+          bit_rate: 224000,
+          disposition: { default: 1 },
+        }),
+      ],
+      {
+        ensureStereo: true,
+        stereoAction: 'convert',
+        stereoBitrate: 224,
+      },
+    );
+    await audio.plugin(repeatArgs);
+    expect(changes(repeatArgs)).toEqual([]);
+    expect(repeatArgs.variables.ffmpegCommand.shouldProcess).toBe(false);
+  });
+
+  it('applies downmixFilter for multichannel tracks, stripping quotes or flags', async () => {
+    const args = argsFor([video, track(1, 'audio', 'eng', { codec_name: 'eac3', channels: 6 })], {
+      ensureStereo: true,
+      stereoAction: 'convert',
+      downmixFilter: '-filter:a "pan=stereo|c0=c2+0.30*c0|c1=c2+0.30*c1"',
+    });
+    await audio.plugin(args);
+    const converted = kept(args, 'audio')[0]!;
+    expect(converted.outputArgs).toEqual([
+      '-c:{outputIndex}',
+      'aac',
+      '-ac:{outputIndex}',
+      '2',
+      '-filter:{outputIndex}',
+      'pan=stereo|c0=c2+0.30*c0|c1=c2+0.30*c1',
+      '-b:{outputIndex}',
+      '192k',
+    ]);
+  });
+
+  it('applies downmixFilter when adding a stereo compatibility track', async () => {
+    const args = argsFor([video, track(1, 'audio', 'eng', { codec_name: 'truehd', channels: 8 })], {
+      ensureStereo: true,
+      stereoAction: 'add',
+      downmixFilter: 'pan=stereo|c0=c2+0.30*c0|c1=c2+0.30*c1',
+    });
+    await audio.plugin(args);
+    const streams = kept(args, 'audio');
+    expect(streams).toHaveLength(2);
+    const added = streams[1]!;
+    expect(added.outputArgs).toContain('-filter:{outputIndex}');
+    expect(added.outputArgs).toContain('pan=stereo|c0=c2+0.30*c0|c1=c2+0.30*c1');
+  });
+
+  it('does not apply downmixFilter to source tracks with 2 or fewer channels', async () => {
+    const args = argsFor([video, track(1, 'audio', 'eng', { codec_name: 'mp3', channels: 2 })], {
+      ensureStereo: true,
+      stereoAction: 'convert',
+      downmixFilter: 'pan=stereo|c0=c2+0.30*c0|c1=c2+0.30*c1',
+    });
+    await audio.plugin(args);
+    const converted = kept(args, 'audio')[0]!;
+    expect(converted.outputArgs).not.toContain('-filter:{outputIndex}');
+    expect(converted.outputArgs).toContain('aac');
+  });
+
+  it('ignores inactive stereoAction and downmixFilter when ensureStereo is false', async () => {
+    const args = argsFor([video, track(1, 'audio', 'eng', { codec_name: 'ac3', channels: 6 })], {
+      ensureStereo: false,
+      stereoAction: 'not-an-action',
+      downmixFilter: 12345,
+    });
+    await audio.plugin(args);
+    expect(changes(args)).toEqual([]);
+  });
+
   it.each([
     { languageMode: 'drop' },
     { languageMode: 1 },
@@ -426,6 +540,9 @@ describe('Audio Tracks', () => {
     { defaultLanguage: false },
     { ensureStereo: 'yes' },
     { ensureStereo: null },
+    { ensureStereo: true, stereoAction: 'replace' },
+    { ensureStereo: true, stereoAction: 123 },
+    { ensureStereo: true, downmixFilter: 12345 },
     ...[0, 31, 513, 128.5, '', '128k', null, {}, true].map((stereoBitrate) => ({
       ensureStereo: true,
       stereoBitrate,

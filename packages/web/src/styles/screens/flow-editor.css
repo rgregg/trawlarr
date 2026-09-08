@@ -2,19 +2,28 @@
   min-width: 0;
 }
 
-.flow-canvas-toolbar {
+/*
+ * Canvas actions ride ON the canvas (a React Flow panel), because the page
+ * around them does not scroll and the canvas pans: anchored here they are in
+ * the same place whatever the graph is doing.
+ */
+.flow-canvas-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
 
-.flow-canvas-toolbar .detail {
-  flex: 1 1 16rem;
+.flow-canvas-actions button {
   font-size: var(--text-sm);
+  padding: 0.25rem 0.6rem;
 }
 
-.flow-canvas-help,
 .flow-canvas-notice {
   color: var(--ink-muted);
   font-size: var(--text-sm);
@@ -25,11 +34,17 @@
   min-height: 1.5em;
 }
 
+/*
+ * The workspace takes whatever height the editor page has left rather than a
+ * viewport fraction: the page is a fixed-height column, so a second scrollbar
+ * here (page scrolls, then canvas scrolls) is exactly what made the toolbar
+ * unreachable on a laptop.
+ */
 .flow-canvas-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 15.5rem;
-  min-height: 40rem;
-  height: min(74vh, 58rem);
+  grid-template-columns: minmax(0, 1fr) 16.5rem;
+  flex: 1;
+  min-height: 18rem;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -158,14 +173,17 @@
   font-size: 10px;
 }
 
-.flow-node-id {
-  color: var(--ink-muted);
-  font-family: var(--mono);
-  display: block;
-  font-size: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* A validation problem names the node it is about, and selects it when clicked. */
+.flow-problem-node {
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 1px dotted currentColor;
+  padding: 0;
+  min-height: 0;
+  cursor: pointer;
 }
 
 .flow-node-outputs {
@@ -252,6 +270,9 @@
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
   overflow-wrap: anywhere;
+  /* Capped, so a flow with twenty problems cannot squeeze the canvas away. */
+  max-height: 9rem;
+  overflow-y: auto;
 }
 
 .flow-canvas-empty {
@@ -440,4 +461,70 @@
   .flow-palette-items {
     grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
   }
+}
+
+/* --- the component palette, grouped ---------------------------------------
+   Built-in components first, then one heading per plugin source, and within a
+   group the components that build the ffmpeg command kept together: an
+   operator adding a transcode step is looking for a different kind of thing
+   from one adding a branch. */
+
+.flow-palette-group h3 {
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+  margin: var(--space-3) 0 var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--line);
+}
+
+.flow-palette-group h4 {
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+  font-weight: 500;
+  margin: var(--space-2) 0 var(--space-1);
+}
+
+/* --- the property catalogue in a node's configuration --------------------- */
+
+.flow-config-fields-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.flow-config-fields-picker label {
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+}
+
+.flow-config-catalogue {
+  margin-bottom: var(--space-3);
+}
+
+.flow-config-fields-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0 0;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.flow-config-fields-list > div {
+  display: contents;
+}
+
+.flow-config-fields-list dt {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.flow-config-fields-list dd {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
 }

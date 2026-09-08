@@ -745,6 +745,68 @@ describe('files', () => {
 });
 
 describe('flows', () => {
+  it('renames a flow without touching its definition, hash, draft or history', async () => {
+    const flow = await createFlowViaApi();
+    createFlowRepo(db).saveDraft({
+      id: flow.id,
+      draft: OTHER_DEF,
+      baseHash: flow.definitionHash,
+      nowMs: NOW,
+    });
+    const before = createFlowRepo(db).getById(flow.id)!;
+
+    const response = await api('PATCH', `/flows/${flow.id}`, { name: 'Renamed flow' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.name).toBe('Renamed flow');
+    // The signature is the definition's hash and nothing else. A rename that
+    // moved it would mark every converged file in the library stale and
+    // re-queue a library for a typo fix.
+    expect(response.body.definitionHash).toBe(before.definitionHash);
+    const after = createFlowRepo(db).getById(flow.id)!;
+    expect(after).toEqual({ ...before, name: 'Renamed flow' });
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body.total).toBe(1);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a rename onto a name another flow already has', async () => {
+    const first = await createFlowViaApi();
+    const second = await createFlowViaApi();
+
+    const response = await api('PATCH', `/flows/${second.id}`, { name: first.name });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('duplicate-name');
+    expect(createFlowRepo(db).getById(second.id)!.name).toBe(second.name);
+  });
+
+  it('refuses an empty rename and a patch that asks for nothing', async () => {
+    const flow = await createFlowViaApi();
+
+    expect((await api('PATCH', `/flows/${flow.id}`, { name: '' })).status).toBe(400);
+    expect((await api('PATCH', `/flows/${flow.id}`, {})).status).toBe(400);
+    expect((await api('PATCH', '/flows/nope', { name: 'x' })).status).toBe(404);
+    expect(createFlowRepo(db).getById(flow.id)!.name).toBe(flow.name);
+  });
+
+  it('serves the property catalogue a flow can read, described', async () => {
+    const response = await api('GET', '/flows/fields');
+
+    expect(response.status).toBe(200);
+    expect(response.body.syntax).toBe('{{property}}');
+    const names = (response.body.fields as { name: string; description: string }[]).map(
+      (field) => field.name,
+    );
+    expect(names).toContain('video.codec');
+    expect(names).toContain('file.path');
+    expect(response.body.fields.every((field: { description: string }) => field.description)).toBe(
+      true,
+    );
+    expect(
+      (response.body.namespaces as { prefix: string }[]).map((namespace) => namespace.prefix),
+    ).toEqual(['user.', 'library.', 'global.']);
+  });
+
   it('previews the authoritative hash without changing the live flow, draft or history', async () => {
     const flow = await createFlowViaApi();
     const library = seedLibrary({ flowId: flow.id });
@@ -1656,7 +1718,13 @@ describe('plugins', () => {
           sideEffects: 'inert',
           details: expect.objectContaining({
             inputs: expect.arrayContaining([
-              expect.objectContaining({ name: 'message', inputUI: { type: 'textarea' } }),
+              expect.objectContaining({
+                name: 'message',
+                // Declared as taking {{property}} placeholders, which is what
+                // makes the editor offer the catalogue on this input and not
+                // on Fail File's otherwise identical one.
+                inputUI: { type: 'textarea', acceptsFlowFields: true },
+              }),
               expect.objectContaining({ name: 'interpolate', inputUI: { type: 'switch' } }),
             ]),
             outputs: [expect.objectContaining({ number: 1 })],
