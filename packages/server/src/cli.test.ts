@@ -186,6 +186,56 @@ describe('cli: library add', () => {
     expect(library?.extensions).toEqual(['mkv', 'mp4']);
     db.close();
   });
+
+  it('stores configured --staging-dir and --trash-dir', async () => {
+    const dataDir = newDataDir();
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-root-'));
+    const stagingDir = mkdtempSync(join(tmpdir(), 'trawlarr-cli-staging-'));
+    const trashDir = mkdtempSync(join(tmpdir(), 'trawlarr-cli-trash-'));
+    expect(
+      await main([
+        'library',
+        'add',
+        '--name',
+        'WithStaging',
+        '--root',
+        root,
+        '--staging-dir',
+        stagingDir,
+        '--trash-dir',
+        trashDir,
+        '--data-dir',
+        dataDir,
+      ]),
+    ).toBe(0);
+
+    const db = openDatabase({ file: join(dataDir, 'trawlarr.db') });
+    migrate(db);
+    const library = createLibraryRepo(db).getByName('WithStaging');
+    expect(library?.stagingDir).toBe(stagingDir);
+    expect(library?.trashDir).toBe(trashDir);
+    db.close();
+  });
+
+  it('rejects a relative --staging-dir with an actionable message', async () => {
+    const dataDir = newDataDir();
+    const root = mkdtempSync(join(tmpdir(), 'trawlarr-cli-root-'));
+    expect(
+      await main([
+        'library',
+        'add',
+        '--name',
+        'RelativeStaging',
+        '--root',
+        root,
+        '--staging-dir',
+        'relative/staging',
+        '--data-dir',
+        dataDir,
+      ]),
+    ).not.toBe(0);
+    expect(stderr()).toContain('is not an absolute path');
+  });
 });
 
 describe('cli: flow add', () => {

@@ -17,6 +17,8 @@ import { LibrarySetup } from './LibrarySetup.js';
 export interface LibraryRow extends LibraryResource {
   extensions: string[];
   allowHardlinked: boolean;
+  stagingDir?: string | null;
+  trashDir?: string | null;
 }
 
 type View =
@@ -100,6 +102,12 @@ const Row = (props: {
                 title, since it is what the API and the CLI both speak. */}
             <span title={library.flowId}>{flowLabel(library.flowId, props.flowNames)}</span>
           </Link>
+        </p>
+      )}
+
+      {library.stagingDir && (
+        <p className="detail">
+          Staging: <code>{library.stagingDir}</code>
         </p>
       )}
 

@@ -5,6 +5,7 @@ export interface LibraryDraft {
   roots: string;
   extensions: string;
   allowHardlinked: boolean;
+  stagingDir: string;
 }
 
 export interface LibraryCreateBody {
@@ -12,6 +13,7 @@ export interface LibraryCreateBody {
   roots: string[];
   extensions?: string[];
   allowHardlinked?: boolean;
+  stagingDir?: string | null;
 }
 
 const split = (raw: string): string[] =>
@@ -38,11 +40,21 @@ export const draftProblems = (draft: LibraryDraft): string[] => {
         'path inside the container, e.g. /library/movies, not the host path.',
     );
   }
+
+  const staging = draft.stagingDir.trim();
+  if (staging !== '' && !staging.startsWith('/')) {
+    problems.push(
+      'Staging directory must be an absolute path as the trawlarr process sees it — in Docker ' +
+        'that is the path inside the container, e.g. /cache/staging, not the host path.',
+    );
+  }
+
   return problems;
 };
 
 export const toCreateBody = (draft: LibraryDraft): LibraryCreateBody => {
   const extensions = split(draft.extensions);
+  const staging = draft.stagingDir.trim();
   return {
     name: draft.name.trim(),
     roots: split(draft.roots),
@@ -50,6 +62,7 @@ export const toCreateBody = (draft: LibraryDraft): LibraryCreateBody => {
     // nothing", which scans as a permanently empty library with no error.
     ...(extensions.length > 0 ? { extensions } : {}),
     allowHardlinked: draft.allowHardlinked,
+    ...(staging !== '' ? { stagingDir: staging } : { stagingDir: null }),
   };
 };
 
