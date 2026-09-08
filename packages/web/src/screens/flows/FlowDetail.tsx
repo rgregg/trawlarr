@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
@@ -30,6 +30,15 @@ interface ApiLibraryStub {
   name: string;
   flowId: string | null;
 }
+
+interface ApiVersionPage {
+  items: ApiVersionSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+const VERSION_PAGE_SIZE = 50;
 
 const copyToClipboard = (text: string): Promise<void> | null => {
   const clipboard = (
@@ -104,6 +113,7 @@ export const FlowDetail = (props: {
   navigate: (to: string) => void;
 }): JSX.Element => {
   const { client, id } = props;
+  const currentFlowId = useRef(id);
 
   const [flow, setFlow] = useState<ApiFlowResource | null>(null);
   const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
@@ -120,19 +130,28 @@ export const FlowDetail = (props: {
   // history fetch is something an operator retries, and a Retry button that
   // does not exist cannot be reached for.
   const [versions, setVersions] = useState<VersionRow[] | null>(null);
+  const [versionsTotal, setVersionsTotal] = useState<number | null>(null);
   const [versionsFailure, setVersionsFailure] = useState<ReturnType<typeof describeFailure> | null>(
     null,
   );
+  const [versionsMoreFailure, setVersionsMoreFailure] = useState<ReturnType<
+    typeof describeFailure
+  > | null>(null);
+  const [loadingMoreVersions, setLoadingMoreVersions] = useState(false);
   const [versionsAttempt, setVersionsAttempt] = useState(0);
   const versionsLoading = versionsFailure === null && versions === null;
 
   useEffect(() => {
+    currentFlowId.current = id;
     setFlow(null);
     setFailure(null);
     setLibraries(null);
     setCopied(false);
     setVersions(null);
+    setVersionsTotal(null);
     setVersionsFailure(null);
+    setVersionsMoreFailure(null);
+    setLoadingMoreVersions(false);
   }, [id]);
 
   useEffect(() => {
@@ -188,11 +207,12 @@ export const FlowDetail = (props: {
     let cancelled = false;
     void (async () => {
       try {
-        const page = await client.get<{ items: ApiVersionSummary[] }>(
-          `/flows/${id}/versions?limit=50`,
+        const page = await client.get<ApiVersionPage>(
+          `/flows/${id}/versions?limit=${String(VERSION_PAGE_SIZE)}`,
         );
         if (cancelled) return;
         setVersions(toVersionRows(page.items, Date.now()));
+        setVersionsTotal(page.total);
         setVersionsFailure(null);
       } catch (error) {
         if (!cancelled) setVersionsFailure(describeFailure(error));
@@ -202,6 +222,29 @@ export const FlowDetail = (props: {
       cancelled = true;
     };
   }, [client, id, versionsAttempt]);
+
+  const loadMoreVersions = (): void => {
+    if (versions === null || loadingMoreVersions) return;
+
+    setLoadingMoreVersions(true);
+    setVersionsMoreFailure(null);
+    void (async () => {
+      try {
+        const page = await client.get<ApiVersionPage>(
+          `/flows/${id}/versions?limit=${String(VERSION_PAGE_SIZE)}&offset=${String(versions.length)}`,
+        );
+        if (currentFlowId.current !== id) return;
+        setVersions((current) =>
+          current === null ? current : [...current, ...toVersionRows(page.items, Date.now())],
+        );
+        setVersionsTotal(page.total);
+      } catch (error) {
+        if (currentFlowId.current === id) setVersionsMoreFailure(describeFailure(error));
+      } finally {
+        if (currentFlowId.current === id) setLoadingMoreVersions(false);
+      }
+    })();
+  };
 
   const rows = flow === null ? [] : toGraphRows(flow.definition);
   const currentVersion = versions?.find((version) => version.isCurrent) ?? null;
@@ -371,6 +414,24 @@ export const FlowDetail = (props: {
                   </li>
                 ))}
               </ul>
+            )}
+
+          {versionsFailure === null &&
+            !versionsLoading &&
+            versions !== null &&
+            versionsTotal !== null &&
+            versions.length < versionsTotal && (
+              <div className="flow-history-more">
+                {versionsMoreFailure !== null && (
+                  <p role="alert">
+                    <strong>{versionsMoreFailure.title}</strong>
+                    <span className="verbatim"> {versionsMoreFailure.message}</span>
+                  </p>
+                )}
+                <button type="button" onClick={loadMoreVersions} disabled={loadingMoreVersions}>
+                  {loadingMoreVersions ? 'Loading history…' : 'Load more history'}
+                </button>
+              </div>
             )}
         </>
       )}

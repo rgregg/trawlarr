@@ -1,5 +1,6 @@
 import type { ProbeData, ProbeStream } from '@trawlarr/plugin-api';
-import { canonicalJson, sha256Hex } from './canonical-json.js';
+import { canonicalJson } from './canonical-json.js';
+import { sha256Hex } from './sha256.js';
 
 export interface StreamFact {
   index: number;

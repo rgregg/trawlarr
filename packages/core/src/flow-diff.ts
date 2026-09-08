@@ -1,4 +1,5 @@
 import type { FlowDefinition, FlowEdge, FlowNode } from './flow.js';
+import { canonicalJson } from './canonical-json.js';
 
 /**
  * Diffs two flow definitions as a graph, not as text.
@@ -25,7 +26,7 @@ export interface FlowDiff {
 }
 
 function edgeKey(edge: EdgeRef): string {
-  return `${edge.fromNodeId} ${edge.outputNumber} ${edge.toNodeId}`;
+  return canonicalJson([edge.fromNodeId, edge.outputNumber, edge.toNodeId]);
 }
 
 function nodesById(nodes: FlowNode[]): Map<string, FlowNode> {
@@ -68,7 +69,7 @@ function inputValueRepr(value: unknown): InputRepr {
   if (value === undefined) {
     return { compare: null, display: null };
   }
-  const json = JSON.stringify(value) ?? 'undefined';
+  const json = canonicalJson(value);
   return { compare: json, display: typeof value === 'string' ? value : json };
 }
 

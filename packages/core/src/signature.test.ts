@@ -35,6 +35,18 @@ describe('flowDefinitionHash', () => {
     expect(flowDefinitionHash(reordered)).toBe(flowDefinitionHash(flow()));
   });
 
+  it('ignores edge ordering even when node ids contain delimiter characters', () => {
+    const collidingSortKeys = flow({
+      edges: [
+        { fromNodeId: 'a|1', outputNumber: 2, toNodeId: 'b' },
+        { fromNodeId: 'a', outputNumber: 1, toNodeId: '2|b' },
+      ],
+    });
+    const reordered = flow({ edges: [...collidingSortKeys.edges].reverse() });
+
+    expect(flowDefinitionHash(reordered)).toBe(flowDefinitionHash(collidingSortKeys));
+  });
+
   it('changes when a node input changes', () => {
     const edited = flow({
       nodes: [

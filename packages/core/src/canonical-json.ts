@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 const notSerialisable = (value: unknown): never => {
   throw new Error(`canonicalJson: value is not serialisable deterministically: ${String(value)}`);
 };
@@ -90,6 +88,3 @@ const canonicalJsonInner = (value: unknown, ancestors: Set<unknown>): string => 
     ancestors.delete(obj);
   }
 };
-
-export const sha256Hex = (input: string): string =>
-  createHash('sha256').update(input, 'utf8').digest('hex');

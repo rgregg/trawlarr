@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalJson, sha256Hex } from './canonical-json.js';
+import { canonicalJson } from './canonical-json.js';
+import { sha256Hex } from './sha256.js';
 
 describe('canonicalJson', () => {
   it('orders object keys so equal content hashes equally', () => {
