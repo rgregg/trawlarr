@@ -4,6 +4,7 @@ import {
   validateFlowDefinition,
   type FlowDefinition,
 } from '@trawlarr/core';
+import { FLOW_FIELD_DOCS, FLOW_FIELD_NAMESPACES } from '@trawlarr/plugins-core';
 import { checkAllLibraries } from '../../daemon/library-health.js';
 import { createFlowRepo, FlowChangedError, type FlowRecord } from '../../db/flow-repo.js';
 import { createFlowVersionRepo, type FlowVersionRecord } from '../../db/flow-version-repo.js';
@@ -229,6 +230,26 @@ export const flowRoutes: Route[] = [
   },
 
   /**
+   * The properties a flow can read about the file it is working on, as
+   * `{{placeholder}}` names.
+   *
+   * Served rather than shipped in the web bundle so the list can never be a
+   * stale copy: it is generated from the same `FLOW_FIELD_DOCS` the engine's
+   * reader is asserted against, on the daemon whose version will actually
+   * run the flow. A UI built against a newer daemon therefore offers exactly
+   * what that daemon can answer.
+   */
+  {
+    method: 'GET',
+    path: '/flows/fields',
+    handler: () => ({
+      syntax: '{{property}}',
+      fields: FLOW_FIELD_DOCS,
+      namespaces: FLOW_FIELD_NAMESPACES,
+    }),
+  },
+
+  /**
    * Listed BEFORE `/flows/:id` for a reader's sake only — the router matches
    * by specificity, so a flow whose id is literally "templates" is not what
    * this returns either way.
@@ -412,6 +433,39 @@ export const flowRoutes: Route[] = [
       const flow = requireFlow(ctx, params.id!);
       createFlowRepo(ctx.db).clearDraft(flow.id);
       return noContent();
+    },
+  },
+
+  /**
+   * Rename, and edit the description. Deliberately NOT part of `PUT
+   * /flows/:id`: that request publishes a definition, appends a version and
+   * invalidates every file signature, and a rename must do none of those.
+   * The name is outside the definition, so it is outside the signature hash.
+   */
+  {
+    method: 'PATCH',
+    path: '/flows/:id',
+    handler: ({ params, body, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const patch = (body ?? {}) as Record<string, unknown>;
+      if (patch.name === undefined && patch.description === undefined) {
+        throw new ApiError(
+          400,
+          'invalid-body',
+          `Send "name" and/or "description". A flow's definition is published through ` +
+            `PUT /api/v1/flows/${flow.id}, which is a different request because it makes a new ` +
+            `flow version.`,
+        );
+      }
+      const name = patch.name === undefined ? flow.name : requireString(body, 'name');
+      const description =
+        patch.description === undefined ? undefined : String(patch.description ?? '');
+      try {
+        return toFlowResource(createFlowRepo(ctx.db).rename({ id: flow.id, name, description }));
+      } catch (error) {
+        // The same 409 `POST /flows` answers, for the same constraint.
+        return asFlowValidationError(error);
+      }
     },
   },
 

@@ -45,6 +45,15 @@ export interface FlowRepo {
     note?: string;
     baseHash?: string;
   }): FlowRecord;
+  /**
+   * Renames a flow, and nothing else.
+   *
+   * A name is presentation: it lives outside `FlowDefinition`, so it is not
+   * in the signature hash, and renaming must not append a version, clear a
+   * draft, or restamp `updated_at` — otherwise typo-fixing a name would
+   * invalidate every file's recorded signature and re-queue the library.
+   */
+  rename(input: { id: string; name: string; description?: string }): FlowRecord;
   saveDraft(input: {
     id: string;
     draft: FlowDefinition;
@@ -280,6 +289,20 @@ export const createFlowRepo = (
         note: input.note ?? '',
         baseHash: input.baseHash,
       });
+    },
+
+    rename(input) {
+      const current = get(input.id);
+      if (current === null) throw new Error(`Unknown flow: ${input.id}`);
+      // `flow.name` is UNIQUE; the constraint failure surfaces to the caller
+      // as the duplicate-name error rather than being pre-checked here,
+      // because a pre-check is a race between two renames.
+      db.prepare(`UPDATE flow SET name = ?, description = ? WHERE id = ?`).run(
+        input.name,
+        input.description ?? current.description,
+        input.id,
+      );
+      return get(input.id)!;
     },
 
     saveDraft(input) {

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { ApiClient } from './api/client.js';
 import type { AccountResource } from './api/session.js';
 import { Config } from './screens/config/Config.js';
@@ -104,6 +105,26 @@ const Shell = (props: {
   // and a heading called another. Detail screens are absent from it and
   // render their own header, because only they know the thing's name.
   const page = NAV.find((entry) => entry.matches === route.name);
+  // Published as `--masthead-height` for the screens that fill the rest of
+  // the viewport instead of scrolling (the flow editor). Measured rather than
+  // assumed: the masthead's two rows wrap differently at different widths and
+  // with a longer connection message, and a screen sized from a guessed
+  // height either hides its own toolbar or leaves a gap under it.
+  const masthead = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = masthead.current;
+    if (element === null) return;
+    const publish = (): void => {
+      document.documentElement.style.setProperty(
+        '--masthead-height',
+        `${String(element.getBoundingClientRect().height)}px`,
+      );
+    };
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <div className="app">
@@ -111,7 +132,7 @@ const Shell = (props: {
           rows by role rather than by fit is what lets the same structure
           hold from 320px up, with no width at which it re-arranges into
           something the operator has to re-learn. */}
-      <div className="app-masthead">
+      <div className="app-masthead" ref={masthead}>
         <header className="app-header">
           <span className="app-brand">
             <BrandMark />

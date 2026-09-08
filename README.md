@@ -260,14 +260,31 @@ Open **Configure → Flows** to see every flow, including flows not attached to
 a library. Choose **New flow** for a canvas with a Start element, or **Edit
 flow** to change an existing flow.
 
-Drag components from the searchable right-hand panel onto the canvas. Compact
-boxes have an input at the top and the plugin's numbered outputs along the
-bottom: draw a line from an output handle to another box's input, or reconnect
-an existing line to change a branch. Auto-layout arranges the flow top to bottom.
-Branches can rejoin and cycles are supported. Double-click a box (or use its
-configuration icon) to edit the plugin's parameters, with controls, defaults,
-conditional fields and help supplied by the plugin itself. The Start element
-is clearly marked and protected from deletion.
+Drag components from the searchable right-hand panel onto the canvas. The
+panel is grouped by where a component came from — built-in components first,
+then one heading per installed plugin source — and within each group the
+components that build up the ffmpeg command are listed together, apart from
+the ones that branch or decide. Start and On Error disappear from the panel
+once the flow has one, since a flow may only contain one of each. Boxes are
+named after their plugin, numbered only when a flow uses the same plugin more
+than once.
+
+Compact boxes have an input at the top and the plugin's numbered outputs along
+the bottom: draw a line from an output handle to another box's input, or
+reconnect an existing line to change a branch. Auto-layout arranges the flow
+top to bottom. Branches can rejoin and cycles are supported. Double-click a box
+(or use its configuration icon) to edit the plugin's parameters, with controls,
+defaults, conditional fields and help supplied by the plugin itself. Inputs
+whose node expands `{{property}}` placeholders offer the daemon's own list of
+available data fields, each described, and insert one at the cursor. The Start
+element is clearly marked and protected from deletion.
+
+The editor fills the window rather than scrolling: the canvas actions (undo,
+redo, auto-layout, fit, delete) sit on the canvas itself, and the draft and
+publish actions stay in the bar at the top. A validation problem names the
+node it is about and selects it on the canvas when clicked. **Rename** changes
+a flow's name in place; a name is not part of the definition, so renaming
+creates no version and invalidates no file signatures.
 
 The canvas supports pan, zoom, fit, auto-layout, selection and undo/redo.
 Node positions save automatically on the daemon and survive reloads, browser

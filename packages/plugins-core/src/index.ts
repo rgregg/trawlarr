@@ -37,3 +37,14 @@ export const FIRST_PARTY_PLUGINS: Record<string, { id: string; module: PluginMod
   'trawlarr:onError': entry('trawlarr:onError', onError),
   'trawlarr:holdForReview': entry('trawlarr:holdForReview', holdForReview),
 };
+
+// The property catalogue is part of this package's public surface because the
+// API serves it to the flow editor: the list an operator inserts from must be
+// the one `readFlowValue` can answer, not a copy maintained in the web bundle.
+export {
+  FLOW_FIELDS,
+  FLOW_FIELD_DOCS,
+  FLOW_FIELD_NAMESPACES,
+  readFlowValue,
+  renderMessageTemplate,
+} from './flow-values.js';

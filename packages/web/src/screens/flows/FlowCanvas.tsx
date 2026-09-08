@@ -5,6 +5,7 @@ import {
   Controls,
   Handle,
   MiniMap,
+  Panel,
   Position,
   ReactFlow,
   ReactFlowProvider,
@@ -39,7 +40,10 @@ import type {
   EditorPlugin,
   ValidationProblem,
 } from './flow-canvas-model.js';
+import { nodeLabels } from './flow-canvas-model.js';
+import { palette, paletteCount } from './palette-model.js';
 import { NodeConfig } from './NodeConfig.js';
+import type { FlowFieldCatalogue } from './plugin-input-model.js';
 import { layoutsEqual } from './flow-layout-model.js';
 import '@xyflow/react/dist/style.css';
 import '../../styles/screens/flow-editor.css';
@@ -51,6 +55,8 @@ export interface FlowCanvasProps {
   onChange: (definition: FlowDefinition) => void;
   initialLayout: CanvasLayout;
   onLayoutChange: (layout: CanvasLayout) => void;
+  /** The daemon's property catalogue; null while it is loading or unavailable. */
+  fields: FlowFieldCatalogue | null;
   disabled?: boolean;
 }
 
@@ -87,7 +93,7 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
         position={Position.Top}
         id="input"
         isConnectable={!data.readOnly}
-        aria-label={`Input of ${node.id}`}
+        aria-label={`Input of ${data.label}`}
       />
       <span className="flow-node-input-label">
         {data.protectedStart ? 'Start' : data.errorEntry ? 'On flow error' : 'Input'}
@@ -97,10 +103,7 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
           {data.protectedStart ? '▶' : '◇'}
         </span>
         <div className="flow-node-title">
-          <strong title={plugin?.name ?? node.pluginId}>{plugin?.name ?? node.pluginId}</strong>
-          <span className="flow-node-id" title={node.id}>
-            {node.id}
-          </span>
+          <strong title={plugin?.name ?? node.pluginId}>{data.label}</strong>
           {data.protectedStart && <span className="flow-node-start">Protected start</span>}
           {data.errorEntry && <span className="flow-node-start">Error entry</span>}
         </div>
@@ -108,7 +111,7 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
           type="button"
           className="nodrag nopan flow-node-configure"
           onClick={() => data.configure(node.id)}
-          aria-label={`Configure ${plugin?.name ?? node.pluginId}, node ${node.id}`}
+          aria-label={`Configure ${data.label}`}
           title="Configure (or double-click the node)"
         >
           <svg
@@ -157,7 +160,7 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
                 position={Position.Bottom}
                 id={String(output.number)}
                 isConnectable={!output.missing && !data.readOnly}
-                aria-label={`Output ${output.number} of ${node.id}: ${output.tooltip}`}
+                aria-label={`Output ${output.number} of ${data.label}: ${output.tooltip}`}
               />
             </div>
           ))}
@@ -168,6 +171,17 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
 }
 
 const nodeTypes = { plugin: PluginNode };
+
+/**
+ * How the canvas frames a flow, here and on every Fit view.
+ *
+ * `maxZoom` below 1 is the point: React Flow's default fit scales a small
+ * graph UP until it fills the viewport, so a three-node flow opened as three
+ * enormous cards with no room to drop the next one. Capping the zoom means
+ * opening a flow always shows it at or below actual size, with space around
+ * it to work in.
+ */
+const FIT_VIEW = { padding: 0.2, maxZoom: 0.8 };
 const dragType = 'application/x-trawlarr-plugin';
 
 function CanvasEditor({
@@ -177,6 +191,7 @@ function CanvasEditor({
   onChange,
   initialLayout,
   onLayoutChange,
+  fields,
   disabled = false,
 }: FlowCanvasProps): JSX.Element {
   const flow = useReactFlow<EditorNode, EditorEdge>();
@@ -199,6 +214,7 @@ function CanvasEditor({
   } | null>(null);
   const [insertOutput, setInsertOutput] = useState('');
   const start = startNodeId(definition, plugins);
+  const labels = nodeLabels(definition, plugins);
   const selectedNodes = nodes.filter((node) => node.selected);
   const selectedEdges = edges.filter((edge) => edge.selected);
   const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : undefined;
@@ -371,6 +387,13 @@ function CanvasEditor({
     );
   };
 
+  /** Reveals and selects one node — how a validation problem gets you to it. */
+  const select = (id: string): void => {
+    setNodes((current) => current.map((node) => ({ ...node, selected: node.id === id })));
+    const node = nodes.find((candidate) => candidate.id === id);
+    if (node) void flow.setCenter(node.position.x + 100, node.position.y + 60, { duration: 250 });
+  };
+
   const canvasBounds = useRef<HTMLDivElement>(null);
   const onDrop = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault();
@@ -400,76 +423,77 @@ function CanvasEditor({
     }
   };
 
-  const visiblePlugins = plugins
-    .filter((plugin) =>
-      `${plugin.name} ${plugin.id} ${plugin.description} ${plugin.tags} ${plugin.source}`
-        .toLowerCase()
-        .includes(search.toLowerCase().trim()),
-    )
-    .sort(
-      (left, right) =>
-        left.details.sidebarPosition - right.details.sidebarPosition ||
-        left.name.localeCompare(right.name),
-    );
+  const errorEntryPresent = definition.nodes.some((node) =>
+    plugins.some(
+      (candidate) => candidate.id === node.pluginId && candidate.details.pType === 'onFlowError',
+    ),
+  );
+  const groups = palette({
+    plugins,
+    search,
+    startPresent: start !== undefined,
+    errorEntryPresent,
+  });
   const configured = definition.nodes.find((node) => node.id === configId);
+
+  /**
+   * The canvas's own actions, rendered as an overlay INSIDE the canvas rather
+   * than as a row above it. On a laptop the page and the canvas both scrolled,
+   * so Undo and Delete were regularly off screen while editing the very graph
+   * they act on; anchored to the canvas they are always where the work is.
+   */
+  const canvasActions = (
+    <div className="flow-canvas-actions" aria-label="Canvas actions">
+      <button
+        type="button"
+        disabled={disabled || history.past.length === 0}
+        onClick={() => travel('undo')}
+      >
+        Undo
+      </button>
+      <button
+        type="button"
+        disabled={disabled || history.future.length === 0}
+        onClick={() => travel('redo')}
+      >
+        Redo
+      </button>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          commit(definition, autoLayout(definition, plugins));
+          window.requestAnimationFrame(() => {
+            void flow.fitView({ ...FIT_VIEW, duration: 250 });
+          });
+        }}
+      >
+        Auto-layout
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          void flow.fitView({ ...FIT_VIEW, duration: 250 });
+        }}
+      >
+        Fit view
+      </button>
+      <button
+        type="button"
+        className="btn-danger"
+        disabled={
+          disabled ||
+          (selectedNodes.every((node) => node.id === start) && selectedEdges.length === 0)
+        }
+        onClick={removeSelection}
+      >
+        Delete selected
+      </button>
+    </div>
+  );
 
   return (
     <section className="flow-canvas-editor" aria-label="Visual flow editor" onKeyDown={keyboard}>
-      <div className="flow-canvas-toolbar" aria-label="Canvas actions">
-        <button
-          type="button"
-          disabled={disabled || history.past.length === 0}
-          onClick={() => travel('undo')}
-        >
-          Undo
-        </button>
-        <button
-          type="button"
-          disabled={disabled || history.future.length === 0}
-          onClick={() => travel('redo')}
-        >
-          Redo
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => {
-            commit(definition, autoLayout(definition, plugins));
-            window.requestAnimationFrame(() => {
-              void flow.fitView({ padding: 0.2, duration: 250 });
-            });
-          }}
-        >
-          Auto-layout
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            void flow.fitView({ padding: 0.2, duration: 250 });
-          }}
-        >
-          Fit view
-        </button>
-        <button
-          type="button"
-          className="btn-danger"
-          disabled={
-            disabled ||
-            (selectedNodes.every((node) => node.id === start) && selectedEdges.length === 0)
-          }
-          onClick={removeSelection}
-        >
-          Delete selected
-        </button>
-        <span className="detail">
-          Layout saves automatically without changing the flow version.
-        </span>
-      </div>
-      <p className="flow-canvas-help">
-        Drag components onto the canvas. Connect an output handle to an input. Drag a line’s
-        endpoint to reconnect. Double-click a node to configure. Shift-drag to select several nodes;
-        Delete removes the selection.
-      </p>
       {start === undefined && (
         <p className="flow-canvas-warning">
           No Start is present. Add a Start component from the palette.
@@ -511,9 +535,10 @@ function CanvasEditor({
             minZoom={0.1}
             maxZoom={2}
             fitView
-            fitViewOptions={{ padding: 0.2 }}
+            fitViewOptions={FIT_VIEW}
             defaultEdgeOptions={{ type: 'smoothstep', interactionWidth: 24 }}
           >
+            <Panel position="top-left">{canvasActions}</Panel>
             <Background gap={20} size={1} />
             <Controls showInteractive={false} />
             <MiniMap
@@ -538,8 +563,9 @@ function CanvasEditor({
             onChange={(event) => setSearch(event.target.value)}
           />
           <p className="help">
-            Drag a component left, or use Add. Installed plugins run as the service user, not in a
-            sandbox.
+            Drag a component onto the canvas, or use Add. Connect an output handle to an input, and
+            drag a line’s endpoint to reconnect. Double-click a node to configure it; shift-drag
+            selects several. Installed plugins run as the service user, not in a sandbox.
           </p>
           {selectedEdge && (
             <div className="flow-palette-insert">
@@ -556,7 +582,8 @@ function CanvasEditor({
                 Insert on selected connection
               </label>
               <p className="help">
-                {selectedEdge.source} → {selectedEdge.target}
+                {labels[selectedEdge.source] ?? selectedEdge.source} →{' '}
+                {labels[selectedEdge.target] ?? selectedEdge.target}
               </p>
             </div>
           )}
@@ -606,51 +633,42 @@ function CanvasEditor({
               </button>
             </fieldset>
           )}
-          <div className="flow-palette-items">
-            {visiblePlugins.map((plugin) => {
-              const duplicateStart =
-                (plugin.isStartPlugin || plugin.details.isStartPlugin) && start !== undefined;
-              const duplicateError =
-                plugin.details.pType === 'onFlowError' &&
-                definition.nodes.some((node) =>
-                  plugins.some(
-                    (candidate) =>
-                      candidate.id === node.pluginId && candidate.details.pType === 'onFlowError',
-                  ),
-                );
-              const unavailable = disabled || !plugin.enabled || duplicateStart || duplicateError;
-              return (
-                <article
-                  className="flow-palette-item"
-                  key={plugin.id}
-                  draggable={!unavailable}
-                  onDragStart={(event) => {
-                    event.dataTransfer.setData(dragType, plugin.id);
-                    event.dataTransfer.effectAllowed = 'copy';
-                  }}
-                >
-                  <strong>{plugin.name}</strong>
-                  <p title={plugin.description}>{plugin.description}</p>
-                  <small>{plugin.tags || plugin.source}</small>
-                  <button
-                    type="button"
-                    disabled={unavailable}
-                    onClick={() => addFromPalette(plugin)}
-                    aria-label={`Add ${plugin.name}`}
-                  >
-                    {!plugin.enabled
-                      ? 'Disabled'
-                      : duplicateStart
-                        ? 'Start already present'
-                        : duplicateError
-                          ? 'On Error already present'
-                          : 'Add'}
-                  </button>
-                </article>
-              );
-            })}
-            {visiblePlugins.length === 0 && <p>No components match this search.</p>}
-          </div>
+          {groups.map((group) => (
+            <section className="flow-palette-group" key={group.key}>
+              <h3>{group.title}</h3>
+              {group.sections.map((section) => (
+                <div key={section.title}>
+                  {section.title !== '' && <h4>{section.title}</h4>}
+                  <div className="flow-palette-items">
+                    {section.entries.map(({ plugin, unavailable }) => (
+                      <article
+                        className="flow-palette-item"
+                        key={plugin.id}
+                        draggable={!disabled && unavailable === null}
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData(dragType, plugin.id);
+                          event.dataTransfer.effectAllowed = 'copy';
+                        }}
+                      >
+                        <strong>{plugin.name}</strong>
+                        <p title={plugin.description}>{plugin.description}</p>
+                        <small>{plugin.tags || plugin.source}</small>
+                        <button
+                          type="button"
+                          disabled={disabled || unavailable !== null}
+                          onClick={() => addFromPalette(plugin)}
+                          aria-label={`Add ${plugin.name}`}
+                        >
+                          {unavailable ?? 'Add'}
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </section>
+          ))}
+          {paletteCount(groups) === 0 && <p>No components match this search.</p>}
         </aside>
       </div>
       <p className="flow-canvas-notice" role="status">
@@ -664,13 +682,23 @@ function CanvasEditor({
           <ul>
             {problems.map((problem, index) => (
               <li key={index}>
-                {problem.nodeId && <strong>{problem.nodeId}: </strong>}
+                {problem.nodeId !== undefined && (
+                  <button
+                    type="button"
+                    className="flow-problem-node"
+                    title={problem.nodeId}
+                    onClick={() => select(problem.nodeId!)}
+                  >
+                    {labels[problem.nodeId] ?? problem.nodeId}
+                  </button>
+                )}{' '}
                 {problem.message}
                 {problem.edge && (
                   <span>
                     {' '}
-                    ({problem.edge.fromNodeId}, output {problem.edge.outputNumber} →{' '}
-                    {problem.edge.toNodeId})
+                    ({labels[problem.edge.fromNodeId] ?? problem.edge.fromNodeId}, output{' '}
+                    {problem.edge.outputNumber} →{' '}
+                    {labels[problem.edge.toNodeId] ?? problem.edge.toNodeId})
                   </span>
                 )}
               </li>
@@ -683,6 +711,8 @@ function CanvasEditor({
           key={configured.id}
           node={configured}
           plugin={plugins.find((plugin) => plugin.id === configured.pluginId)}
+          label={labels[configured.id] ?? configured.id}
+          fields={fields}
           disabled={disabled}
           onClose={() => setConfigId(null)}
           onSave={(node) => {

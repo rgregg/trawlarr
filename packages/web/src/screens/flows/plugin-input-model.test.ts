@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { InputCondition, PluginInput } from '@trawlarr/plugin-api';
 import {
+  acceptsFlowFields,
   coerceInputValue,
   effectiveInputs,
   inputDefaults,
+  hasFlowFieldInputs,
   inputText,
+  insertFlowField,
   isInputVisible,
   parseInputObject,
   pluginInputBufferKey,
@@ -261,5 +264,57 @@ describe('metadata display conditions', () => {
         {},
       ),
     ).toBe(true);
+  });
+});
+
+describe('flow property insertion', () => {
+  const textField = (over: Partial<PluginInput> = {}): PluginInput => ({
+    name: 'message',
+    label: 'Message',
+    type: 'string',
+    defaultValue: '',
+    tooltip: '',
+    inputUI: { type: 'textarea' },
+    ...over,
+  });
+
+  it('offers the catalogue only on inputs whose node expands placeholders', () => {
+    expect(acceptsFlowFields(textField())).toBe(false);
+    expect(
+      acceptsFlowFields(textField({ inputUI: { type: 'textarea', acceptsFlowFields: true } })),
+    ).toBe(true);
+    expect(hasFlowFieldInputs([textField(), textField()])).toBe(false);
+    expect(
+      hasFlowFieldInputs([
+        textField(),
+        textField({ inputUI: { type: 'text', acceptsFlowFields: true } }),
+      ]),
+    ).toBe(true);
+  });
+
+  it('inserts at the caret, replaces a selection, and leaves the caret past the placeholder', () => {
+    expect(
+      insertFlowField({ text: 'a b', selectionStart: 2, selectionEnd: 2, field: 'file.name' }),
+    ).toEqual({ text: 'a {{file.name}}b', cursor: 15 });
+    expect(
+      insertFlowField({
+        text: 'old value',
+        selectionStart: 0,
+        selectionEnd: 3,
+        field: 'video.codec',
+      }),
+    ).toEqual({ text: '{{video.codec}} value', cursor: 15 });
+  });
+
+  // A textarea that has never been focused reports no selection at all, and a
+  // stale caret can outlive an edit; both must append rather than throw or
+  // silently truncate the text the operator already typed.
+  it('survives a caret that is missing or past the end of the text', () => {
+    expect(
+      insertFlowField({ text: 'abc', selectionStart: 99, selectionEnd: 99, field: 'job.id' }),
+    ).toEqual({ text: 'abc{{job.id}}', cursor: 13 });
+    expect(
+      insertFlowField({ text: 'abc', selectionStart: -1, selectionEnd: -1, field: 'job.id' }),
+    ).toEqual({ text: '{{job.id}}abc', cursor: 10 });
   });
 });

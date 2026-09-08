@@ -21,7 +21,7 @@ export const details = (): PluginDetails => ({
       defaultValue: DEFAULT_MESSAGE,
       tooltip:
         'Text for the job log and step excerpt. Enable placeholders to use {{file.path}}, {{video.codec}}, {{audio.languages}}, {{job.id}}, {{error.message}}, or {{user.name}}. Error fields require an On Error branch; missing or unknown properties are reported as errors.',
-      inputUI: { type: 'textarea' },
+      inputUI: { type: 'textarea', acceptsFlowFields: true },
     },
     {
       label: 'Expand placeholders',

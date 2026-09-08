@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FLOW_FIELD_DOCS,
+  FLOW_FIELD_NAMESPACES,
   readFlowValue,
   renderMessageTemplate,
   type FlowValue,
@@ -109,6 +111,21 @@ describe('flow properties', () => {
     expect(readFlowValue(args(), 'user.toString')).toBeUndefined();
     expect(() => readFlowValue(args(), 'process.env')).toThrow('Unknown flow property');
     expect(readFlowValue(args(), 'error.message')).toBeUndefined();
+  });
+
+  // The editor offers exactly FLOW_FIELD_DOCS as insertable properties. A
+  // documented name the reader rejects would only be discovered when a real
+  // file failed mid-flow, so the catalogue is asserted against the reader
+  // itself rather than against a second copy of the list.
+  it('documents every property the reader accepts, and nothing it does not', () => {
+    for (const field of FLOW_FIELD_DOCS) {
+      expect(() => readFlowValue(args(), field.name)).not.toThrow();
+      expect(field.description.length).toBeGreaterThan(0);
+    }
+    expect(new Set(FLOW_FIELD_DOCS.map((field) => field.name)).size).toBe(FLOW_FIELD_DOCS.length);
+    for (const namespace of FLOW_FIELD_NAMESPACES) {
+      expect(() => readFlowValue(args(), `${namespace.prefix}anything`)).not.toThrow();
+    }
   });
 
   it('supports Windows filenames and untagged audio', () => {
