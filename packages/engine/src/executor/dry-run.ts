@@ -146,6 +146,7 @@ export const runDryFlow = async (
 
   const result = await runFlow({
     ...options,
+    routeLoadErrors: false,
     loadPlugin: (node) => {
       const plugin = options.loadPlugin(node);
       const classification = classifySideEffects(plugin);

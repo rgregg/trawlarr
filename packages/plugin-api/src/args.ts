@@ -14,6 +14,9 @@ export interface LiveSizeCompare {
 export interface RunVariables {
   ffmpegCommand: FfmpegCommand;
   flowFailed: boolean;
+  flowError?: { nodeId: string; pluginId: string; pluginName: string; message: string };
+  /** First-party On Error's explicit choice; absent for legacy/community recovery handlers. */
+  flowErrorOutcome?: 'failure' | 'success';
   user: Record<string, string>;
   healthCheck?: 'Success';
   queueTags?: string;

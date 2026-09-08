@@ -38,6 +38,7 @@ const toFileResource = (row: MediaFileRow) => ({
   attemptCount: row.attempt_count,
   consecutiveNoopCount: row.consecutive_noop_count,
   holdUntilMs: row.hold_until_ms,
+  reviewReason: row.review_reason,
   priority: row.priority,
   lastRunId: row.last_run_id,
   missingSinceMs: row.missing_since_ms,

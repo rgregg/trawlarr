@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { flowDefinitionHash, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from './connection.js';
 import { migrate } from './migrate.js';
-import { createFlowRepo, type FlowRepo } from './flow-repo.js';
+import { createFlowRepo, FlowChangedError, type FlowRepo } from './flow-repo.js';
 import { createFlowVersionRepo } from './flow-version-repo.js';
 
 const NOW = 1_700_000_000_000;
@@ -50,6 +50,46 @@ beforeEach(() => {
 });
 
 describe('createFlowRepo', () => {
+  it('persists positions without changing the flow, draft, timestamps, hash, or version history', () => {
+    const flow = repo.create({ name: 'Layout', definition: DEF, nowMs: NOW });
+    repo.saveDraft({
+      id: flow.id,
+      draft: INVALID_DEF,
+      baseHash: flow.definitionHash,
+      nowMs: NOW + 1,
+    });
+    const before = repo.getById(flow.id);
+    const versions = createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 });
+    const layout = { start: { x: 10, y: 200 }, newDraftNode: { x: -100, y: 20 } };
+    expect(repo.saveLayout(flow.id, layout)).toEqual(layout);
+    expect(createFlowRepo(db).getById(flow.id)).toEqual({ ...before, layout });
+    expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 })).toEqual(
+      versions,
+    );
+    expect(repo.list()[0]?.layout).toEqual(layout);
+    expect(repo.getByName('Layout')?.layout).toEqual(layout);
+    expect(() => repo.saveLayout('missing', layout)).toThrow('Unknown flow');
+  });
+
+  it('keeps layout independent of publishing and discarding drafts', () => {
+    const flow = repo.create({ name: 'Layout', definition: DEF, nowMs: NOW });
+    const layout = { start: { x: 500, y: 200 } };
+    repo.saveLayout(flow.id, layout);
+    repo.saveDraft({
+      id: flow.id,
+      draft: OTHER_DEF,
+      baseHash: flow.definitionHash,
+      nowMs: NOW + 1,
+    });
+    repo.clearDraft(flow.id);
+    expect(repo.getById(flow.id)?.layout).toEqual(layout);
+    const published = repo.update({ id: flow.id, definition: OTHER_DEF, nowMs: NOW + 2 });
+    expect(published.layout).toEqual(layout);
+    expect(published.definitionHash).toBe(flowDefinitionHash(OTHER_DEF));
+    repo.saveLayout(flow.id, {});
+    expect(repo.getById(flow.id)).toEqual({ ...published, layout: {} });
+  });
+
   it('stores the definition and its hash together', () => {
     const created = repo.create({ name: 'HEVC', definition: definition(), nowMs: NOW });
     expect(created.definitionHash).toBe(flowDefinitionHash(definition()));
@@ -178,6 +218,162 @@ describe('createFlowRepo: version history', () => {
     const versions = createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 });
     expect(versions.total).toBe(1);
     expect(versions.items[0]!.definitionHash).toBe(flow.definitionHash);
+  });
+
+  describe('createFlowRepo: drafts', () => {
+    it('stores invalid work without changing the live definition, timestamps or history', () => {
+      const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+      expect(flow).toMatchObject({ draft: null, draftBaseHash: null, draftUpdatedAt: null });
+      const versions = createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 });
+
+      const saved = repo.saveDraft({
+        id: flow.id,
+        draft: INVALID_DEF,
+        baseHash: flow.definitionHash,
+        nowMs: NOW + 1,
+      });
+
+      expect(saved).toEqual({
+        ...flow,
+        draft: INVALID_DEF,
+        draftBaseHash: flow.definitionHash,
+        draftUpdatedAt: NOW + 1,
+      });
+      expect(repo.getById(flow.id)).toEqual(saved);
+      expect(repo.getByName(flow.name)).toEqual(saved);
+      expect(repo.list()).toEqual([saved]);
+      expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 })).toEqual(
+        versions,
+      );
+    });
+
+    it('saves an empty graph and permits retaining a stale base hash', () => {
+      const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+      const saved = repo.saveDraft({
+        id: flow.id,
+        draft: { nodes: [], edges: [] },
+        baseHash: 'earlier-hash',
+        nowMs: NOW + 1,
+      });
+      expect(saved.draft).toEqual({ nodes: [], edges: [] });
+      expect(saved.draftBaseHash).toBe('earlier-hash');
+    });
+
+    it.each([
+      {},
+      { nodes: [null], edges: [] },
+      { nodes: DEF.nodes, edges: [{ fromNodeId: 'start', toNodeId: 'enc', outputNumber: '1' }] },
+      { nodes: [{ ...DEF.nodes[0], inputs: [] }], edges: [] },
+    ])('rejects a malformed draft without replacing saved work: %j', (malformed) => {
+      const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+      const saved = repo.saveDraft({
+        id: flow.id,
+        draft: OTHER_DEF,
+        baseHash: flow.definitionHash,
+        nowMs: NOW + 1,
+      });
+      expect(() =>
+        repo.saveDraft({
+          id: flow.id,
+          draft: malformed as unknown as FlowDefinition,
+          baseHash: flow.definitionHash,
+          nowMs: NOW + 2,
+        }),
+      ).toThrow();
+      expect(repo.getById(flow.id)).toEqual(saved);
+    });
+
+    it('discards only draft state and is idempotent', () => {
+      const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+      repo.saveDraft({ id: flow.id, draft: OTHER_DEF, baseHash: flow.definitionHash, nowMs: NOW });
+      repo.clearDraft(flow.id);
+      repo.clearDraft(flow.id);
+      expect(repo.getById(flow.id)).toEqual(flow);
+      expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 }).total).toBe(
+        1,
+      );
+    });
+
+    it('refuses to save a draft for an unknown flow', () => {
+      expect(() =>
+        repo.saveDraft({ id: 'missing', draft: DEF, baseHash: 'hash', nowMs: NOW }),
+      ).toThrow(/Unknown flow/);
+    });
+
+    it('rejects a stale publication without clearing the draft or appending history', () => {
+      const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+      repo.update({ id: flow.id, definition: OTHER_DEF, nowMs: NOW + 1 });
+      const saved = repo.saveDraft({
+        id: flow.id,
+        draft: DEF,
+        baseHash: flow.definitionHash,
+        nowMs: NOW + 2,
+      });
+      expect(() =>
+        repo.update({
+          id: flow.id,
+          definition: DEF,
+          baseHash: flow.definitionHash,
+          nowMs: NOW + 3,
+        }),
+      ).toThrow(FlowChangedError);
+      expect(repo.getById(flow.id)).toEqual(saved);
+      expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 }).total).toBe(
+        2,
+      );
+    });
+
+    it('keeps the draft when publishing is invalid or the version append fails', () => {
+      const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+      const saved = repo.saveDraft({
+        id: flow.id,
+        draft: OTHER_DEF,
+        baseHash: flow.definitionHash,
+        nowMs: NOW + 1,
+      });
+      expect(() => repo.update({ id: flow.id, definition: INVALID_DEF, nowMs: NOW + 2 })).toThrow();
+      expect(repo.getById(flow.id)).toEqual(saved);
+
+      db.exec(
+        `CREATE TRIGGER boom BEFORE INSERT ON flow_version BEGIN SELECT RAISE(ABORT, 'boom'); END;`,
+      );
+      expect(() => repo.update({ id: flow.id, definition: OTHER_DEF, nowMs: NOW + 2 })).toThrow(
+        /boom/,
+      );
+      expect(repo.getById(flow.id)).toEqual(saved);
+      expect(createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 }).total).toBe(
+        1,
+      );
+    });
+
+    it.each([true, false])(
+      'publishes and clears the draft with a base hash supplied: %s',
+      (guard) => {
+        const flow = repo.create({ name: 'Draft', definition: DEF, nowMs: NOW });
+        repo.saveDraft({
+          id: flow.id,
+          draft: OTHER_DEF,
+          baseHash: flow.definitionHash,
+          nowMs: NOW,
+        });
+        const published = repo.update({
+          id: flow.id,
+          definition: OTHER_DEF,
+          baseHash: guard ? flow.definitionHash : undefined,
+          nowMs: NOW + 1,
+        });
+        expect(published).toMatchObject({
+          definition: OTHER_DEF,
+          draft: null,
+          draftBaseHash: null,
+          draftUpdatedAt: null,
+        });
+        expect(published.definitionHash).not.toBe(flow.definitionHash);
+        expect(
+          createFlowVersionRepo(db).list({ flowId: flow.id, limit: 10, offset: 0 }).total,
+        ).toBe(2);
+      },
+    );
   });
 
   it('records a version on update, carrying the note', () => {

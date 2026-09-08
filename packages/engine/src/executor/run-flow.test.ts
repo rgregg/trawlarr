@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { FlowDefinition, FlowNode } from '@trawlarr/core';
+import { ReviewHoldSignal, type FlowDefinition, type FlowNode } from '@trawlarr/core';
 import type {
   PluginDetails,
   PluginInputArgs,
@@ -72,6 +72,133 @@ const node = (id: string, pluginId = id, isStart = false): FlowNode => ({
 });
 
 describe('runFlow — routing', () => {
+  it.each([
+    { explicit: true, withHandler: true, expected: ['encoder', 'manual'] },
+    { explicit: false, withHandler: true, expected: ['encoder', 'handler'] },
+    { explicit: false, withHandler: false, expected: ['encoder'] },
+  ])('respects author failure branches before automatic recovery: %j', async (scenario) => {
+    const result = await runFlow({
+      flow: flow(
+        [node('encoder'), node('manual'), ...(scenario.withHandler ? [node('handler')] : [])],
+        scenario.explicit ? [{ fromNodeId: 'encoder', outputNumber: 2, toNodeId: 'manual' }] : [],
+      ),
+      initialPath: '/in.mkv',
+      startNodeId: 'encoder',
+      loadPlugin: loaderFor({
+        encoder: {
+          module: routeTo(2),
+          details: details({
+            name: 'Encoder',
+            outputs: [{ number: 2, tooltip: 'Failed', outcome: 'failure' }],
+          }),
+        },
+        handler: { module: routeTo(1), details: details({ pType: 'onFlowError' }) },
+        manual: { module: routeTo(1) },
+      }),
+      buildArgs,
+    });
+    expect(result.steps.map((step) => step.nodeId)).toEqual(scenario.expected);
+    expect(result.variables.flowError).toEqual({
+      nodeId: 'encoder',
+      pluginId: 'encoder',
+      pluginName: 'Encoder',
+      message: '"Encoder" reported failure on output 2.',
+    });
+    // Generic handlers and explicitly routed remediation retain their
+    // existing success rule. Without a handler the final failure output is
+    // still available for the job runner's usual failure classification.
+    expect(result.failed).toBe(false);
+    if (!scenario.withHandler) expect(result.steps.at(-1)!.outputOutcome).toBe('failure');
+  });
+
+  it.each([true, false])(
+    'routes plugin load failures only when permitted: %s',
+    async (routeLoadErrors) => {
+      const result = await runFlow({
+        flow: flow([node('missing'), node('error')], []),
+        initialPath: '/in.mkv',
+        startNodeId: 'missing',
+        routeLoadErrors,
+        loadPlugin: loaderFor({
+          error: { details: details({ pType: 'onFlowError' }), module: routeTo(1) },
+        }),
+        buildArgs,
+      });
+      expect(result.stopReason).toBe(routeLoadErrors ? 'end-of-flow' : 'plugin-error');
+      expect(result.steps.map((step) => step.nodeId)).toEqual(
+        routeLoadErrors ? ['missing', 'error'] : ['missing'],
+      );
+      expect(result.variables.flowError).toEqual({
+        nodeId: 'missing',
+        pluginId: 'missing',
+        pluginName: 'missing',
+        message: 'no fixture for plugin missing',
+      });
+    },
+  );
+
+  it('does not let On Error resume a review hold', async () => {
+    const handler = vi.fn(routeTo(1).plugin);
+    const result = await runFlow({
+      flow: flow([node('hold'), node('error')], []),
+      initialPath: '/in.mkv',
+      startNodeId: 'hold',
+      loadPlugin: loaderFor({
+        hold: {
+          module: {
+            details,
+            plugin: () => {
+              throw new ReviewHoldSignal('Inspect it.');
+            },
+          },
+        },
+        error: {
+          details: details({ pType: 'onFlowError' }),
+          module: { details, plugin: handler },
+        },
+      }),
+      buildArgs,
+    });
+    expect(result.stopReason).toBe('held-for-review');
+    expect(result.reviewReason).toBe('Inspect it.');
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]!.error).toBeNull();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('preserves original failure context throughout its recovery branch', async () => {
+    const result = await runFlow({
+      flow: flow(
+        [node('bad'), node('error'), node('finish')],
+        [{ fromNodeId: 'error', outputNumber: 1, toNodeId: 'finish' }],
+      ),
+      initialPath: '/in.mkv',
+      startNodeId: 'bad',
+      loadPlugin: loaderFor({
+        bad: {
+          details: details({ name: 'Broken node' }),
+          module: {
+            details,
+            plugin: () => {
+              throw new Error('Original failure');
+            },
+          },
+        },
+        error: { details: details({ pType: 'onFlowError' }), module: routeTo(1) },
+        finish: { module: routeTo(1) },
+      }),
+      buildArgs,
+    });
+    expect(result.stopReason).toBe('end-of-flow');
+    expect(result.variables.flowFailed).toBe(true);
+    expect(result.variables.flowError).toEqual({
+      nodeId: 'bad',
+      pluginId: 'bad',
+      pluginName: 'Broken node',
+      message: 'Original failure',
+    });
+  });
+
   it('walks a linear flow and records a step per node', async () => {
     const result = await runFlow({
       flow: flow([node('a'), node('b')], [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }]),

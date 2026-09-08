@@ -1,9 +1,15 @@
-import { FlowValidationError, validateFlowDefinition, type FlowDefinition } from '@trawlarr/core';
+import {
+  flowDefinitionHash,
+  FlowValidationError,
+  validateFlowDefinition,
+  type FlowDefinition,
+} from '@trawlarr/core';
 import { checkAllLibraries } from '../../daemon/library-health.js';
-import { createFlowRepo, type FlowRecord } from '../../db/flow-repo.js';
+import { createFlowRepo, FlowChangedError, type FlowRecord } from '../../db/flow-repo.js';
 import { createFlowVersionRepo, type FlowVersionRecord } from '../../db/flow-version-repo.js';
 import { createLibraryRepo } from '../../db/library-repo.js';
 import { createNodeCapabilityResolver } from '../../flow/node-capabilities.js';
+import { InvalidFlowLayoutError, parseFlowLayout } from '../../flow/layout.js';
 import { createPluginRegistry } from '../../plugins/registry.js';
 import { dryRunFlow, DryRunInputError } from '../../flow/dry-run.js';
 import { buildFromTemplate, FLOW_TEMPLATES, UnknownTemplateError } from '../../flow/templates.js';
@@ -27,6 +33,10 @@ const toFlowResource = (flow: FlowRecord) => ({
   // one is stale the moment a definition changes, which is why it travels
   // with every representation rather than being computed by clients.
   definitionHash: flow.definitionHash,
+  draft: flow.draft,
+  draftBaseHash: flow.draftBaseHash,
+  draftUpdatedAt: flow.draftUpdatedAt,
+  layout: flow.layout,
   createdAt: flow.createdAt,
   updatedAt: flow.updatedAt,
 });
@@ -93,6 +103,9 @@ const requireDefinition = (body: unknown): FlowDefinition => {
  * only reason they are worth reading.
  */
 const asFlowValidationError = (error: unknown): never => {
+  if (error instanceof FlowChangedError) {
+    throw new ApiError(409, 'flow-changed', error.message);
+  }
   if (error instanceof FlowValidationError) {
     throw new ApiError(
       400,
@@ -138,13 +151,14 @@ const fromTemplate = (templateId: string, values: unknown): FlowDefinition => {
  */
 const publishFlow = (
   ctx: ApiContext,
-  input: { id: string; definition: FlowDefinition; note?: string },
+  input: { id: string; definition: FlowDefinition; note?: string; baseHash?: string },
 ): FlowRecord => {
   const updated = createFlowRepo(ctx.db).update({
     id: input.id,
     definition: input.definition,
     nowMs: ctx.nowMs(),
     note: input.note,
+    baseHash: input.baseHash,
   });
   // A flow edit can make a paused library runnable, or an attached flow
   // unrunnable. Re-checked here so the library's `pausedReason` is correct
@@ -162,6 +176,23 @@ const publishFlow = (
 };
 
 export const flowRoutes: Route[] = [
+  {
+    method: 'PUT',
+    path: '/flows/:id/layout',
+    handler: ({ params, body, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      try {
+        const layout = parseFlowLayout((body as { layout?: unknown } | null)?.layout);
+        return { layout: createFlowRepo(ctx.db).saveLayout(flow.id, layout) };
+      } catch (error) {
+        if (error instanceof InvalidFlowLayoutError) {
+          throw new ApiError(400, 'invalid-layout', error.message);
+        }
+        throw error;
+      }
+    },
+  },
+
   {
     method: 'GET',
     path: '/flows',
@@ -344,6 +375,48 @@ export const flowRoutes: Route[] = [
 
   {
     method: 'PUT',
+    path: '/flows/:id/draft',
+    handler: ({ params, body, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const definition = requireDefinition(body);
+      const baseHash = requireString(body, 'baseHash');
+      const problems = validateFlowDefinition(
+        definition,
+        createNodeCapabilityResolver({ registry: createPluginRegistry(ctx.db) }),
+      );
+      // This preview is never written to the live flow or its version history.
+      const definitionHash = problems.length === 0 ? flowDefinitionHash(definition) : null;
+      try {
+        const saved = createFlowRepo(ctx.db).saveDraft({
+          id: flow.id,
+          draft: definition,
+          baseHash,
+          nowMs: ctx.nowMs(),
+        });
+        return {
+          flow: toFlowResource(saved),
+          ok: problems.length === 0,
+          problems,
+          definitionHash,
+        };
+      } catch (error) {
+        return asFlowValidationError(error);
+      }
+    },
+  },
+
+  {
+    method: 'DELETE',
+    path: '/flows/:id/draft',
+    handler: ({ params, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      createFlowRepo(ctx.db).clearDraft(flow.id);
+      return noContent();
+    },
+  },
+
+  {
+    method: 'PUT',
     path: '/flows/:id',
     handler: ({ params, body, ctx }) => {
       const flow = requireFlow(ctx, params.id!);
@@ -354,6 +427,7 @@ export const flowRoutes: Route[] = [
           id: flow.id,
           definition: requireDefinition(body),
           note: typeof patch.note === 'string' ? patch.note : undefined,
+          baseHash: patch.baseHash === undefined ? undefined : requireString(body, 'baseHash'),
         });
       } catch (error) {
         return asFlowValidationError(error);
@@ -395,7 +469,8 @@ export const flowRoutes: Route[] = [
       );
       return {
         ok: problems.length === 0,
-        problems: problems.map((problem) => ({ code: problem.code, message: problem.message })),
+        problems,
+        definitionHash: problems.length === 0 ? flowDefinitionHash(definition) : null,
         stored: false,
       };
     },

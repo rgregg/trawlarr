@@ -133,10 +133,13 @@ export const parseAgentMessage = (raw: unknown): AgentToDaemon | null => {
         nowMs: typeof raw['nowMs'] === 'number' ? raw['nowMs'] : undefined,
       };
     }
-    case 'done':
-      return isRecord(raw['report'])
-        ? { type: 'done', report: raw['report'] as unknown as JobReport }
-        : null;
+    case 'done': {
+      const report = raw['report'];
+      if (!isRecord(report)) return null;
+      if (report['held'] !== undefined && typeof report['held'] !== 'boolean') return null;
+      if (report['reviewReason'] != null && typeof report['reviewReason'] !== 'string') return null;
+      return { type: 'done', report: report as unknown as JobReport };
+    }
     case 'failed':
       return typeof raw['error'] === 'string' ? { type: 'failed', error: raw['error'] } : null;
     default:

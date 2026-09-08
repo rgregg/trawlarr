@@ -44,6 +44,34 @@ beforeEach(() => {
 });
 
 describe('upsertScanned and identity', () => {
+  it('persists manual review holds and excludes them from claims until explicitly requeued', () => {
+    const fileId = scan();
+    repo.setLedger({
+      fileId,
+      record: {
+        ...newLedgerRecord(),
+        state: 'held',
+        reviewReason: 'Inspect quality.',
+        attemptCount: 2,
+      },
+    });
+    scan({ path: '/media/movies/renamed.mkv' });
+    expect(repo.getLedger(fileId)).toMatchObject({
+      state: 'held',
+      reviewReason: 'Inspect quality.',
+      holdUntilMs: null,
+      attemptCount: 2,
+    });
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: Number.MAX_SAFE_INTEGER })).toBeNull();
+    repo.requeue(fileId);
+    expect(repo.getLedger(fileId)).toMatchObject({
+      reviewReason: null,
+      attemptCount: 0,
+      state: 'queued',
+    });
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: NOW })?.fileId).toBe(fileId);
+  });
+
   it('inserts a new file', () => {
     const id = scan();
     expect(repo.getById(id)?.path).toBe('/media/movies/Arrival.mkv');
@@ -391,6 +419,7 @@ describe('probe, facts and ledger persistence', () => {
       attemptCount: 2,
       consecutiveNoopCount: 1,
       holdUntilMs: NOW + 5000,
+      reviewReason: null,
     };
     repo.setLedger({ fileId: id, record });
     expect(repo.getLedger(id)).toEqual(record);

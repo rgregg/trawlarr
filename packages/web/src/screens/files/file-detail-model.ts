@@ -98,6 +98,7 @@ export const explainState = (input: {
   attemptCount: number;
   lastJobReason: string | null;
   holdUntilMs: number | null;
+  reviewReason?: string | null;
   nowMs: number;
 }): string => {
   switch (input.state) {
@@ -114,6 +115,9 @@ export const explainState = (input: {
         input.lastJobReason === null ? '' : `: ${input.lastJobReason}`
       }. It will not retry on its own.`;
     case 'held': {
+      if (input.reviewReason != null) {
+        return `Held for review: ${input.reviewReason} It will not retry automatically. Requeue it after reviewing the file.`;
+      }
       if (input.holdUntilMs === null) return 'Held after a failed attempt. It will be retried.';
       const delay = humanDelay(input.holdUntilMs - input.nowMs);
       return delay === null

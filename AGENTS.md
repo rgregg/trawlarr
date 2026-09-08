@@ -68,14 +68,14 @@ this repo has been bitten twice by silently-skipped real-media tests.
 pnpm workspace, `packages/*`, strict TypeScript with project references (`tsconfig.json`
 at the root references every package except `web`, which builds through Vite).
 
-| Package                  | Role                                                                                                                                                                                                                                               |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@trawlarr/plugin-api`   | Types only: the Tdarr plugin contract (`args`, `details()`, inputs/outputs, injected `deps`).                                                                                                                                                      |
-| `@trawlarr/core`         | Pure domain. Identity, facts, the convergence ledger, flow definitions + signature hash, the ffmpeg command model (build → compile to argv), schedule, worker classes.                                                                             |
-| `@trawlarr/plugins-core` | First-party flow nodes (Start, Check Video Codec, Begin Command, Set Video Encoder, Execute, Verify Output, Replace Original File).                                                                                                                |
-| `@trawlarr/engine`       | Plugin host + executor: validating CommonJS loader, `deps` implementations (`crudTransDBN`, `axiosMiddleware`, injected npm modules), the file-object projection plugins expect, ffmpeg invocation and progress parsing, the flow walker, dry run. |
-| `@trawlarr/server`       | SQLite persistence and migrations, scanner, worker supervisor + forked agents, watcher and scan coordinator, REST API and event stream, the daemon, and the `trawlarr` CLI.                                                                        |
-| `@trawlarr/web`          | React + Vite UI, served as static files by the daemon.                                                                                                                                                                                             |
+| Package                  | Role                                                                                                                                                                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@trawlarr/plugin-api`   | Types only: the Tdarr plugin contract (`args`, `details()`, inputs/outputs, injected `deps`).                                                                                                                                                         |
+| `@trawlarr/core`         | Pure domain. Identity, facts, the convergence ledger, flow definitions + signature hash, the ffmpeg command model (build → compile to argv), schedule, worker classes.                                                                                |
+| `@trawlarr/plugins-core` | First-party flow nodes: Start, Check Video Codec, Check Condition, Begin Command, Set Video Encoder, Audio Tracks, Subtitle Tracks, Set Container, Execute, Verify Output, Replace Original File, Write to Log, Fail File, On Error, Hold for Review. |
+| `@trawlarr/engine`       | Plugin host + executor: validating CommonJS loader, `deps` implementations (`crudTransDBN`, `axiosMiddleware`, injected npm modules), the file-object projection plugins expect, ffmpeg invocation and progress parsing, the flow walker, dry run.    |
+| `@trawlarr/server`       | SQLite persistence and migrations, scanner, worker supervisor + forked agents, watcher and scan coordinator, REST API and event stream, the daemon, and the `trawlarr` CLI.                                                                           |
+| `@trawlarr/web`          | React + Vite UI, served as static files by the daemon.                                                                                                                                                                                                |
 
 Dependencies flow one way: `plugin-api` → `core` → `plugins-core` → `engine` → `server`.
 
@@ -102,6 +102,11 @@ one where a whole library reported 100% converged with nothing transcoded and no
 flow keeps changing the file without settling) are never re-touched by the scanner or the
 queue; `requeue` is the only way out. Backoff and attempt counting live in
 `packages/core/src/ledger.ts`.
+
+**Manual review holds are not retry backoff.** Hold for Review records a reason,
+spends no attempt, and cannot be claimed or released by scans/flow edits; only explicit
+requeue releases it. A hold after replacement must still reconcile the installed file.
+First-party On Error preserves failed outcomes unless successful recovery is explicitly enabled.
 
 **Two workers on one file is how a replacement destroys data.** Hence: atomic claiming in
 the DB, `trawlarr run` refusing to drain beside a running daemon, a 24h floor on the stalled-row

@@ -103,11 +103,13 @@ describe('parseRoute', () => {
       } as const,
       { name: 'job', id: 'job-9' } as const,
       { name: 'flow', id: 'flow-7' } as const,
+      { name: 'flowEdit', id: 'flow-7' } as const,
       { name: 'flowVersion', flowId: 'flow-7', versionId: 'v-1' } as const,
       { name: 'flowVersionDirect', versionId: 'v-1' } as const,
       { name: 'flowCompare', flowId: 'flow-7', from: null, to: null } as const,
       { name: 'flowCompare', flowId: 'flow-7', from: 'v-1', to: 'v-2' } as const,
       { name: 'config', tab: 'libraries' } as const,
+      { name: 'config', tab: 'flows' } as const,
       { name: 'files', filters: { library: 'lib-1', state: 'failed', q: 'x' } } as const,
     ];
     for (const route of routes) {

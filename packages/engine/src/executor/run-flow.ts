@@ -1,4 +1,4 @@
-import type { FlowDefinition, FlowNode } from '@trawlarr/core';
+import { ReviewHoldSignal, type FlowDefinition, type FlowNode } from '@trawlarr/core';
 import type { PluginInputArgs, RunVariables } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
 
@@ -26,7 +26,12 @@ export interface StepRecord {
 }
 
 export type StopReason =
-  'end-of-flow' | 'plugin-error' | 'step-budget' | 'missing-node' | 'no-start-node';
+  | 'end-of-flow'
+  | 'plugin-error'
+  | 'step-budget'
+  | 'missing-node'
+  | 'no-start-node'
+  | 'held-for-review';
 
 export interface FlowRunResult {
   steps: StepRecord[];
@@ -35,6 +40,7 @@ export interface FlowRunResult {
   failed: boolean;
   stopReason: StopReason;
   error: string | null;
+  reviewReason?: string | null;
 }
 
 export interface NodeInvocation {
@@ -52,6 +58,8 @@ export interface RunFlowOptions {
   buildArgs: (invocation: NodeInvocation) => PluginInputArgs;
   startNodeId?: string;
   maxSteps?: number;
+  /** Dry runs disable this: their loader uses refusal as a safety boundary, not a plugin error. */
+  routeLoadErrors?: boolean;
   onStep?: (step: StepRecord) => void;
   nowMs?: () => number;
 }
@@ -87,14 +95,20 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
     user: {},
   };
   let currentPath = options.initialPath;
+  let reviewReason: string | null = null;
 
   const finish = (stopReason: StopReason, error: string | null): FlowRunResult => ({
     steps,
     variables,
     currentPath,
-    failed: stopReason !== 'end-of-flow',
+    failed: stopReason !== 'end-of-flow' || variables.flowErrorOutcome === 'failure',
     stopReason,
-    error,
+    error:
+      error ??
+      (stopReason === 'end-of-flow' && variables.flowErrorOutcome === 'failure'
+        ? (variables.flowError?.message ?? 'The error branch finished without successful recovery.')
+        : null),
+    reviewReason,
   });
 
   // Memoise loads for this run only: discovery (findStartNode / findErrorHandler) and the
@@ -194,7 +208,24 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
       };
       steps.push(step);
       options.onStep?.(step);
-      variables = { ...variables, flowFailed: true };
+      variables = {
+        ...variables,
+        flowFailed: true,
+        flowError: variables.flowError ?? {
+          nodeId: node.id,
+          pluginId: node.pluginId,
+          pluginName: node.pluginId,
+          message: step.error!,
+        },
+      };
+      if (options.routeLoadErrors !== false && !errorHandlerUsed) {
+        const handler = findErrorHandler();
+        if (handler !== undefined && handler.id !== node.id) {
+          errorHandlerUsed = true;
+          current = handler;
+          continue;
+        }
+      }
       return finish('plugin-error', messageOf(error));
     }
 
@@ -209,6 +240,7 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
 
     let outputNumber: number | null = null;
     let stepError: string | null = null;
+    let held = false;
 
     try {
       const output = await plugin.module.plugin(args);
@@ -224,7 +256,12 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
       }
       if (output.variables !== undefined) variables = output.variables;
     } catch (error) {
-      stepError = messageOf(error);
+      if (error instanceof ReviewHoldSignal) {
+        reviewReason = error.reason;
+        held = true;
+      } else {
+        stepError = messageOf(error);
+      }
     }
 
     const step: StepRecord = {
@@ -249,8 +286,36 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
     steps.push(step);
     options.onStep?.(step);
 
+    if (held) return finish('held-for-review', null);
+
+    // Explicitly routed failure outputs may enter On Error too. Keep the
+    // failure's own diagnostics, not the later logger's successful output.
+    if (step.outputOutcome === 'failure') {
+      variables = {
+        ...variables,
+        flowFailed: true,
+        flowError: variables.flowError ?? {
+          nodeId: node.id,
+          pluginId: node.pluginId,
+          pluginName: plugin.details.name,
+          message:
+            step.logExcerpt.trim() ||
+            `"${plugin.details.name}" reported failure on output ${String(outputNumber)}.`,
+        },
+      };
+    }
+
     if (stepError !== null) {
-      variables = { ...variables, flowFailed: true };
+      variables = {
+        ...variables,
+        flowFailed: true,
+        flowError: variables.flowError ?? {
+          nodeId: node.id,
+          pluginId: node.pluginId,
+          pluginName: plugin.details.name,
+          message: stepError,
+        },
+      };
 
       // One attempt at the error handler. If it throws too, stop — retrying a
       // failing handler is how a failure becomes an infinite loop.
@@ -268,6 +333,16 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
     const edge = options.flow.edges.find(
       (candidate) => candidate.fromNodeId === node.id && candidate.outputNumber === outputNumber,
     );
+    // An author's wired failure branch always wins. Only an otherwise
+    // unrouted declared failure enters the flow-wide handler automatically.
+    if (edge === undefined && step.outputOutcome === 'failure' && !errorHandlerUsed) {
+      const handler = findErrorHandler();
+      if (handler !== undefined && handler.id !== node.id) {
+        errorHandlerUsed = true;
+        current = handler;
+        continue;
+      }
+    }
     if (edge === undefined) return finish('end-of-flow', null);
 
     const next = nodesById.get(edge.toNodeId);

@@ -36,20 +36,28 @@ export const createNodeCapabilityResolver = (options?: {
     const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
     if (firstParty !== undefined) {
       const details = firstParty.module.details();
-      return capabilitiesFrom(details.outputs, details.isStartPlugin);
+      return capabilitiesFrom(details.outputs, details.isStartPlugin, details.pType);
     }
     const installed = options?.registry?.resolveAbsPath(node.pluginId) ?? null;
     if (installed !== null) {
       try {
         const loaded = loader.load(installed);
-        return capabilitiesFrom(loaded.details.outputs, loaded.details.isStartPlugin);
+        return capabilitiesFrom(
+          loaded.details.outputs,
+          loaded.details.isStartPlugin,
+          loaded.details.pType,
+        );
       } catch {
         return null;
       }
     }
     try {
       const loaded = loader.load(node.pluginId);
-      return capabilitiesFrom(loaded.details.outputs, loaded.details.isStartPlugin);
+      return capabilitiesFrom(
+        loaded.details.outputs,
+        loaded.details.isStartPlugin,
+        loaded.details.pType,
+      );
     } catch {
       return null;
     }
@@ -59,7 +67,9 @@ export const createNodeCapabilityResolver = (options?: {
 const capabilitiesFrom = (
   outputs: { number: number }[],
   isStartPlugin: boolean,
+  pType: string,
 ): FlowNodeCapabilities => ({
   outputNumbers: outputs.map((output) => output.number),
   isStartPlugin: isStartPlugin === true,
+  isErrorHandler: pType === 'onFlowError',
 });

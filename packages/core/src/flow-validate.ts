@@ -9,6 +9,7 @@ import type { FlowDefinition, FlowEdge, FlowNode } from './flow.js';
 export interface FlowNodeCapabilities {
   outputNumbers: number[];
   isStartPlugin: boolean;
+  isErrorHandler?: boolean;
 }
 
 /**
@@ -41,7 +42,8 @@ export type FlowValidationCode =
   | 'ambiguous-edge'
   | 'no-nodes'
   | 'no-start-node'
-  | 'multiple-start-nodes';
+  | 'multiple-start-nodes'
+  | 'multiple-error-handlers';
 
 export interface FlowValidationProblem {
   code: FlowValidationCode;
@@ -328,6 +330,16 @@ export const validateFlowDefinition = (
     .filter((node) => capabilitiesByNodeId.get(node.id)?.isStartPlugin === true)
     .map((node) => node.id);
   const unresolvable = uniqueNodes.filter((node) => capabilitiesByNodeId.get(node.id) == null);
+  const errorHandlers = uniqueNodes.filter(
+    (node) => capabilitiesByNodeId.get(node.id)?.isErrorHandler === true,
+  );
+  if (errorHandlers.length > 1) {
+    problems.push({
+      code: 'multiple-error-handlers',
+      nodeId: errorHandlers[0]!.id,
+      message: `This flow has ${errorHandlers.length} On Error entries. Keep only one: otherwise array order determines which recovery branch runs.`,
+    });
+  }
 
   if (startNodeIds.length > 1) {
     problems.push({

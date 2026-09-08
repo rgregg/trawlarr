@@ -54,6 +54,17 @@ describe('explainState', () => {
     nowMs: 1_000,
   };
 
+  it('explains indefinite review holds without promising an automatic retry', () => {
+    expect(
+      explainState({ ...base, state: 'held', reviewReason: 'Check the subtitle timing.' }),
+    ).toBe(
+      'Held for review: Check the subtitle timing. It will not retry automatically. Requeue it after reviewing the file.',
+    );
+    expect(explainState({ ...base, state: 'held', reviewReason: null })).toBe(
+      'Held after a failed attempt. It will be retried.',
+    );
+  });
+
   it('explains a converged file by its signature, not by silence', () => {
     expect(explainState({ ...base, state: 'good' })).toBe(
       'Converged. Its signature matches the flow this library uses, so there is nothing to do.',

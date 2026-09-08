@@ -105,6 +105,96 @@ const convergedSignature = (row: MediaFileRow, flowDefinitionHash: string): stri
 };
 
 describe('scanLibrary', () => {
+  it('adopts externally replaced content at a held path without opening a claimable second row', async () => {
+    await scan();
+    const repo = createMediaFileRepo(db);
+    const held = repo.listByLibrary({ libraryId })[0]!;
+    // Model the old identity being replaced externally: the actual media on
+    // disk is different from both stored identity keys, at the same path.
+    db.prepare('UPDATE media_file SET inode_key = ?, content_key = ? WHERE id = ?').run(
+      'old-inode',
+      'old-content',
+      held.id,
+    );
+    for (const row of repo.listByLibrary({ libraryId })) {
+      repo.setLedger({
+        fileId: row.id,
+        record: {
+          ...repo.getLedger(row.id)!,
+          state: 'held',
+          reviewReason: 'Inspect before retry.',
+        },
+      });
+    }
+    const result = await scan();
+    const rows = repo.listByLibrary({ libraryId });
+    expect(result.added).toBe(0);
+    expect(result.queued).toBe(0);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => row.path === held.path)).toHaveLength(1);
+    expect(repo.getById(held.id)?.content_key).not.toBe('old-content');
+    expect(repo.getById(held.id)?.video_codec).toBe('h264');
+    expect(repo.getLedger(held.id)).toMatchObject({
+      state: 'held',
+      reviewReason: 'Inspect before retry.',
+      attemptCount: 0,
+      holdUntilMs: null,
+    });
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: Number.MAX_SAFE_INTEGER })).toBeNull();
+    repo.requeue(held.id);
+    expect(repo.getById(held.id)?.review_path).toBeNull();
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: NOW })?.fileId).toBe(held.id);
+  });
+
+  it('recognizes a held replacement path even when its old path and identity were not reconciled', async () => {
+    await scan();
+    const repo = createMediaFileRepo(db);
+    const held = repo.listByLibrary({ libraryId })[0]!;
+    repo.setLedger({
+      fileId: held.id,
+      record: { ...repo.getLedger(held.id)!, state: 'held', reviewReason: 'Probe unavailable.' },
+    });
+    repo.rememberReviewIntent({ fileId: held.id, reason: 'Probe unavailable.', path: held.path });
+    db.prepare('UPDATE media_file SET path = ?, inode_key = ?, content_key = ? WHERE id = ?').run(
+      `${held.path}.old`,
+      'old-inode',
+      'old-content',
+      held.id,
+    );
+    const result = await scan();
+    expect(result.added).toBe(0);
+    expect(repo.listByLibrary({ libraryId })).toHaveLength(2);
+    expect(repo.getById(held.id)).toMatchObject({
+      path: held.path,
+      state: 'held',
+      review_reason: 'Probe unavailable.',
+    });
+  });
+
+  it('never automatically releases a manual review hold, including after a flow edit', async () => {
+    await scan();
+    const repo = createMediaFileRepo(db);
+    const file = repo.listByLibrary({ libraryId })[0]!;
+    repo.setLedger({
+      fileId: file.id,
+      record: { ...repo.getLedger(file.id)!, state: 'held', reviewReason: 'Inspect subtitles.' },
+    });
+    const library = createLibraryRepo(db).getById(libraryId)!;
+    db.prepare('UPDATE flow SET definition_hash = ? WHERE id = ?').run(
+      'changed-flow',
+      library.flowId,
+    );
+    await scan();
+    expect(repo.getLedger(file.id)).toMatchObject({
+      state: 'held',
+      reviewReason: 'Inspect subtitles.',
+      holdUntilMs: null,
+      attemptCount: 0,
+    });
+    repo.requeue(file.id);
+    expect(repo.getLedger(file.id)).toMatchObject({ state: 'queued', reviewReason: null });
+  });
+
   it('finds media, ignores non-media, and queues what is not yet converged', async () => {
     const summary = await scan();
     expect(summary.seen).toBe(2);

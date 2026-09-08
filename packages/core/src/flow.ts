@@ -15,3 +15,6 @@ export interface FlowDefinition {
   nodes: FlowNode[];
   edges: FlowEdge[];
 }
+
+/** Presentation metadata, deliberately outside the definition and its signature. */
+export type FlowLayout = Record<string, { x: number; y: number }>;

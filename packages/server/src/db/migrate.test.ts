@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { openDatabase } from './connection.js';
 import { SCHEMA_VERSION, migrate } from './migrate.js';
+import { createFlowRepo } from './flow-repo.js';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), 'migrations');
 
@@ -21,6 +22,81 @@ describe('openDatabase', () => {
 });
 
 describe('migrate', () => {
+  it('adds nullable review metadata without changing ordinary held rows from schema 10', () => {
+    const db = memoryDb();
+    for (const file of readdirSync(migrationsDir).sort()) {
+      if (file.endsWith('.sql') && Number.parseInt(file, 10) <= 10) {
+        db.exec(readFileSync(join(migrationsDir, file), 'utf8'));
+      }
+    }
+    db.prepare(`INSERT INTO setting (key, value) VALUES ('schema_version', '10')`).run();
+    db.prepare(`INSERT INTO library (id, name, created_at) VALUES ('lib', 'Library', 1)`).run();
+    db.prepare(
+      `INSERT INTO media_file (
+      id, library_id, content_key, path, nlink, size_bytes, mtime_ms, ctime_ms, container,
+      state, attempt_count, hold_until_ms, discovered_at, updated_at
+    ) VALUES ('file', 'lib', 'key', '/library/movie.mkv', 1, 10, 1, 1, 'mkv', 'held', 2, NULL, 1, 1)`,
+    ).run();
+    migrate(db);
+    expect(
+      db.prepare('SELECT state, attempt_count, hold_until_ms, review_reason FROM media_file').get(),
+    ).toEqual({
+      state: 'held',
+      attempt_count: 2,
+      hold_until_ms: null,
+      review_reason: null,
+    });
+    db.close();
+  });
+
+  it.each([7, 8, 9])('flow metadata migrations preserve existing data from schema %i', (from) => {
+    const db = memoryDb();
+    for (const file of readdirSync(migrationsDir).sort()) {
+      if (file.endsWith('.sql') && Number.parseInt(file, 10) <= from) {
+        db.exec(readFileSync(join(migrationsDir, file), 'utf8'));
+      }
+    }
+    db.prepare(`INSERT INTO setting (key, value) VALUES ('schema_version', ?)`).run(String(from));
+    if (from >= 8) {
+      db.prepare(
+        `INSERT INTO account (id, username, created_at) VALUES ('account-1', 'admin', 10)`,
+      ).run();
+    }
+    db.prepare(
+      `INSERT INTO flow (id, name, definition_json, definition_hash, created_at, updated_at)
+       VALUES ('legacy', 'Legacy', '{"nodes":[],"edges":[]}', 'legacy-hash', 10, 20)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO flow_version (id, flow_id, definition_hash, definition_json, note, created_at)
+       VALUES ('v1', 'legacy', 'legacy-hash', '{"nodes":[],"edges":[]}', 'old version', 20)`,
+    ).run();
+    const history = db.prepare('SELECT * FROM flow_version').all();
+    if (from === 9) {
+      db.prepare(
+        `UPDATE flow SET draft_json = '{"nodes":[],"edges":[]}', draft_base_hash = 'legacy-hash',
+         draft_updated_at = 30 WHERE id = 'legacy'`,
+      ).run();
+    }
+
+    expect(migrate(db)).toEqual({ from, to: SCHEMA_VERSION });
+    expect(createFlowRepo(db).getById('legacy')).toMatchObject({
+      definition: { nodes: [], edges: [] },
+      definitionHash: 'legacy-hash',
+      createdAt: 10,
+      updatedAt: 20,
+      draft: from === 9 ? { nodes: [], edges: [] } : null,
+      draftBaseHash: from === 9 ? 'legacy-hash' : null,
+      draftUpdatedAt: from === 9 ? 30 : null,
+      layout: {},
+    });
+    expect(db.prepare('SELECT * FROM flow_version').all()).toEqual(history);
+    expect(db.prepare('SELECT id, username FROM account').all()).toEqual(
+      from >= 8 ? [{ id: 'account-1', username: 'admin' }] : [],
+    );
+    expect(migrate(db).from).toBe(SCHEMA_VERSION);
+    db.close();
+  });
+
   it('applies every migration to a fresh database', () => {
     const db = memoryDb();
     const result = migrate(db);

@@ -346,7 +346,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
 
     // Terminal states, and files already mid-flight, are left alone: a
     // scan must not silently retry a file the system has given up on.
-    if (NEVER_REQUEUE_STATES.has(row.state)) return;
+    if (NEVER_REQUEUE_STATES.has(row.state) || row.review_reason != null) return;
 
     if (flowDefinitionHash === null) return; // No flow: cannot compute a signature.
 
@@ -512,7 +512,13 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
 
     const lookup = mediaFileRepo.identityLookup(libraryId);
     const match = matchIdentity(identity, lookup);
-    const isNew = match.fileId === null;
+    const reviewHold = mediaFileRepo.findReviewHoldAtPath(libraryId, entry.path);
+    if (reviewHold?.state === 'running') {
+      summary.inFlight += 1;
+      continue;
+    }
+    if (reviewHold !== null) seenFileIds.add(reviewHold.id);
+    const isNew = reviewHold === null && match.fileId === null;
 
     // A file no row claims, at a path an in-flight run is entitled to be
     // producing, is not a new file — it is that run's replacement, caught
@@ -537,7 +543,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     // AFTER the upsert would compare the new stat to itself and never
     // detect a real change, silently defeating rule 5's probe-skip.
     const existingBeforeUpsert: MediaFileRow | null =
-      match.fileId === null ? null : mediaFileRepo.getById(match.fileId);
+      reviewHold ?? (match.fileId === null ? null : mediaFileRepo.getById(match.fileId));
 
     // upsertScanned preserves the existing record's identity across a
     // rename: path is deliberately not the identity key. One pathological
@@ -598,6 +604,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       // forever — permanently capping the library's convergence
       // percentage, with its only diagnostic long scrolled past.
       existingBeforeUpsert.probe_json === null ||
+      existingBeforeUpsert.content_key !== identity.contentKey ||
       existingBeforeUpsert.size_bytes !== stat.size ||
       existingBeforeUpsert.mtime_ms !== stat.mtimeMs;
 

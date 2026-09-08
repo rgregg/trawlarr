@@ -182,6 +182,121 @@ const setupClaimedFile = async (input: {
 };
 
 describe.runIf(available)('runJob', () => {
+  it.each([
+    { terminal: 'log', explicit: true },
+    { terminal: 'hold', explicit: true },
+    { terminal: 'log', explicit: false },
+    { terminal: 'hold', explicit: false },
+  ])(
+    'preserves an encoder failure through On Error: %j',
+    async ({ terminal, explicit }) => {
+      const definition: FlowDefinition = {
+        nodes: [
+          ...TRANSCODE_FLOW.nodes.map((node) =>
+            node.id === 'encoder'
+              ? { ...node, inputs: { encoder: 'trawlarr_missing_encoder', quality: '30' } }
+              : node,
+          ),
+          { id: 'error', pluginId: 'trawlarr:onError', pluginVersion: '1', inputs: {} },
+          {
+            id: 'log',
+            pluginId: 'trawlarr:writeToLog',
+            pluginVersion: '1',
+            inputs: { interpolate: true, message: '{{error.pluginName}}: {{error.message}}' },
+          },
+          {
+            id: 'hold',
+            pluginId: 'trawlarr:holdForReview',
+            pluginVersion: '1',
+            inputs: { reason: 'Inspect the encoder failure.' },
+          },
+        ],
+        edges: [
+          ...TRANSCODE_FLOW.edges,
+          ...(explicit ? [{ fromNodeId: 'execute', outputNumber: 2, toNodeId: 'error' }] : []),
+          { fromNodeId: 'error', outputNumber: 1, toNodeId: 'log' },
+          ...(terminal === 'hold'
+            ? [{ fromNodeId: 'log', outputNumber: 1, toNodeId: 'hold' }]
+            : []),
+        ],
+      };
+      const { claimed } = await setupClaimedFile({ definition, videoCodec: 'libx264' });
+      const result = await runJob({
+        db,
+        claimed,
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        nowMs: now,
+      });
+      expect(createMediaFileRepo(db).getLedger(claimed.fileId)).toMatchObject({
+        state: 'held',
+        attemptCount: terminal === 'hold' ? 0 : 1,
+        reviewReason: terminal === 'hold' ? 'Inspect the encoder failure.' : null,
+        signature: null,
+      });
+      const steps = createJobRepo(db).getSteps(result.jobId);
+      expect(steps.at(-1)!.nodeId).toBe(terminal);
+      expect(steps.at(-1)!.outputNumber).toBe(terminal === 'hold' ? null : 1);
+      expect(steps.find((step) => step.nodeId === 'log')!.logExcerpt).toContain('Execute');
+      expect(createJobRepo(db).listForFile(claimed.fileId)[0]!.state).toBe('failed');
+    },
+    180_000,
+  );
+
+  it('reconciles a real replacement before holding for review without spending attempts', async () => {
+    const definition: FlowDefinition = {
+      nodes: [
+        ...TRANSCODE_FLOW.nodes,
+        {
+          id: 'review',
+          pluginId: 'trawlarr:holdForReview',
+          pluginVersion: '1.0.0',
+          inputs: { reason: 'Inspect quality.' },
+        },
+        { id: 'error', pluginId: 'trawlarr:onError', pluginVersion: '1.0.0', inputs: {} },
+      ],
+      edges: [
+        ...TRANSCODE_FLOW.edges,
+        { fromNodeId: 'replace', outputNumber: 1, toNodeId: 'review' },
+      ],
+    };
+    const { claimed } = await setupClaimedFile({ definition, videoCodec: 'libx264' });
+    const repo = createMediaFileRepo(db);
+    const before = repo.getById(claimed.fileId)!;
+    const result = await runJob({
+      db,
+      claimed,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    const after = repo.getById(claimed.fileId)!;
+    expect(result.state).toBe('held');
+    expect(result.stepCount).toBe(8);
+    expect(after).toMatchObject({
+      state: 'held',
+      review_reason: 'Inspect quality.',
+      hold_until_ms: null,
+      attempt_count: 0,
+      signature: null,
+      video_codec: 'hevc',
+    });
+    expect(after.inode_key).not.toBe(before.inode_key);
+    expect(after.content_key).not.toBe(before.content_key);
+    expect(await videoCodecOf(after.path)).toBe('hevc');
+    const scan = await scanLibrary({
+      db,
+      libraryId: claimed.libraryId,
+      ffprobePath: 'ffprobe',
+      nowMs: now,
+    });
+    expect(scan.added).toBe(0);
+    expect(repo.getById(claimed.fileId)!.state).toBe('held');
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: Number.MAX_SAFE_INTEGER })).toBeNull();
+    repo.requeue(claimed.fileId);
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: NOW })?.fileId).toBe(claimed.fileId);
+  }, 180_000);
+
   it('transcodes an h264 file, verifies it, replaces the original, and records a good ledger', async () => {
     const { root, claimed } = await setupClaimedFile({
       definition: TRANSCODE_FLOW,

@@ -36,6 +36,46 @@ describe('isKnownGood', () => {
     expect(isKnownGood(newLedgerRecord(), SIG)).toBe(false);
   });
 
+  describe('manual review hold', () => {
+    it('does not turn a persisted review intent into retry backoff after an interrupted fold', () => {
+      const before = record({ state: 'running', attemptCount: 2, reviewReason: 'Inspect output.' });
+      expect(applyStall({ record: before, nowMs: NOW })).toEqual({
+        ...before,
+        state: 'held',
+        holdUntilMs: null,
+      });
+    });
+
+    it('preserves attempts and signature, remains ineligible forever, and requires explicit requeue', () => {
+      const next = applyRunOutcome({
+        record: record({ state: 'running', signature: 'old', attemptCount: 2 }),
+        outcome: {
+          success: false,
+          held: true,
+          reviewReason: 'Inspect the subtitles.',
+          claimedModified: true,
+          preFacts: h264,
+          postFacts: hevc,
+        },
+        currentSignature: SIG,
+        nowMs: NOW,
+      });
+      expect(next).toMatchObject({
+        state: 'held',
+        signature: 'old',
+        attemptCount: 2,
+        holdUntilMs: null,
+        reviewReason: 'Inspect the subtitles.',
+      });
+      expect(isEligible(next, Number.MAX_SAFE_INTEGER)).toBe(false);
+      expect(isKnownGood(next, 'old')).toBe(false);
+      const requeued = applyRequeue(next);
+      expect(requeued.reviewReason).toBeNull();
+      expect(isEligible(requeued, NOW)).toBe(true);
+      expect(isEligible(record({ state: 'held', holdUntilMs: null }), NOW)).toBe(true);
+    });
+  });
+
   it('is true when the stored signature matches and the state is good', () => {
     expect(isKnownGood(record({ state: 'good', signature: SIG }), SIG)).toBe(true);
   });

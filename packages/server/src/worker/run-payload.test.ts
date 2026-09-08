@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -272,6 +272,126 @@ module.exports = { details, plugin };
 `);
 
 describe('runPayload', () => {
+  it.each([
+    { recoverAsSuccess: false, terminal: 'log', success: false, held: false },
+    { recoverAsSuccess: true, terminal: 'log', success: true, held: false },
+    { recoverAsSuccess: false, terminal: 'hold', success: false, held: true },
+    { recoverAsSuccess: true, terminal: 'hold', success: false, held: true },
+  ])('preserves first-party error-handler intent: %j', async (expected) => {
+    const flow: FlowDefinition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1', inputs: {} },
+        {
+          id: 'failure',
+          pluginId: 'trawlarr:failFile',
+          pluginVersion: '1',
+          inputs: { message: 'Decoder rejected the file.' },
+        },
+        {
+          id: 'error',
+          pluginId: 'trawlarr:onError',
+          pluginVersion: '1',
+          inputs: { recoverAsSuccess: expected.recoverAsSuccess },
+        },
+        {
+          id: 'log',
+          pluginId: 'trawlarr:writeToLog',
+          pluginVersion: '1',
+          inputs: { interpolate: true, message: '{{error.message}}' },
+        },
+        {
+          id: 'hold',
+          pluginId: 'trawlarr:holdForReview',
+          pluginVersion: '1',
+          inputs: { reason: 'Inspect the decoder failure.' },
+        },
+      ],
+      edges: [
+        { fromNodeId: 'start', outputNumber: 1, toNodeId: 'failure' },
+        { fromNodeId: 'error', outputNumber: 1, toNodeId: 'log' },
+        ...(expected.terminal === 'hold'
+          ? [{ fromNodeId: 'log', outputNumber: 1, toNodeId: 'hold' }]
+          : []),
+      ],
+    };
+    const report = await runPayload({ payload: payloadFor(flow), ports: quietPorts() });
+    expect(report.success).toBe(expected.success);
+    expect(report.held).toBe(expected.held);
+    expect(report.steps.find((step) => step.nodeId === 'log')!.logExcerpt).toBe(
+      'Decoder rejected the file.',
+    );
+    if (!expected.success && !expected.held) {
+      expect(report.error).toBe('Decoder rejected the file.');
+    }
+    if (expected.held) expect(report.reviewReason).toBe('Inspect the decoder failure.');
+  });
+
+  it('reports a JSON-safe indefinite review hold without routing it through On Error', async () => {
+    const flow: FlowDefinition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'hold',
+          pluginId: 'trawlarr:holdForReview',
+          pluginVersion: '1.0.0',
+          inputs: { reason: 'Inspect quality.' },
+        },
+        { id: 'error', pluginId: 'trawlarr:onError', pluginVersion: '1.0.0', inputs: {} },
+      ],
+      edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'hold' }],
+    };
+    const report = await runPayload({ payload: payloadFor(flow), ports: quietPorts() });
+    expect(report).toMatchObject({
+      held: true,
+      reviewReason: 'Inspect quality.',
+      success: false,
+      stopReason: 'held-for-review',
+    });
+    expect(report.steps.map((step) => step.nodeId)).toEqual(['start', 'hold']);
+    expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+  });
+
+  it('runs Write to Log through the durable job logger and continues successfully', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-log-node-'));
+    try {
+      const definition = flowEndingIn('trawlarr:writeToLog');
+      definition.nodes[1]!.inputs = { message: 'Video already matches policy.\nSkipping encode.' };
+      const logs: string[] = [];
+      const logPath = join(dir, 'job.log');
+      const report = await runPayload({
+        payload: { ...payloadFor(definition), logPath },
+        ports: { ...quietPorts(), onLog: (text) => logs.push(text) },
+      });
+      expect(report.success).toBe(true);
+      expect(report.replaced).toBeNull();
+      expect(report.steps[1]!.logExcerpt).toBe('Video already matches policy.\nSkipping encode.');
+      expect(logs).toContain('Video already matches policy.\nSkipping encode.');
+      expect(readFileSync(logPath, 'utf8')).toContain(
+        'Video already matches policy.\nSkipping encode.',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports Fail File as a failed attempt, not a successful terminal step', async () => {
+    const definition = flowEndingIn('trawlarr:failFile');
+    definition.nodes[1]!.inputs = { message: 'No supported audio track.' };
+    const report = await runPayload({ payload: payloadFor(definition), ports: quietPorts() });
+    expect(report.success).toBe(false);
+    expect(report.failed).toBe(true);
+    expect(report.stopReason).toBe('plugin-error');
+    expect(report.error).toBe('No supported audio track.');
+    expect(report.outcome).toContain('No supported audio track.');
+    expect(report.steps[1]).toMatchObject({
+      pluginId: 'trawlarr:failFile',
+      outputNumber: null,
+      error: 'No supported audio track.',
+      logExcerpt: 'No supported audio track.',
+    });
+    expect(report.replaced).toBeNull();
+  });
+
   it('loads an INSTALLED plugin from the path the payload carries, holding no database', async () => {
     // The worker's own resolution, and the reason `pluginPaths` exists: this
     // process cannot look `tdarr:passThrough` up, so the daemon told it.

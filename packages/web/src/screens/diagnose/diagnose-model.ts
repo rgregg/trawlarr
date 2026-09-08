@@ -115,14 +115,15 @@ export const groupProblems = (input: {
 
   for (const file of input.files) {
     if (UNTROUBLED.has(file.state)) continue;
-    const fetched = input.reasons[file.id] ?? '';
+    const review = file.state === 'held' && file.reviewReason != null;
+    const fetched = (review ? file.reviewReason : input.reasons[file.id]) ?? '';
     const reason = fetched === '' ? NO_REASON : fetched;
-    const key = `${file.state}::${normaliseReason(reason)}`;
+    const key = `${review ? 'review' : file.state}::${normaliseReason(reason)}`;
     const existing = groups.get(key);
     if (existing === undefined) {
       groups.set(key, {
         key,
-        title: titleFor(file.state),
+        title: review ? 'Held for review' : titleFor(file.state),
         reason,
         files: [file],
         totalBytes: file.sizeBytes,

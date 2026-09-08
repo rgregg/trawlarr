@@ -45,6 +45,24 @@ const codesFor = (definition: FlowDefinition): string[] =>
   validateFlowDefinition(definition, resolve).map((problem) => problem.code);
 
 describe('validateFlowDefinition', () => {
+  it('rejects multiple resolvable On Error entries without treating one as a Start', () => {
+    const definition = flow({
+      nodes: [node('s', 'start'), node('e1', 'error'), node('e2', 'error')],
+      edges: [],
+    });
+    const resolver: FlowNodeCapabilityResolver = (n) =>
+      n.pluginId === 'error'
+        ? { isStartPlugin: false, isErrorHandler: true, outputNumbers: [1] }
+        : resolve(n);
+    expect(validateFlowDefinition(definition, resolver).map((problem) => problem.code)).toEqual([
+      'multiple-error-handlers',
+    ]);
+    expect(
+      validateFlowDefinition({ ...definition, nodes: definition.nodes.slice(0, 2) }, resolver),
+    ).toEqual([]);
+    expect(validateFlowDefinition(definition, resolve)).toEqual([]);
+  });
+
   it('accepts a well-formed flow', () => {
     expect(validateFlowDefinition(flow(), resolve)).toEqual([]);
   });

@@ -45,8 +45,8 @@ folder of media, scan it, and drain the queue against real `ffmpeg`/`ffprobe`
 — see "Try it" below — and a `trawlarr daemon` that does the same thing
 unattended behind an HTTP API, a filesystem watcher and a schedule (see "Run
 it as a service"), plus the libraries behind both. The daemon serves a web UI
-covering library setup, flow attachment, a library-centric overview and live
-activity; everything else is still CLI or API only.
+covering library setup, flow attachment, a library-centric overview, live
+activity, and a visual flow editor with drafts and published version history.
 
 The pnpm workspace holds six packages:
 
@@ -54,10 +54,10 @@ The pnpm workspace holds six packages:
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@trawlarr/core`         | Pure domain logic: file identity, fact extraction, the convergence ledger, flow definitions and their signature hash, and the cooperative ffmpeg command model (build → compile to argv). No I/O.                                                                                                                                                                                              |
 | `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                                                                                                                                   |
-| `@trawlarr/plugins-core` | The first-party flow nodes that exist today: Start, Check Video Codec, Begin Command, Set Video Encoder, Execute, Verify Output, Replace Original File.                                                                                                                                                                                                                                        |
+| `@trawlarr/plugins-core` | First-party flow nodes: Start, Check Video Codec, Check Condition, Begin Command, Set Video Encoder, Audio Tracks, Subtitle Tracks, Set Container, Execute, Verify Output, Replace Original File, Write to Log, Fail File, On Error, and Hold for Review.                                                                                                                                      |
 | `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run.                                                                                                          |
 | `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the worker supervisor and its forked worker processes, the filesystem watcher and scan coordinator, the REST API and its event stream, the daemon that composes all of it, and the `trawlarr` CLI — which becomes that daemon's client whenever one is running. |
-| `@trawlarr/web`          | The React UI the daemon serves as static files: the login/SSO gate, the library-centric Overview, library setup and flow attachment, and a live Activity screen fed by the event stream. Built by `pnpm build`; the Docker image ships it.                                                                                                                                                     |
+| `@trawlarr/web`          | The React UI the daemon serves as static files: the login/SSO gate, library setup and flow attachment, live activity, and a visual flow editor with drafts and version history. Built by `pnpm build`; the Docker image ships it.                                                                                                                                                              |
 
 ### Run it in Docker
 
@@ -253,6 +253,105 @@ to finish; anything still running past that is cancelled through its process
 GROUP, which is what reaches an ffmpeg a plugin spawned for itself. A daemon
 that exited leaving an orphaned ffmpeg writing into a library nothing is
 watching would be a defect, not a shortcut.
+
+### Edit flows visually
+
+Open **Configure → Flows** to see every flow, including flows not attached to
+a library. Choose **New flow** for a canvas with a Start element, or **Edit
+flow** to change an existing flow.
+
+Drag components from the searchable right-hand panel onto the canvas. Compact
+boxes have an input at the top and the plugin's numbered outputs along the
+bottom: draw a line from an output handle to another box's input, or reconnect
+an existing line to change a branch. Auto-layout arranges the flow top to bottom.
+Branches can rejoin and cycles are supported. Double-click a box (or use its
+configuration icon) to edit the plugin's parameters, with controls, defaults,
+conditional fields and help supplied by the plugin itself. The Start element
+is clearly marked and protected from deletion.
+
+The canvas supports pan, zoom, fit, auto-layout, selection and undo/redo.
+Node positions save automatically on the daemon and survive reloads, browser
+changes and restarts. Moving boxes, auto-layout and layout undo/redo update
+only presentation metadata: they never create a flow version, change the
+executable definition, or invalidate file signatures. Graph edits still need
+**Save draft** and explicit publication. A failed layout save is shown with a
+retry action, and unsaved positions remain in the tab.
+
+**Save draft** keeps unfinished work on the daemon, including invalid graphs,
+without changing what runs. Saved drafts survive browser and daemon restarts;
+unsaved changes prompt before leaving. Validation runs while you edit, marks
+problems on the graph, and prevents invalid drafts from being published.
+
+**Review & publish** first saves the draft, then shows affected libraries,
+their file counts and the hash transition. Only confirming publication changes
+the live flow and requests library rescans. Terminal files still require manual
+requeue; how many other files actually need encoding is not known in advance.
+A draft based on an older published version cannot overwrite the newer version.
+The existing flow page shows the published definition and version history.
+
+**Diagnostics and failure branches.** Add **Write to Log** to record a custom
+message in the durable job log and step trace, then continue through output 1.
+Enable **Expand placeholders** to include values such as `{{file.path}}`,
+`{{video.codec}}`, `{{audio.languages}}`, `{{job.id}}`, or `{{user.target}}`.
+Variables use the `user.*`, `library.*` and `global.*` namespaces. Substitution
+does not evaluate JavaScript; missing or unknown properties produce a clear
+error rather than silently printing a blank. Expansion is opt-in, so existing
+literal log messages keep their behavior.
+
+**Check Condition** branches on the current file's metadata using one to four
+conditions combined with `all` (AND) or `any` (OR). It supports text, numeric,
+boolean and list comparisons; use `contains` for a language or codec list.
+Output 1 means matched, output 2 means not matched. Missing facts match only
+`is missing`, and disabled conditions are ignored. Sizes are labeled in decimal
+MB or bytes, durations in seconds, and bitrates in bits/second. Connect
+multiple condition nodes for larger or nested decisions.
+
+**On Error** is a separate error entry point: place one on the canvas and wire
+its output to logging, recovery, or review steps. It catches thrown errors,
+reached plugin-load failures, and declared failure outputs with no explicit
+connection. An explicitly wired failure output takes precedence. Templates in
+the error branch can read `{{error.message}}`, `{{error.nodeId}}`,
+`{{error.pluginId}}`, and `{{error.pluginName}}`.
+
+Logging an error does not make the file converged: the first-party handler
+preserves the original failure by default. Successful recovery requires
+explicitly enabling its `recoverAsSuccess` option and completing the recovery
+branch. A handler that fails again does not loop back into itself.
+
+**Hold for Review** stops with a custom reason and leaves the file held until
+an operator explicitly requeues it. It consumes no retry attempt, records no
+successful convergence, and is not released by scans, flow edits, or daemon
+restarts. The reason appears in file details and diagnostics. A useful error
+branch is **On Error → Write to Log → Hold for Review**. Release a reviewed
+file with the UI's Requeue action or `trawlarr requeue --file <id>`.
+
+**Audio, subtitles and containers.** Place these command-building nodes after
+**Begin Command** and before **Execute**. Their defaults preserve the current
+file rather than forcing work:
+
+- **Audio Tracks** keeps or removes listed languages, can choose a default
+  language, and can ensure one stereo AAC compatibility track. Existing
+  suitable stereo AAC is reused; retained original tracks are preserved.
+  Removing every usable audio track is refused.
+- **Subtitle Tracks** selects languages, optionally retains only forced tracks,
+  and can choose a default language. Removing all subtitles requires its
+  explicit switch.
+- **Set Container** selects MKV, MP4, MOV or WebM without encoding untouched
+  streams. Put it after track and encoder changes, immediately before Execute,
+  so its compatibility checks see the final command. Incompatible retained
+  streams raise an actionable error instead of being silently dropped or
+  transcoded.
+
+An empty language list or container selection preserves the existing setting.
+Already-conforming command plans are no-ops. **Verify Output** and **Replace
+Original File** remain explicit steps, and their existing output-size and
+replacement protections still apply.
+
+Add **Fail File** to raise a processing error with your chosen reason. It has
+no outgoing connections and does not delete or modify the media file. The normal
+error-handler and retry policy applies: without an `onFlowError` handler,
+the attempt fails, and the file becomes terminally `failed` only after its retry
+budget is exhausted. Both components work in dry runs too.
 
 ### The development CLI
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { filtersToQuery, formatBytes, formatUpdated, sortRows, toFileRows } from './files-model.js';
+import {
+  fileStateLabel,
+  filtersToQuery,
+  formatBytes,
+  formatUpdated,
+  sortRows,
+  toFileRows,
+} from './files-model.js';
 
 const apiFile = {
   id: 'f1',
@@ -13,6 +20,17 @@ const apiFile = {
 };
 
 describe('toFileRows', () => {
+  it('distinguishes review holds from retry backoff without changing the state filter', () => {
+    const [row] = toFileRows([
+      { ...apiFile, state: 'held', reviewReason: 'Check the video quality.' },
+    ]);
+    expect(row!.state).toBe('held');
+    expect(row!.reviewReason).toBe('Check the video quality.');
+    expect(fileStateLabel(row!)).toBe('Held for review');
+    expect(fileStateLabel({ state: 'held', reviewReason: null })).toBe('held');
+    expect(fileStateLabel({ state: 'queued', reviewReason: 'Stale reason' })).toBe('queued');
+  });
+
   it('shows the file name, keeping the full path for the title', () => {
     const [row] = toFileRows([apiFile]);
     expect(row!.name).toBe('S02E02.mkv');
