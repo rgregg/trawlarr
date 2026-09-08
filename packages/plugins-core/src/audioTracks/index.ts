@@ -7,6 +7,7 @@ import type {
 } from '@trawlarr/plugin-api';
 import {
   chooseDefault,
+  cleanAudioFilter,
   defaultLanguageInput,
   isCommentary,
   languageFilter,
@@ -15,6 +16,7 @@ import {
   preferredTrack,
   showWhen,
   stereoAac,
+  stereoActionInput,
   streamLanguage,
   switchInput,
 } from '../media-track-options.js';
@@ -22,7 +24,7 @@ import {
 export const details = (): PluginDetails => ({
   name: 'Audio Tracks',
   description:
-    'Select audio languages and defaults; optionally add one stereo AAC compatibility track.',
+    'Select audio languages and defaults; optionally add or convert to one stereo AAC track.',
   style: { borderColor: '#5588bb' },
   tags: 'ffmpeg,audio,language',
   isStartPlugin: false,
@@ -37,10 +39,25 @@ export const details = (): PluginDetails => ({
       type: 'boolean',
       defaultValue: 'false',
       tooltip:
-        'Add a stereo AAC copy of the preferred retained audio track only if that language ' +
-        'and commentary role have no stereo AAC track. Keeps every retained original track. ' +
+        'Add or convert to a stereo AAC track for the preferred retained audio track only if that ' +
+        'language and commentary role have no stereo AAC track. ' +
         'Select the default language above to prefer it; otherwise use the current main/default track.',
       inputUI: { type: 'switch' },
+    },
+    {
+      name: 'stereoAction',
+      label: 'Stereo action',
+      type: 'string',
+      defaultValue: 'add',
+      tooltip:
+        'Whether to add a new stereo AAC track alongside existing audio ("add"), or convert ' +
+        'the source track in-place to stereo AAC ("convert"). Tracks already in stereo AAC are ' +
+        'kept as-is.',
+      inputUI: {
+        type: 'dropdown',
+        options: ['add', 'convert'],
+        displayConditions: showWhen('ensureStereo', 'true'),
+      },
     },
     {
       name: 'stereoBitrate',
@@ -48,8 +65,21 @@ export const details = (): PluginDetails => ({
       type: 'number',
       defaultValue: '192',
       tooltip:
-        '32–512 kbps for newly added stereo AAC tracks. Existing stereo AAC is kept without re-encoding, ' +
-        'regardless of its bitrate. AAC requires a compatible final container, such as mkv, mp4, or mov.',
+        '32–512 kbps for newly added or converted stereo AAC tracks. Existing stereo AAC is kept ' +
+        'without re-encoding, regardless of its bitrate. AAC requires a compatible final container, ' +
+        'such as mkv, mp4, or mov.',
+      inputUI: { type: 'text', displayConditions: showWhen('ensureStereo', 'true') },
+    },
+    {
+      name: 'downmixFilter',
+      label: 'Downmix pan filter',
+      type: 'string',
+      defaultValue: '',
+      tooltip:
+        'Optional ffmpeg audio filter applied when downmixing multichannel audio to stereo, e.g. ' +
+        '"pan=stereo|c0=c2+0.30*c0+0.30*c4|c1=c2+0.30*c1+0.30*c5" for dialogue boost. ' +
+        'If empty, standard ffmpeg stereo downmix (-ac 2) is used. Only applies when downmixing ' +
+        'from more than 2 channels.',
       inputUI: { type: 'text', displayConditions: showWhen('ensureStereo', 'true') },
     },
   ],
@@ -76,9 +106,11 @@ const addStereo = (
   args: PluginInputArgs,
   source: FfmpegCommandStream,
   bitrate: number,
+  downmixFilter?: string,
 ): FfmpegCommandStream => {
   const command = args.variables.ffmpegCommand;
   const title = isCommentary(source) ? 'Stereo compatibility (commentary)' : 'Stereo compatibility';
+  const shouldFilter = Boolean(downmixFilter && Number(source.channels) > 2);
   const clone: FfmpegCommandStream = {
     ...source,
     codec_name: 'aac',
@@ -110,6 +142,7 @@ const addStereo = (
       'aac',
       '-ac:{outputIndex}',
       '2',
+      ...(shouldFilter ? ['-filter:{outputIndex}', downmixFilter!.trim()] : []),
       '-b:{outputIndex}',
       `${String(bitrate)}k`,
       '-metadata:s:{outputIndex}',
@@ -119,8 +152,45 @@ const addStereo = (
     ],
   };
   command.streams.push(clone);
-  args.jobLog(`Adding ${String(bitrate)} kbps stereo AAC for ${streamLanguage(source)} audio.`);
+  args.jobLog(
+    `Adding ${String(bitrate)} kbps stereo AAC for ${streamLanguage(source)} audio` +
+      (shouldFilter ? ` with downmix filter "${downmixFilter!.trim()}".` : '.'),
+  );
   return clone;
+};
+
+const convertStereo = (
+  args: PluginInputArgs,
+  source: FfmpegCommandStream,
+  bitrate: number,
+  downmixFilter?: string,
+): void => {
+  const wasMultichannel = Number(source.channels) > 2;
+  const shouldFilter = Boolean(downmixFilter && wasMultichannel);
+  source.codec_name = 'aac';
+  source.channels = 2;
+  source.bit_rate = bitrate * 1000;
+  source.channel_layout = 'stereo';
+  source.forceEncoding = true;
+  const preserved = source.outputArgs.flatMap((flag, index, all) =>
+    index % 2 === 0 && /^-(?:metadata|disposition)(?::|$)/.test(flag)
+      ? [flag, all[index + 1]!]
+      : [],
+  );
+  source.outputArgs = [
+    ...preserved,
+    '-c:{outputIndex}',
+    'aac',
+    '-ac:{outputIndex}',
+    '2',
+    ...(shouldFilter ? ['-filter:{outputIndex}', downmixFilter!.trim()] : []),
+    '-b:{outputIndex}',
+    `${String(bitrate)}k`,
+  ];
+  args.jobLog(
+    `Converting ${streamLanguage(source)} audio to ${String(bitrate)} kbps stereo AAC` +
+      (shouldFilter ? ` with downmix filter "${downmixFilter!.trim()}".` : '.'),
+  );
 };
 
 export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> => {
@@ -129,7 +199,9 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
   const keep = languageFilter(args.inputs);
   const defaultLanguage = defaultLanguageInput(args.inputs.defaultLanguage);
   const ensureStereo = switchInput(args.inputs.ensureStereo, 'Ensure stereo AAC');
+  const stereoAction = ensureStereo ? stereoActionInput(args.inputs.stereoAction) : 'add';
   const bitrate = ensureStereo ? bitrateInput(args.inputs.stereoBitrate) : 192;
+  const downmixFilter = ensureStereo ? cleanAudioFilter(args.inputs.downmixFilter) : '';
   const active = command.streams.filter(
     (stream) => stream.codec_type === 'audio' && !stream.removed,
   );
@@ -160,7 +232,11 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
           isCommentary(stream) === isCommentary(source),
       )
     ) {
-      addStereo(args, source, bitrate);
+      if (stereoAction === 'convert') {
+        convertStereo(args, source, bitrate, downmixFilter);
+      } else {
+        addStereo(args, source, bitrate, downmixFilter);
+      }
     }
   }
   return passThrough(args);

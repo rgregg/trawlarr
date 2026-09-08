@@ -218,6 +218,65 @@ describe.runIf(ffmpegAvailableSync())('first-party media nodes with generated me
     expect(repeat.variables.ffmpegCommand.shouldProcess).toBe(false);
   });
 
+  it('converts multichannel audio to stereo AAC with custom pan formula and converges on repeat', async () => {
+    const source = join(directory, 'source-5ch.mkv');
+    const output = join(directory, 'converted-stereo.mkv');
+    await ffmpeg([
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=duration=1:size=96x64:rate=10',
+      '-f',
+      'lavfi',
+      '-i',
+      'anullsrc=r=48000:cl=5.1',
+      '-t',
+      '1',
+      '-map',
+      '0:v',
+      '-map',
+      '1:a',
+      '-c:v',
+      'libx264',
+      '-threads',
+      '1',
+      '-c:a',
+      'ac3',
+      '-metadata:s:a:0',
+      'language=eng',
+      '-disposition:a:0',
+      'default',
+      source,
+    ]);
+
+    const configure = async (args: PluginInputArgs) => {
+      args.inputs = {
+        ensureStereo: true,
+        stereoAction: 'convert',
+        stereoBitrate: 192,
+        downmixFilter: 'pan=stereo|c0=c2+0.30*c0+0.30*c4|c1=c2+0.30*c1+0.30*c5',
+      };
+      await audioTracks(args);
+    };
+
+    const args = await argsFor(source, 'mkv');
+    await configure(args);
+    expect(changes(args).length).toBeGreaterThan(0);
+    await encode(args, output);
+
+    const probed = await probe(output);
+    const audio = probed.streams!.filter((stream) => stream.codec_type === 'audio');
+    expect(audio).toHaveLength(1);
+    expect(audio[0]!.codec_name).toBe('aac');
+    expect(audio[0]!.channels).toBe(2);
+    expect((audio[0]!.disposition as { default: number }).default).toBe(1);
+
+    const repeat = await argsFor(output, 'mkv');
+    await configure(repeat);
+    expect(changes(repeat)).toEqual([]);
+    expect(repeat.variables.ffmpegCommand.shouldProcess).toBe(false);
+  });
+
   it.each(['mp4', 'mov'])('remuxes untouched streams to %s and converges', async (container) => {
     const source = join(directory, 'source.mkv');
     const output = join(directory, `output.${container}`);
