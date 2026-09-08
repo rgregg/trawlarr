@@ -1,4 +1,5 @@
 export * from './canonical-json.js';
+export * from './sha256.js';
 export * from './identity.js';
 export * from './facts.js';
 export * from './language-tag.js';

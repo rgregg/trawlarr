@@ -13,7 +13,7 @@ export interface FileFilters {
   q: string | null;
 }
 
-export type ConfigTab = 'workers' | 'libraries' | 'flows' | 'plugins' | 'system';
+export type ConfigTab = 'workers' | 'libraries' | 'flows' | 'plugins' | 'system' | 'account';
 
 export type Route =
   | { name: 'watch' }
@@ -50,7 +50,10 @@ export type Route =
   | { name: 'config'; tab: ConfigTab }
   | { name: 'notFound'; path: string };
 
-const CONFIG_TABS: ConfigTab[] = ['workers', 'libraries', 'flows', 'plugins', 'system'];
+// Order is the order the tabs render in: `flows` beside the libraries whose
+// flows it edits, `account` last because it is about the operator rather
+// than the daemon. Two tabs added on two branches; both belong.
+const CONFIG_TABS: ConfigTab[] = ['workers', 'libraries', 'flows', 'plugins', 'system', 'account'];
 
 const isConfigTab = (raw: string | null): raw is ConfigTab =>
   raw !== null && (CONFIG_TABS as string[]).includes(raw);

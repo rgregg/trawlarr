@@ -208,3 +208,34 @@ export const oidcSummary = (settings: PublicAuthSettings): string | null => {
   if (issuer === '') return null;
   return `Settings are saved for ${issuer}, but single sign-on is off.`;
 };
+
+export interface PasswordChangeDraft {
+  currentPassword: string;
+  newPassword: string;
+  confirmPassword: string;
+}
+
+/**
+ * Everything wrong with a password change that can be seen without asking
+ * the daemon, in the order an operator filling the form in would hit it.
+ *
+ * The confirmation check is the one the API CANNOT make on its own: both
+ * boxes are masked, a typo in the second is invisible, and only one of them
+ * is ever sent. Getting it wrong sets a password nobody knows — on the one
+ * screen where that is expensive, since the account it belongs to is the one
+ * you are signed in as.
+ *
+ * The length floor is the same 8 the endpoint and the CLI enforce. Repeating
+ * it here is not the check that matters — the server's is — it just says so
+ * before a round trip instead of after one.
+ */
+export const validatePasswordChange = (draft: PasswordChangeDraft): string | null => {
+  if (draft.currentPassword.trim() === '') return 'Enter your current password.';
+  if (draft.newPassword.length < 8) return 'A new password must be at least 8 characters.';
+  if (draft.newPassword !== draft.confirmPassword) return 'Those two passwords do not match.';
+  // A change to the same value round-trips, succeeds, and reads as "done" —
+  // leaving someone who meant to rotate a leaked password believing they
+  // had. Refused where the difference is still on screen.
+  if (draft.newPassword === draft.currentPassword) return 'That is already your password.';
+  return null;
+};

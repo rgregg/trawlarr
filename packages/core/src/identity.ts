@@ -1,4 +1,4 @@
-import { sha256Hex } from './canonical-json.js';
+import { sha256Hex } from './sha256.js';
 
 export type IdentityKind = 'inode' | 'content';
 

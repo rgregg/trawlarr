@@ -425,6 +425,126 @@ describe('accounts', () => {
   });
 });
 
+describe('PATCH /auth/accounts/:id/password', () => {
+  /** Signs up `root`, returning the id and the session cookie for it. */
+  const signedIn = async (): Promise<{ id: string; cookie: string }> => {
+    const setup = await api('POST', '/auth/setup', {
+      apiKey: null,
+      body: { username: 'root', password: 'hunter22222' },
+    });
+    return {
+      id: (setup.body as { id: string }).id,
+      cookie: `${SESSION_COOKIE_NAME}=${setup.cookies[SESSION_COOKIE_NAME]!}`,
+    };
+  };
+
+  it('changes the password, and the new one is what signs in afterwards', async () => {
+    const { id, cookie } = await signedIn();
+
+    const res = await api('PATCH', `/auth/accounts/${id}/password`, {
+      apiKey: null,
+      cookie,
+      body: { currentPassword: 'hunter22222', newPassword: 'a-longer-secret' },
+    });
+    expect(res.status).toBe(204);
+
+    const withOld = await api('POST', '/auth/login', {
+      apiKey: null,
+      body: { username: 'root', password: 'hunter22222' },
+    });
+    expect(withOld.status).toBe(401);
+
+    const withNew = await api('POST', '/auth/login', {
+      apiKey: null,
+      body: { username: 'root', password: 'a-longer-secret' },
+    });
+    expect(withNew.status).toBe(200);
+  });
+
+  /**
+   * The check that stops a borrowed unlocked browser from silently taking
+   * the account over: knowing the session is not the same as knowing the
+   * password, and only the second is enough to replace it.
+   */
+  it('refuses without the current password, and leaves the old one working', async () => {
+    const { id, cookie } = await signedIn();
+
+    const res = await api('PATCH', `/auth/accounts/${id}/password`, {
+      apiKey: null,
+      cookie,
+      body: { currentPassword: 'not-the-password', newPassword: 'a-longer-secret' },
+    });
+
+    expect(res.status).toBe(400);
+    expect((res.body as { error: { code: string } }).error.code).toBe('invalid-credentials');
+    const stillWorks = await api('POST', '/auth/login', {
+      apiKey: null,
+      body: { username: 'root', password: 'hunter22222' },
+    });
+    expect(stillWorks.status).toBe(200);
+  });
+
+  /**
+   * Every account is an equal admin, so this is not about privilege — it is
+   * that a password is the one thing an account holds which nobody else has
+   * any business replacing. Anyone wanting to lock a colleague out can
+   * already delete the account; they cannot quietly become them.
+   */
+  it("refuses to change another account's password", async () => {
+    const { cookie } = await signedIn();
+    const second = await api('POST', '/auth/accounts', {
+      apiKey: null,
+      cookie,
+      body: { username: 'second', password: 'hunter22222' },
+    });
+    const secondId = (second.body as { id: string }).id;
+
+    const res = await api('PATCH', `/auth/accounts/${secondId}/password`, {
+      apiKey: null,
+      cookie,
+      body: { currentPassword: 'hunter22222', newPassword: 'a-longer-secret' },
+    });
+
+    expect(res.status).toBe(403);
+    const stillWorks = await api('POST', '/auth/login', {
+      apiKey: null,
+      body: { username: 'second', password: 'hunter22222' },
+    });
+    expect(stillWorks.status).toBe(200);
+  });
+
+  // The same floor `POST /auth/accounts` applies, enforced in the same place
+  // rather than only in the browser that happens to ask.
+  it('refuses a new password under eight characters', async () => {
+    const { id, cookie } = await signedIn();
+
+    const res = await api('PATCH', `/auth/accounts/${id}/password`, {
+      apiKey: null,
+      cookie,
+      body: { currentPassword: 'hunter22222', newPassword: 'short' },
+    });
+
+    expect(res.status).toBe(400);
+    expect((res.body as { error: { code: string } }).error.code).toBe('invalid-body');
+  });
+
+  /**
+   * AN API KEY IS NOT AN ACCOUNT. It authorises a script against the whole
+   * API, but it does not say WHO is asking, and this endpoint's entire rule
+   * is "only the account itself". A key holder wanting a new password has
+   * the CLI, which owns the data directory rather than guessing an identity.
+   */
+  it('refuses an API key with no session, since a key names no account', async () => {
+    const { id } = await signedIn();
+
+    const res = await api('PATCH', `/auth/accounts/${id}/password`, {
+      body: { currentPassword: 'hunter22222', newPassword: 'a-longer-secret' },
+    });
+
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('GET /auth/oidc/start', () => {
   it('answers 404 when OIDC is not enabled', async () => {
     const res = await api('GET', '/auth/oidc/start', { apiKey: null });

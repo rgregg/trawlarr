@@ -195,6 +195,30 @@ describe('diffFlowDefinitions', () => {
     ]);
   });
 
+  it('treats nested input objects with reordered keys as unchanged', () => {
+    const before = { nodes: [node('n', 'x', { options: { alpha: 1, beta: 2 } })], edges: [] };
+    const after = { nodes: [node('n', 'x', { options: { beta: 2, alpha: 1 } })], edges: [] };
+
+    expect(flowDefinitionHash(before)).toBe(flowDefinitionHash(after));
+    expect(isEmptyDiff(diffFlowDefinitions(before, after))).toBe(true);
+  });
+
+  it('does not confuse edges when node ids contain delimiter characters', () => {
+    const before = {
+      nodes: [],
+      edges: [{ fromNodeId: 'a 1', outputNumber: 2, toNodeId: 'b' }],
+    };
+    const after = {
+      nodes: [],
+      edges: [{ fromNodeId: 'a', outputNumber: 1, toNodeId: '2 b' }],
+    };
+
+    const diff = diffFlowDefinitions(before, after);
+    expect(diff.edgesRemoved).toEqual(before.edges);
+    expect(diff.edgesAdded).toEqual(after.edges);
+    expect(isEmptyDiff(diff)).toBe(false);
+  });
+
   it('is empty exactly when the two definitions share a flow hash', () => {
     // The property the whole screen rests on: an empty diff is the UI's
     // licence to say "these versions are identical", and a differing hash is

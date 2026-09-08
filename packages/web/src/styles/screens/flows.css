@@ -219,6 +219,14 @@
   gap: 0.2rem;
 }
 
+.flow-history-more {
+  margin-top: var(--space-3);
+}
+
+.flow-history-more p {
+  margin: 0 0 var(--space-2);
+}
+
 .flow-history-row {
   display: flex;
   align-items: center;

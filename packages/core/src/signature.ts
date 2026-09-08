@@ -1,10 +1,11 @@
-import { canonicalJson, sha256Hex } from './canonical-json.js';
+import { canonicalJson } from './canonical-json.js';
+import { sha256Hex } from './sha256.js';
 import { factsHash, type FactSet } from './facts.js';
 import type { FlowDefinition, FlowEdge, FlowNode } from './flow.js';
 
 const nodeKey = (node: FlowNode): string => node.id;
 const edgeKey = (edge: FlowEdge): string =>
-  `${edge.fromNodeId}|${edge.outputNumber}|${edge.toNodeId}`;
+  canonicalJson([edge.fromNodeId, edge.outputNumber, edge.toNodeId]);
 
 /**
  * A total ordering on the sort keys. Returning 0 for equal keys matters: a
