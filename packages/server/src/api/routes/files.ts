@@ -1,3 +1,4 @@
+import { unlink } from 'node:fs/promises';
 import type { FileState } from '@trawlarr/core';
 import { createJobRepo } from '../../db/job-repo.js';
 import { ALL_STATES, createMediaFileRepo, type MediaFileRow } from '../../db/media-file-repo.js';
@@ -220,6 +221,64 @@ export const fileRoutes: Route[] = [
         note:
           `Held until ${new Date(holdUntilMs).toISOString()}; it becomes claimable again on its ` +
           `own after that, without anyone having to remember to requeue it.`,
+      };
+    },
+  },
+  {
+    method: 'DELETE',
+    path: '/files/:id',
+    handler: async ({ params, ctx }) => {
+      const row = requireFile(ctx, params.id!);
+
+      // NEVER while a worker holds it. A running job may be inside `Replace
+      // Original File`, which empties the original's path and writes the
+      // replacement moments later; unlinking underneath that is the same
+      // two-writers-one-file shape every claim guard in this codebase exists
+      // to prevent, and here it destroys the replacement as well as the
+      // original. `requeue` is how an operator gets a running file back.
+      if (row.state === 'running') {
+        throw new ApiError(
+          409,
+          'file-running',
+          `"${row.path}" is being processed right now. Deleting it under the worker would race ` +
+            `the replacement it is writing. Wait for the run to finish, then delete it.`,
+        );
+      }
+
+      // DISK FIRST, ROW SECOND, and the order is the whole safety argument.
+      // If the unlink fails (read-only mount, a share the service user cannot
+      // write) the row must survive: forgetting a file that is still on disk
+      // does not remove it from the library, it removes its HISTORY — the
+      // next scan re-adds it as a brand-new file with no ledger, no attempt
+      // count and no record that anyone ever tried to delete it.
+      let fileExisted = true;
+      try {
+        await unlink(row.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          // Already gone — that is the outcome that was asked for, and a row
+          // whose file has vanished is exactly what this deletes next.
+          fileExisted = false;
+        } else {
+          throw new ApiError(
+            500,
+            'delete-failed',
+            `"${row.path}" could not be deleted: ${(error as Error).message}. The file and its ` +
+              `history are both untouched.`,
+          );
+        }
+      }
+
+      // Cascades to `job` and, through it, `job_step` — see `MediaFileRepo.delete`.
+      createMediaFileRepo(ctx.db).delete(row.id);
+
+      return {
+        deleted: true,
+        path: row.path,
+        fileExisted,
+        note: fileExisted
+          ? `Deleted "${row.path}" from disk, along with its run history.`
+          : `"${row.path}" was already gone from disk; its row and run history are now removed too.`,
       };
     },
   },

@@ -1,6 +1,13 @@
 import { mkdtemp, mkdir, symlink, writeFile, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -651,6 +658,87 @@ describe('files', () => {
 
     expect(response.status).toBe(200);
     expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
+  });
+
+  it('deletes the file from disk and the row with it', async () => {
+    const library = seedLibrary();
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));
+    const path = join(dir, 'a.mkv');
+    writeFileSync(path, 'media');
+    const fileId = seedFile({ libraryId: library.id, path, state: 'good' });
+    createJobRepo(db).start({
+      id: 'job-del',
+      fileId,
+      flowId: 'flow-1',
+      flowHash: 'hash-1',
+      nowMs: NOW,
+    });
+
+    const response = await api('DELETE', `/files/${fileId}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.deleted).toBe(true);
+    expect(existsSync(path)).toBe(false);
+    expect(createMediaFileRepo(db).getById(fileId)).toBeNull();
+    expect(createJobRepo(db).listForFile(fileId)).toHaveLength(0);
+  });
+
+  it('refuses to delete a file a worker is running, so nothing is unlinked mid-replace', async () => {
+    const library = seedLibrary();
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));
+    const path = join(dir, 'running.mkv');
+    writeFileSync(path, 'media');
+    const fileId = seedFile({ libraryId: library.id, path, state: 'running' });
+
+    const response = await api('DELETE', `/files/${fileId}`);
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('file-running');
+    // The point of the refusal: both the file and its row survive intact.
+    expect(existsSync(path)).toBe(true);
+    expect(createMediaFileRepo(db).getById(fileId)).not.toBeNull();
+  });
+
+  it('still forgets a row whose file is already gone from disk', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/never-existed.mkv' });
+
+    const response = await api('DELETE', `/files/${fileId}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.fileExisted).toBe(false);
+    expect(createMediaFileRepo(db).getById(fileId)).toBeNull();
+  });
+
+  it('keeps the row when the file cannot be unlinked, rather than forgetting a file that is still there', async () => {
+    const library = seedLibrary();
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));
+    const path = join(dir, 'locked.mkv');
+    writeFileSync(path, 'media');
+    const fileId = seedFile({ libraryId: library.id, path, state: 'good' });
+    // A read-only parent directory is what an unlink failure looks like on a
+    // real library: a read-only mount, or a share the service user cannot
+    // write. The row must survive it — forgetting a file that is still on
+    // disk means the next scan re-adds it as a brand-new file with no history.
+    chmodSync(dir, 0o500);
+
+    try {
+      const response = await api('DELETE', `/files/${fileId}`);
+
+      expect(response.status).toBe(500);
+      expect(response.body.error.code).toBe('delete-failed');
+      expect(existsSync(path)).toBe(true);
+      expect(createMediaFileRepo(db).getById(fileId)).not.toBeNull();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  it('404s deleting a file that is not there', async () => {
+    const response = await api('DELETE', '/files/missing');
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('file-not-found');
   });
 
   it('raises a file priority so it is claimed next', async () => {
