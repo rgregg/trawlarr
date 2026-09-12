@@ -4,6 +4,9 @@ import {
   addPluginNode,
   autoLayout,
   canvasNodeWidth,
+  NODE_COLUMN_GAP,
+  NODE_MIN_WIDTH,
+  NODE_OUTPUT_WIDTH,
   connectNodes,
   definitionsEqual,
   deleteSelection,
@@ -96,20 +99,23 @@ describe('canvas translation and layout', () => {
     expect(addPluginNode(definition, onError, 'second-error', available)).toBe(definition);
   });
 
-  it('uses compact 200px boxes and lays a chain out from top to bottom', () => {
+  it('uses compact boxes and lays a chain out from top to bottom', () => {
     const definition = chain();
     const layout = autoLayout(definition, plugins);
     expect(definition.nodes.map((item) => layout[item.id])).toEqual([
       { x: 40, y: 40 },
-      { x: 40, y: 240 },
-      { x: 40, y: 440 },
-      { x: 40, y: 640 },
+      { x: 40, y: 148 },
+      { x: 40, y: 256 },
+      { x: 40, y: 364 },
     ]);
-    expect(toCanvas(definition, plugins).nodes.every((item) => item.style.width === 200)).toBe(
-      true,
-    );
-    expect(canvasNodeWidth(0)).toBe(200);
-    expect(canvasNodeWidth(4)).toBe(200);
+    expect(
+      toCanvas(definition, plugins).nodes.every((item) => item.style.width === NODE_MIN_WIDTH),
+    ).toBe(true);
+    expect(canvasNodeWidth(0)).toBe(NODE_MIN_WIDTH);
+    // Three outputs still fit the floor; the width only grows past it after
+    // that, so a plain two-way branch is no wider than a terminal node.
+    expect(canvasNodeWidth(3)).toBe(NODE_MIN_WIDTH);
+    expect(canvasNodeWidth(4)).toBe(4 * NODE_OUTPUT_WIDTH);
   });
 
   it('spreads sibling branches horizontally and gives every bottom output room', () => {
@@ -121,10 +127,10 @@ describe('canvas translation and layout', () => {
     const layout = autoLayout(definition, available);
     const projected = toCanvas(definition, available);
     const wide = projected.nodes.find((item) => item.id === 'b')!;
-    expect(wide.style.width).toBe(6 * 48);
+    expect(wide.style.width).toBe(6 * NODE_OUTPUT_WIDTH);
     expect(layout.b!.y).toBe(layout.c!.y);
     expect(layout.b!.y).toBeGreaterThan(layout.a!.y);
-    expect(layout.c!.x - layout.b!.x).toBe(wide.style.width + 48);
+    expect(layout.c!.x - layout.b!.x).toBe(wide.style.width + NODE_COLUMN_GAP);
   });
 
   it('reserves bottom connector space for undeclared outputs without altering the flow', () => {

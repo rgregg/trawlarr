@@ -100,7 +100,37 @@ const errorEntryIds = (definition: FlowDefinition, plugins: EditorPlugin[]): str
     )
     .map((node) => node.id);
 
-export const canvasNodeWidth = (outputCount: number): number => Math.max(200, outputCount * 48);
+/**
+ * Node geometry, in canvas pixels.
+ *
+ * A flow is read as a SHAPE — which way it branches, where it rejoins, what
+ * is unreachable — and that reading happens at whatever zoom fits the graph
+ * on screen. Cards big enough to read a paragraph in push a fifteen-node
+ * flow past the viewport, so the card carries a name and its branch labels
+ * and nothing else; the tooltip and the config panel hold the detail.
+ * Tdarr's canvas, the reference here, goes further still and drops the
+ * branch labels entirely — worth knowing, deliberately not copied, because
+ * "output 1 vs output 2" is unreadable without them on a condition node.
+ */
+export const NODE_MIN_WIDTH = 168;
+/** Per output, so a wide node still gives every bottom handle room to land. */
+export const NODE_OUTPUT_WIDTH = 48;
+/**
+ * Between layers, top to bottom.
+ *
+ * One step for every node, so it has to clear the TALLEST card — a branch
+ * node carrying its output labels, measured at 81px — with room for an edge
+ * to be followed between them. Straight-line nodes are half that and sit in
+ * more space than they need; the alternative is a per-layer height computed
+ * from an estimate of what the CSS will produce, which is a second source of
+ * truth for a number only the browser actually knows.
+ */
+export const NODE_LAYER_STEP = 108;
+/** Between sibling branches, left to right. */
+export const NODE_COLUMN_GAP = 40;
+
+export const canvasNodeWidth = (outputCount: number): number =>
+  Math.max(NODE_MIN_WIDTH, outputCount * NODE_OUTPUT_WIDTH);
 
 /** Top-to-bottom layers terminate on cycles and keep rejoined nodes in one place. */
 export function autoLayout(definition: FlowDefinition, plugins: EditorPlugin[]): CanvasLayout {
@@ -129,8 +159,8 @@ export function autoLayout(definition: FlowDefinition, plugins: EditorPlugin[]):
           .filter((edge) => edge.fromNodeId === node.id)
           .map((edge) => edge.outputNumber),
       ]);
-      columns.set(layer, x + canvasNodeWidth(outputs.size) + 48);
-      return [node.id, { x, y: 40 + layer * 200 }];
+      columns.set(layer, x + canvasNodeWidth(outputs.size) + NODE_COLUMN_GAP);
+      return [node.id, { x, y: 40 + layer * NODE_LAYER_STEP }];
     }),
   );
 }

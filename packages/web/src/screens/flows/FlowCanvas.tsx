@@ -75,6 +75,7 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
   const warning = !plugin ? 'Plugin unavailable' : !plugin.enabled ? 'Plugin disabled' : null;
   // Metadata is only an accent. Arbitrary HTML/icons and styles never enter the page.
   const accent = plugin?.details.style.borderColor;
+  const compactOutputs = outputs.length === 1 && !outputs[0]!.missing;
   const style = {
     '--plugin-accent': accent && CSS.supports('color', accent) ? accent : 'var(--line-strong)',
   } as CSSProperties;
@@ -95,9 +96,6 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
         isConnectable={!data.readOnly}
         aria-label={`Input of ${data.label}`}
       />
-      <span className="flow-node-input-label">
-        {data.protectedStart ? 'Start' : data.errorEntry ? 'On flow error' : 'Input'}
-      </span>
       <header>
         <span className="flow-node-glyph" aria-hidden="true">
           {data.protectedStart ? '▶' : '◇'}
@@ -141,20 +139,32 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
         </p>
       )}
       {outputs.length > 0 && (
-        <div className="flow-node-outputs">
+        // A label per output EARNS its height only when there is a choice to
+        // read. One output is a continuation, not a branch: naming it costs
+        // every straight-line node in the flow a third of its height to say
+        // what the single edge leaving it already says. Its tooltip still
+        // carries the text, and a missing output keeps the full treatment
+        // because that one is a problem to be read, not a continuation.
+        <div className={`flow-node-outputs${compactOutputs ? ' is-single' : ''}`}>
           {outputs.map((output) => (
             <div
               className={`flow-node-output${output.missing ? ' is-missing' : ''}`}
               key={output.number}
               title={output.tooltip}
             >
-              <b>
-                {output.number}
-                {output.missing && ' !'}
-              </b>
-              <span className="flow-node-output-description">
-                {output.missing ? 'Missing output' : output.tooltip || `Output ${output.number}`}
-              </span>
+              {!compactOutputs && (
+                <>
+                  <b>
+                    {output.number}
+                    {output.missing && ' !'}
+                  </b>
+                  <span className="flow-node-output-description">
+                    {output.missing
+                      ? 'Missing output'
+                      : output.tooltip || `Output ${output.number}`}
+                  </span>
+                </>
+              )}
               <Handle
                 type="source"
                 position={Position.Bottom}
