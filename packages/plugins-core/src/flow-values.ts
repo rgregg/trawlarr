@@ -164,15 +164,15 @@ export const readFlowValue = (args: FlowValueArgs, name: string): FlowValue | un
     case 'audio.codecs':
       return audio && [...new Set(audio.map((stream) => stream.codec_name))];
     case 'audio.channels': {
-      if (!audio) return undefined;
-      return [
-        ...new Set(
-          audio
-            .map((stream) => finite(stream.channels))
-            .filter((channels): channels is number => channels !== undefined)
-            .map(String),
-        ),
-      ];
+      // UNDEFINED when ANY stream's channel count is unreadable, matching
+      // `audio.maxChannels` below. Filtering the unreadable streams out and
+      // answering from the rest looks harmless on a list property, but it
+      // turns partial probe data into a confident answer: `audio.channels
+      // does not include "6"` would return true for a file whose one
+      // unprobed stream is the 5.1 track. A condition that cannot be
+      // answered must not be answered.
+      if (!audio || audio.some((stream) => finite(stream.channels) === undefined)) return undefined;
+      return [...new Set(audio.map((stream) => String(Number(stream.channels))))];
     }
     case 'audio.maxChannels': {
       if (!audio || audio.some((stream) => finite(stream.channels) === undefined)) return undefined;

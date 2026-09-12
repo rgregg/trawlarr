@@ -229,14 +229,22 @@ export const fileRoutes: Route[] = [
     path: '/files/:id',
     handler: async ({ params, ctx }) => {
       const row = requireFile(ctx, params.id!);
+      const repo = createMediaFileRepo(ctx.db);
 
-      // NEVER while a worker holds it. A running job may be inside `Replace
-      // Original File`, which empties the original's path and writes the
-      // replacement moments later; unlinking underneath that is the same
+      // NEVER while a worker holds it, and the refusal has to be ATOMIC with
+      // taking the row out of the queue's reach. A running job may be inside
+      // `Replace Original File`, which empties the original's path and writes
+      // the replacement moments later; unlinking underneath that is the same
       // two-writers-one-file shape every claim guard in this codebase exists
       // to prevent, and here it destroys the replacement as well as the
-      // original. `requeue` is how an operator gets a running file back.
-      if (row.state === 'running') {
+      // original. A plain `row.state === 'running'` read before the unlink
+      // was not enough on two counts: `claimNext` could take a queued row
+      // while the unlink was in flight, and `POST /files/:id/hold` can write
+      // `held` over a live run, which made the state say "idle" about a file
+      // a worker was transcoding. `requeue` is how an operator gets a
+      // running file back.
+      const reservation = repo.reserveForDeletion({ fileId: row.id, nowMs: ctx.nowMs() });
+      if (reservation === null) {
         throw new ApiError(
           409,
           'file-running',
@@ -260,6 +268,9 @@ export const fileRoutes: Route[] = [
           // whose file has vanished is exactly what this deletes next.
           fileExisted = false;
         } else {
+          // Put the row back exactly as it was: the file is still on disk, so
+          // it is still the library's file and still belongs in the queue.
+          repo.restoreFromDeletion({ fileId: row.id, ...reservation });
           throw new ApiError(
             500,
             'delete-failed',
@@ -270,7 +281,7 @@ export const fileRoutes: Route[] = [
       }
 
       // Cascades to `job` and, through it, `job_step` — see `MediaFileRepo.delete`.
-      createMediaFileRepo(ctx.db).delete(row.id);
+      repo.delete(row.id);
 
       return {
         deleted: true,

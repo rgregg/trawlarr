@@ -8,6 +8,7 @@ import {
   toIdleInputs,
   toLibraryCard,
   toRunningRows,
+  nextDebounceDelayMs,
   toWorkerSlots,
   type LibraryResource,
   type LibraryStats,
@@ -593,5 +594,23 @@ describe('mergeRunningRows with finishedJobIds', () => {
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.jobId).toBe('running-job');
+  });
+});
+
+describe('nextDebounceDelayMs', () => {
+  it('waits the full delay for a change that has only just arrived', () => {
+    expect(nextDebounceDelayMs({ waitedMs: 0, delayMs: 400, maxWaitMs: 2000 })).toBe(400);
+  });
+
+  it('shortens the wait as the ceiling approaches', () => {
+    expect(nextDebounceDelayMs({ waitedMs: 1800, delayMs: 400, maxWaitMs: 2000 })).toBe(200);
+  });
+
+  it('releases immediately once the ceiling is reached, however long the bumps keep coming', () => {
+    // The starvation case: a sweep finishing a file every ~100ms against a
+    // 400ms delay never leaves a gap, so without the ceiling this returns
+    // 400 for ever and the screen's counters never refresh.
+    expect(nextDebounceDelayMs({ waitedMs: 2000, delayMs: 400, maxWaitMs: 2000 })).toBe(0);
+    expect(nextDebounceDelayMs({ waitedMs: 9999, delayMs: 400, maxWaitMs: 2000 })).toBe(0);
   });
 });

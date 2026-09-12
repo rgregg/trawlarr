@@ -666,13 +666,12 @@ describe('files', () => {
     const path = join(dir, 'a.mkv');
     writeFileSync(path, 'media');
     const fileId = seedFile({ libraryId: library.id, path, state: 'good' });
-    createJobRepo(db).start({
-      id: 'job-del',
-      fileId,
-      flowId: 'flow-1',
-      flowHash: 'hash-1',
-      nowMs: NOW,
-    });
+    const jobRepo = createJobRepo(db);
+    jobRepo.start({ id: 'job-del', fileId, flowId: 'flow-1', flowHash: 'hash-1', nowMs: NOW });
+    // FINISHED history, not a live run: a job still in state `running` is
+    // refused (the test below), and what this one is here to prove is that
+    // the row's history goes with it.
+    jobRepo.finish({ jobId: 'job-del', state: 'done', outcome: 'converged', nowMs: NOW });
 
     const response = await api('DELETE', `/files/${fileId}`);
 
@@ -699,6 +698,32 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)).not.toBeNull();
   });
 
+  it('refuses while a job is still running, even when the row says it is held', async () => {
+    const library = seedLibrary();
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));
+    const path = join(dir, 'held-but-live.mkv');
+    writeFileSync(path, 'media');
+    const fileId = seedFile({ libraryId: library.id, path, state: 'good' });
+    createJobRepo(db).start({
+      id: 'job-live',
+      fileId,
+      flowId: 'flow-1',
+      flowHash: 'hash-1',
+      nowMs: NOW,
+    });
+    // `POST /files/:id/hold` does not care that a worker is mid-run, so this
+    // is a state an operator can actually produce: a row reading `held` with
+    // a live job under it. Trusting the row alone here unlinks the original
+    // out from under Replace Original File.
+    await api('POST', `/files/${fileId}/hold`, { hours: 6 });
+
+    const response = await api('DELETE', `/files/${fileId}`);
+
+    expect(response.status).toBe(409);
+    expect(existsSync(path)).toBe(true);
+    expect(createMediaFileRepo(db).getById(fileId)).not.toBeNull();
+  });
+
   it('still forgets a row whose file is already gone from disk', async () => {
     const library = seedLibrary();
     const fileId = seedFile({ libraryId: library.id, path: '/media/never-existed.mkv' });
@@ -710,29 +735,44 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)).toBeNull();
   });
 
-  it('keeps the row when the file cannot be unlinked, rather than forgetting a file that is still there', async () => {
-    const library = seedLibrary();
-    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));
-    const path = join(dir, 'locked.mkv');
-    writeFileSync(path, 'media');
-    const fileId = seedFile({ libraryId: library.id, path, state: 'good' });
-    // A read-only parent directory is what an unlink failure looks like on a
-    // real library: a read-only mount, or a share the service user cannot
-    // write. The row must survive it — forgetting a file that is still on
-    // disk means the next scan re-adds it as a brand-new file with no history.
-    chmodSync(dir, 0o500);
+  // Root ignores directory permission bits, so the read-only directory below
+  // does not stop an unlink and the case cannot be staged at all. Skipped
+  // rather than silently passing: a green assertion that never ran is how a
+  // guard rots. CI containers commonly run as root.
+  const itUnlessRoot = process.getuid?.() === 0 ? it.skip : it;
 
-    try {
-      const response = await api('DELETE', `/files/${fileId}`);
+  itUnlessRoot(
+    'keeps the row when the file cannot be unlinked, rather than forgetting a file that is still there',
+    async () => {
+      const library = seedLibrary();
+      const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));
+      const path = join(dir, 'locked.mkv');
+      writeFileSync(path, 'media');
+      const fileId = seedFile({ libraryId: library.id, path, state: 'queued' });
+      // A read-only parent directory is what an unlink failure looks like on
+      // a real library: a read-only mount, or a share the service user cannot
+      // write. The row must survive it — forgetting a file that is still on
+      // disk means the next scan re-adds it as a brand-new file with no
+      // history.
+      chmodSync(dir, 0o500);
 
-      expect(response.status).toBe(500);
-      expect(response.body.error.code).toBe('delete-failed');
-      expect(existsSync(path)).toBe(true);
-      expect(createMediaFileRepo(db).getById(fileId)).not.toBeNull();
-    } finally {
-      chmodSync(dir, 0o700);
-    }
-  });
+      try {
+        const response = await api('DELETE', `/files/${fileId}`);
+
+        expect(response.status).toBe(500);
+        expect(response.body.error.code).toBe('delete-failed');
+        expect(existsSync(path)).toBe(true);
+        // Restored, not merely present: the reservation parks the row on a
+        // long hold to keep the queue off it during the unlink, and a row
+        // left parked would be a file that silently never runs again.
+        const row = createMediaFileRepo(db).getById(fileId)!;
+        expect(row.state).toBe('queued');
+        expect(row.hold_until_ms).toBeNull();
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
 
   it('404s deleting a file that is not there', async () => {
     const response = await api('DELETE', '/files/missing');

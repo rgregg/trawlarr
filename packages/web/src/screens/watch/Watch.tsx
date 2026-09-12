@@ -11,6 +11,7 @@ import {
   mergeRunningRows,
   ranFfmpeg,
   summarise24h,
+  nextDebounceDelayMs,
   toIdleInputs,
   toLibraryCard,
   toWorkerSlots,
@@ -21,12 +22,44 @@ import {
   type RestRunningJob,
 } from './watch-model.js';
 
-const useDebouncedValue = <T,>(value: T, delayMs: number): T => {
+/**
+ * Coalesces a stream of staleness bumps into refetches, with a CEILING on
+ * how long it will coalesce for.
+ *
+ * A plain trailing debounce starves under exactly the workload this exists
+ * for: the timer restarts on every change, and a sweep of skip-only files
+ * finishes jobs faster than the delay, so the value never settles and the
+ * screen's counters stay frozen at whatever they were when the sweep began
+ * — refreshing only once the library goes quiet, which is the one moment
+ * nobody is watching. `maxWaitMs` bounds that: however long the bumps keep
+ * coming, the value is released at least that often.
+ */
+const useDebouncedValue = <T,>(value: T, delayMs: number, maxWaitMs = delayMs * 5): T => {
   const [debounced, setDebounced] = useState<T>(value);
+  // When the current run of changes began — the anchor the ceiling is
+  // measured from, reset each time a value is actually released.
+  const firstPendingAt = useRef<number | null>(null);
+
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delayMs);
+    if (Object.is(value, debounced)) {
+      firstPendingAt.current = null;
+      return;
+    }
+    firstPendingAt.current ??= Date.now();
+    const timer = setTimeout(
+      () => {
+        firstPendingAt.current = null;
+        setDebounced(value);
+      },
+      nextDebounceDelayMs({
+        waitedMs: Date.now() - firstPendingAt.current,
+        delayMs,
+        maxWaitMs,
+      }),
+    );
     return () => clearTimeout(timer);
-  }, [value, delayMs]);
+  }, [value, debounced, delayMs, maxWaitMs]);
+
   return debounced;
 };
 
@@ -383,7 +416,16 @@ export const Watch = (props: {
 
   const assignedSlots = useRef<Map<string, number>>(new Map());
 
-  const configuredWorkers = workerStatus
+  // How many SLOT CARDS the list renders — the transcode pool only, because
+  // those are the workers that run files, and summing every class used to
+  // inflate the row with health workers that never appear in it.
+  //
+  // Deliberately NOT the number `explainIdle` reasons about: that one is
+  // `sum(baseCounts)` across all classes (see `toIdleInputs`), which is the
+  // number an operator sets on the Configure screen. Two different questions
+  // — "how many cards belong here" and "has anyone configured any workers" —
+  // so the idle box below asks the second one rather than this.
+  const transcodeSlots = workerStatus
     ? (workerStatus.target.transcode ?? workerStatus.baseCounts.transcode ?? 0)
     : 0;
 
@@ -397,13 +439,13 @@ export const Watch = (props: {
   const showIdleBox =
     runningRows.length === 0 &&
     (workerStatus?.paused ||
-      configuredWorkers === 0 ||
+      idleInputs?.workers === 0 ||
       (idleInputs !== null &&
         (!idleInputs.withinWindow ||
           (idleInputs.converged && (libraryTotals?.queued ?? 0) === 0))));
 
   const workerSlots = toWorkerSlots({
-    configuredWorkers,
+    configuredWorkers: transcodeSlots,
     runningRows,
     queued: libraryTotals?.queued ?? 0,
     activeWorkers: workerStatus?.active ?? runningRows.length,
@@ -506,7 +548,16 @@ export const Watch = (props: {
                   <li key={slot.slotNumber} className="job running">
                     <div className="watch-running-head">
                       <div className="job-identity">
-                        <span className="job-worker-badge">{slot.workerLabel}</span>
+                        {/* The slot number is a UI-local index — it is this
+                            card's position, not the worker's identity. The
+                            real `workerId` is what appears in `job.started`,
+                            the daemon log and `GET /workers`, so an operator
+                            chasing a stuck card here has something to match
+                            on; printing only the slot left them nothing. */}
+                        <span className="job-worker-badge" title={`Worker id: ${row.workerId}`}>
+                          {slot.workerLabel}
+                          <span className="job-worker-id">{row.workerId}</span>
+                        </span>
                         <Link to={`/files/${row.fileId}`} navigate={navigate} className="job-file">
                           {row.name}
                         </Link>

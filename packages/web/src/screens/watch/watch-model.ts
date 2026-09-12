@@ -509,3 +509,21 @@ export const ranFfmpeg = (steps: StepExcerpt[]): boolean => {
   const execute = steps.find((step) => step.pluginId === 'trawlarr:execute');
   return execute !== undefined && execute.logExcerpt.startsWith('Running ffmpeg');
 };
+
+/**
+ * How long a coalescing refetch may still wait, given how long this run of
+ * changes has already been waiting.
+ *
+ * A plain trailing debounce restarts its timer on every change, so a stream
+ * of bumps arriving faster than the delay postpones the refetch for as long
+ * as the stream lasts. On the Watch screen that is not a corner case: it is
+ * a sweep of skip-only files, each finishing in ~100ms against a 400ms
+ * delay, and the counters simply stop moving until the library goes quiet.
+ * The ceiling turns "wait for a gap" into "wait for a gap, but never longer
+ * than `maxWaitMs` since the first pending change".
+ */
+export const nextDebounceDelayMs = (input: {
+  waitedMs: number;
+  delayMs: number;
+  maxWaitMs: number;
+}): number => Math.max(0, Math.min(input.delayMs, input.maxWaitMs - input.waitedMs));

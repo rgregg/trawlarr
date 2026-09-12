@@ -119,6 +119,22 @@ export interface UpdateAfterRunInput {
   nowMs: number;
 }
 
+/**
+ * How far ahead `reserveForDeletion` parks a row's hold.
+ *
+ * Long enough that no scan or supervisor tick can claim the row while an
+ * unlink is in flight — an unlink is milliseconds, a tick is seconds — and
+ * irrelevant afterwards, because the same request either deletes the row or
+ * puts its old hold back.
+ */
+const DELETION_RESERVATION_MS = 60 * 60 * 1000;
+
+/** What a row looked like before `reserveForDeletion` parked it. */
+export interface DeletionReservation {
+  previousState: FileState;
+  previousHoldUntilMs: number | null;
+}
+
 export interface MediaFileRepo {
   identityLookup(libraryId: string): IdentityLookup;
   upsertScanned(input: UpsertScannedInput): string;
@@ -257,6 +273,29 @@ export interface MediaFileRepo {
   /** The file is back: clear the mark. A no-op when it was never set. */
   clearMissing(fileId: string): void;
   /**
+   * Take a row OUT of the queue's reach so it can be deleted from disk, or
+   * refuse because something is running it.
+   *
+   * Deleting a library file is two steps that cannot be one — unlink the
+   * file, then drop the row — and between them the row is still an ordinary
+   * queue candidate. `claimNext` runs on a timer and on every requeue, so a
+   * plain "is it running?" read before the unlink is a check-then-act race:
+   * the file can be claimed while the unlink is in flight, and the worker
+   * then runs a flow against a path that is being removed underneath it.
+   *
+   * The refusal reads BOTH halves of "nobody is touching this file". The row
+   * state is not enough on its own: `POST /files/:id/hold` writes `held`
+   * without regard for a live run, so a held row can still have a worker
+   * inside `Replace Original File`, which is exactly the moment an unlink
+   * destroys the replacement as well as the original.
+   *
+   * Returns what the row looked like before, for `restoreFromDeletion`, or
+   * null when the file must not be deleted right now.
+   */
+  reserveForDeletion(input: { fileId: string; nowMs: number }): DeletionReservation | null;
+  /** Puts back what `reserveForDeletion` replaced, when the delete did not happen. */
+  restoreFromDeletion(input: { fileId: string } & DeletionReservation): void;
+  /**
    * Delete a media file row and its associated job history (via CASCADE).
    * Returns true if a row was deleted, false if no row existed with that id.
    */
@@ -330,6 +369,9 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
   );
   const selectById = db.prepare(`SELECT * FROM media_file WHERE id = ?`);
   const deleteById = db.prepare(`DELETE FROM media_file WHERE id = ?`);
+  const runningJobForFile = db.prepare(
+    `SELECT id FROM job WHERE file_id = ? AND state = 'running' LIMIT 1`,
+  );
   const runningPaths = db.prepare(
     `SELECT path FROM media_file WHERE library_id = ? AND state = 'running'`,
   );
@@ -837,6 +879,37 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
 
     clearMissing(fileId) {
       clearMissingStatement.run(fileId);
+    },
+
+    reserveForDeletion(input) {
+      // One transaction, because the read and the write together are the
+      // guard: better-sqlite3 is synchronous, so nothing interleaves inside
+      // this, and a worker's claim either lands entirely before it or finds
+      // the row already parked.
+      const reserve = db.transaction((fileId: string, nowMs: number) => {
+        const row = selectById.get(fileId) as MediaFileRow | undefined;
+        if (row === undefined || row.state === 'running') return null;
+        if (runningJobForFile.get(fileId) !== undefined) return null;
+
+        // `claimNext` takes rows in state `queued`/`held` whose hold has
+        // expired, so a hold this far out is unclaimable by any tick that
+        // could run before the unlink finishes. The row is restored (or
+        // gone) within the same request either way.
+        db.prepare(
+          `UPDATE media_file SET state = 'held', hold_until_ms = ?, updated_at = ? WHERE id = ?`,
+        ).run(nowMs + DELETION_RESERVATION_MS, nowMs, fileId);
+
+        return { previousState: row.state, previousHoldUntilMs: row.hold_until_ms };
+      });
+      return reserve(input.fileId, input.nowMs) as DeletionReservation | null;
+    },
+
+    restoreFromDeletion(input) {
+      db.prepare(`UPDATE media_file SET state = ?, hold_until_ms = ? WHERE id = ?`).run(
+        input.previousState,
+        input.previousHoldUntilMs,
+        input.fileId,
+      );
     },
 
     delete(fileId) {

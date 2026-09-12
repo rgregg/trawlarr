@@ -379,3 +379,13 @@
   margin: var(--space-2) 0 0;
   font-size: var(--text-sm);
 }
+
+/* The real worker id beside the slot label. Secondary weight on purpose:
+   the slot is what the eye tracks card to card, the id is what gets matched
+   against a log line or `GET /workers` when something looks stuck. */
+.job-worker-id {
+  margin-left: var(--space-1);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  opacity: 0.7;
+}
