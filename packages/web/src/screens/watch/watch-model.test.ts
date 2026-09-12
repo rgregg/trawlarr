@@ -529,4 +529,69 @@ describe('toWorkerSlots', () => {
     expect(slots).toHaveLength(2);
     expect(slots[0]!.idleDetail).toBe('Standing by — queue is empty');
   });
+
+  it('never strands a running job in a slot the pool no longer renders', () => {
+    // The operator dropped the pool from 4 workers to 1 while the job holding
+    // slot 4 kept running. A stale high assignment used to put the row in a
+    // slot outside the rendered range, so an actively-transcoding file simply
+    // vanished from the screen.
+    const assignedSlots = new Map<string, number>([['j1', 4]]);
+    const slots = toWorkerSlots({
+      configuredWorkers: 1,
+      runningRows: [runningJob],
+      queued: 0,
+      activeWorkers: 1,
+      assignedSlots,
+    });
+    expect(slots).toHaveLength(1);
+    expect(slots[0]!.running).toBe(runningJob);
+  });
+
+  it('forgets the slot a job held once it is no longer running', () => {
+    const assignedSlots = new Map<string, number>([['gone', 1]]);
+    toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [],
+      queued: 0,
+      activeWorkers: 0,
+      assignedSlots,
+    });
+    expect(assignedSlots.has('gone')).toBe(false);
+  });
+
+  it('maintains sticky slot assignments when preceding worker finishes', () => {
+    const assignedSlots = new Map<string, number>([['j2', 2]]);
+    const job2 = { ...runningJob, jobId: 'j2', name: 'Movie2.mkv' };
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [job2],
+      queued: 10,
+      activeWorkers: 1,
+      assignedSlots,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.slotNumber).toBe(1);
+    expect(slots[0]!.running).toBeNull();
+    expect(slots[1]!.slotNumber).toBe(2);
+    expect(slots[1]!.running).toBe(job2);
+  });
+});
+
+describe('mergeRunningRows with finishedJobIds', () => {
+  it('excludes rest jobs that are recorded as finished in live state', () => {
+    const live = {
+      ...initialLiveState,
+      finishedJobIds: new Set(['finished-job']),
+    };
+    const rows = mergeRunningRows({
+      rest: [
+        { id: 'finished-job', fileId: 'f1', workerPid: 1, workerHost: null },
+        { id: 'running-job', fileId: 'f2', workerPid: 2, workerHost: null },
+      ],
+      files: {},
+      live,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.jobId).toBe('running-job');
+  });
 });

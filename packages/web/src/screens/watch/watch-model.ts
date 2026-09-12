@@ -218,7 +218,8 @@ export const mergeRunningRows = (input: {
   live: LiveState;
 }): RunningRow[] => {
   const { rest, files, live } = input;
-  const rows: RunningRow[] = rest.map((job) => {
+  const activeRest = rest.filter((job) => !live.finishedJobIds.has(job.id));
+  const rows: RunningRow[] = activeRest.map((job) => {
     const liveJob = live.jobs[job.id];
     // The live frame's path is the same path and arrives sooner; the fetched
     // one is what makes the row appear at all with no socket.
@@ -233,7 +234,7 @@ export const mergeRunningRows = (input: {
     };
   });
 
-  const fetched = new Set(rest.map((job) => job.id));
+  const fetched = new Set(activeRest.map((job) => job.id));
   for (const row of toRunningRows(live)) {
     if (!fetched.has(row.jobId)) rows.push(row);
   }
@@ -262,11 +263,41 @@ export const toWorkerSlots = (input: {
   runningRows: RunningRow[];
   queued: number;
   activeWorkers: number;
+  assignedSlots?: Map<string, number>;
 }): WorkerSlotView[] => {
+  const assigned = input.assignedSlots ?? new Map<string, number>();
   const slotCount = Math.max(input.configuredWorkers, input.runningRows.length, 1);
+
+  // Forget a job's slot once it stops running, and forget an assignment that
+  // now points outside the rendered range — the operator can shrink the pool
+  // while a job holding a high slot is still encoding, and a row parked in a
+  // slot nothing renders would disappear from the screen mid-transcode.
+  const runningIds = new Set(input.runningRows.map((row) => row.jobId));
+  for (const [jobId, slot] of assigned) {
+    if (!runningIds.has(jobId) || slot > slotCount) assigned.delete(jobId);
+  }
+
+  // Every remaining row takes the lowest free slot and keeps it, so a
+  // neighbour finishing does not shuffle the cards beside it. There are at
+  // least as many slots as rows, so a free one always exists.
+  const occupied = new Set(assigned.values());
+  for (const row of input.runningRows) {
+    if (assigned.has(row.jobId)) continue;
+    let slot = 1;
+    while (occupied.has(slot)) slot += 1;
+    assigned.set(row.jobId, slot);
+    occupied.add(slot);
+  }
+
+  const rowBySlot = new Map<number, RunningRow>();
+  for (const row of input.runningRows) {
+    const slot = assigned.get(row.jobId);
+    if (slot !== undefined) rowBySlot.set(slot, row);
+  }
+
   return Array.from({ length: slotCount }, (_, i) => {
-    const running = input.runningRows[i] ?? null;
     const slotNumber = i + 1;
+    const running = rowBySlot.get(slotNumber) ?? null;
     const workerLabel = `Worker ${String(slotNumber)}`;
     const idleDetail =
       input.queued > 0

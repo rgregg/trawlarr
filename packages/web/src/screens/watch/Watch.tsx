@@ -381,13 +381,10 @@ export const Watch = (props: {
     }
   };
 
-  const sumCounts = (counts: Record<string, number> | undefined): number =>
-    counts ? Object.values(counts).reduce((total, count) => total + count, 0) : 0;
+  const assignedSlots = useRef<Map<string, number>>(new Map());
 
   const configuredWorkers = workerStatus
-    ? sumCounts(workerStatus.target) > 0
-      ? sumCounts(workerStatus.target)
-      : sumCounts(workerStatus.baseCounts)
+    ? (workerStatus.target.transcode ?? workerStatus.baseCounts.transcode ?? 0)
     : 0;
 
   const idleInputs =
@@ -410,6 +407,7 @@ export const Watch = (props: {
     runningRows,
     queued: libraryTotals?.queued ?? 0,
     activeWorkers: workerStatus?.active ?? runningRows.length,
+    assignedSlots: assignedSlots.current,
   });
 
   return (
