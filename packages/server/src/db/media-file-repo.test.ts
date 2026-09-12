@@ -643,4 +643,25 @@ describe('missing-file marking', () => {
     expect(repo.countsByState(LIB).unknown).toBe(1);
     expect(repo.missingCount(LIB)).toBe(0);
   });
+
+  it('deletes a row and cascades to its job history', () => {
+    const id = scan();
+    db.prepare(
+      `INSERT INTO job (id, file_id, flow_id, flow_hash, state, started_at)
+       VALUES ('job-1', ?, 'flow-1', 'hash-1', 'running', ?)`,
+    ).run(id, NOW);
+    db.prepare(
+      `INSERT INTO job_step (job_id, seq, node_id, plugin_id) VALUES ('job-1', 1, 'n1', 'p1')`,
+    ).run();
+
+    expect(repo.delete(id)).toBe(true);
+    expect(repo.getById(id)).toBeNull();
+    // Both levels of the cascade: job rows and the steps hanging off them. A
+    // job row whose file_id points at nothing breaks every history query.
+    expect(db.prepare(`SELECT id FROM job WHERE id = 'job-1'`).get()).toBeUndefined();
+    expect(db.prepare(`SELECT id FROM job_step WHERE job_id = 'job-1'`).get()).toBeUndefined();
+
+    // A second delete has nothing to remove and says so.
+    expect(repo.delete(id)).toBe(false);
+  });
 });

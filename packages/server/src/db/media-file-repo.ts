@@ -256,6 +256,11 @@ export interface MediaFileRepo {
   markMissing(input: { fileId: string; expectPath: string; nowMs: number }): boolean;
   /** The file is back: clear the mark. A no-op when it was never set. */
   clearMissing(fileId: string): void;
+  /**
+   * Delete a media file row and its associated job history (via CASCADE).
+   * Returns true if a row was deleted, false if no row existed with that id.
+   */
+  delete(fileId: string): boolean;
 }
 
 const RESOLUTION_LABELS: ReadonlyArray<{ minWidth: number; label: string }> = [
@@ -324,6 +329,7 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     `SELECT id FROM media_file WHERE library_id = ? AND content_key = ?`,
   );
   const selectById = db.prepare(`SELECT * FROM media_file WHERE id = ?`);
+  const deleteById = db.prepare(`DELETE FROM media_file WHERE id = ?`);
   const runningPaths = db.prepare(
     `SELECT path FROM media_file WHERE library_id = ? AND state = 'running'`,
   );
@@ -831,6 +837,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
 
     clearMissing(fileId) {
       clearMissingStatement.run(fileId);
+    },
+
+    delete(fileId) {
+      return deleteById.run(fileId).changes > 0;
     },
   };
 };
