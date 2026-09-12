@@ -71,6 +71,7 @@ describe('flow properties', () => {
     ['audio.count', 2],
     ['audio.languages', ['eng', 'ger']],
     ['audio.codecs', ['aac', 'ac3']],
+    ['audio.channels', ['2', '6']],
     ['audio.maxChannels', 6],
     ['subtitle.count', 1],
     ['subtitle.languages', ['eng']],
