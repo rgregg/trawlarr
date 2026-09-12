@@ -337,6 +337,40 @@ export const Watch = (props: {
     // same effect.
   }, [client, runningFileIds]);
 
+  const [togglingPause, setTogglingPause] = useState(false);
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const toggleWorkerPause = async () => {
+    if (workerStatus === null) return;
+    setTogglingPause(true);
+    setActionError(null);
+    try {
+      const endpoint = workerStatus.paused ? '/workers/resume' : '/workers/pause';
+      const updated = await client.post<WorkerStatus>(endpoint);
+      setWorkerStatus(updated);
+      setRuntimeAttempt((n) => n + 1);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTogglingPause(false);
+    }
+  };
+
+  const handleCancelJob = async (jobId: string) => {
+    setCancellingJobId(jobId);
+    setActionError(null);
+    try {
+      await client.post(`/jobs/${jobId}/cancel`);
+      setRunningAttempt((n) => n + 1);
+      setRuntimeAttempt((n) => n + 1);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCancellingJobId(null);
+    }
+  };
+
   const idle =
     runningRows.length > 0 || libraryTotals === null || workerStatus === null
       ? null
@@ -345,7 +379,49 @@ export const Watch = (props: {
   return (
     <div className="watch">
       <section className="watch-running">
-        <h2>Running</h2>
+        <div className="watch-section-header">
+          <h2>Running</h2>
+          {workerStatus !== null && (
+            <div className="watch-section-actions">
+              <button
+                type="button"
+                className={workerStatus.paused ? 'btn-primary' : 'button'}
+                onClick={() => void toggleWorkerPause()}
+                disabled={togglingPause}
+                aria-label={workerStatus.paused ? 'Resume processing' : 'Pause processing'}
+              >
+                {togglingPause
+                  ? workerStatus.paused
+                    ? 'Resuming…'
+                    : 'Pausing…'
+                  : workerStatus.paused
+                    ? '▶ Resume processing'
+                    : '❚❚ Pause processing'}
+              </button>
+            </div>
+          )}
+        </div>
+        {actionError !== null && (
+          <p role="alert" className="problem" style={{ margin: '0 0 var(--space-3)' }}>
+            {actionError}
+          </p>
+        )}
+        {workerStatus?.paused && (
+          <div className="watch-paused-banner" role="status">
+            <div className="watch-paused-banner-text">
+              <strong>Processing is paused</strong>
+              <span>No new files will be claimed by workers.</span>
+            </div>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void toggleWorkerPause()}
+              disabled={togglingPause}
+            >
+              Resume processing
+            </button>
+          </div>
+        )}
         {runningFailure !== null && (
           <FailureBox
             failure={runningFailure}
@@ -358,13 +434,32 @@ export const Watch = (props: {
           idle === null ? (
             runningFailure === null && <p>Loading…</p>
           ) : (
-            <div className={`idle-box ${idle.action === null ? 'idle-ok' : 'idle-attention'}`}>
+            <div
+              className={`idle-box ${
+                idle.headline === 'Processing is paused'
+                  ? 'idle-paused'
+                  : idle.action === null
+                    ? 'idle-ok'
+                    : 'idle-attention'
+              }`}
+            >
               <h3>{idle.headline}</h3>
               <p>{idle.detail}</p>
               {idle.action !== null && (
                 <Link to={idle.action.to} navigate={navigate} className="idle-action">
                   {idle.action.label}
                 </Link>
+              )}
+              {workerStatus?.paused && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ marginTop: 'var(--space-3)' }}
+                  onClick={() => void toggleWorkerPause()}
+                  disabled={togglingPause}
+                >
+                  Resume processing
+                </button>
               )}
             </div>
           )
@@ -398,9 +493,20 @@ export const Watch = (props: {
                     {runningFiles[row.fileId] !== undefined &&
                       ` — ${formatBytes(runningFiles[row.fileId]!.sizeBytes)}`}
                   </span>
-                  <Link to={`/jobs/${row.jobId}`} navigate={navigate} className="watch-job-link">
-                    Job detail
-                  </Link>
+                  <div className="watch-job-actions">
+                    <Link to={`/jobs/${row.jobId}`} navigate={navigate} className="watch-job-link">
+                      Job detail
+                    </Link>
+                    <button
+                      type="button"
+                      className="btn-danger btn-sm"
+                      onClick={() => void handleCancelJob(row.jobId)}
+                      disabled={cancellingJobId === row.jobId}
+                      title="Stop this job and release the worker"
+                    >
+                      {cancellingJobId === row.jobId ? 'Stopping…' : 'Stop job'}
+                    </button>
+                  </div>
                 </div>
               </li>
             ))}
@@ -506,7 +612,19 @@ export const Watch = (props: {
       </section>
 
       <section className="watch-runtime">
-        <h2>Runtime</h2>
+        <div className="watch-section-header">
+          <h2>Runtime</h2>
+          {workerStatus !== null && (
+            <button
+              type="button"
+              className={workerStatus.paused ? 'btn-primary btn-sm' : 'button btn-sm'}
+              onClick={() => void toggleWorkerPause()}
+              disabled={togglingPause}
+            >
+              {workerStatus.paused ? 'Resume pool' : 'Pause pool'}
+            </button>
+          )}
+        </div>
         {runtimeFailure !== null && (
           <FailureBox
             failure={runtimeFailure}

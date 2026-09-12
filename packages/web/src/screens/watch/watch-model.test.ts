@@ -106,6 +106,19 @@ describe('explainIdle', () => {
     const both = explainIdle({ queued: 9, workers: 0, converged: false, withinWindow: false });
     expect(both.headline).toBe('Nothing will start');
   });
+
+  it('explains when processing is paused, regardless of schedule or queue', () => {
+    const paused = explainIdle({
+      queued: 42,
+      workers: 2,
+      converged: false,
+      withinWindow: true,
+      paused: true,
+    });
+    expect(paused.headline).toBe('Processing is paused');
+    expect(paused.detail).toBe('42 files are queued, but the worker pool is paused.');
+    expect(paused.action).toBeNull();
+  });
 });
 
 describe('summarise24h', () => {
@@ -435,5 +448,14 @@ describe('toIdleInputs', () => {
     });
     expect(inputs.converged).toBe(true);
     expect(explainIdle(inputs).headline).toBe('Everything is converged');
+  });
+
+  it('passes through worker pool paused flag to idle inputs', () => {
+    const inputs = toIdleInputs({
+      totals,
+      workers: { baseCounts: { transcode: 1 }, target: { transcode: 0 }, paused: true },
+    });
+    expect(inputs.paused).toBe(true);
+    expect(explainIdle(inputs).headline).toBe('Processing is paused');
   });
 });

@@ -274,7 +274,18 @@ export const explainIdle = (input: {
   workers: number;
   converged: boolean;
   withinWindow: boolean;
+  paused?: boolean;
 }): IdleReason => {
+  if (input.paused) {
+    return {
+      headline: 'Processing is paused',
+      detail:
+        input.queued > 0
+          ? `${String(input.queued)} files are queued, but the worker pool is paused.`
+          : 'The worker pool is paused. No new work will start.',
+      action: null,
+    };
+  }
   if (input.converged && input.queued === 0) {
     return {
       headline: 'Everything is converged',
@@ -323,8 +334,18 @@ export const explainIdle = (input: {
  */
 export const toIdleInputs = (input: {
   totals: { total: number; good: number; queued: number };
-  workers: { target: Record<string, number>; baseCounts: Record<string, number> };
-}): { queued: number; workers: number; converged: boolean; withinWindow: boolean } => {
+  workers: {
+    target: Record<string, number>;
+    baseCounts: Record<string, number>;
+    paused?: boolean;
+  };
+}): {
+  queued: number;
+  workers: number;
+  converged: boolean;
+  withinWindow: boolean;
+  paused: boolean;
+} => {
   const sum = (counts: Record<string, number>): number =>
     Object.values(counts).reduce((total, count) => total + count, 0);
   return {
@@ -332,6 +353,7 @@ export const toIdleInputs = (input: {
     workers: sum(input.workers.baseCounts),
     converged: input.totals.total === 0 || input.totals.good === input.totals.total,
     withinWindow: sum(input.workers.target) > 0,
+    paused: input.workers.paused ?? false,
   };
 };
 
