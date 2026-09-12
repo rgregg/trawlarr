@@ -2,6 +2,18 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { FlowNode } from '@trawlarr/core';
 import type { PluginInput } from '@trawlarr/plugin-api';
 import { useNavigationGuard } from '../../shell/useRoute.js';
+
+/**
+ * The cap the daemon enforces on a node name, repeated here so the field
+ * stops typing rather than failing the save.
+ *
+ * `@trawlarr/core` is imported by this bundle for TYPES ONLY — it reads
+ * `node:crypto`, which cannot be bundled for a browser — so the number
+ * cannot be imported. `satisfies` closes the gap the copy opens: the type is
+ * read through `typeof import(...)`, which erases at compile time, and this
+ * file stops compiling if core ever changes the bound.
+ */
+const FLOW_NODE_NAME_MAX = 2000 satisfies typeof import('@trawlarr/core').FLOW_NODE_NAME_MAX;
 import type { EditorPlugin } from './flow-canvas-model.js';
 import {
   acceptsFlowFields,
@@ -24,12 +36,14 @@ const inputBuffers = new Map<string, PluginInputBuffer>();
 interface Props {
   node: FlowNode;
   plugin?: EditorPlugin;
-  /** What the canvas calls this node — its plugin's name, not its id. */
+  /** What the canvas calls this node right now — a custom name or the plugin's. */
   label: string;
+  /** The operator's own name for this node, or '' when it uses the plugin's. */
+  name: string;
   /** The daemon's property catalogue; null while loading or unavailable. */
   fields: FlowFieldCatalogue | null;
   disabled?: boolean;
-  onSave: (node: FlowNode) => void;
+  onSave: (node: FlowNode, name: string) => void;
   onClose: () => void;
 }
 
@@ -159,6 +173,7 @@ export function NodeConfig({
   node,
   plugin,
   label,
+  name: initialName,
   fields: catalogue,
   disabled,
   onSave,
@@ -169,11 +184,15 @@ export function NodeConfig({
   const bufferKey = pluginInputBufferKey(window.location.pathname, node);
   const [initial] = useState(() => recoverPluginInputBuffer(node, inputBuffers.get(bufferKey)));
   const [inputs, setInputs] = useState(initial.inputs);
+  const [name, setName] = useState(initialName);
   const [raw, setRaw] = useState(initial.raw);
   const [rawError, setRawError] = useState<string | null>(initial.error);
   const fields = plugin?.details.inputs ?? [];
   const effective = effectiveInputs(fields, inputs);
-  const configDirty = raw !== JSON.stringify(node.inputs, null, 2);
+  // A rename is a change to save too, even when no input moved: the name
+  // lives in the layout rather than the definition, and losing it on
+  // navigate-away would be indistinguishable from never having typed it.
+  const configDirty = raw !== JSON.stringify(node.inputs, null, 2) || name !== initialName;
   useNavigationGuard(configDirty);
   const rememberInputs = (
     nextInputs: Record<string, unknown>,
@@ -267,7 +286,7 @@ export function NodeConfig({
           event.preventDefault();
           if (!disabled && !rawError) {
             inputBuffers.delete(bufferKey);
-            onSave({ ...node, inputs });
+            onSave({ ...node, inputs }, name);
           }
         }}
       >
@@ -285,6 +304,35 @@ export function NodeConfig({
         <p>
           {plugin?.description ?? 'Plugin metadata is unavailable. Edit preserved inputs as JSON.'}
         </p>
+        <div className="flow-config-name">
+          <label htmlFor={`${prefix}-name`}>Name on the canvas</label>
+          {plugin?.details.nameUI?.type === 'textarea' ? (
+            <textarea
+              id={`${prefix}-name`}
+              value={name}
+              rows={6}
+              disabled={disabled}
+              maxLength={FLOW_NODE_NAME_MAX}
+              onChange={(event) => setName(event.target.value)}
+            />
+          ) : (
+            <input
+              id={`${prefix}-name`}
+              type="text"
+              value={name}
+              disabled={disabled}
+              maxLength={FLOW_NODE_NAME_MAX}
+              placeholder={plugin?.name ?? node.pluginId}
+              onChange={(event) => setName(event.target.value)}
+            />
+          )}
+          <p className="help">
+            {plugin?.details.nameUI?.type === 'textarea'
+              ? 'This node shows its name as text on the diagram. Leave it empty to hide it.'
+              : 'Only what the canvas calls this node. Leave it empty to use the plugin name.'}{' '}
+            Names are not part of the flow definition, so changing one never re-queues the library.
+          </p>
+        </div>
         {initial.raw !== JSON.stringify(node.inputs, null, 2) && (
           <p className="flow-canvas-warning" role="status">
             Recovered unapplied configuration from this tab after an interruption. Apply to draft to

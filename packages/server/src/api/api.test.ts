@@ -1590,6 +1590,34 @@ describe('flow layouts', () => {
     expect(events).toEqual([]);
   });
 
+  it('renames a node without changing the signature, so no file is re-queued', async () => {
+    const flow = await createFlowViaApi();
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = seedFile({ libraryId: library.id, path: '/media/good.mkv', state: 'good' });
+    createMediaFileRepo(db).setLedger({
+      fileId,
+      record: { ...createMediaFileRepo(db).getLedger(fileId)!, signature: flow.definitionHash },
+    });
+    const versions = (await api('GET', `/flows/${flow.id}/versions`)).body;
+
+    const layout = {
+      start: { x: 40, y: 50, name: 'Is it already stereo AAC?\nChecked before any transcode.' },
+    };
+    const saved = await api('PUT', `/flows/${flow.id}/layout`, { layout });
+
+    expect(saved.status).toBe(200);
+    expect(saved.body).toEqual({ layout });
+    // The signature is the whole point: a name is presentation, so the hash
+    // every file's ledger recorded still matches and the library stays
+    // converged. Folding the name into the definition would re-queue it all.
+    const after = (await api('GET', `/flows/${flow.id}`)).body;
+    expect(after.definitionHash).toBe(flow.definitionHash);
+    expect((await api('GET', `/flows/${flow.id}/versions`)).body).toEqual(versions);
+    const row = createMediaFileRepo(db).getById(fileId)!;
+    expect(row.state).toBe('good');
+    expect(createMediaFileRepo(db).getLedger(fileId)!.signature).toBe(flow.definitionHash);
+  });
+
   it.each([
     {},
     { layout: null },
