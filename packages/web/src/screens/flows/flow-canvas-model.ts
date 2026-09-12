@@ -34,6 +34,8 @@ export type CanvasNodeData = {
   errorEntry: boolean;
   unreachable: boolean;
   label: string;
+  /** Render `label` as prose rather than a title — see `toCanvas`. */
+  multilineName: boolean;
   outputs: Array<{ number: number; tooltip: string; missing: boolean }>;
   problems: string[];
 };
@@ -175,17 +177,33 @@ export function autoLayout(definition: FlowDefinition, plugins: EditorPlugin[]):
  * whose plugin is not installed falls back to the plugin id, which is the
  * only name anyone can act on.
  */
+/**
+ * What to CALL each node on the canvas.
+ *
+ * A name the operator typed wins outright and is never numbered: they chose
+ * it to tell two nodes apart, so appending "2" to it would undo the thing it
+ * was for. Everything else falls back to the plugin's own name, numbered
+ * only when the flow holds more than one node of that plugin — and the
+ * numbering counts only the nodes actually using the plugin name, so naming
+ * one of three "Check Condition" nodes leaves the other two as 1 and 2
+ * rather than renumbering them around a gap.
+ */
 export function nodeLabels(
   definition: FlowDefinition,
   plugins: EditorPlugin[],
+  layout: FlowLayout = {},
 ): Record<string, string> {
+  const custom = (node: { id: string }): string | undefined => layout[node.id]?.name;
   const seen = new Map<string, number>();
   const total = new Map<string, number>();
   for (const node of definition.nodes) {
+    if (custom(node) !== undefined) continue;
     total.set(node.pluginId, (total.get(node.pluginId) ?? 0) + 1);
   }
   return Object.fromEntries(
     definition.nodes.map((node) => {
+      const chosen = custom(node);
+      if (chosen !== undefined) return [node.id, chosen];
       const name =
         plugins.find((candidate) => candidate.id === node.pluginId)?.name ?? node.pluginId;
       const ordinal = (seen.get(node.pluginId) ?? 0) + 1;
@@ -208,7 +226,7 @@ export function toCanvas(
     for (const id of reachableNodeIds(definition, entry)) reachable.add(id);
   }
   const fallback = autoLayout(definition, plugins);
-  const labels = nodeLabels(definition, plugins);
+  const labels = nodeLabels(definition, plugins, layout);
   return {
     nodes: definition.nodes.map((node) => {
       const plugin = plugins.find((candidate) => candidate.id === node.pluginId);
@@ -226,10 +244,13 @@ export function toCanvas(
           });
         }
       }
+      const view = layout[node.id] ?? fallback[node.id]!;
       return {
         id: node.id,
         type: 'plugin',
-        position: layout[node.id] ?? fallback[node.id]!,
+        // Coordinates only: React Flow owns this object and writes back to
+        // it on drag, and the name beside them is ours.
+        position: { x: view.x, y: view.y },
         style: { width: canvasNodeWidth(outputs.length) },
         deletable: node.id !== start,
         data: {
@@ -239,6 +260,11 @@ export function toCanvas(
           errorEntry: errorEntries.includes(node.id),
           unreachable: !reachable.has(node.id),
           label: labels[node.id]!,
+          // A plugin asking for a textarea is asking to be read as prose on
+          // the canvas — that is the whole mechanism behind a comment node,
+          // which has no other field to put its text in.
+          multilineName:
+            plugin?.details.nameUI?.type === 'textarea' && layout[node.id]?.name !== undefined,
           outputs,
           problems: problems
             .filter(

@@ -194,6 +194,22 @@
   font-size: 9px;
 }
 
+/* A node whose plugin asks for a textarea name is a note: its text IS the
+   content, so it wraps instead of clamping to two lines and loses the
+   title's weight. Comment nodes in the community corpus work this way — the
+   plugin declares `nameUI: { type: 'textarea' }` and carries no other field. */
+.flow-canvas-node.is-note .flow-node-title strong {
+  display: block;
+  font-weight: 400;
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+.flow-canvas-node.is-note .flow-node-glyph {
+  align-self: flex-start;
+}
+
 /* A validation problem names the node it is about, and selects it when clicked. */
 .flow-problem-node {
   font: inherit;

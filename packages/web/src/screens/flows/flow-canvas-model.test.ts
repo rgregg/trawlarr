@@ -522,4 +522,42 @@ describe('node labels', () => {
       d: 'community:missing',
     });
   });
+
+  it('lets a name the operator typed win, and never numbers it', () => {
+    const definition: FlowDefinition = {
+      nodes: [node('a', 'start'), node('b', 'check'), node('c', 'check')],
+      edges: [],
+    };
+    const layout = {
+      b: { x: 0, y: 0, name: 'Is it already stereo AAC?' },
+    };
+    // The remaining `check` node keeps the bare plugin name: numbering
+    // counts only the nodes still using it, so naming one of a pair does not
+    // leave the other stranded as "check 2" with no "check 1" beside it.
+    expect(nodeLabels(definition, [plugin('start', [1], true), plugin('check')], layout)).toEqual({
+      a: 'start',
+      b: 'Is it already stereo AAC?',
+      c: 'check',
+    });
+  });
+
+  it('carries a name into the canvas and marks a textarea plugin as prose', () => {
+    const comment: EditorPlugin = {
+      ...plugin('comment'),
+      details: { ...plugin('comment').details, nameUI: { type: 'textarea' } },
+    };
+    const definition: FlowDefinition = {
+      nodes: [node('a', 'start'), node('n', 'comment')],
+      edges: [],
+    };
+    const layout = { n: { x: 10, y: 20, name: 'Downmix only when\nthere is no stereo track' } };
+    const canvas = toCanvas(definition, [plugin('start', [1], true), comment], [], layout);
+    const noteNode = canvas.nodes.find((item) => item.id === 'n')!;
+    expect(noteNode.data.label).toBe('Downmix only when\nthere is no stereo track');
+    expect(noteNode.data.multilineName).toBe(true);
+    // React Flow owns the position object and writes back to it on drag, so
+    // the name must not travel inside it.
+    expect(noteNode.position).toEqual({ x: 10, y: 20 });
+    expect(canvas.nodes.find((item) => item.id === 'a')!.data.multilineName).toBe(false);
+  });
 });

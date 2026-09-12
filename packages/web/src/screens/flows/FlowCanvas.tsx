@@ -83,6 +83,7 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
     <div
       className={[
         'flow-canvas-node',
+        data.multilineName ? 'is-note' : '',
         selected ? 'is-selected' : '',
         data.problems.length ? 'has-problems' : '',
         data.unreachable ? 'is-unreachable' : '',
@@ -224,11 +225,13 @@ function CanvasEditor({
   } | null>(null);
   const [insertOutput, setInsertOutput] = useState('');
   const start = startNodeId(definition, plugins);
-  const labels = nodeLabels(definition, plugins);
+  const layout = history.present.layout;
+  // After `layout`, which now feeds it: a node's label can be a name the
+  // operator typed, and that lives in the layout rather than the definition.
+  const labels = nodeLabels(definition, plugins, layout);
   const selectedNodes = nodes.filter((node) => node.selected);
   const selectedEdges = edges.filter((edge) => edge.selected);
   const selectedEdge = selectedEdges.length === 1 ? selectedEdges[0] : undefined;
-  const layout = history.present.layout;
 
   const remember = useCallback((next: CanvasHistory): void => {
     historyRef.current = next;
@@ -722,14 +725,27 @@ function CanvasEditor({
           node={configured}
           plugin={plugins.find((plugin) => plugin.id === configured.pluginId)}
           label={labels[configured.id] ?? configured.id}
+          name={layout[configured.id]?.name ?? ''}
           fields={fields}
           disabled={disabled}
           onClose={() => setConfigId(null)}
-          onSave={(node) => {
-            commit({
-              ...definition,
-              nodes: definition.nodes.map((current) => (current.id === node.id ? node : current)),
-            });
+          onSave={(node, name) => {
+            // The name rides in the LAYOUT, never the definition, so that
+            // renaming leaves the signature — and every file converging
+            // against it — untouched. Committing both together keeps one
+            // undo step for what the operator did as one action.
+            const view = layout[node.id] ?? { x: 0, y: 0 };
+            const trimmed = name.trim() === '' ? undefined : name;
+            commit(
+              {
+                ...definition,
+                nodes: definition.nodes.map((current) => (current.id === node.id ? node : current)),
+              },
+              {
+                ...layout,
+                [node.id]: { x: view.x, y: view.y, ...(trimmed === undefined ? {} : { name }) },
+              },
+            );
             setConfigId(null);
           }}
         />
