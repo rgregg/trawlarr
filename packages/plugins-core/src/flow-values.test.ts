@@ -71,6 +71,7 @@ describe('flow properties', () => {
     ['audio.count', 2],
     ['audio.languages', ['eng', 'ger']],
     ['audio.codecs', ['aac', 'ac3']],
+    ['audio.channels', ['2', '6']],
     ['audio.maxChannels', 6],
     ['subtitle.count', 1],
     ['subtitle.languages', ['eng']],
@@ -94,6 +95,17 @@ describe('flow properties', () => {
     expect(readFlowValue(input, 'audio.count')).toBe(0);
     expect(readFlowValue(input, 'audio.maxChannels')).toBe(0);
     expect(readFlowValue(input, 'subtitle.languages')).toEqual([]);
+  });
+
+  it('refuses to answer either channel property when a stream channel count is unreadable', () => {
+    const input = args();
+    delete input.inputFileObj.ffProbeData.streams![2]!.channels;
+    // Both, and for the same reason: a list answer built from the readable
+    // streams turns partial probe data into a confident one, so
+    // `audio.channels does not include "6"` would come back true for a file
+    // whose unprobed stream is the 5.1 track.
+    expect(readFlowValue(input, 'audio.channels')).toBeUndefined();
+    expect(readFlowValue(input, 'audio.maxChannels')).toBeUndefined();
   });
 
   it.each([

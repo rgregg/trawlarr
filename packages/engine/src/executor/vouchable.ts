@@ -20,6 +20,7 @@ export type SideEffectClass = 'inert' | 'engine-controlled' | 'unknown';
 export const FIRST_PARTY_INERT = new Set([
   'trawlarr:start',
   'trawlarr:checkVideoCodec',
+  'trawlarr:checkAudioStream',
   'trawlarr:beginCommand',
   'trawlarr:setVideoEncoder',
   'trawlarr:writeToLog',

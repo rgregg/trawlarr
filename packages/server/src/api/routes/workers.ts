@@ -81,6 +81,12 @@ export const workerRoutes: Route[] = [
       // produces nothing and costs the whole two hours again later. Pause
       // stops new work from starting; POST /jobs/:id/cancel is the hard stop.
       ctx.supervisor.pause();
+      const status = ctx.supervisor.status();
+      ctx.bus.emit({
+        type: 'workers.changed',
+        target: status.target,
+        active: status.workers.length,
+      });
       return {
         ...statusResource(ctx),
         note:
@@ -97,6 +103,12 @@ export const workerRoutes: Route[] = [
     handler: async ({ ctx }) => {
       ctx.supervisor.resume();
       await ctx.supervisor.tick();
+      const status = ctx.supervisor.status();
+      ctx.bus.emit({
+        type: 'workers.changed',
+        target: status.target,
+        active: status.workers.length,
+      });
       return statusResource(ctx);
     },
   },

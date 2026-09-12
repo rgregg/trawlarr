@@ -165,9 +165,11 @@ export const forgetMissing = async (input: ForgetMissingInput): Promise<ForgetSu
     const jobCount = jobRepo.listForFile(row.id).length;
     if (input.dryRun !== true) {
       // `job` (and `job_step` under it) cascade from `media_file`, so this
-      // one statement is what discards the history — which is exactly why
-      // callers are expected to say so before running it.
-      input.db.prepare(`DELETE FROM media_file WHERE id = ?`).run(row.id);
+      // one call is what discards the history — which is exactly why callers
+      // are expected to say so before running it. It goes through the repo so
+      // that deleting a row means the same thing here as it does behind
+      // `DELETE /files/:id`, rather than being a second copy of the statement.
+      mediaFileRepo.delete(row.id);
     }
     summary.forgotten += 1;
     summary.files.push({ fileId: row.id, path: row.path, state: row.state, jobCount });

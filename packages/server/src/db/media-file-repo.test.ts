@@ -643,4 +643,72 @@ describe('missing-file marking', () => {
     expect(repo.countsByState(LIB).unknown).toBe(1);
     expect(repo.missingCount(LIB)).toBe(0);
   });
+
+  it('reserves a row for deletion so no worker can claim it mid-unlink', () => {
+    const id = scan();
+    repo.setState({ fileId: id, state: 'queued' });
+
+    const reserved = repo.reserveForDeletion({ fileId: id, nowMs: NOW });
+
+    expect(reserved).toEqual({ previousState: 'queued', previousHoldUntilMs: null });
+    // The whole point: between reserving and unlinking, a supervisor tick
+    // must not be able to hand this file to a worker.
+    expect(repo.claimNext({ workerClass: 'transcode', nowMs: NOW })).toBeNull();
+  });
+
+  it('refuses to reserve a row a worker already holds', () => {
+    const id = scan();
+    repo.setState({ fileId: id, state: 'running' });
+
+    expect(repo.reserveForDeletion({ fileId: id, nowMs: NOW })).toBeNull();
+  });
+
+  it('refuses to reserve a row with a running job, however the row state reads', () => {
+    const id = scan();
+    // `POST /files/:id/hold` writes `held` with no regard for whether a
+    // worker is mid-run, so the row state alone cannot be trusted to say
+    // "nobody is touching this file" — the job table is the other half of
+    // the answer, and without it a hold turns into an unlink under a live
+    // Replace Original File.
+    repo.setState({ fileId: id, state: 'held', holdUntilMs: NOW + 60_000 });
+    db.prepare(
+      `INSERT INTO job (id, file_id, flow_id, flow_hash, state, started_at)
+       VALUES ('job-live', ?, 'flow-1', 'hash-1', 'running', ?)`,
+    ).run(id, NOW);
+
+    expect(repo.reserveForDeletion({ fileId: id, nowMs: NOW })).toBeNull();
+  });
+
+  it('restores the state a reservation replaced, so a failed unlink leaves no trace', () => {
+    const id = scan();
+    repo.setState({ fileId: id, state: 'held', holdUntilMs: NOW + 5_000 });
+
+    const reserved = repo.reserveForDeletion({ fileId: id, nowMs: NOW })!;
+    repo.restoreFromDeletion({ fileId: id, ...reserved });
+
+    const row = repo.getById(id)!;
+    expect(row.state).toBe('held');
+    expect(row.hold_until_ms).toBe(NOW + 5_000);
+  });
+
+  it('deletes a row and cascades to its job history', () => {
+    const id = scan();
+    db.prepare(
+      `INSERT INTO job (id, file_id, flow_id, flow_hash, state, started_at)
+       VALUES ('job-1', ?, 'flow-1', 'hash-1', 'running', ?)`,
+    ).run(id, NOW);
+    db.prepare(
+      `INSERT INTO job_step (job_id, seq, node_id, plugin_id) VALUES ('job-1', 1, 'n1', 'p1')`,
+    ).run();
+
+    expect(repo.delete(id)).toBe(true);
+    expect(repo.getById(id)).toBeNull();
+    // Both levels of the cascade: job rows and the steps hanging off them. A
+    // job row whose file_id points at nothing breaks every history query.
+    expect(db.prepare(`SELECT id FROM job WHERE id = 'job-1'`).get()).toBeUndefined();
+    expect(db.prepare(`SELECT id FROM job_step WHERE job_id = 'job-1'`).get()).toBeUndefined();
+
+    // A second delete has nothing to remove and says so.
+    expect(repo.delete(id)).toBe(false);
+  });
 });

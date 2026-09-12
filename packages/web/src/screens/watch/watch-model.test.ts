@@ -8,6 +8,8 @@ import {
   toIdleInputs,
   toLibraryCard,
   toRunningRows,
+  nextDebounceDelayMs,
+  toWorkerSlots,
   type LibraryResource,
   type LibraryStats,
 } from './watch-model.js';
@@ -105,6 +107,19 @@ describe('explainIdle', () => {
   it('prefers "set workers" over the window when both are true, because raising the count is the fix that matters', () => {
     const both = explainIdle({ queued: 9, workers: 0, converged: false, withinWindow: false });
     expect(both.headline).toBe('Nothing will start');
+  });
+
+  it('explains when processing is paused, regardless of schedule or queue', () => {
+    const paused = explainIdle({
+      queued: 42,
+      workers: 2,
+      converged: false,
+      withinWindow: true,
+      paused: true,
+    });
+    expect(paused.headline).toBe('Processing is paused');
+    expect(paused.detail).toBe('42 files are queued, but the worker pool is paused.');
+    expect(paused.action).toBeNull();
   });
 });
 
@@ -435,5 +450,167 @@ describe('toIdleInputs', () => {
     });
     expect(inputs.converged).toBe(true);
     expect(explainIdle(inputs).headline).toBe('Everything is converged');
+  });
+
+  it('passes through worker pool paused flag to idle inputs', () => {
+    const inputs = toIdleInputs({
+      totals,
+      workers: { baseCounts: { transcode: 1 }, target: { transcode: 0 }, paused: true },
+    });
+    expect(inputs.paused).toBe(true);
+    expect(explainIdle(inputs).headline).toBe('Processing is paused');
+  });
+});
+
+describe('toWorkerSlots', () => {
+  const runningJob = {
+    jobId: 'j1',
+    fileId: 'f1',
+    name: 'Movie.mkv',
+    percent: 42,
+    stage: 'Execute',
+    workerId: 'worker-1',
+  };
+
+  it('maintains fixed slots matching the configured worker count when one is active', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [runningJob],
+      queued: 50,
+      activeWorkers: 1,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toEqual({
+      slotNumber: 1,
+      workerLabel: 'Worker 1',
+      running: runningJob,
+      idleDetail: 'Standing by — waiting for next file or hardware slot',
+    });
+    expect(slots[1]).toEqual({
+      slotNumber: 2,
+      workerLabel: 'Worker 2',
+      running: null,
+      idleDetail: 'Standing by — waiting for next file or hardware slot',
+    });
+  });
+
+  it('keeps both slots stable and idle when between claims in a queued run', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [],
+      queued: 50,
+      activeWorkers: 0,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.running).toBeNull();
+    expect(slots[0]!.idleDetail).toBe('Standing by — claiming next file…');
+    expect(slots[1]!.running).toBeNull();
+    expect(slots[1]!.idleDetail).toBe('Standing by — claiming next file…');
+  });
+
+  it('expands slots if active jobs exceed configured workers', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 1,
+      runningRows: [runningJob, { ...runningJob, jobId: 'j2', name: 'Movie2.mkv' }],
+      queued: 0,
+      activeWorkers: 2,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.running).not.toBeNull();
+    expect(slots[1]!.running).not.toBeNull();
+  });
+
+  it('reports queue empty when no files are queued', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [],
+      queued: 0,
+      activeWorkers: 0,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.idleDetail).toBe('Standing by — queue is empty');
+  });
+
+  it('never strands a running job in a slot the pool no longer renders', () => {
+    // The operator dropped the pool from 4 workers to 1 while the job holding
+    // slot 4 kept running. A stale high assignment used to put the row in a
+    // slot outside the rendered range, so an actively-transcoding file simply
+    // vanished from the screen.
+    const assignedSlots = new Map<string, number>([['j1', 4]]);
+    const slots = toWorkerSlots({
+      configuredWorkers: 1,
+      runningRows: [runningJob],
+      queued: 0,
+      activeWorkers: 1,
+      assignedSlots,
+    });
+    expect(slots).toHaveLength(1);
+    expect(slots[0]!.running).toBe(runningJob);
+  });
+
+  it('forgets the slot a job held once it is no longer running', () => {
+    const assignedSlots = new Map<string, number>([['gone', 1]]);
+    toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [],
+      queued: 0,
+      activeWorkers: 0,
+      assignedSlots,
+    });
+    expect(assignedSlots.has('gone')).toBe(false);
+  });
+
+  it('maintains sticky slot assignments when preceding worker finishes', () => {
+    const assignedSlots = new Map<string, number>([['j2', 2]]);
+    const job2 = { ...runningJob, jobId: 'j2', name: 'Movie2.mkv' };
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [job2],
+      queued: 10,
+      activeWorkers: 1,
+      assignedSlots,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.slotNumber).toBe(1);
+    expect(slots[0]!.running).toBeNull();
+    expect(slots[1]!.slotNumber).toBe(2);
+    expect(slots[1]!.running).toBe(job2);
+  });
+});
+
+describe('mergeRunningRows with finishedJobIds', () => {
+  it('excludes rest jobs that are recorded as finished in live state', () => {
+    const live = {
+      ...initialLiveState,
+      finishedJobIds: new Set(['finished-job']),
+    };
+    const rows = mergeRunningRows({
+      rest: [
+        { id: 'finished-job', fileId: 'f1', workerPid: 1, workerHost: null },
+        { id: 'running-job', fileId: 'f2', workerPid: 2, workerHost: null },
+      ],
+      files: {},
+      live,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.jobId).toBe('running-job');
+  });
+});
+
+describe('nextDebounceDelayMs', () => {
+  it('waits the full delay for a change that has only just arrived', () => {
+    expect(nextDebounceDelayMs({ waitedMs: 0, delayMs: 400, maxWaitMs: 2000 })).toBe(400);
+  });
+
+  it('shortens the wait as the ceiling approaches', () => {
+    expect(nextDebounceDelayMs({ waitedMs: 1800, delayMs: 400, maxWaitMs: 2000 })).toBe(200);
+  });
+
+  it('releases immediately once the ceiling is reached, however long the bumps keep coming', () => {
+    // The starvation case: a sweep finishing a file every ~100ms against a
+    // 400ms delay never leaves a gap, so without the ceiling this returns
+    // 400 for ever and the screen's counters never refresh.
+    expect(nextDebounceDelayMs({ waitedMs: 2000, delayMs: 400, maxWaitMs: 2000 })).toBe(0);
+    expect(nextDebounceDelayMs({ waitedMs: 9999, delayMs: 400, maxWaitMs: 2000 })).toBe(0);
   });
 });

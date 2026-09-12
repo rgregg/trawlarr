@@ -218,7 +218,8 @@ export const mergeRunningRows = (input: {
   live: LiveState;
 }): RunningRow[] => {
   const { rest, files, live } = input;
-  const rows: RunningRow[] = rest.map((job) => {
+  const activeRest = rest.filter((job) => !live.finishedJobIds.has(job.id));
+  const rows: RunningRow[] = activeRest.map((job) => {
     const liveJob = live.jobs[job.id];
     // The live frame's path is the same path and arrives sooner; the fetched
     // one is what makes the row appear at all with no socket.
@@ -233,11 +234,84 @@ export const mergeRunningRows = (input: {
     };
   });
 
-  const fetched = new Set(rest.map((job) => job.id));
+  const fetched = new Set(activeRest.map((job) => job.id));
   for (const row of toRunningRows(live)) {
     if (!fetched.has(row.jobId)) rows.push(row);
   }
   return rows;
+};
+
+export interface WorkerSlotView {
+  slotNumber: number;
+  workerLabel: string;
+  running: RunningRow | null;
+  idleDetail: string;
+}
+
+/**
+ * Projects configured workers and in-flight jobs into stable, persistent
+ * worker slots.
+ *
+ * Slots do NOT appear and disappear as sub-second jobs start and finish: a
+ * configured 2-worker pool renders two cards on screen, whether both are
+ * encoding, one is encoding while one is idle, or both are momentarily
+ * waiting between claims. This eliminates layout shifts, jumping, and UI
+ * strobing during fast sweeps.
+ */
+export const toWorkerSlots = (input: {
+  configuredWorkers: number;
+  runningRows: RunningRow[];
+  queued: number;
+  activeWorkers: number;
+  assignedSlots?: Map<string, number>;
+}): WorkerSlotView[] => {
+  const assigned = input.assignedSlots ?? new Map<string, number>();
+  const slotCount = Math.max(input.configuredWorkers, input.runningRows.length, 1);
+
+  // Forget a job's slot once it stops running, and forget an assignment that
+  // now points outside the rendered range — the operator can shrink the pool
+  // while a job holding a high slot is still encoding, and a row parked in a
+  // slot nothing renders would disappear from the screen mid-transcode.
+  const runningIds = new Set(input.runningRows.map((row) => row.jobId));
+  for (const [jobId, slot] of assigned) {
+    if (!runningIds.has(jobId) || slot > slotCount) assigned.delete(jobId);
+  }
+
+  // Every remaining row takes the lowest free slot and keeps it, so a
+  // neighbour finishing does not shuffle the cards beside it. There are at
+  // least as many slots as rows, so a free one always exists.
+  const occupied = new Set(assigned.values());
+  for (const row of input.runningRows) {
+    if (assigned.has(row.jobId)) continue;
+    let slot = 1;
+    while (occupied.has(slot)) slot += 1;
+    assigned.set(row.jobId, slot);
+    occupied.add(slot);
+  }
+
+  const rowBySlot = new Map<number, RunningRow>();
+  for (const row of input.runningRows) {
+    const slot = assigned.get(row.jobId);
+    if (slot !== undefined) rowBySlot.set(slot, row);
+  }
+
+  return Array.from({ length: slotCount }, (_, i) => {
+    const slotNumber = i + 1;
+    const running = rowBySlot.get(slotNumber) ?? null;
+    const workerLabel = `Worker ${String(slotNumber)}`;
+    const idleDetail =
+      input.queued > 0
+        ? input.activeWorkers > 0 || input.runningRows.length > 0
+          ? 'Standing by — waiting for next file or hardware slot'
+          : 'Standing by — claiming next file…'
+        : 'Standing by — queue is empty';
+    return {
+      slotNumber,
+      workerLabel,
+      running,
+      idleDetail,
+    };
+  });
 };
 
 export interface IdleReason {
@@ -274,7 +348,18 @@ export const explainIdle = (input: {
   workers: number;
   converged: boolean;
   withinWindow: boolean;
+  paused?: boolean;
 }): IdleReason => {
+  if (input.paused) {
+    return {
+      headline: 'Processing is paused',
+      detail:
+        input.queued > 0
+          ? `${String(input.queued)} files are queued, but the worker pool is paused.`
+          : 'The worker pool is paused. No new work will start.',
+      action: null,
+    };
+  }
   if (input.converged && input.queued === 0) {
     return {
       headline: 'Everything is converged',
@@ -323,8 +408,18 @@ export const explainIdle = (input: {
  */
 export const toIdleInputs = (input: {
   totals: { total: number; good: number; queued: number };
-  workers: { target: Record<string, number>; baseCounts: Record<string, number> };
-}): { queued: number; workers: number; converged: boolean; withinWindow: boolean } => {
+  workers: {
+    target: Record<string, number>;
+    baseCounts: Record<string, number>;
+    paused?: boolean;
+  };
+}): {
+  queued: number;
+  workers: number;
+  converged: boolean;
+  withinWindow: boolean;
+  paused: boolean;
+} => {
   const sum = (counts: Record<string, number>): number =>
     Object.values(counts).reduce((total, count) => total + count, 0);
   return {
@@ -332,6 +427,7 @@ export const toIdleInputs = (input: {
     workers: sum(input.workers.baseCounts),
     converged: input.totals.total === 0 || input.totals.good === input.totals.total,
     withinWindow: sum(input.workers.target) > 0,
+    paused: input.workers.paused ?? false,
   };
 };
 
@@ -413,3 +509,21 @@ export const ranFfmpeg = (steps: StepExcerpt[]): boolean => {
   const execute = steps.find((step) => step.pluginId === 'trawlarr:execute');
   return execute !== undefined && execute.logExcerpt.startsWith('Running ffmpeg');
 };
+
+/**
+ * How long a coalescing refetch may still wait, given how long this run of
+ * changes has already been waiting.
+ *
+ * A plain trailing debounce restarts its timer on every change, so a stream
+ * of bumps arriving faster than the delay postpones the refetch for as long
+ * as the stream lasts. On the Watch screen that is not a corner case: it is
+ * a sweep of skip-only files, each finishing in ~100ms against a 400ms
+ * delay, and the counters simply stop moving until the library goes quiet.
+ * The ceiling turns "wait for a gap" into "wait for a gap, but never longer
+ * than `maxWaitMs` since the first pending change".
+ */
+export const nextDebounceDelayMs = (input: {
+  waitedMs: number;
+  delayMs: number;
+  maxWaitMs: number;
+}): number => Math.max(0, Math.min(input.delayMs, input.maxWaitMs - input.waitedMs));

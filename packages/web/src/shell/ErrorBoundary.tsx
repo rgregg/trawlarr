@@ -40,17 +40,21 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   private handleReload = (): void => {
-    window.location.reload();
+    const loc = (globalThis as { location?: { reload?: () => void } }).location;
+    loc?.reload?.();
   };
 
   private handleReset = (): void => {
     try {
-      localStorage.clear();
-      sessionStorage.clear();
+      (globalThis as { localStorage?: Storage }).localStorage?.clear?.();
+      (globalThis as { sessionStorage?: Storage }).sessionStorage?.clear?.();
     } catch {
       // Storage access may be restricted
     }
-    window.location.href = '/';
+    const loc = (globalThis as { location?: { href?: string } }).location;
+    if (loc !== undefined) {
+      loc.href = '/';
+    }
   };
 
   private handleCopy = async (): Promise<void> => {
@@ -59,7 +63,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     const componentStack = this.state.componentStack ?? '';
     const text = `Trawlarr Web Error:\n${message}\n\nStack:\n${stack}\n\nComponent Stack:\n${componentStack}`;
     try {
-      await navigator.clipboard.writeText(text);
+      const nav = (
+        globalThis as {
+          navigator?: { clipboard?: { writeText?: (s: string) => Promise<void> } };
+        }
+      ).navigator;
+      await nav?.clipboard?.writeText?.(text);
     } catch {
       // Clipboard write not permitted
     }

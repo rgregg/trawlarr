@@ -11,14 +11,57 @@ import {
   mergeRunningRows,
   ranFfmpeg,
   summarise24h,
+  nextDebounceDelayMs,
   toIdleInputs,
   toLibraryCard,
+  toWorkerSlots,
   type Job24h,
   type JobListRow,
   type LibraryResource,
   type LibraryStats,
   type RestRunningJob,
 } from './watch-model.js';
+
+/**
+ * Coalesces a stream of staleness bumps into refetches, with a CEILING on
+ * how long it will coalesce for.
+ *
+ * A plain trailing debounce starves under exactly the workload this exists
+ * for: the timer restarts on every change, and a sweep of skip-only files
+ * finishes jobs faster than the delay, so the value never settles and the
+ * screen's counters stay frozen at whatever they were when the sweep began
+ * — refreshing only once the library goes quiet, which is the one moment
+ * nobody is watching. `maxWaitMs` bounds that: however long the bumps keep
+ * coming, the value is released at least that often.
+ */
+const useDebouncedValue = <T,>(value: T, delayMs: number, maxWaitMs = delayMs * 5): T => {
+  const [debounced, setDebounced] = useState<T>(value);
+  // When the current run of changes began — the anchor the ceiling is
+  // measured from, reset each time a value is actually released.
+  const firstPendingAt = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (Object.is(value, debounced)) {
+      firstPendingAt.current = null;
+      return;
+    }
+    firstPendingAt.current ??= Date.now();
+    const timer = setTimeout(
+      () => {
+        firstPendingAt.current = null;
+        setDebounced(value);
+      },
+      nextDebounceDelayMs({
+        waitedMs: Date.now() - firstPendingAt.current,
+        delayMs,
+        maxWaitMs,
+      }),
+    );
+    return () => clearTimeout(timer);
+  }, [value, debounced, delayMs, maxWaitMs]);
+
+  return debounced;
+};
 
 /** `GET /workers`. `baseCounts` is the operator's permanent setting; `target`
  * is what the schedule says RIGHT NOW after applying any active window — the
@@ -119,7 +162,7 @@ export const Watch = (props: {
   } | null>(null);
   const [libraryFailure, setLibraryFailure] = useState<Failure | null>(null);
   const [libraryAttempt, setLibraryAttempt] = useState(0);
-  const staleLibraries = live.staleness.libraries;
+  const debouncedStaleLibraries = useDebouncedValue(live.staleness.libraries, 400);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +184,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleLibraries, libraryAttempt]);
+  }, [client, debouncedStaleLibraries, libraryAttempt]);
 
   const libraryCards =
     libraries === null
@@ -167,7 +210,7 @@ export const Watch = (props: {
   const [schedule, setSchedule] = useState<ScheduleInfo | null>(null);
   const [runtimeFailure, setRuntimeFailure] = useState<Failure | null>(null);
   const [runtimeAttempt, setRuntimeAttempt] = useState(0);
-  const staleWorkers = live.staleness.workers;
+  const debouncedStaleWorkers = useDebouncedValue(live.staleness.workers, 400);
 
   useEffect(() => {
     let cancelled = false;
@@ -202,7 +245,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleWorkers, runtimeAttempt]);
+  }, [client, debouncedStaleWorkers, runtimeAttempt]);
 
   // --- Last 24 hours: encoded vs. skipped vs. failed. --------------------
   const [summary, setSummary] = useState<ReturnType<typeof summarise24h> | null>(null);
@@ -212,7 +255,7 @@ export const Watch = (props: {
   // window, so a job's step trace is fetched ONCE however many times this
   // effect re-runs. A ref, not state: writing it must not itself re-render.
   const ffmpegSeen = useRef<Map<string, boolean>>(new Map());
-  const staleJobs = live.staleness.jobs;
+  const debouncedStaleJobs = useDebouncedValue(live.staleness.jobs, 400);
 
   useEffect(() => {
     let cancelled = false;
@@ -268,7 +311,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleJobs, summaryAttempt]);
+  }, [client, debouncedStaleJobs, summaryAttempt]);
 
   // --- Running: fetched from the record, with live frames laid over it. ---
   const [restRunning, setRestRunning] = useState<RestRunningJob[]>([]);
@@ -290,7 +333,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleJobs, runningAttempt]);
+  }, [client, debouncedStaleJobs, runningAttempt]);
 
   // A running row's file is worth one small extra fetch: it carries both the
   // path (a job row has none) and the size. Bounded by how many jobs are
@@ -337,15 +380,124 @@ export const Watch = (props: {
     // same effect.
   }, [client, runningFileIds]);
 
-  const idle =
-    runningRows.length > 0 || libraryTotals === null || workerStatus === null
-      ? null
-      : explainIdle(toIdleInputs({ totals: libraryTotals, workers: workerStatus }));
+  const [togglingPause, setTogglingPause] = useState(false);
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const toggleWorkerPause = async () => {
+    if (workerStatus === null) return;
+    setTogglingPause(true);
+    setActionError(null);
+    try {
+      const endpoint = workerStatus.paused ? '/workers/resume' : '/workers/pause';
+      const updated = await client.post<WorkerStatus>(endpoint);
+      setWorkerStatus(updated);
+      setRuntimeAttempt((n) => n + 1);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTogglingPause(false);
+    }
+  };
+
+  const handleCancelJob = async (jobId: string) => {
+    setCancellingJobId(jobId);
+    setActionError(null);
+    try {
+      await client.post(`/jobs/${jobId}/cancel`);
+      setRunningAttempt((n) => n + 1);
+      setRuntimeAttempt((n) => n + 1);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCancellingJobId(null);
+    }
+  };
+
+  const assignedSlots = useRef<Map<string, number>>(new Map());
+
+  // How many SLOT CARDS the list renders — the transcode pool only, because
+  // those are the workers that run files, and summing every class used to
+  // inflate the row with health workers that never appear in it.
+  //
+  // Deliberately NOT the number `explainIdle` reasons about: that one is
+  // `sum(baseCounts)` across all classes (see `toIdleInputs`), which is the
+  // number an operator sets on the Configure screen. Two different questions
+  // — "how many cards belong here" and "has anyone configured any workers" —
+  // so the idle box below asks the second one rather than this.
+  const transcodeSlots = workerStatus
+    ? (workerStatus.target.transcode ?? workerStatus.baseCounts.transcode ?? 0)
+    : 0;
+
+  const idleInputs =
+    libraryTotals !== null && workerStatus !== null
+      ? toIdleInputs({ totals: libraryTotals, workers: workerStatus })
+      : null;
+
+  const idle = idleInputs !== null ? explainIdle(idleInputs) : null;
+
+  const showIdleBox =
+    runningRows.length === 0 &&
+    (workerStatus?.paused ||
+      idleInputs?.workers === 0 ||
+      (idleInputs !== null &&
+        (!idleInputs.withinWindow ||
+          (idleInputs.converged && (libraryTotals?.queued ?? 0) === 0))));
+
+  const workerSlots = toWorkerSlots({
+    configuredWorkers: transcodeSlots,
+    runningRows,
+    queued: libraryTotals?.queued ?? 0,
+    activeWorkers: workerStatus?.active ?? runningRows.length,
+    assignedSlots: assignedSlots.current,
+  });
 
   return (
     <div className="watch">
       <section className="watch-running">
-        <h2>Running</h2>
+        <div className="watch-section-header">
+          <h2>Running</h2>
+          {workerStatus !== null && (
+            <div className="watch-section-actions">
+              <button
+                type="button"
+                className={workerStatus.paused ? 'btn-primary' : 'button'}
+                onClick={() => void toggleWorkerPause()}
+                disabled={togglingPause}
+                aria-label={workerStatus.paused ? 'Resume processing' : 'Pause processing'}
+              >
+                {togglingPause
+                  ? workerStatus.paused
+                    ? 'Resuming…'
+                    : 'Pausing…'
+                  : workerStatus.paused
+                    ? '▶ Resume processing'
+                    : '❚❚ Pause processing'}
+              </button>
+            </div>
+          )}
+        </div>
+        {actionError !== null && (
+          <p role="alert" className="problem" style={{ margin: '0 0 var(--space-3)' }}>
+            {actionError}
+          </p>
+        )}
+        {workerStatus?.paused && (
+          <div className="watch-paused-banner" role="status">
+            <div className="watch-paused-banner-text">
+              <strong>Processing is paused</strong>
+              <span>No new files will be claimed by workers.</span>
+            </div>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void toggleWorkerPause()}
+              disabled={togglingPause}
+            >
+              Resume processing
+            </button>
+          </div>
+        )}
         {runningFailure !== null && (
           <FailureBox
             failure={runningFailure}
@@ -354,11 +506,19 @@ export const Watch = (props: {
             }}
           />
         )}
-        {runningRows.length === 0 ? (
+        {showIdleBox ? (
           idle === null ? (
             runningFailure === null && <p>Loading…</p>
           ) : (
-            <div className={`idle-box ${idle.action === null ? 'idle-ok' : 'idle-attention'}`}>
+            <div
+              className={`idle-box ${
+                idle.headline === 'Processing is paused'
+                  ? 'idle-paused'
+                  : idle.action === null
+                    ? 'idle-ok'
+                    : 'idle-attention'
+              }`}
+            >
               <h3>{idle.headline}</h3>
               <p>{idle.detail}</p>
               {idle.action !== null && (
@@ -366,44 +526,103 @@ export const Watch = (props: {
                   {idle.action.label}
                 </Link>
               )}
+              {workerStatus?.paused && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ marginTop: 'var(--space-3)' }}
+                  onClick={() => void toggleWorkerPause()}
+                  disabled={togglingPause}
+                >
+                  Resume processing
+                </button>
+              )}
             </div>
           )
         ) : (
           <ul className="job-list">
-            {runningRows.map((row) => (
-              <li key={row.jobId} className="job running">
-                <div className="watch-running-head">
-                  <Link to={`/files/${row.fileId}`} navigate={navigate} className="job-file">
-                    {row.name}
-                  </Link>
-                  <span className="job-progress">
-                    {row.percent === null ? row.stage : `${String(row.percent)}% — ${row.stage}`}
-                  </span>
-                </div>
-                {row.percent !== null && (
-                  <div
-                    className="bar"
-                    role="progressbar"
-                    aria-valuenow={row.percent}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label={`${row.name} progress`}
-                  >
-                    <div className="bar-fill" style={{ width: `${String(row.percent)}%` }} />
+            {workerSlots.map((slot) => {
+              const row = slot.running;
+              if (row !== null) {
+                return (
+                  <li key={slot.slotNumber} className="job running">
+                    <div className="watch-running-head">
+                      <div className="job-identity">
+                        {/* The slot number is a UI-local index — it is this
+                            card's position, not the worker's identity. The
+                            real `workerId` is what appears in `job.started`,
+                            the daemon log and `GET /workers`, so an operator
+                            chasing a stuck card here has something to match
+                            on; printing only the slot left them nothing. */}
+                        <span className="job-worker-badge" title={`Worker id: ${row.workerId}`}>
+                          {slot.workerLabel}
+                          <span className="job-worker-id">{row.workerId}</span>
+                        </span>
+                        <Link to={`/files/${row.fileId}`} navigate={navigate} className="job-file">
+                          {row.name}
+                        </Link>
+                      </div>
+                      <span className="job-progress">
+                        {row.percent === null
+                          ? row.stage
+                          : `${String(row.percent)}% — ${row.stage}`}
+                      </span>
+                    </div>
+                    {row.percent !== null && (
+                      <div
+                        className="bar"
+                        role="progressbar"
+                        aria-valuenow={row.percent}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`${row.name} progress`}
+                      >
+                        <div className="bar-fill" style={{ width: `${String(row.percent)}%` }} />
+                      </div>
+                    )}
+                    <div className="watch-running-meta">
+                      <span className="detail">
+                        {runningFiles[row.fileId] !== undefined
+                          ? formatBytes(runningFiles[row.fileId]!.sizeBytes)
+                          : 'In progress'}
+                      </span>
+                      <div className="watch-job-actions">
+                        <Link
+                          to={`/jobs/${row.jobId}`}
+                          navigate={navigate}
+                          className="watch-job-link"
+                        >
+                          Job detail
+                        </Link>
+                        <button
+                          type="button"
+                          className="btn-danger btn-sm"
+                          onClick={() => void handleCancelJob(row.jobId)}
+                          disabled={cancellingJobId === row.jobId}
+                          title="Stop this job and release the worker"
+                        >
+                          {cancellingJobId === row.jobId ? 'Stopping…' : 'Stop job'}
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              }
+              return (
+                <li key={slot.slotNumber} className="job idle">
+                  <div className="watch-running-head">
+                    <div className="job-identity">
+                      <span className="job-worker-badge idle">{slot.workerLabel}</span>
+                      <span className="job-idle-title">Idle</span>
+                    </div>
+                    <span className="job-progress job-progress-idle">Standing by</span>
                   </div>
-                )}
-                <div className="watch-running-meta">
-                  <span className="detail">
-                    worker {row.workerId}
-                    {runningFiles[row.fileId] !== undefined &&
-                      ` — ${formatBytes(runningFiles[row.fileId]!.sizeBytes)}`}
-                  </span>
-                  <Link to={`/jobs/${row.jobId}`} navigate={navigate} className="watch-job-link">
-                    Job detail
-                  </Link>
-                </div>
-              </li>
-            ))}
+                  <div className="watch-running-meta">
+                    <span className="detail">{slot.idleDetail}</span>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -506,7 +725,19 @@ export const Watch = (props: {
       </section>
 
       <section className="watch-runtime">
-        <h2>Runtime</h2>
+        <div className="watch-section-header">
+          <h2>Runtime</h2>
+          {workerStatus !== null && (
+            <button
+              type="button"
+              className={workerStatus.paused ? 'btn-primary btn-sm' : 'button btn-sm'}
+              onClick={() => void toggleWorkerPause()}
+              disabled={togglingPause}
+            >
+              {workerStatus.paused ? 'Resume pool' : 'Pause pool'}
+            </button>
+          )}
+        </div>
         {runtimeFailure !== null && (
           <FailureBox
             failure={runtimeFailure}

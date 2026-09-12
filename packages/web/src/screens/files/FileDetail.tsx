@@ -101,6 +101,12 @@ export const FileDetail = (props: {
   const [requeueBusy, setRequeueBusy] = useState(false);
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [dryRunBusy, setDryRunBusy] = useState(false);
+  // Two-step, like the trash purge in `Config.tsx`: the first click only
+  // arms the confirmation. This is the one control on the screen that
+  // destroys the operator's media, and a misclick beside "Requeue" must not
+  // be able to do it.
+  const [deleteConfirming, setDeleteConfirming] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [dryRun, setDryRun] = useState<DryRunResult | null>(null);
 
@@ -182,6 +188,25 @@ export const FileDetail = (props: {
   const onRequeue = useCallback((): void => {
     void runAction(setRequeueBusy, async () => await client.post(`/files/${id}/requeue`));
   }, [client, id, runAction]);
+
+  const onDelete = useCallback((): void => {
+    setDeleteBusy(true);
+    setActionError(null);
+    void (async () => {
+      try {
+        await client.del(`/files/${id}`);
+        // The row this screen is ABOUT is gone, so there is nothing left to
+        // render here — staying would re-fetch it and show the 404 view as
+        // if something had gone wrong. Back to the listing it was opened
+        // from, filters intact.
+        navigate(formatRoute({ name: 'files', filters }));
+      } catch (error) {
+        setActionError(describeFailure(error).message);
+        setDeleteConfirming(false);
+        setDeleteBusy(false);
+      }
+    })();
+  }, [client, id, navigate, filters]);
 
   const onRaisePriority = useCallback((): void => {
     void runAction(
@@ -329,7 +354,53 @@ export const FileDetail = (props: {
             >
               {dryRunBusy ? 'Running dry-run…' : 'Dry-run'}
             </button>
+            <button
+              type="button"
+              className="btn-danger"
+              disabled={deleteBusy || deleteConfirming || file.state === 'running'}
+              title={
+                file.state === 'running'
+                  ? 'A worker is processing this file right now. Deleting it would race the ' +
+                    'replacement being written — wait for the run to finish.'
+                  : undefined
+              }
+              onClick={() => {
+                setDeleteConfirming(true);
+              }}
+            >
+              Delete…
+            </button>
           </div>
+
+          {deleteConfirming && (
+            <div role="alert" className="failure file-detail-delete-confirm">
+              <strong>This cannot be undone.</strong>
+              <p>
+                <span className="verbatim">{file.path}</span> will be deleted from disk, along with
+                its run history. This is not the trash — the file is unlinked, and no flow ever
+                brings it back.
+              </p>
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="btn-danger"
+                  disabled={deleteBusy}
+                  onClick={onDelete}
+                >
+                  {deleteBusy ? 'Deleting…' : 'Yes, permanently delete this file'}
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => {
+                    setDeleteConfirming(false);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {flowId !== null && (
             // "Why did this file get rewritten" is usually a question about

@@ -55,6 +55,13 @@ export type TrawlarrEvent =
  */
 export const LIVE_LOG_LINES = 200;
 
+/**
+ * How many finished job ids are remembered to suppress stale REST rows.
+ * Only needs to outlive one poll interval; the cap keeps a long-lived tab
+ * from accumulating a job id per file in the library.
+ */
+export const FINISHED_JOB_IDS_KEPT = 200;
+
 export interface LiveJob {
   jobId: string;
   fileId: string;
@@ -70,6 +77,13 @@ export interface LiveJob {
 
 export interface LiveState {
   jobs: Record<string, LiveJob>;
+  /**
+   * Jobs the socket has told us finished. A REST list of running jobs is a
+   * snapshot taken before those events arrived, so without this the Watch
+   * screen re-materialises a job that already ended and flashes it back on
+   * screen until the next poll. Bounded: liveness data, not history.
+   */
+  finishedJobIds: Set<string>;
   /** libraryId -> files seen so far by the scan currently walking it. */
   scanning: Record<string, number>;
   /**
@@ -81,6 +95,7 @@ export interface LiveState {
 
 export const initialLiveState: LiveState = {
   jobs: {},
+  finishedJobIds: new Set(),
   scanning: {},
   staleness: { libraries: 0, jobs: 0, workers: 0 },
 };
@@ -192,7 +207,16 @@ export const reduceLive = (state: LiveState, event: TrawlarrEvent): LiveState =>
     case 'job.finished': {
       const jobs = { ...state.jobs };
       delete jobs[event.jobId];
-      return bump({ ...state, jobs }, 'jobs', 'libraries');
+      const finishedJobIds = new Set(state.finishedJobIds);
+      finishedJobIds.add(event.jobId);
+      // Insertion-ordered, so the oldest id is the first one out. Any REST
+      // snapshot still carrying an id this old is long superseded.
+      while (finishedJobIds.size > FINISHED_JOB_IDS_KEPT) {
+        const oldest = finishedJobIds.values().next().value;
+        if (oldest === undefined) break;
+        finishedJobIds.delete(oldest);
+      }
+      return bump({ ...state, jobs, finishedJobIds }, 'jobs', 'libraries');
     }
 
     case 'scan.progress':

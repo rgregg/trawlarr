@@ -51,6 +51,10 @@ export const FLOW_FIELD_DOCS: { name: string; description: string }[] = [
     description: 'Normalized language tags of the audio streams, without duplicates.',
   },
   { name: 'audio.codecs', description: 'Codecs of the audio streams, without duplicates.' },
+  {
+    name: 'audio.channels',
+    description: 'Channel counts of all audio streams as strings (e.g. "2", "6").',
+  },
   { name: 'audio.maxChannels', description: 'Highest channel count across the audio streams.' },
   { name: 'subtitle.count', description: 'Number of subtitle streams.' },
   { name: 'subtitle.languages', description: 'Normalized language tags of the subtitle streams.' },
@@ -159,6 +163,17 @@ export const readFlowValue = (args: FlowValueArgs, name: string): FlowValue | un
       return audio && languages(audio);
     case 'audio.codecs':
       return audio && [...new Set(audio.map((stream) => stream.codec_name))];
+    case 'audio.channels': {
+      // UNDEFINED when ANY stream's channel count is unreadable, matching
+      // `audio.maxChannels` below. Filtering the unreadable streams out and
+      // answering from the rest looks harmless on a list property, but it
+      // turns partial probe data into a confident answer: `audio.channels
+      // does not include "6"` would return true for a file whose one
+      // unprobed stream is the 5.1 track. A condition that cannot be
+      // answered must not be answered.
+      if (!audio || audio.some((stream) => finite(stream.channels) === undefined)) return undefined;
+      return [...new Set(audio.map((stream) => String(Number(stream.channels))))];
+    }
     case 'audio.maxChannels': {
       if (!audio || audio.some((stream) => finite(stream.channels) === undefined)) return undefined;
       return Math.max(0, ...audio.map((stream) => Number(stream.channels)));

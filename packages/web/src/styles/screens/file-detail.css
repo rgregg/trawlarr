@@ -348,3 +348,18 @@
     overflow-wrap: anywhere;
   }
 }
+
+/* The delete confirmation, armed by the "Delete…" action above it. Rendered
+   as a `.failure` block on purpose: this is the only control on the screen
+   that destroys the operator's media, so it gets the same weight as an error
+   rather than the quiet styling of the actions row. */
+.file-detail-delete-confirm {
+  margin: 0 0 var(--space-3);
+}
+
+.file-detail-delete-confirm .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
