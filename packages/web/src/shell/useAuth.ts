@@ -43,10 +43,21 @@ export const useAuth = (): AuthState => {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [nextStatus, nextAccount] = await Promise.all([fetchAuthStatus(), fetchSession()]);
-      if (cancelled) return;
-      setStatus(nextStatus);
-      setAccount(nextAccount);
+      try {
+        const [nextStatus, nextAccount] = await Promise.all([fetchAuthStatus(), fetchSession()]);
+        if (cancelled) return;
+        setStatus(nextStatus);
+        setAccount(nextAccount);
+      } catch (caught) {
+        if (cancelled) return;
+        setStatus({ setupRequired: false, oidc: null });
+        setAccount(null);
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : 'Could not connect to trawlarr daemon. Check your connection.',
+        );
+      }
     })();
     return () => {
       cancelled = true;

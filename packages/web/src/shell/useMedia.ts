@@ -39,8 +39,22 @@ interface MediaQueryListLike {
 export const FILES_NARROW = '(max-width: 48rem)';
 
 const matchMedia = (query: string): MediaQueryListLike | null => {
+  const win = (globalThis as { window?: { matchMedia?: (query: string) => MediaQueryListLike } })
+    .window;
+  if (win?.matchMedia) {
+    try {
+      return win.matchMedia(query);
+    } catch {
+      return null;
+    }
+  }
   const fn = (globalThis as { matchMedia?: (query: string) => MediaQueryListLike }).matchMedia;
-  return fn === undefined ? null : fn.call(globalThis, query);
+  if (fn === undefined) return null;
+  try {
+    return fn.call(globalThis, query);
+  } catch {
+    return null;
+  }
 };
 
 export const useMedia = (query: string): boolean => {

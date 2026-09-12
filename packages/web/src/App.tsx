@@ -16,7 +16,9 @@ import { Watch } from './screens/watch/Watch.js';
 import { AuthGate } from './shell/AuthGate.js';
 import { attentionBadge, attentionLabel } from './shell/attention.js';
 import { BrandMark } from './shell/BrandMark.js';
+import { ErrorBoundary } from './shell/ErrorBoundary.js';
 import { Link } from './shell/Link.js';
+
 import { PageHeader } from './shell/PageHeader.js';
 import { ThemeToggle } from './shell/ThemeToggle.js';
 import { useAttention } from './shell/useAttention.js';
@@ -121,9 +123,14 @@ const Shell = (props: {
       );
     };
     publish();
-    const observer = new ResizeObserver(publish);
-    observer.observe(element);
-    return () => observer.disconnect();
+    if (typeof ResizeObserver === 'undefined') return;
+    try {
+      const observer = new ResizeObserver(publish);
+      observer.observe(element);
+      return () => observer.disconnect();
+    } catch {
+      // ResizeObserver not available or threw
+    }
   }, []);
 
   return (
@@ -297,13 +304,15 @@ export const App = (): JSX.Element => {
   return (
     <AuthGate auth={auth}>
       {auth.client !== null && auth.account !== null && auth.account !== undefined && (
-        <Shell
-          client={auth.client}
-          account={auth.account}
-          signOut={() => {
-            void auth.signOut();
-          }}
-        />
+        <ErrorBoundary fallbackTitle="Application Error">
+          <Shell
+            client={auth.client}
+            account={auth.account}
+            signOut={() => {
+              void auth.signOut();
+            }}
+          />
+        </ErrorBoundary>
       )}
     </AuthGate>
   );

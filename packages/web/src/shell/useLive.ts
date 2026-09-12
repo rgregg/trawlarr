@@ -70,7 +70,17 @@ export const useLive = (
     let closed = false;
 
     const open = (): void => {
-      socket = createSocket(eventsUrl({ apiKey }));
+      try {
+        socket = createSocket(eventsUrl({ apiKey }));
+      } catch {
+        setConnected(false);
+        if (closed) return;
+        setLive(initialLiveState);
+        const delay = RECONNECT_MS[Math.min(attempt.current, RECONNECT_MS.length - 1)]!;
+        attempt.current += 1;
+        timer = setTimeout(open, delay);
+        return;
+      }
       socket.onopen = () => {
         attempt.current = 0;
         setConnected(true);
