@@ -13,12 +13,22 @@ import {
   summarise24h,
   toIdleInputs,
   toLibraryCard,
+  toWorkerSlots,
   type Job24h,
   type JobListRow,
   type LibraryResource,
   type LibraryStats,
   type RestRunningJob,
 } from './watch-model.js';
+
+const useDebouncedValue = <T,>(value: T, delayMs: number): T => {
+  const [debounced, setDebounced] = useState<T>(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
+};
 
 /** `GET /workers`. `baseCounts` is the operator's permanent setting; `target`
  * is what the schedule says RIGHT NOW after applying any active window — the
@@ -119,7 +129,7 @@ export const Watch = (props: {
   } | null>(null);
   const [libraryFailure, setLibraryFailure] = useState<Failure | null>(null);
   const [libraryAttempt, setLibraryAttempt] = useState(0);
-  const staleLibraries = live.staleness.libraries;
+  const debouncedStaleLibraries = useDebouncedValue(live.staleness.libraries, 400);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +151,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleLibraries, libraryAttempt]);
+  }, [client, debouncedStaleLibraries, libraryAttempt]);
 
   const libraryCards =
     libraries === null
@@ -167,7 +177,7 @@ export const Watch = (props: {
   const [schedule, setSchedule] = useState<ScheduleInfo | null>(null);
   const [runtimeFailure, setRuntimeFailure] = useState<Failure | null>(null);
   const [runtimeAttempt, setRuntimeAttempt] = useState(0);
-  const staleWorkers = live.staleness.workers;
+  const debouncedStaleWorkers = useDebouncedValue(live.staleness.workers, 400);
 
   useEffect(() => {
     let cancelled = false;
@@ -202,7 +212,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleWorkers, runtimeAttempt]);
+  }, [client, debouncedStaleWorkers, runtimeAttempt]);
 
   // --- Last 24 hours: encoded vs. skipped vs. failed. --------------------
   const [summary, setSummary] = useState<ReturnType<typeof summarise24h> | null>(null);
@@ -212,7 +222,7 @@ export const Watch = (props: {
   // window, so a job's step trace is fetched ONCE however many times this
   // effect re-runs. A ref, not state: writing it must not itself re-render.
   const ffmpegSeen = useRef<Map<string, boolean>>(new Map());
-  const staleJobs = live.staleness.jobs;
+  const debouncedStaleJobs = useDebouncedValue(live.staleness.jobs, 400);
 
   useEffect(() => {
     let cancelled = false;
@@ -268,7 +278,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleJobs, summaryAttempt]);
+  }, [client, debouncedStaleJobs, summaryAttempt]);
 
   // --- Running: fetched from the record, with live frames laid over it. ---
   const [restRunning, setRestRunning] = useState<RestRunningJob[]>([]);
@@ -290,7 +300,7 @@ export const Watch = (props: {
     return () => {
       cancelled = true;
     };
-  }, [client, staleJobs, runningAttempt]);
+  }, [client, debouncedStaleJobs, runningAttempt]);
 
   // A running row's file is worth one small extra fetch: it carries both the
   // path (a job row has none) and the size. Bounded by how many jobs are
@@ -371,10 +381,36 @@ export const Watch = (props: {
     }
   };
 
-  const idle =
-    runningRows.length > 0 || libraryTotals === null || workerStatus === null
-      ? null
-      : explainIdle(toIdleInputs({ totals: libraryTotals, workers: workerStatus }));
+  const sumCounts = (counts: Record<string, number> | undefined): number =>
+    counts ? Object.values(counts).reduce((total, count) => total + count, 0) : 0;
+
+  const configuredWorkers = workerStatus
+    ? sumCounts(workerStatus.target) > 0
+      ? sumCounts(workerStatus.target)
+      : sumCounts(workerStatus.baseCounts)
+    : 0;
+
+  const idleInputs =
+    libraryTotals !== null && workerStatus !== null
+      ? toIdleInputs({ totals: libraryTotals, workers: workerStatus })
+      : null;
+
+  const idle = idleInputs !== null ? explainIdle(idleInputs) : null;
+
+  const showIdleBox =
+    runningRows.length === 0 &&
+    (workerStatus?.paused ||
+      configuredWorkers === 0 ||
+      (idleInputs !== null &&
+        (!idleInputs.withinWindow ||
+          (idleInputs.converged && (libraryTotals?.queued ?? 0) === 0))));
+
+  const workerSlots = toWorkerSlots({
+    configuredWorkers,
+    runningRows,
+    queued: libraryTotals?.queued ?? 0,
+    activeWorkers: workerStatus?.active ?? runningRows.length,
+  });
 
   return (
     <div className="watch">
@@ -430,7 +466,7 @@ export const Watch = (props: {
             }}
           />
         )}
-        {runningRows.length === 0 ? (
+        {showIdleBox ? (
           idle === null ? (
             runningFailure === null && <p>Loading…</p>
           ) : (
@@ -465,51 +501,79 @@ export const Watch = (props: {
           )
         ) : (
           <ul className="job-list">
-            {runningRows.map((row) => (
-              <li key={row.jobId} className="job running">
-                <div className="watch-running-head">
-                  <Link to={`/files/${row.fileId}`} navigate={navigate} className="job-file">
-                    {row.name}
-                  </Link>
-                  <span className="job-progress">
-                    {row.percent === null ? row.stage : `${String(row.percent)}% — ${row.stage}`}
-                  </span>
-                </div>
-                {row.percent !== null && (
-                  <div
-                    className="bar"
-                    role="progressbar"
-                    aria-valuenow={row.percent}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label={`${row.name} progress`}
-                  >
-                    <div className="bar-fill" style={{ width: `${String(row.percent)}%` }} />
+            {workerSlots.map((slot) => {
+              const row = slot.running;
+              if (row !== null) {
+                return (
+                  <li key={slot.slotNumber} className="job running">
+                    <div className="watch-running-head">
+                      <div className="job-identity">
+                        <span className="job-worker-badge">{slot.workerLabel}</span>
+                        <Link to={`/files/${row.fileId}`} navigate={navigate} className="job-file">
+                          {row.name}
+                        </Link>
+                      </div>
+                      <span className="job-progress">
+                        {row.percent === null
+                          ? row.stage
+                          : `${String(row.percent)}% — ${row.stage}`}
+                      </span>
+                    </div>
+                    {row.percent !== null && (
+                      <div
+                        className="bar"
+                        role="progressbar"
+                        aria-valuenow={row.percent}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`${row.name} progress`}
+                      >
+                        <div className="bar-fill" style={{ width: `${String(row.percent)}%` }} />
+                      </div>
+                    )}
+                    <div className="watch-running-meta">
+                      <span className="detail">
+                        {runningFiles[row.fileId] !== undefined
+                          ? formatBytes(runningFiles[row.fileId]!.sizeBytes)
+                          : 'In progress'}
+                      </span>
+                      <div className="watch-job-actions">
+                        <Link
+                          to={`/jobs/${row.jobId}`}
+                          navigate={navigate}
+                          className="watch-job-link"
+                        >
+                          Job detail
+                        </Link>
+                        <button
+                          type="button"
+                          className="btn-danger btn-sm"
+                          onClick={() => void handleCancelJob(row.jobId)}
+                          disabled={cancellingJobId === row.jobId}
+                          title="Stop this job and release the worker"
+                        >
+                          {cancellingJobId === row.jobId ? 'Stopping…' : 'Stop job'}
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              }
+              return (
+                <li key={slot.slotNumber} className="job idle">
+                  <div className="watch-running-head">
+                    <div className="job-identity">
+                      <span className="job-worker-badge idle">{slot.workerLabel}</span>
+                      <span className="job-idle-title">Idle</span>
+                    </div>
+                    <span className="job-progress job-progress-idle">Standing by</span>
                   </div>
-                )}
-                <div className="watch-running-meta">
-                  <span className="detail">
-                    worker {row.workerId}
-                    {runningFiles[row.fileId] !== undefined &&
-                      ` — ${formatBytes(runningFiles[row.fileId]!.sizeBytes)}`}
-                  </span>
-                  <div className="watch-job-actions">
-                    <Link to={`/jobs/${row.jobId}`} navigate={navigate} className="watch-job-link">
-                      Job detail
-                    </Link>
-                    <button
-                      type="button"
-                      className="btn-danger btn-sm"
-                      onClick={() => void handleCancelJob(row.jobId)}
-                      disabled={cancellingJobId === row.jobId}
-                      title="Stop this job and release the worker"
-                    >
-                      {cancellingJobId === row.jobId ? 'Stopping…' : 'Stop job'}
-                    </button>
+                  <div className="watch-running-meta">
+                    <span className="detail">{slot.idleDetail}</span>
                   </div>
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

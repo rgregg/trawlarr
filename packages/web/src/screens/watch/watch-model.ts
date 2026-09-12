@@ -240,6 +240,49 @@ export const mergeRunningRows = (input: {
   return rows;
 };
 
+export interface WorkerSlotView {
+  slotNumber: number;
+  workerLabel: string;
+  running: RunningRow | null;
+  idleDetail: string;
+}
+
+/**
+ * Projects configured workers and in-flight jobs into stable, persistent
+ * worker slots.
+ *
+ * Slots do NOT appear and disappear as sub-second jobs start and finish: a
+ * configured 2-worker pool renders two cards on screen, whether both are
+ * encoding, one is encoding while one is idle, or both are momentarily
+ * waiting between claims. This eliminates layout shifts, jumping, and UI
+ * strobing during fast sweeps.
+ */
+export const toWorkerSlots = (input: {
+  configuredWorkers: number;
+  runningRows: RunningRow[];
+  queued: number;
+  activeWorkers: number;
+}): WorkerSlotView[] => {
+  const slotCount = Math.max(input.configuredWorkers, input.runningRows.length, 1);
+  return Array.from({ length: slotCount }, (_, i) => {
+    const running = input.runningRows[i] ?? null;
+    const slotNumber = i + 1;
+    const workerLabel = `Worker ${String(slotNumber)}`;
+    const idleDetail =
+      input.queued > 0
+        ? input.activeWorkers > 0 || input.runningRows.length > 0
+          ? 'Standing by — waiting for next file or hardware slot'
+          : 'Standing by — claiming next file…'
+        : 'Standing by — queue is empty';
+    return {
+      slotNumber,
+      workerLabel,
+      running,
+      idleDetail,
+    };
+  });
+};
+
 export interface IdleReason {
   headline: string;
   detail: string;

@@ -8,6 +8,7 @@ import {
   toIdleInputs,
   toLibraryCard,
   toRunningRows,
+  toWorkerSlots,
   type LibraryResource,
   type LibraryStats,
 } from './watch-model.js';
@@ -457,5 +458,75 @@ describe('toIdleInputs', () => {
     });
     expect(inputs.paused).toBe(true);
     expect(explainIdle(inputs).headline).toBe('Processing is paused');
+  });
+});
+
+describe('toWorkerSlots', () => {
+  const runningJob = {
+    jobId: 'j1',
+    fileId: 'f1',
+    name: 'Movie.mkv',
+    percent: 42,
+    stage: 'Execute',
+    workerId: 'worker-1',
+  };
+
+  it('maintains fixed slots matching the configured worker count when one is active', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [runningJob],
+      queued: 50,
+      activeWorkers: 1,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]).toEqual({
+      slotNumber: 1,
+      workerLabel: 'Worker 1',
+      running: runningJob,
+      idleDetail: 'Standing by — waiting for next file or hardware slot',
+    });
+    expect(slots[1]).toEqual({
+      slotNumber: 2,
+      workerLabel: 'Worker 2',
+      running: null,
+      idleDetail: 'Standing by — waiting for next file or hardware slot',
+    });
+  });
+
+  it('keeps both slots stable and idle when between claims in a queued run', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [],
+      queued: 50,
+      activeWorkers: 0,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.running).toBeNull();
+    expect(slots[0]!.idleDetail).toBe('Standing by — claiming next file…');
+    expect(slots[1]!.running).toBeNull();
+    expect(slots[1]!.idleDetail).toBe('Standing by — claiming next file…');
+  });
+
+  it('expands slots if active jobs exceed configured workers', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 1,
+      runningRows: [runningJob, { ...runningJob, jobId: 'j2', name: 'Movie2.mkv' }],
+      queued: 0,
+      activeWorkers: 2,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.running).not.toBeNull();
+    expect(slots[1]!.running).not.toBeNull();
+  });
+
+  it('reports queue empty when no files are queued', () => {
+    const slots = toWorkerSlots({
+      configuredWorkers: 2,
+      runningRows: [],
+      queued: 0,
+      activeWorkers: 0,
+    });
+    expect(slots).toHaveLength(2);
+    expect(slots[0]!.idleDetail).toBe('Standing by — queue is empty');
   });
 });
