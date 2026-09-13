@@ -33,14 +33,14 @@ describe('draftProblems', () => {
     // host path that is not the container's path — so the form names it
     // rather than round-tripping a 400.
     expect(draftProblems(draft({ roots: 'media/movies' }))).toContain(
-      'Roots must be absolute paths as the trawlarr process sees them — in Docker that is the ' +
+      'Roots must be absolute paths as the Trawlarr process sees them — in Docker that is the ' +
         'path inside the container, e.g. /library/movies, not the host path.',
     );
   });
 
   it('rejects a relative staging directory before the request is sent', () => {
     expect(draftProblems(draft({ stagingDir: 'cache/staging' }))).toContain(
-      'Staging directory must be an absolute path as the trawlarr process sees it — in Docker ' +
+      'Staging directory must be an absolute path as the Trawlarr process sees it — in Docker ' +
         'that is the path inside the container, e.g. /cache/staging, not the host path.',
     );
   });
@@ -78,7 +78,7 @@ describe('describeFailure', () => {
       message: 'Root "/library" overlaps library "TV".',
     });
     expect(describeFailure(error)).toEqual({
-      title: 'trawlarr refused this',
+      title: 'Trawlarr refused this',
       message: 'Root "/library" overlaps library "TV".',
       retryable: false,
     });
@@ -95,7 +95,7 @@ describe('describeFailure', () => {
 
   it('describes a lost connection as a connection problem', () => {
     expect(describeFailure(new TypeError('Failed to fetch'))).toEqual({
-      title: 'Could not reach trawlarr',
+      title: 'Could not reach Trawlarr',
       message:
         'The daemon did not answer. It may be restarting, or this page may have been left open ' +
         'after it stopped.',

@@ -36,7 +36,7 @@ export const draftProblems = (draft: LibraryDraft): string[] => {
     // because in a container the tempting value is the HOST path and the
     // correct one is the container path — a distinction a 400 does not teach.
     problems.push(
-      'Roots must be absolute paths as the trawlarr process sees them — in Docker that is the ' +
+      'Roots must be absolute paths as the Trawlarr process sees them — in Docker that is the ' +
         'path inside the container, e.g. /library/movies, not the host path.',
     );
   }
@@ -44,7 +44,7 @@ export const draftProblems = (draft: LibraryDraft): string[] => {
   const staging = draft.stagingDir.trim();
   if (staging !== '' && !staging.startsWith('/')) {
     problems.push(
-      'Staging directory must be an absolute path as the trawlarr process sees it — in Docker ' +
+      'Staging directory must be an absolute path as the Trawlarr process sees it — in Docker ' +
         'that is the path inside the container, e.g. /cache/staging, not the host path.',
     );
   }
@@ -79,13 +79,13 @@ export const describeFailure = (
 ): { title: string; message: string; retryable: boolean } => {
   if (error instanceof ApiClientError) {
     return {
-      title: 'trawlarr refused this',
+      title: 'Trawlarr refused this',
       message: error.message,
       retryable: error.status >= 500,
     };
   }
   return {
-    title: 'Could not reach trawlarr',
+    title: 'Could not reach Trawlarr',
     message:
       'The daemon did not answer. It may be restarting, or this page may have been left open ' +
       'after it stopped.',

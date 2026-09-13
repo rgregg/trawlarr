@@ -134,7 +134,7 @@ export const FlowPicker = (props: {
       <h2>Flow for {props.library.name}</h2>
       <p className="help">
         Attaching a flow changes what &ldquo;converged&rdquo; means for every file in this library,
-        so trawlarr will rescan it.
+        so Trawlarr will rescan it.
       </p>
 
       {failure !== null && (

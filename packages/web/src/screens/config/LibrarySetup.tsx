@@ -92,7 +92,7 @@ export const LibrarySetup = (props: {
         }}
       />
       <p id="library-roots-help" className="help">
-        One per line, absolute, <strong>as the trawlarr process sees them</strong>. In Docker that
+        One per line, absolute, <strong>as the Trawlarr process sees them</strong>. In Docker that
         is the path inside the container (<code>/library/movies</code>), not the path on the host.
       </p>
 
@@ -107,7 +107,7 @@ export const LibrarySetup = (props: {
         }}
       />
       <p id="library-extensions-help" className="help">
-        Comma-separated. Leave it empty to keep trawlarr&rsquo;s own list — an empty list is never
+        Comma-separated. Leave it empty to keep Trawlarr&rsquo;s own list — an empty list is never
         sent, because &ldquo;match nothing&rdquo; scans as a permanently empty library with no error
         to explain it.
       </p>
@@ -130,7 +130,7 @@ export const LibrarySetup = (props: {
       <p id="library-hardlinked-help" className="help">
         Files hardlinked into a torrent client&rsquo;s download directory are skipped by default.
         Replacing one either breaks the link or mutates a copy that is still seeding. If your
-        library was seeded by a torrent client and trawlarr reports nothing to do, this is why.
+        library was seeded by a torrent client and Trawlarr reports nothing to do, this is why.
       </p>
 
       <label htmlFor="library-staging-dir">Staging directory</label>

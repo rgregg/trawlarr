@@ -382,7 +382,7 @@ export const FlowVersion = (props: {
             <>
               <h3>Restore</h3>
               <p className="help">
-                Restoring re-queues every file in every library bound to this flow, so trawlarr can
+                Restoring re-queues every file in every library bound to this flow, so Trawlarr can
                 re-derive convergence under the restored definition. Whether a given file actually
                 needs re-encoding is decided per file once that runs — this cannot be known ahead of
                 time and is not estimated here.

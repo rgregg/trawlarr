@@ -1,3 +1,5 @@
+<img src="docs/assets/trawlarr-icon.png" alt="" width="128" height="128" align="right" />
+
 # Trawlarr
 
 Trawlarr is a media library transformation engine. It drives every file in a
