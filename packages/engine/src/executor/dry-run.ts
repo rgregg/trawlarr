@@ -1,6 +1,7 @@
 import type { PluginModule } from '@trawlarr/plugin-api';
 import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
+import { commandEncodes, type CommandEncodes } from './command-encodes.js';
 import { resolveEncodeTarget } from './encode-target.js';
 import { decideNoopGate, type NoopGateDecision } from './noop-gate.js';
 import { muxingQueueSizeFrom, withMuxingQueueSize } from './muxing-queue.js';
@@ -23,6 +24,8 @@ export interface DryRunExecuteDecision extends NoopGateDecision {
   nodeId: string;
   /** The argv that would have run, or null when the gate skipped. */
   command: string[] | null;
+  /** What the command re-encodes; null when the gate skipped. */
+  encodes: CommandEncodes | null;
 }
 
 export interface DryRunResult extends FlowRunResult {
@@ -114,7 +117,12 @@ export const runDryFlow = async (
           muxingQueueSizeFrom(args.inputs.muxingQueueSize),
         );
         plannedCommands.push(compiled);
-        executeDecisions.push({ ...gate, nodeId, command: compiled });
+        executeDecisions.push({
+          ...gate,
+          nodeId,
+          command: compiled,
+          encodes: commandEncodes(args.variables.ffmpegCommand),
+        });
         return {
           outputNumber: 1,
           outputFileObj: { _id: args.inputFileObj._id },
@@ -131,7 +139,7 @@ export const runDryFlow = async (
         // real node closes it. The gate's own reason IS recorded — "why was
         // this file left alone" is as much a question a dry run has to
         // answer as "why would it be rewritten".
-        executeDecisions.push({ ...gate, nodeId, command: null });
+        executeDecisions.push({ ...gate, nodeId, command: null, encodes: null });
         return {
           outputNumber: 1,
           outputFileObj: { _id: args.inputFileObj._id },
