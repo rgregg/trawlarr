@@ -15,6 +15,7 @@ import { createPluginRegistry } from '../../plugins/registry.js';
 import { dryRunFlow, DryRunInputError } from '../../flow/dry-run.js';
 import { buildFromTemplate, FLOW_TEMPLATES, UnknownTemplateError } from '../../flow/templates.js';
 import {
+  accepted,
   ApiError,
   created,
   noContent,
@@ -552,6 +553,81 @@ export const flowRoutes: Route[] = [
         }
         throw error;
       }
+    },
+  },
+
+  /**
+   * The library-wide preview behind the flow editor: every file the flow's
+   * libraries hold, walked once against the posted (possibly unsaved) canvas
+   * definition and once against the flow as published, so a draft can be
+   * previewed before anyone publishes it. See `flow/dry-run-runs.ts`.
+   */
+  {
+    method: 'POST',
+    path: '/flows/:id/dry-runs',
+    handler: ({ params, body, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const definition = requireDefinition(body);
+      // Validated the same way `POST /flows/validate` and a publish are: a
+      // canvas the executor could not run is not worth walking a library
+      // against, and the problems are the useful answer here, not a run.
+      const problems = validateFlowDefinition(
+        definition,
+        createNodeCapabilityResolver({ registry: createPluginRegistry(ctx.db) }),
+      );
+      if (problems.length > 0) {
+        throw new ApiError(
+          400,
+          'invalid-flow',
+          problems.map((problem) => problem.message).join(' '),
+        );
+      }
+      // The hash is computed here, from the validated definition, and never
+      // accepted from the client — a caller-supplied hash could claim a
+      // definition matches one it does not, corrupting the `publishedHash`
+      // comparison the editor uses to say what a draft would change.
+      const definitionHash = flowDefinitionHash(definition);
+      const { runId } = ctx.dryRuns.start({ flowId: flow.id, definition, definitionHash });
+      // 202: the walk continues past this request, in the daemon's event
+      // loop — see the coordinator's own header comment for why it yields
+      // between files rather than running the whole library synchronously.
+      return accepted({ runId });
+    },
+  },
+
+  {
+    method: 'GET',
+    path: '/flows/:id/dry-runs/:runId',
+    handler: ({ params, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const run = ctx.dryRuns.get(flow.id, params.runId!);
+      if (run === null) throw new ApiError(404, 'not-found', 'No such dry run.');
+      return run;
+    },
+  },
+
+  {
+    method: 'GET',
+    path: '/flows/:id/dry-runs/:runId/files/:fileId',
+    handler: ({ params, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      const detail = ctx.dryRuns.file(flow.id, params.runId!, params.fileId!);
+      if (detail === null) throw new ApiError(404, 'not-found', 'No such dry run.');
+      return detail;
+    },
+  },
+
+  {
+    method: 'DELETE',
+    path: '/flows/:id/dry-runs/:runId',
+    handler: ({ params, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      // Existence is `cancel`'s own answer: building the whole run view just
+      // to learn whether the run exists is work a DELETE has no use for.
+      if (!ctx.dryRuns.cancel(flow.id, params.runId!)) {
+        throw new ApiError(404, 'not-found', 'No such dry run.');
+      }
+      return noContent();
     },
   },
 ];

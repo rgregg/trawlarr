@@ -32,6 +32,7 @@ import {
 } from '../plugins/sync-coordinator.js';
 import { createApiContext, createApiServer } from './server.js';
 import { createPluginLoader } from '@trawlarr/engine';
+import { dryRunFlow } from '../flow/dry-run.js';
 
 /**
  * A data directory for the context these suites build.
@@ -1560,6 +1561,117 @@ describe('dry run', () => {
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe('dry-run-input');
     expect(response.body.error.message).toContain('never been probed');
+  });
+
+  it('walks a definition it is given instead of the stored one, and writes nothing', async () => {
+    const flow = createFlowRepo(db).create({
+      name: 'override',
+      definition: VALID_FLOW,
+      nowMs: NOW,
+    });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id);
+    const before = createMediaFileRepo(db).getLedger(fileId);
+    const held = {
+      nodes: [
+        ...VALID_FLOW.nodes,
+        {
+          id: 'review',
+          pluginId: 'trawlarr:holdForReview',
+          pluginVersion: '1.0.0',
+          inputs: { reason: 'From the canvas.' },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'review' }],
+    };
+
+    const result = await dryRunFlow({
+      db,
+      flowId: flow.id,
+      fileId,
+      definition: held,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: () => NOW,
+    });
+
+    expect(result.reviewReason).toBe('From the canvas.');
+    expect(createFlowRepo(db).getById(flow.id)!.definition).toEqual(VALID_FLOW);
+    expect(createMediaFileRepo(db).getLedger(fileId)).toEqual(before);
+  });
+});
+
+describe('library dry runs', () => {
+  const waitForRun = async (flowId: string, runId: string) => {
+    for (let i = 0; i < 400; i += 1) {
+      const response = await api('GET', `/flows/${flowId}/dry-runs/${runId}`);
+      if ((response.body as { status: string }).status !== 'running') return response;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('dry run did not finish');
+  };
+
+  it('runs the canvas definition across the library and reports what changes', async () => {
+    const flow = createFlowRepo(db).create({ name: 'lib-dry', definition: VALID_FLOW, nowMs: NOW });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id);
+    const canvas = {
+      nodes: [
+        ...VALID_FLOW.nodes,
+        {
+          id: 'review',
+          pluginId: 'trawlarr:holdForReview',
+          pluginVersion: '1.0.0',
+          inputs: { reason: 'Canvas.' },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'review' }],
+    };
+
+    const started = await api('POST', `/flows/${flow.id}/dry-runs`, { definition: canvas });
+    expect(started.status).toBe(202);
+    const { runId } = started.body as { runId: string };
+    const done = await waitForRun(flow.id, runId);
+
+    expect(done.body).toMatchObject({
+      status: 'done',
+      processed: 1,
+      total: 1,
+      counts: { 'hold:Canvas.': 1 },
+      changes: [{ to: { kind: 'hold', detail: 'Canvas.' }, files: [{ fileId }] }],
+    });
+    const detail = await api('GET', `/flows/${flow.id}/dry-runs/${runId}/files/${fileId}`);
+    expect(detail.body).toMatchObject({
+      outcome: { kind: 'hold', detail: 'Canvas.' },
+      canvas: { reviewReason: 'Canvas.' },
+    });
+    expect(done.body).not.toHaveProperty('files');
+
+    // Deleting a finished run frees it rather than being a no-op.
+    expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(204);
+    expect((await api('GET', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(404);
+    expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(404);
+  });
+
+  it('refuses a definition that does not validate', async () => {
+    const flow = createFlowRepo(db).create({ name: 'bad-dry', definition: VALID_FLOW, nowMs: NOW });
+    const response = await api('POST', `/flows/${flow.id}/dry-runs`, {
+      definition: { nodes: [], edges: [] },
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('answers 404 for a run it does not have, and 204 to a cancel', async () => {
+    const flow = createFlowRepo(db).create({
+      name: 'gone-dry',
+      definition: VALID_FLOW,
+      nowMs: NOW,
+    });
+    expect((await api('GET', `/flows/${flow.id}/dry-runs/nope`)).status).toBe(404);
+    seedLibrary({ flowId: flow.id });
+    const { runId } = (await api('POST', `/flows/${flow.id}/dry-runs`, { definition: VALID_FLOW }))
+      .body as { runId: string };
+    expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(204);
   });
 });
 

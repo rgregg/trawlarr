@@ -5,6 +5,7 @@ import type { EventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
 import type { PluginSyncCoordinator } from '../plugins/sync-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
+import type { FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
 
@@ -32,6 +33,8 @@ export interface ApiContext {
    * 202; nothing in an HTTP handler ever awaits a sync.
    */
   pluginSyncs: PluginSyncCoordinator;
+  /** Library dry runs from the editor. Held in memory; see flow/dry-run-runs.ts. */
+  dryRuns: FlowDryRunCoordinator;
   /**
    * The data directory this daemon owns. Handed in for the same reason
    * everything else here is: a handler that read it from an environment

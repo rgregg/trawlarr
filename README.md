@@ -304,7 +304,11 @@ problems on the graph, and prevents invalid drafts from being published.
 **Review & publish** first saves the draft, then shows affected libraries,
 their file counts and the hash transition. Only confirming publication changes
 the live flow and requests library rescans. Terminal files still require manual
-requeue; how many other files actually need encoding is not known in advance.
+requeue.
+
+**Dry run** walks every file in the flow's libraries against the canvas and the
+published flow, without changing anything, and shows which files would change
+outcome. The Publish dialog shows those counts while the run matches the draft.
 A draft based on an older published version cannot overwrite the newer version.
 The existing flow page shows the published definition and version history.
 

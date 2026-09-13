@@ -16,4 +16,5 @@ export * from './executor/verify-output.js';
 export * from './executor/replace-original.js';
 export * from './executor/size-change.js';
 export * from './executor/vouchable.js';
+export * from './executor/command-encodes.js';
 export * from './executor/dry-run.js';

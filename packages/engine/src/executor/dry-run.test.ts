@@ -267,6 +267,7 @@ describe('runDryFlow', () => {
     const reportedOutputPath = planned.at(-1)!;
     expect(reportedOutputPath).not.toBe('/in.mkv');
     expect(reportedOutputPath).toMatch(/^\/staging\/out\.trawlarr-tmp-.+\.mkv$/);
+    expect(result.executeDecisions[0]!.encodes).toEqual({ video: true, audio: false });
   });
 
   it("plans the command WITH Execute's muxing queue size, exactly as the real run adds it", async () => {
@@ -347,6 +348,7 @@ describe('runDryFlow', () => {
     expect(result.executeDecisions).toHaveLength(1);
     expect(result.executeDecisions[0]!.skip).toBe(true);
     expect(result.executeDecisions[0]!.command).toBeNull();
+    expect(result.executeDecisions[0]!.encodes).toBeNull();
     expect(result.executeDecisions[0]!.reason).toContain('already in the state this flow wants');
   });
 
