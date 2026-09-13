@@ -435,6 +435,21 @@
   overflow-wrap: anywhere;
 }
 
+/* Square and quiet: closing is the one thing in this dialog nobody needs
+   prompting to find, and a worded button pulled the eye away from the
+   heading it sat beside. Keeps the global tap floor — unlike the canvas
+   card's button, there is no second way to dismiss this by pointer. */
+.flow-config-close {
+  flex: 0 0 var(--tap);
+  width: var(--tap);
+  padding: 0;
+  color: var(--ink-muted);
+}
+
+.flow-config-close:hover:not(:disabled) {
+  color: var(--ink);
+}
+
 .flow-config-fields {
   display: grid;
   gap: var(--space-4);
