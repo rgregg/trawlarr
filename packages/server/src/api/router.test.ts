@@ -5,6 +5,7 @@ import type { Db } from '../db/connection.js';
 import { createEventBus } from '../daemon/events.js';
 import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
 import type { PluginSyncCoordinator } from '../plugins/sync-coordinator.js';
+import type { FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
 import type { Supervisor } from '../daemon/supervisor.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import { ApiError, created, noContent, type ApiContext, type Route } from './router.js';
@@ -26,6 +27,7 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   scans: {} as ScanCoordinator,
   accounts: {} as AccountRepo,
   pluginSyncs: {} as PluginSyncCoordinator,
+  dryRuns: {} as FlowDryRunCoordinator,
   dataDir: '/nonexistent-data-dir',
   nowMs: () => 1_700_000_000_000,
   version: '0.0.0-test',

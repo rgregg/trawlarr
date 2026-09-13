@@ -7,6 +7,7 @@ import {
   type PluginSyncCoordinator,
 } from '../plugins/sync-coordinator.js';
 import type { Supervisor } from '../daemon/supervisor.js';
+import { createFlowDryRunCoordinator, type FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
 import { SCHEMA_VERSION } from '../db/migrate.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EnvApplication } from '../config/env-settings.js';
@@ -333,6 +334,8 @@ export interface CreateApiContextInput {
   hardwareFindings?: HardwareFinding[];
   /** Seam for tests; production always gets the real coordinator built here. */
   pluginSyncs?: PluginSyncCoordinator;
+  /** Seam for tests; production always gets the real coordinator built here. */
+  dryRuns?: FlowDryRunCoordinator;
   /** Seam for tests; production always gets the real repo built here. */
   accounts?: AccountRepo;
 }
@@ -360,6 +363,13 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
         db: input.db,
         bus: input.bus,
         dataDir: input.dataDir,
+        nowMs,
+      }),
+    dryRuns:
+      input.dryRuns ??
+      createFlowDryRunCoordinator({
+        db: input.db,
+        binaries: () => input.settings.getBinaries(),
         nowMs,
       }),
     dataDir: input.dataDir,
