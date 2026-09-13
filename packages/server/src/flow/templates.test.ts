@@ -110,6 +110,23 @@ describe('FLOW_TEMPLATES', () => {
     ]);
   });
 
+  it.each(FLOW_TEMPLATES.map((template) => template.id))(
+    'template %s checks the size change before Replace, and keeps the original when it grew',
+    (id) => {
+      const flow = buildFromTemplate({ templateId: id, values: {} });
+      // Replace has no size limit of its own any more; without this node a
+      // re-encode that doubled a file would be installed.
+      expect(flow.nodes.find((node) => node.id === 'size')).toMatchObject({
+        pluginId: 'trawlarr:checkSizeChange',
+        inputs: { maxSizePercent: '101' },
+      });
+      expect(flow.edges.filter((edge) => edge.toNodeId === 'replace')).toEqual([
+        { fromNodeId: 'size', outputNumber: 1, toNodeId: 'replace' },
+      ]);
+      expect(flow.edges.filter((edge) => edge.fromNodeId === 'size')).toHaveLength(1);
+    },
+  );
+
   it('refuses an unknown template by name', () => {
     expect(() => buildFromTemplate({ templateId: 'nope', values: {} })).toThrow(
       UnknownTemplateError,

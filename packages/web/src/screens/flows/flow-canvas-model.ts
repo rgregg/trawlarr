@@ -33,6 +33,8 @@ export type CanvasNodeData = {
   protectedStart: boolean;
   errorEntry: boolean;
   unreachable: boolean;
+  /** A Replace Original File no Check Size Change guards — see `replacesWithoutSizeCheck`. */
+  sizeUnchecked: boolean;
   label: string;
   /** Render `label` as prose rather than a title — see `toCanvas`. */
   multilineName: boolean;
@@ -91,6 +93,39 @@ export function reachableNodeIds(definition: FlowDefinition, start?: string): Se
     pending.push(...(outgoing.get(id) ?? []));
   }
   return reached;
+}
+
+const SIZE_CHECK_PLUGIN = 'trawlarr:checkSizeChange';
+const REPLACE_PLUGIN = 'trawlarr:replaceOriginal';
+
+/**
+ * Replace Original File nodes an entry can reach without passing a Check Size
+ * Change first.
+ *
+ * Replace has no size limit of its own: a re-encode that doubled a file would
+ * be installed. That is a legitimate flow — one that means to grow files, say —
+ * so it is a warning on the node, never a validation problem that stops the
+ * flow running.
+ */
+export function replacesWithoutSizeCheck(
+  definition: FlowDefinition,
+  entries: ReadonlyArray<string>,
+): Set<string> {
+  const pluginOf = new Map(definition.nodes.map((node) => [node.id, node.pluginId]));
+  const outgoing = new Map<string, string[]>();
+  for (const edge of definition.edges) {
+    outgoing.set(edge.fromNodeId, [...(outgoing.get(edge.fromNodeId) ?? []), edge.toNodeId]);
+  }
+  const reached = new Set<string>();
+  const pending = [...entries];
+  for (let index = 0; index < pending.length; index += 1) {
+    const id = pending[index]!;
+    // A size check guards everything after it, so the walk stops there.
+    if (reached.has(id) || pluginOf.get(id) === SIZE_CHECK_PLUGIN) continue;
+    reached.add(id);
+    pending.push(...(outgoing.get(id) ?? []));
+  }
+  return new Set([...reached].filter((id) => pluginOf.get(id) === REPLACE_PLUGIN));
 }
 
 const errorEntryIds = (definition: FlowDefinition, plugins: EditorPlugin[]): string[] =>
@@ -261,6 +296,10 @@ export function toCanvas(
   for (const entry of errorEntries) {
     for (const id of reachableNodeIds(definition, entry)) reachable.add(id);
   }
+  const unchecked = replacesWithoutSizeCheck(definition, [
+    ...(start === undefined ? [] : [start]),
+    ...errorEntries,
+  ]);
   const fallback = autoLayout(definition, plugins);
   const labels = nodeLabels(definition, plugins, layout);
   return {
@@ -301,6 +340,7 @@ export function toCanvas(
           protectedStart: node.id === start,
           errorEntry: errorEntries.includes(node.id),
           unreachable: !reachable.has(node.id),
+          sizeUnchecked: unchecked.has(node.id),
           label: labels[node.id]!,
           // A plugin asking for a textarea is asking to be read as prose on
           // the canvas — that is the whole mechanism behind a comment node,

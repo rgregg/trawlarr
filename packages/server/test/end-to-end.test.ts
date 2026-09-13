@@ -156,6 +156,15 @@ const transcodeFlow = (quality: string): FlowDefinition => ({
       inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
     },
     {
+      // The size limit lives in the flow now, where it can be changed; this
+      // is the shape a template gives a new flow. Output 2 is deliberately
+      // unwired: a file that came out too big ends the run unreplaced.
+      id: 'size',
+      pluginId: 'trawlarr:checkSizeChange',
+      pluginVersion: '1.0.0',
+      inputs: { maxSizePercent: '101' },
+    },
+    {
       id: 'replace',
       pluginId: 'trawlarr:replaceOriginal',
       pluginVersion: '1.0.0',
@@ -168,7 +177,8 @@ const transcodeFlow = (quality: string): FlowDefinition => ({
     { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'encoder' },
     { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'execute' },
     { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
-    { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+    { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'size' },
+    { fromNodeId: 'size', outputNumber: 1, toNodeId: 'replace' },
   ],
 });
 
@@ -958,19 +968,26 @@ describe.runIf(available)('a flow whose encode comes out bigger than the origina
         .n;
       expect(jobCountAfterFirstRun).toBe(1);
 
-      // 4. THE JOB LOG. Both sizes, named, in the step that made the call —
-      // so this is visible to somebody reading one job rather than a
-      // disk-usage graph.
+      // 4. THE JOB LOG. Both sizes, named, in the Check Size Change step that
+      // made the call — so this is visible to somebody reading one job rather
+      // than a disk-usage graph. And Replace Original File never ran at all:
+      // output 2 is unwired, so the run ended there.
       const step = db
-        .prepare(`SELECT log_excerpt FROM job_step WHERE plugin_id = 'trawlarr:replaceOriginal'`)
-        .get() as { log_excerpt: string };
-      expect(step.log_excerpt).toContain('Not installing this replacement');
-      expect(step.log_excerpt).toContain(`the original's ${sizeBefore} bytes`);
-      expect(step.log_excerpt).toMatch(/the new file is \d+ bytes/);
+        .prepare(
+          `SELECT log_excerpt, output_number FROM job_step WHERE plugin_id = 'trawlarr:checkSizeChange'`,
+        )
+        .get() as { log_excerpt: string; output_number: number };
+      expect(step.output_number).toBe(2);
+      expect(step.log_excerpt).toContain('Larger than allowed');
+      expect(step.log_excerpt).toContain(`the original's ${sizeBefore}`);
       // The number it reports for the new file is the encode's real size, and
-      // it really was bigger — the guard fired on a fact, not on a default.
-      const reported = Number(/the new file is (\d+) bytes/.exec(step.log_excerpt)![1]);
+      // it really was bigger — the limit fired on a fact, not on a default.
+      const reported = Number(/The new file is (\d+) bytes/.exec(step.log_excerpt)![1]);
       expect(reported).toBeGreaterThan(sizeBefore + 1_048_576);
+      const replaceSteps = db
+        .prepare(`SELECT COUNT(*) AS n FROM job_step WHERE plugin_id = 'trawlarr:replaceOriginal'`)
+        .get() as { n: number };
+      expect(replaceSteps.n).toBe(0);
       db.close();
     }
 

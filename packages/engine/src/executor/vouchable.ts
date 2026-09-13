@@ -37,6 +37,7 @@ export const FIRST_PARTY_INERT = new Set([
 export const FIRST_PARTY_ENGINE_CONTROLLED = new Set([
   'trawlarr:execute',
   'trawlarr:verifyOutput',
+  'trawlarr:checkSizeChange',
   'trawlarr:replaceOriginal',
 ]);
 

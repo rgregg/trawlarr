@@ -157,6 +157,12 @@ const transcodeHevc: FlowTemplate = {
           inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
         },
         {
+          id: 'size',
+          pluginId: 'trawlarr:checkSizeChange',
+          pluginVersion: PLUGIN_VERSION,
+          inputs: { maxSizePercent: '101' },
+        },
+        {
           id: 'replace',
           pluginId: 'trawlarr:replaceOriginal',
           pluginVersion: PLUGIN_VERSION,
@@ -172,7 +178,10 @@ const transcodeHevc: FlowTemplate = {
         { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'encoder' },
         { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'execute' },
         { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
-        { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+        { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'size' },
+        // Output 2, "larger than allowed", is left unwired: the run ends with
+        // the original kept and the file recorded as done.
+        { fromNodeId: 'size', outputNumber: 1, toNodeId: 'replace' },
       ],
     };
   },
@@ -449,6 +458,12 @@ const conformLibrary: FlowTemplate = {
           },
         },
         {
+          id: 'size',
+          pluginId: 'trawlarr:checkSizeChange',
+          pluginVersion: PLUGIN_VERSION,
+          inputs: { maxSizePercent: '101' },
+        },
+        {
           id: 'replace',
           pluginId: 'trawlarr:replaceOriginal',
           pluginVersion: PLUGIN_VERSION,
@@ -476,7 +491,10 @@ const conformLibrary: FlowTemplate = {
         { fromNodeId: 'audio', outputNumber: 1, toNodeId: 'language' },
         { fromNodeId: 'language', outputNumber: 1, toNodeId: 'execute' },
         { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
-        { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+        { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'size' },
+        // Output 2, "larger than allowed", is left unwired: the run ends with
+        // the original kept and the file recorded as done.
+        { fromNodeId: 'size', outputNumber: 1, toNodeId: 'replace' },
       ],
     };
   },

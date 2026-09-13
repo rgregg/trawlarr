@@ -14,5 +14,6 @@ export * from './executor/noop-gate.js';
 export * from './executor/execute-node.js';
 export * from './executor/verify-output.js';
 export * from './executor/replace-original.js';
+export * from './executor/size-change.js';
 export * from './executor/vouchable.js';
 export * from './executor/dry-run.js';

@@ -18,6 +18,7 @@ import { createPluginLoader, type LoadedPlugin } from './host/loader.js';
 import { createExecuteRunner } from './executor/execute-node.js';
 import { createVerifyOutputRunner } from './executor/verify-output.js';
 import { createReplaceOriginalRunner } from './executor/replace-original.js';
+import { createCheckSizeChangeRunner } from './executor/size-change.js';
 import { runFlow } from './executor/run-flow.js';
 import { runDryFlow } from './executor/dry-run.js';
 
@@ -147,6 +148,7 @@ const main = async (): Promise<number> => {
   const runners = [
     createExecuteRunner({ ffmpegPath: values.ffmpeg!, outputPathFor, log }),
     createVerifyOutputRunner({ probeFile: (path) => probe(values.ffprobe!, path), statFile }),
+    createCheckSizeChangeRunner({ statFile }),
     createReplaceOriginalRunner({
       // This CLI runs against a single file with no library record, so trash
       // defaults to the same reserved directory a library root would use.
