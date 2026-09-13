@@ -622,15 +622,11 @@ export const flowRoutes: Route[] = [
     path: '/flows/:id/dry-runs/:runId',
     handler: ({ params, ctx }) => {
       const flow = requireFlow(ctx, params.id!);
-      // `cancel` itself answers false both for a run that never existed and
-      // for one that already finished — a DELETE on the latter is not an
-      // error, so existence (via `get`) is what decides the 404, and `cancel`
-      // is a no-op the coordinator is free to skip for a run no longer
-      // `running`.
-      if (ctx.dryRuns.get(flow.id, params.runId!) === null) {
+      // Existence is `cancel`'s own answer: building the whole run view just
+      // to learn whether the run exists is work a DELETE has no use for.
+      if (!ctx.dryRuns.cancel(flow.id, params.runId!)) {
         throw new ApiError(404, 'not-found', 'No such dry run.');
       }
-      ctx.dryRuns.cancel(flow.id, params.runId!);
       return noContent();
     },
   },

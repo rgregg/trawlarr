@@ -154,7 +154,7 @@ describe('createFlowDryRunCoordinator', () => {
 
     await until(() => runs.get(flow.id, runId)?.status === 'done');
     expect(runs.get(flow.id, runId)!.total).toBe(1);
-    expect(runs.get(flow.id, runId)!.files.map((row) => row.path)).toEqual(['/a.mkv']);
+    expect(runs.get(flow.id, runId)!.processed).toBe(1);
   });
 
   it('throws for an unknown flow', () => {
@@ -167,24 +167,28 @@ describe('createFlowDryRunCoordinator', () => {
   it('a file that cannot be dry-run is a failure, not a crashed run', async () => {
     seedFile({ libraryId, path: '/a.mkv' });
     const bId = seedFile({ libraryId, path: '/b.mkv' });
+    const cId = seedFile({ libraryId, path: '/c.mkv' });
+    const published = fakeResult({});
     const runs = coordinator((input) =>
-      input.fileId === bId
+      input.fileId === bId || (input.fileId === cId && input.definition === CANVAS)
         ? Promise.reject(new Error('never probed'))
-        : Promise.resolve(fakeResult({})),
+        : Promise.resolve(published),
     );
     const { runId } = start(runs);
 
     await until(() => runs.get(flow.id, runId)?.status === 'done');
     const view = runs.get(flow.id, runId)!;
-    const row = view.files.find((file) => file.fileId === bId)!;
-    expect(row.outcome).toEqual({ kind: 'fail', detail: 'never probed' });
-    expect(row.publishedOutcome).toEqual({ kind: 'fail', detail: 'never probed' });
-    expect(view.counts).toEqual({ 'no-change': 1, fail: 1 });
-    expect(runs.file(flow.id, runId, bId)).toEqual({
-      fileId: bId,
-      path: '/b.mkv',
+    expect(view.counts).toEqual({ 'no-change': 1, fail: 2 });
+    // Failing both ways is no change of outcome, so it keeps no detail.
+    expect(runs.file(flow.id, runId, bId)).toBeNull();
+    // The reason travels with the detail, since the failed half has no walk.
+    expect(runs.file(flow.id, runId, cId)).toEqual({
+      fileId: cId,
+      path: '/c.mkv',
+      outcome: { kind: 'fail', detail: 'never probed' },
+      publishedOutcome: { kind: 'no-change' },
       canvas: null,
-      published: null,
+      published,
     });
   });
 
@@ -296,7 +300,7 @@ describe('createFlowDryRunCoordinator', () => {
     const view = runs.get(flow.id, runId)!;
     expect(view.status).toBe('cancelled');
     expect(view.processed).toBe(0);
-    expect(view.files).toEqual([]);
+    expect(view.counts).toEqual({});
   });
 
   it('file() returns both walks', async () => {
@@ -308,9 +312,67 @@ describe('createFlowDryRunCoordinator', () => {
     await until(() => runs.get(flow.id, runId)?.status === 'done');
     const detail = runs.file(flow.id, runId, bId)!;
     expect(detail.path).toBe('/b.mkv');
+    expect(detail.outcome).toEqual({ kind: 'hold', detail: 'Short.' });
+    expect(detail.publishedOutcome).toEqual({ kind: 'no-change' });
     expect(detail.canvas!.reviewReason).toBe('Short.');
     expect(detail.published!.stopReason).toBe('end-of-flow');
     expect(runs.file(flow.id, runId, 'unknown')).toBeNull();
     expect(runs.file(flow.id, 'other-run', bId)).toBeNull();
+  });
+
+  it('keeps no detail for a file whose outcome does not change', async () => {
+    const aId = seedFile({ libraryId, path: '/a.mkv' });
+    seedFile({ libraryId, path: '/b.mkv' });
+    const runs = coordinator(holdB);
+    const { runId } = start(runs);
+
+    await until(() => runs.get(flow.id, runId)?.status === 'done');
+    expect(runs.file(flow.id, runId, aId)).toBeNull();
+  });
+
+  it('reports changes only once the run is no longer walking', async () => {
+    seedFile({ libraryId, path: '/a.mkv' });
+    seedFile({ libraryId, path: '/b.mkv' });
+    const cId = seedFile({ libraryId, path: '/c.mkv' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Holds the walk on the last file, after the changed one is recorded.
+    const runs = coordinator(async (input) => {
+      if (input.fileId === cId) await gate;
+      return holdB(input);
+    });
+    const { runId } = start(runs);
+
+    await until(() => runs.get(flow.id, runId)!.processed === 2);
+    const running = runs.get(flow.id, runId)!;
+    expect(running.status).toBe('running');
+    expect(running.changes).toEqual([]);
+    release();
+    await until(() => runs.get(flow.id, runId)?.status === 'done');
+    expect(runs.get(flow.id, runId)!.changes).toHaveLength(1);
+  });
+
+  it('cancel drops a run that has already finished', async () => {
+    seedFile({ libraryId, path: '/a.mkv' });
+    const runs = coordinator(holdB);
+    const { runId } = start(runs);
+
+    await until(() => runs.get(flow.id, runId)?.status === 'done');
+    expect(runs.cancel(flow.id, runId)).toBe(true);
+    expect(runs.get(flow.id, runId)).toBeNull();
+    expect(runs.cancel(flow.id, runId)).toBe(false);
+  });
+
+  it('forgets the run of a flow that no longer exists', async () => {
+    seedFile({ libraryId, path: '/b.mkv' });
+    const runs = coordinator(holdB);
+    const { runId } = start(runs);
+    await until(() => runs.get(flow.id, runId)?.status === 'done');
+
+    createFlowRepo(db).remove(flow.id);
+    expect(runs.get(flow.id, runId)).toBeNull();
+    await runs.stopAll();
   });
 });

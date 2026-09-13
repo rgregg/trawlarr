@@ -24,13 +24,6 @@ import { classifyDryRun, outcomeKey, type DryRunOutcome } from './dry-run-outcom
 
 export type DryRunStatus = 'running' | 'done' | 'cancelled' | 'failed';
 
-export interface DryRunFileRow {
-  fileId: string;
-  path: string;
-  outcome: DryRunOutcome;
-  publishedOutcome: DryRunOutcome;
-}
-
 export interface DryRunChangeGroup {
   from: DryRunOutcome;
   to: DryRunOutcome;
@@ -48,15 +41,21 @@ export interface DryRunRunView {
   publishedHash: string;
   /** Count per outcomeKey, for the canvas definition. */
   counts: Record<string, number>;
-  /** Only files whose outcomeKey differs; largest group first. */
+  /**
+   * Only files whose outcomeKey differs; largest group first. Empty while the
+   * run is walking: the editor polls every second and renders changes only
+   * once a run has finished, and rebuilding thousands of rows per poll for
+   * nobody is what made the poll payload grow with the library.
+   */
   changes: DryRunChangeGroup[];
-  files: DryRunFileRow[];
 }
 
 export interface FlowDryRunDetail {
   fileId: string;
   path: string;
-  /** Null when the walk threw for this file; the reason is the row's `fail` outcome. */
+  outcome: DryRunOutcome;
+  publishedOutcome: DryRunOutcome;
+  /** Null when the walk threw for this file; the reason is `outcome.detail`. */
   canvas: FlowDryRunResult | null;
   published: FlowDryRunResult | null;
 }
@@ -66,7 +65,12 @@ export interface FlowDryRunCoordinator {
     runId: string;
   };
   get(flowId: string, runId: string): DryRunRunView | null;
+  /** Only files whose canvas and published outcomes differ keep a detail; any other is null. */
   file(flowId: string, runId: string, fileId: string): FlowDryRunDetail | null;
+  /**
+   * False when there is no such run. A running run is cancelled and stays
+   * readable (as `cancelled`); a run that is no longer running is dropped.
+   */
   cancel(flowId: string, runId: string): boolean;
   /** Cancels every run and resolves when none is walking. Daemon shutdown awaits this before closing the db. */
   stopAll(): Promise<void>;
@@ -77,29 +81,29 @@ interface Run {
   flowId: string;
   status: DryRunStatus;
   error: string | null;
+  processed: number;
   total: number;
   definitionHash: string;
   publishedHash: string;
-  files: DryRunFileRow[];
-  results: Map<string, { canvas: FlowDryRunResult | null; published: FlowDryRunResult | null }>;
+  counts: Record<string, number>;
+  /**
+   * Full walks, kept ONLY for files whose outcome changes: those are the only
+   * ones the editor can open, and two complete results per file for a whole
+   * library held for the life of the daemon ran to well over 100MB.
+   */
+  changed: Map<string, FlowDryRunDetail>;
   cancelled: boolean;
-  walking: Promise<void>;
 }
 
-const summarise = (files: DryRunFileRow[]) => {
-  const counts: Record<string, number> = {};
+const groupChanges = (changed: Iterable<FlowDryRunDetail>): DryRunChangeGroup[] => {
   const groups = new Map<string, DryRunChangeGroup>();
-  for (const row of files) {
-    const key = outcomeKey(row.outcome);
-    counts[key] = (counts[key] ?? 0) + 1;
-    const from = outcomeKey(row.publishedOutcome);
-    if (from === key) continue;
-    const id = `${from} -> ${key}`;
+  for (const row of changed) {
+    const id = `${outcomeKey(row.publishedOutcome)} -> ${outcomeKey(row.outcome)}`;
     const group = groups.get(id) ?? { from: row.publishedOutcome, to: row.outcome, files: [] };
     group.files.push({ fileId: row.fileId, path: row.path });
     groups.set(id, group);
   }
-  return { counts, changes: [...groups.values()].sort((a, b) => b.files.length - a.files.length) };
+  return [...groups.values()].sort((a, b) => b.files.length - a.files.length);
 };
 
 const messageOf = (error: unknown): string =>
@@ -113,17 +117,34 @@ export const createFlowDryRunCoordinator = (input: {
   dryRun?: typeof dryRunFlow;
 }): FlowDryRunCoordinator => {
   const dryRun = input.dryRun ?? dryRunFlow;
+  const flows = createFlowRepo(input.db);
   const runs = new Map<string, Run>();
-
-  const find = (flowId: string, runId: string): Run | null => {
-    const run = runs.get(flowId);
-    return run !== undefined && run.runId === runId ? run : null;
-  };
+  // Tracked apart from `runs`: a replaced, dropped or evicted run is no
+  // longer reachable there, but its walk may be mid-file, reading the
+  // database, and `stopAll` must still wait for it.
+  const walking = new Set<Promise<void>>();
 
   const cancelRun = (run: Run): void => {
     if (run.status !== 'running') return;
     run.cancelled = true;
     run.status = 'cancelled';
+  };
+
+  // A deleted flow's run can never be asked for again through the API (every
+  // route 404s on the flow first), so without this its results would sit in
+  // memory until the daemon restarts.
+  const evictIfFlowGone = (flowId: string): boolean => {
+    const run = runs.get(flowId);
+    if (run === undefined || flows.getById(flowId) !== null) return false;
+    cancelRun(run);
+    runs.delete(flowId);
+    return true;
+  };
+
+  const find = (flowId: string, runId: string): Run | null => {
+    if (evictIfFlowGone(flowId)) return null;
+    const run = runs.get(flowId);
+    return run !== undefined && run.runId === runId ? run : null;
   };
 
   const walk = async (
@@ -168,13 +189,19 @@ export const createFlowDryRunCoordinator = (input: {
         if (run.cancelled) return;
         const publishedHalf = await attempt(file.id, published);
         if (run.cancelled) return;
-        run.results.set(file.id, { canvas: canvas.result, published: publishedHalf.result });
-        run.files.push({
-          fileId: file.id,
-          path: file.path,
-          outcome: canvas.outcome,
-          publishedOutcome: publishedHalf.outcome,
-        });
+        const key = outcomeKey(canvas.outcome);
+        run.counts[key] = (run.counts[key] ?? 0) + 1;
+        run.processed += 1;
+        if (outcomeKey(publishedHalf.outcome) !== key) {
+          run.changed.set(file.id, {
+            fileId: file.id,
+            path: file.path,
+            outcome: canvas.outcome,
+            publishedOutcome: publishedHalf.outcome,
+            canvas: canvas.result,
+            published: publishedHalf.result,
+          });
+        }
       }
       if (!run.cancelled) run.status = 'done';
     } catch (error) {
@@ -187,7 +214,8 @@ export const createFlowDryRunCoordinator = (input: {
 
   return {
     start({ flowId, definition, definitionHash }) {
-      const flow = createFlowRepo(input.db).getById(flowId);
+      for (const id of [...runs.keys()]) evictIfFlowGone(id);
+      const flow = flows.getById(flowId);
       if (flow === null) throw new DryRunInputError(`Unknown flow: ${flowId}`);
       const snapshot = input.db
         .prepare(
@@ -204,68 +232,59 @@ export const createFlowDryRunCoordinator = (input: {
         flowId,
         status: 'running',
         error: null,
+        processed: 0,
         total: snapshot.length,
         definitionHash,
         publishedHash: flow.definitionHash,
-        files: [],
-        results: new Map(),
+        counts: {},
+        changed: new Map(),
         cancelled: false,
-        walking: Promise.resolve(),
       };
       runs.set(flowId, run);
       // The published half walks the definition as it stood at THIS moment,
       // passed explicitly: left to re-read the stored flow per file, a publish
       // mid-run would compare later files against a newer definition than the
       // `publishedHash` this run reports.
-      run.walking = walk(run, definition, flow.definition, snapshot);
-      // The cancelled predecessor is no longer reachable through `runs`, but
-      // `stopAll` must still wait for it: its walk may be mid-file, reading
-      // the database.
-      if (previous !== undefined) {
-        const tail = previous.walking;
-        run.walking = Promise.all([run.walking, tail]).then(() => undefined);
-      }
+      const walked = walk(run, definition, flow.definition, snapshot);
+      walking.add(walked);
+      void walked.finally(() => walking.delete(walked));
       return { runId: run.runId };
     },
 
     get(flowId, runId) {
       const run = find(flowId, runId);
       if (run === null) return null;
-      const files = [...run.files];
       return {
         runId: run.runId,
         flowId: run.flowId,
         status: run.status,
         error: run.error,
-        processed: files.length,
+        processed: run.processed,
         total: run.total,
         definitionHash: run.definitionHash,
         publishedHash: run.publishedHash,
-        ...summarise(files),
-        files,
+        counts: { ...run.counts },
+        changes: run.status === 'running' ? [] : groupChanges(run.changed.values()),
       };
     },
 
     file(flowId, runId, fileId) {
-      const run = find(flowId, runId);
-      const results = run?.results.get(fileId);
-      if (run === null || results === undefined) return null;
-      const row = run.files.find((candidate) => candidate.fileId === fileId);
-      if (row === undefined) return null;
-      return { fileId, path: row.path, canvas: results.canvas, published: results.published };
+      return find(flowId, runId)?.changed.get(fileId) ?? null;
     },
 
     cancel(flowId, runId) {
       const run = find(flowId, runId);
-      if (run === null || run.status !== 'running') return false;
-      cancelRun(run);
+      if (run === null) return false;
+      if (run.status === 'running') cancelRun(run);
+      // A finished run is only memory by now: whoever deletes it is done
+      // reading it, and nothing else would ever free it.
+      else runs.delete(flowId);
       return true;
     },
 
     async stopAll() {
-      const all = [...runs.values()];
-      for (const run of all) cancelRun(run);
-      await Promise.all(all.map((run) => run.walking));
+      for (const run of runs.values()) cancelRun(run);
+      await Promise.all([...walking]);
     },
   };
 };

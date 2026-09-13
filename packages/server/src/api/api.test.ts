@@ -1641,7 +1641,16 @@ describe('library dry runs', () => {
       changes: [{ to: { kind: 'hold', detail: 'Canvas.' }, files: [{ fileId }] }],
     });
     const detail = await api('GET', `/flows/${flow.id}/dry-runs/${runId}/files/${fileId}`);
-    expect(detail.body).toMatchObject({ canvas: { reviewReason: 'Canvas.' } });
+    expect(detail.body).toMatchObject({
+      outcome: { kind: 'hold', detail: 'Canvas.' },
+      canvas: { reviewReason: 'Canvas.' },
+    });
+    expect(done.body).not.toHaveProperty('files');
+
+    // Deleting a finished run frees it rather than being a no-op.
+    expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(204);
+    expect((await api('GET', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(404);
+    expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(404);
   });
 
   it('refuses a definition that does not validate', async () => {

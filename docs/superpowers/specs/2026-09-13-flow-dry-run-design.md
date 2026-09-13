@@ -69,12 +69,15 @@ like `pluginSyncs`:
   cancels the previous. Files = every non-missing file in libraries whose flow
   is this flow, ordered by path, snapshotted at start.
 - For each file, dry-runs the canvas definition then the published one,
-  classifies both, keeps the full results. Yields to the event loop between
+  classifies both, and keeps the full results only for files whose outcome
+  key differs (the only files the editor can open). Yields to the event loop between
   files (`setImmediate`) so the API and the supervisor stay responsive.
 - Held in memory, latest run per flow only, discarded on restart. A run
   records the canvas definition's hash and the published hash it compared
   against.
-- `cancel(flowId, runId)`.
+- `cancel(flowId, runId)`: cancels a running run (it stays readable as
+  `cancelled`) and drops one that is no longer running. A run whose flow has
+  been deleted is dropped the next time runs are read or started.
 
 ### API
 
@@ -82,12 +85,17 @@ like `pluginSyncs`:
   definition must validate (same resolver as publish); otherwise `400` with
   the problems.
 - `GET /flows/:id/dry-runs/:runId` → `{ status: running|done|cancelled|failed,
-  processed, total, definitionHash, publishedHash, counts, changes: [{ from,
-  to, files: [{ fileId, path, detail? }] }], files: [{ fileId, path, outcome,
-  publishedOutcome }] }`.
-- `GET /flows/:id/dry-runs/:runId/files/:fileId` → both full
-  `FlowDryRunResult`s.
-- `DELETE /flows/:id/dry-runs/:runId` → cancel.
+  error, processed, total, definitionHash, publishedHash, counts, changes:
+  [{ from, to, files: [{ fileId, path }] }] }`. No per-file rows: the poll
+  stays small however large the library. `changes` is empty while `running`
+  and filled once the run is not.
+- `GET /flows/:id/dry-runs/:runId/files/:fileId` → `{ fileId, path, outcome,
+  publishedOutcome, canvas, published }`, the last two the full
+  `FlowDryRunResult`s (null for a walk that threw; the reason is the
+  outcome's `detail`). Only for files in `changes`; any other is `404`.
+- `DELETE /flows/:id/dry-runs/:runId` → `204`: cancels a running run, drops a
+  finished one. `404` for no such run. The editor sends it when the panel
+  closes or unmounts.
 
 The web polls the run while it is running (1s). No event-bus event: progress
 is liveness only.
