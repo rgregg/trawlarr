@@ -595,3 +595,89 @@
   font-size: var(--text-sm);
   color: var(--ink-muted);
 }
+
+/* --- Check Condition's row editor -------------------------------------------
+   One row per condition on a shared grid, so property, comparison and value
+   line up down the list and read as a table rather than a stack of forms. */
+.condition-editor {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.condition-match {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.condition-match label {
+  font-weight: 500;
+}
+
+.condition-match select {
+  width: auto;
+}
+
+.condition-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.condition-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 0.9fr) minmax(0, 1.2fr) auto;
+  gap: var(--space-2);
+  align-items: start;
+}
+
+.condition-row select,
+.condition-row input {
+  width: 100%;
+  min-width: 0;
+}
+
+/* A custom property stacks its name box under the picker, in the same cell. */
+.condition-property {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.condition-remove {
+  width: var(--tap);
+  padding: 0;
+  font-size: var(--text-lg);
+  color: var(--ink-muted);
+}
+
+.condition-remove:hover:not(:disabled) {
+  color: var(--bad);
+}
+
+.condition-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.condition-case {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* Narrow screens: the property takes the full row, the rest share the next. */
+@media (max-width: 30rem) {
+  .condition-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
+
+  .condition-property {
+    grid-column: 1 / -1;
+  }
+}
