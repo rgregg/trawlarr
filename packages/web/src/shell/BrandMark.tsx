@@ -1,10 +1,12 @@
 import mark from '../assets/trawlarr-mark.png';
 
 /**
- * The mark: a trawler with its nets out over the water.
+ * The mark: a trawler, bow on, riding the waves.
  *
- * A raster rather than inline SVG, so it no longer follows the accent colour;
- * the icon carries its own navy tile, which reads on both themes. Imported
+ * A raster rather than inline SVG, so it does not follow the accent colour.
+ * It sits on no tile of its own: the white hull and light water read on both
+ * themes, and a tile would put a navy block beside the wordmark. Exported at
+ * 192px, twice the largest size it is shown at, so it stays sharp. Imported
  * through Vite so the URL is content-hashed — the daemon serves every asset
  * but `index.html` as immutable for a year, and a fixed filename would pin
  * browsers to the old mark after an upgrade.
