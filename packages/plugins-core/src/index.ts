@@ -6,6 +6,7 @@ import * as beginCommand from './beginCommand/index.js';
 import * as setVideoEncoder from './setVideoEncoder/index.js';
 import * as execute from './execute/index.js';
 import * as verifyOutput from './verifyOutput/index.js';
+import * as checkSizeChange from './checkSizeChange/index.js';
 import * as replaceOriginalFile from './replaceOriginalFile/index.js';
 import * as failFile from './failFile/index.js';
 import * as writeToLog from './writeToLog/index.js';
@@ -29,6 +30,7 @@ export const FIRST_PARTY_PLUGINS: Record<string, { id: string; module: PluginMod
   'trawlarr:setVideoEncoder': entry('trawlarr:setVideoEncoder', setVideoEncoder),
   'trawlarr:execute': entry('trawlarr:execute', execute),
   'trawlarr:verifyOutput': entry('trawlarr:verifyOutput', verifyOutput),
+  'trawlarr:checkSizeChange': entry('trawlarr:checkSizeChange', checkSizeChange),
   'trawlarr:replaceOriginal': entry('trawlarr:replaceOriginal', replaceOriginalFile),
   'trawlarr:writeToLog': entry('trawlarr:writeToLog', writeToLog),
   'trawlarr:failFile': entry('trawlarr:failFile', failFile),

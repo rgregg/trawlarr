@@ -142,6 +142,13 @@ export const runDryFlow = async (
         };
       }
 
+      if (plugin.id === 'trawlarr:checkSizeChange') {
+        // No encode ran, so there is no new file to measure: the walk goes on
+        // as though it were within the limit, and says so rather than
+        // presenting that as a finding.
+        args.jobLog('Size is decided at run time: a dry run has no new file to measure.');
+      }
+
       return {
         outputNumber: 1,
         outputFileObj: { _id: args.inputFileObj._id },

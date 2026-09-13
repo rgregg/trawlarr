@@ -86,6 +86,14 @@
       }
     },
     {
+      "id": "size",
+      "pluginId": "trawlarr:checkSizeChange",
+      "pluginVersion": "1.0.0",
+      "inputs": {
+        "maxSizePercent": "101"
+      }
+    },
+    {
       "id": "replace",
       "pluginId": "trawlarr:replaceOriginal",
       "pluginVersion": "1.0.0",
@@ -148,6 +156,11 @@
     },
     {
       "fromNodeId": "verify",
+      "outputNumber": 1,
+      "toNodeId": "size"
+    },
+    {
+      "fromNodeId": "size",
       "outputNumber": 1,
       "toNodeId": "replace"
     }

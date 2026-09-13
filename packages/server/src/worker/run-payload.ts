@@ -16,6 +16,7 @@ import {
   createCrudTransDbn,
   createExecuteRunner,
   createPluginLoader,
+  createCheckSizeChangeRunner,
   createReplaceOriginalRunner,
   createVerifyOutputRunner,
   runFlow,
@@ -415,6 +416,7 @@ export const runPayload = async (input: {
           probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
           statFile: statFileSeam,
         }),
+        createCheckSizeChangeRunner({ statFile: ports.statFile ?? statFileSeam }),
         createReplaceOriginalRunner({
           trashDirFor: (originalPath) => resolveTrashDir({ library, filePath: originalPath }),
           companionExtensions: library.companionExtensions,

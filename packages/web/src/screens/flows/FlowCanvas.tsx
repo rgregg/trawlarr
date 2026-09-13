@@ -137,6 +137,9 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
       {data.unreachable && (
         <p className="flow-node-status flow-canvas-warning">Unreachable from any entry</p>
       )}
+      {data.sizeUnchecked && (
+        <p className="flow-node-status flow-canvas-warning">No Check Size Change before this</p>
+      )}
       {data.problems.length > 0 && (
         <p className="flow-node-problems" title={data.problems.join('\n')}>
           {data.problems.length} validation issue(s)

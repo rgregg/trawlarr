@@ -209,6 +209,26 @@ describe('runDryFlow', () => {
     expect(result.steps[1]!.logExcerpt).toBe('Diagnostic message');
   });
 
+  it('walks through Check Size Change on output 1, saying the size is decided at run time', async () => {
+    const logs: string[] = [];
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:checkSizeChange'), node('b', 'trawlarr:writeToLog')],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) => loaded(n.pluginId, pass),
+      buildArgs: (invocation) => ({ ...buildArgs(invocation), jobLog: (text) => logs.push(text) }),
+    });
+
+    expect(result.complete).toBe(true);
+    expect(result.steps.map((step) => [step.nodeId, step.outputNumber])).toEqual([
+      ['a', 1],
+      ['b', 1],
+    ]);
+    expect(logs).toContain('Size is decided at run time: a dry run has no new file to measure.');
+  });
+
   it('completes a flow built only from first-party nodes', async () => {
     const result = await runDryFlow({
       ...base,

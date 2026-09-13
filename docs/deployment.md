@@ -60,6 +60,7 @@ original replaced — is the whole of a working first deployment; drop it in
     { "id": "encoder", "pluginId": "trawlarr:setVideoEncoder", "pluginVersion": "1.0.0", "inputs": { "encoder": "libx265", "quality": "28" } },
     { "id": "execute", "pluginId": "trawlarr:execute", "pluginVersion": "1.0.0", "inputs": {} },
     { "id": "verify", "pluginId": "trawlarr:verifyOutput", "pluginVersion": "1.0.0", "inputs": { "durationToleranceSeconds": "1", "minSizeRatio": "0.05" } },
+    { "id": "size", "pluginId": "trawlarr:checkSizeChange", "pluginVersion": "1.0.0", "inputs": { "maxSizePercent": "101" } },
     { "id": "replace", "pluginId": "trawlarr:replaceOriginal", "pluginVersion": "1.0.0", "inputs": { "trashRetentionDays": "14", "allowCrossDevice": "false" } }
   ],
   "edges": [
@@ -68,14 +69,17 @@ original replaced — is the whole of a working first deployment; drop it in
     { "fromNodeId": "begin", "outputNumber": 1, "toNodeId": "encoder" },
     { "fromNodeId": "encoder", "outputNumber": 1, "toNodeId": "execute" },
     { "fromNodeId": "execute", "outputNumber": 1, "toNodeId": "verify" },
-    { "fromNodeId": "verify", "outputNumber": 1, "toNodeId": "replace" }
+    { "fromNodeId": "verify", "outputNumber": 1, "toNodeId": "size" },
+    { "fromNodeId": "size", "outputNumber": 1, "toNodeId": "replace" }
   ]
 }
 ```
 
 `check` output 1 is "already HEVC" and is routed nowhere, which is how a
 converged file costs nothing: the flow ends immediately. Output 2 is "differs",
-and is what runs the encode. `allowCrossDevice: "false"` is deliberate — see
+and is what runs the encode. `size` keeps the original whenever the new file
+comes out more than 1% bigger: its output 2 is routed nowhere too, so such a
+file is left as it was and recorded as done. `allowCrossDevice: "false"` is deliberate — see
 §3.
 
 ## 2. Volumes

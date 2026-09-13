@@ -19,6 +19,7 @@ import {
   nodeLabels,
   pushHistory,
   reachableNodeIds,
+  replacesWithoutSizeCheck,
   redoHistory,
   settledLayout,
   startNodeId,
@@ -597,5 +598,44 @@ describe('edge labels', () => {
       [1, false],
       [2, true],
     ]);
+  });
+});
+
+describe('replacesWithoutSizeCheck', () => {
+  const flow = (edges: FlowEdge[]): FlowDefinition => ({
+    nodes: [
+      node('s', 'start'),
+      node('verify'),
+      node('size', 'trawlarr:checkSizeChange'),
+      node('replace', 'trawlarr:replaceOriginal'),
+    ],
+    edges,
+  });
+
+  it('flags a Replace reached with no size check before it', () => {
+    const definition = flow([edge('s', 'verify'), edge('verify', 'replace')]);
+    expect(replacesWithoutSizeCheck(definition, ['s'])).toEqual(new Set(['replace']));
+  });
+
+  it('accepts a Replace every path to which passes a size check', () => {
+    const definition = flow([edge('s', 'verify'), edge('verify', 'size'), edge('size', 'replace')]);
+    expect(replacesWithoutSizeCheck(definition, ['s'])).toEqual(new Set());
+  });
+
+  it('still flags it when one branch goes around the size check', () => {
+    const definition = flow([
+      edge('s', 'verify'),
+      edge('verify', 'size'),
+      edge('verify', 'replace', 2),
+      edge('size', 'replace'),
+    ]);
+    expect(replacesWithoutSizeCheck(definition, ['s'])).toEqual(new Set(['replace']));
+  });
+
+  it('marks the node on the canvas, and leaves an unreachable Replace to its own warning', () => {
+    const unguarded = toCanvas(flow([edge('s', 'verify'), edge('verify', 'replace')]), plugins);
+    expect(unguarded.nodes.find((item) => item.id === 'replace')!.data.sizeUnchecked).toBe(true);
+    const orphaned = toCanvas(flow([edge('s', 'verify')]), plugins);
+    expect(orphaned.nodes.find((item) => item.id === 'replace')!.data.sizeUnchecked).toBe(false);
   });
 });
