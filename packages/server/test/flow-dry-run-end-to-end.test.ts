@@ -36,7 +36,8 @@ const execFileAsync = promisify(execFile);
 const available = ffmpegAvailableSync();
 
 const CLI_PATH = join(process.cwd(), 'packages/server/dist/cli.js');
-const SERVER_SRC = join(process.cwd(), 'packages/server/src');
+// Engine too: the walk itself is engine code the daemon runs from its dist.
+const SOURCE_DIRS = ['packages/server/src', 'packages/engine/src'];
 
 /** Newest mtime of any file under `dir`, recursively. */
 const newestMtimeMs = (dir: string): number => {
@@ -49,21 +50,23 @@ const newestMtimeMs = (dir: string): number => {
 };
 
 /**
- * This suite spawns a BUILT artifact, so a server-side regression is
- * invisible here unless `pnpm build` (or `tsc --build --force`) ran first.
+ * This suite spawns a BUILT artifact, so a server- or engine-side regression
+ * is invisible here unless `pnpm build` (or `tsc --build --force`) ran first.
  */
 const assertBuiltCliIsFresh = (): void => {
   if (!existsSync(CLI_PATH)) {
     throw new Error(`${CLI_PATH} does not exist. Run "pnpm build" before this suite.`);
   }
   const builtAt = statSync(CLI_PATH).mtimeMs;
-  const newestSource = newestMtimeMs(SERVER_SRC);
-  if (builtAt < newestSource) {
-    throw new Error(
-      `${CLI_PATH} (built ${new Date(builtAt).toISOString()}) is older than the newest file ` +
-        `under packages/server/src (${new Date(newestSource).toISOString()}) — this suite would ` +
-        `be exercising STALE compiled output. Run "pnpm build" first.`,
-    );
+  for (const dir of SOURCE_DIRS) {
+    const newestSource = newestMtimeMs(join(process.cwd(), dir));
+    if (builtAt < newestSource) {
+      throw new Error(
+        `${CLI_PATH} (built ${new Date(builtAt).toISOString()}) is older than the newest file ` +
+          `under ${dir} (${new Date(newestSource).toISOString()}) — this suite would ` +
+          `be exercising STALE compiled output. Run "pnpm build" first.`,
+      );
+    }
   }
 };
 
@@ -239,17 +242,13 @@ interface DryRunViewBody {
     to: DryRunOutcomeBody;
     files: Array<{ fileId: string; path: string }>;
   }>;
-  files: Array<{
-    fileId: string;
-    path: string;
-    outcome: DryRunOutcomeBody;
-    publishedOutcome: DryRunOutcomeBody;
-  }>;
 }
 
 interface DryRunDetailBody {
   fileId: string;
   path: string;
+  outcome: DryRunOutcomeBody;
+  publishedOutcome: DryRunOutcomeBody;
   canvas: { plannedCommands: string[][] } | null;
   published: { plannedCommands: string[][] } | null;
 }
@@ -395,6 +394,8 @@ describe.runIf(available)(
         run = await api<DryRunViewBody>('GET', `/flows/${flow.id}/dry-runs/${started.runId}`);
 
         expect(run.status).toBe('done');
+        // The poll carries summaries, never a row per library file.
+        expect(run).not.toHaveProperty('files');
         expect(run.processed).toBe(2);
         expect(run.total).toBe(2);
         expect(run.counts).toEqual({ 'no-change': 1, 'change:video': 1 });
@@ -426,6 +427,8 @@ describe.runIf(available)(
           'GET',
           `/flows/${flow.id}/dry-runs/${started.runId}/files/${hevcFile.id}`,
         );
+        expect(hevcDetail.outcome).toEqual({ kind: 'change', detail: 'video' });
+        expect(hevcDetail.publishedOutcome).toEqual({ kind: 'no-change' });
         expect(hevcDetail.canvas).not.toBeNull();
         expect(hevcDetail.canvas!.plannedCommands).toHaveLength(1);
         expect(hevcDetail.canvas!.plannedCommands[0]!.join(' ')).toContain('libx265');
