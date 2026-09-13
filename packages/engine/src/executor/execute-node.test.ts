@@ -263,6 +263,38 @@ describe('createExecuteRunner', () => {
     expect(existsSync(join(workDir, 'source.mkv'))).toBe(false);
   });
 
+  it('passes a muxing queue size to ffmpeg as an output option', async () => {
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const module = runnerFor({ workDir, runFfmpegFn: ffmpeg.run })(executePlugin())!;
+    const args = argsFor({ inputPath, encodes: true });
+    args.inputs = { muxingQueueSize: '2048' };
+
+    await module.plugin(args);
+
+    const argv = ffmpeg.calls[0]!.args;
+    expect(argv.slice(-3, -1)).toEqual(['-max_muxing_queue_size', '2048']);
+    // Not smuggled into the command model, where it would count as a change.
+    expect(args.variables.ffmpegCommand.overallOuputArguments).toEqual([]);
+  });
+
+  it('still skips a file with nothing to change when a muxing queue size is set', async () => {
+    // The trap this setting must not fall into: any overall output argument
+    // counts as a change to the file, so carrying the size there would make
+    // every already-conformed file in a library run ffmpeg again. Applied
+    // after the skip decision instead, it cannot affect it.
+    const { inputPath, workDir } = workspace();
+    const ffmpeg = fakeRunner({ code: 0 });
+    const module = runnerFor({ workDir, runFfmpegFn: ffmpeg.run })(executePlugin())!;
+    const args = argsFor({ inputPath, encodes: false });
+    args.inputs = { muxingQueueSize: '2048' };
+
+    const out = await module.plugin(args);
+
+    expect(ffmpeg.calls).toEqual([]);
+    expect(out.outputFileObj._id).toBe(inputPath);
+  });
+
   it('skips a command that declares work but would change nothing about the file', async () => {
     // The 8.4 TB incident in miniature: a `Set Container` to the container the
     // file already has, plus a filter that matched nothing, leaves a command

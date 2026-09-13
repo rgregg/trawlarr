@@ -5,6 +5,7 @@ import { runFfmpeg, type RunFfmpegFn } from '../ffmpeg/run.js';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
 import { decideNoopGate } from './noop-gate.js';
+import { muxingQueueSizeFrom, withMuxingQueueSize } from './muxing-queue.js';
 
 /**
  * The engine owns execution: the Execute node's declared behaviour is replaced
@@ -57,7 +58,9 @@ export const createExecuteRunner =
           container: command.container,
           outputPathFor: input.outputPathFor,
         });
-        const ffmpegArgs = compileFfmpegArgs({
+        // After the gate, never before it: see `muxing-queue.ts` for why the
+        // size must not reach the command model.
+        const compiledArgs = compileFfmpegArgs({
           command,
           outputPath: scratchOutputPath,
           // Never silent: a file that came out with one fewer stream must say
@@ -76,6 +79,10 @@ export const createExecuteRunner =
           // from the job log rather than from the source.
           onRestoredStreams: (restored) => input.log?.(restored.reason),
         });
+        const ffmpegArgs = withMuxingQueueSize(
+          compiledArgs,
+          muxingQueueSizeFrom(args.inputs.muxingQueueSize),
+        );
 
         input.log?.(`Running: ${input.ffmpegPath} ${ffmpegArgs.join(' ')}`);
 
