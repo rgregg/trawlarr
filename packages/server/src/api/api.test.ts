@@ -32,6 +32,7 @@ import {
 } from '../plugins/sync-coordinator.js';
 import { createApiContext, createApiServer } from './server.js';
 import { createPluginLoader } from '@trawlarr/engine';
+import { dryRunFlow } from '../flow/dry-run.js';
 
 /**
  * A data directory for the context these suites build.
@@ -1560,6 +1561,43 @@ describe('dry run', () => {
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe('dry-run-input');
     expect(response.body.error.message).toContain('never been probed');
+  });
+
+  it('walks a definition it is given instead of the stored one, and writes nothing', async () => {
+    const flow = createFlowRepo(db).create({
+      name: 'override',
+      definition: VALID_FLOW,
+      nowMs: NOW,
+    });
+    const library = seedLibrary({ flowId: flow.id });
+    const fileId = await seedProbedFile(library.id);
+    const before = createMediaFileRepo(db).getLedger(fileId);
+    const held = {
+      nodes: [
+        ...VALID_FLOW.nodes,
+        {
+          id: 'review',
+          pluginId: 'trawlarr:holdForReview',
+          pluginVersion: '1.0.0',
+          inputs: { reason: 'From the canvas.' },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'review' }],
+    };
+
+    const result = await dryRunFlow({
+      db,
+      flowId: flow.id,
+      fileId,
+      definition: held,
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      nowMs: () => NOW,
+    });
+
+    expect(result.reviewReason).toBe('From the canvas.');
+    expect(createFlowRepo(db).getById(flow.id)!.definition).toEqual(VALID_FLOW);
+    expect(createMediaFileRepo(db).getLedger(fileId)).toEqual(before);
   });
 });
 
