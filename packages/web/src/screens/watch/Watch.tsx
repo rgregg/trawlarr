@@ -547,29 +547,35 @@ export const Watch = (props: {
                 return (
                   <li key={slot.slotNumber} className="job running">
                     <div className="watch-running-head">
-                      <div className="job-identity">
+                      <div className="job-identity" title={row.name}>
                         {/* The slot number is a UI-local index — it is this
                             card's position, not the worker's identity. The
-                            real `workerId` is what appears in `job.started`,
-                            the daemon log and `GET /workers`, so an operator
-                            chasing a stuck card here has something to match
-                            on; printing only the slot left them nothing. */}
+                            real `workerId` (what `job.started`, the daemon log
+                            and `GET /workers` name) is kept in the tooltip:
+                            it climbs by one per job, so on the card it read
+                            as a meaningless "WORKER-555". */}
                         <span className="job-worker-badge" title={`Worker id: ${row.workerId}`}>
                           {slot.workerLabel}
-                          <span className="job-worker-id">{row.workerId}</span>
                         </span>
                         <Link to={`/files/${row.fileId}`} navigate={navigate} className="job-file">
                           {row.name}
                         </Link>
                       </div>
-                      <span className="job-progress">
+                      <span className="job-progress" title={row.stage}>
                         {row.percent === null
                           ? row.stage
                           : `${String(row.percent)}% — ${row.stage}`}
                       </span>
                     </div>
-                    {row.percent !== null && (
+                    {/* Always rendered, empty until a percentage arrives: a
+                        bar that appeared mid-job changed the card's height,
+                        and short jobs made the whole list jump. */}
+                    {/* Keyed by job, so a new job in this slot gets a fresh
+                        bar instead of the last job's fill animating back down
+                        from its final percentage. */}
+                    {row.percent !== null ? (
                       <div
+                        key={row.jobId}
                         className="bar"
                         role="progressbar"
                         aria-valuenow={row.percent}
@@ -579,6 +585,8 @@ export const Watch = (props: {
                       >
                         <div className="bar-fill" style={{ width: `${String(row.percent)}%` }} />
                       </div>
+                    ) : (
+                      <div key={row.jobId} className="bar" aria-hidden="true" />
                     )}
                     <div className="watch-running-meta">
                       <span className="detail">
@@ -608,6 +616,8 @@ export const Watch = (props: {
                   </li>
                 );
               }
+              // Same three rows as a running card, so a slot flipping between
+              // idle and running between short jobs keeps its height.
               return (
                 <li key={slot.slotNumber} className="job idle">
                   <div className="watch-running-head">
@@ -617,8 +627,11 @@ export const Watch = (props: {
                     </div>
                     <span className="job-progress job-progress-idle">Standing by</span>
                   </div>
+                  <div className="bar" aria-hidden="true" />
                   <div className="watch-running-meta">
-                    <span className="detail">{slot.idleDetail}</span>
+                    <span className="detail" title={slot.idleDetail}>
+                      {slot.idleDetail}
+                    </span>
                   </div>
                 </li>
               );
