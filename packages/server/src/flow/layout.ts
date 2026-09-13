@@ -1,9 +1,10 @@
-import type { FlowLayout } from '@trawlarr/core';
+import { FLOW_NODE_NAME_MAX, type FlowLayout, type FlowNodeView } from '@trawlarr/core';
 
 export class InvalidFlowLayoutError extends Error {
   constructor() {
     super(
-      'Layout must map non-empty node IDs to positions with finite numeric x and y coordinates.',
+      'Layout must map non-empty node IDs to positions with finite numeric x and y coordinates, ' +
+        `each optionally naming the node with at most ${String(FLOW_NODE_NAME_MAX)} characters.`,
     );
     this.name = 'InvalidFlowLayoutError';
   }
@@ -29,7 +30,17 @@ export const parseFlowLayout = (value: unknown): FlowLayout => {
       ) {
         throw new InvalidFlowLayoutError();
       }
-      return [id, { x: position.x, y: position.y }];
+      const view: FlowNodeView = { x: position.x, y: position.y };
+      if ('name' in position && position.name !== undefined) {
+        if (typeof position.name !== 'string' || position.name.length > FLOW_NODE_NAME_MAX) {
+          throw new InvalidFlowLayoutError();
+        }
+        // A blank name is not a name: storing one would say "this node is
+        // called nothing" where the absent key says "call it what the plugin
+        // calls it", and the canvas has to render something either way.
+        if (position.name.trim() !== '') view.name = position.name;
+      }
+      return [id, view];
     }),
   );
 };

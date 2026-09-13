@@ -4,8 +4,14 @@ import type { ApiClient } from '../../api/client.js';
 export const layoutsEqual = (left: FlowLayout, right: FlowLayout): boolean =>
   Object.keys(left).length === Object.keys(right).length &&
   Object.entries(left).every(
-    ([id, position]) =>
-      Object.hasOwn(right, id) && position.x === right[id]!.x && position.y === right[id]!.y,
+    ([id, view]) =>
+      Object.hasOwn(right, id) &&
+      view.x === right[id]!.x &&
+      view.y === right[id]!.y &&
+      // The name rides in the layout, so a rename with nothing dragged is
+      // still an unsaved change; comparing coordinates alone silently
+      // dropped it on navigate-away.
+      view.name === right[id]!.name,
   );
 
 export interface LayoutSaveState {
