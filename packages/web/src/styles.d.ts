@@ -5,3 +5,9 @@
  * import that makes the app look like anything.
  */
 declare module '*.css';
+
+/** Vite resolves an image import to its (hashed) URL. */
+declare module '*.png' {
+  const url: string;
+  export default url;
+}

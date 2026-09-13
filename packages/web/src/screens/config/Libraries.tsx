@@ -304,7 +304,7 @@ export const Libraries = (props: {
       ) : libraries.length === 0 ? (
         <div className="empty-state">
           <p>
-            No libraries yet. A library is a set of roots trawlarr scans, plus the flow every file
+            No libraries yet. A library is a set of roots Trawlarr scans, plus the flow every file
             under them is driven toward.
           </p>
           <button

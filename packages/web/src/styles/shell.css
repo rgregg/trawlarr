@@ -49,14 +49,10 @@
   margin-right: auto;
 }
 
-.app-brand svg {
+.app-brand .brand-mark {
   display: block;
-  color: var(--accent);
 }
 
-/* Lowercase, because the product is written lowercase everywhere else it
-   appears — the CLI, the daemon's logs, the Docker image. A wordmark that
-   disagrees with the command you type is a small lie about what this is. */
 .app-brand .product {
   font-size: var(--text-md);
   font-weight: 600;
@@ -289,6 +285,13 @@ main {
 
 .auth-gate .app-brand {
   margin: 0 0 var(--space-3);
+}
+
+/* Alone on the card, with no wordmark beside it, the header size reads as a
+   stray bullet. The source is 96px, so this stays sharp at 2x. */
+.auth-gate .brand-mark {
+  width: 3rem;
+  height: 3rem;
 }
 
 .auth-gate h1 {

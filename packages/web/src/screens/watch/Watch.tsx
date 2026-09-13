@@ -763,7 +763,7 @@ export const Watch = (props: {
             </p>
             {health !== null && (
               <p className="detail">
-                trawlarr {health.version} (schema {String(health.schemaVersion)}) — {health.status}
+                Trawlarr {health.version} (schema {String(health.schemaVersion)}) — {health.status}
               </p>
             )}
             {schedule !== null && (

@@ -143,7 +143,7 @@ const Shell = (props: {
         <header className="app-header">
           <span className="app-brand">
             <BrandMark />
-            <span className="product">trawlarr</span>
+            <span className="product">Trawlarr</span>
           </span>
           {/* One group, so that at 390px the three of them wrap onto a
               second line TOGETHER rather than leaving Sign out stranded on

@@ -55,7 +55,7 @@ export const useAuth = (): AuthState => {
         setError(
           caught instanceof Error
             ? caught.message
-            : 'Could not connect to trawlarr daemon. Check your connection.',
+            : 'Could not connect to Trawlarr daemon. Check your connection.',
         );
       }
     })();

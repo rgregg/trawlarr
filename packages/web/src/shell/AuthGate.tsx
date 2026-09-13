@@ -58,7 +58,7 @@ const SetupForm = (props: { auth: AuthState }): JSX.Element => {
       <span className="app-brand">
         <BrandMark />
       </span>
-      <h1>Set up trawlarr</h1>
+      <h1>Set up Trawlarr</h1>
       <p>This daemon has no accounts yet. Create the first one to sign in.</p>
       <label htmlFor="setup-username">Username</label>
       <input
@@ -117,7 +117,7 @@ const LoginForm = (props: {
       <span className="app-brand">
         <BrandMark />
       </span>
-      <h1>Sign in to trawlarr</h1>
+      <h1>Sign in to Trawlarr</h1>
       <label htmlFor="login-username">Username</label>
       <input
         id="login-username"
