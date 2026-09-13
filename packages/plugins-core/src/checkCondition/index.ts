@@ -1,11 +1,5 @@
-import type {
-  PluginDetails,
-  PluginInput,
-  PluginInputArgs,
-  PluginOutputArgs,
-} from '@trawlarr/plugin-api';
+import type { PluginDetails, PluginInputArgs, PluginOutputArgs } from '@trawlarr/plugin-api';
 import {
-  FLOW_FIELDS,
   readFlowValue,
   renderMessageTemplate,
   type FlowValue,
@@ -25,56 +19,6 @@ export const OPERATORS = [
   'is missing',
 ];
 
-const visible = (
-  index: number,
-  needsValue = false,
-): PluginInput['inputUI']['displayConditions'] => ({
-  logic: 'AND',
-  sets: [
-    {
-      logic: 'AND',
-      inputs: [
-        { name: 'conditionCount', condition: '>=', value: String(index) },
-        ...(needsValue
-          ? [
-              { name: `operator${index}`, condition: '!==' as const, value: 'exists' },
-              { name: `operator${index}`, condition: '!==' as const, value: 'is missing' },
-            ]
-          : []),
-      ],
-    },
-  ],
-});
-
-const conditionFields = (index: number): PluginInput[] => [
-  {
-    name: `field${index}`,
-    label: `Condition ${index}: property`,
-    type: 'string',
-    defaultValue: 'video.codec',
-    tooltip:
-      'Sizes are decimal MB or bytes as named; durations are seconds and bitrates are bits/second. HDR means PQ/HLG transfer metadata. Use contains for language/codec lists; missing facts match only "is missing". Custom user.*, library.* and global.* properties can also be entered in the input JSON.',
-    inputUI: { type: 'dropdown', options: FLOW_FIELDS, displayConditions: visible(index) },
-  },
-  {
-    name: `operator${index}`,
-    label: `Condition ${index}: comparison`,
-    type: 'string',
-    defaultValue: 'equals',
-    tooltip: 'Numeric comparisons require numbers. Exists and is missing do not need a value.',
-    inputUI: { type: 'dropdown', options: OPERATORS, displayConditions: visible(index) },
-  },
-  {
-    name: `value${index}`,
-    label: `Condition ${index}: value`,
-    type: 'string',
-    defaultValue: 'hevc',
-    tooltip:
-      'Text, a number, true/false, or a {{property}} placeholder. For lists use contains with one exact item, such as eng.',
-    inputUI: { type: 'text', acceptsFlowFields: true, displayConditions: visible(index, true) },
-  },
-];
-
 export const details = (): PluginDetails => ({
   name: 'Check Condition',
   description:
@@ -87,31 +31,33 @@ export const details = (): PluginDetails => ({
   icon: 'faCodeBranch',
   inputs: [
     {
-      name: 'conditionCount',
-      label: 'Number of conditions',
-      type: 'number',
-      defaultValue: '1',
-      tooltip:
-        'Use 1-4 conditions here, or connect multiple Check Condition nodes for larger or nested rules.',
-      inputUI: { type: 'dropdown', options: ['1', '2', '3', '4'] },
-    },
-    {
       name: 'match',
       label: 'Match',
       type: 'string',
       defaultValue: 'all',
-      tooltip: 'all = AND; any = OR. Every enabled condition is checked for configuration errors.',
+      tooltip: 'all = every condition; any = at least one.',
       inputUI: { type: 'dropdown', options: ['all', 'any'] },
     },
     {
       name: 'caseSensitive',
-      label: 'Case-sensitive text comparisons',
+      label: 'Case-sensitive',
       type: 'boolean',
       defaultValue: 'false',
       tooltip: 'Numbers and booleans are always compared by value.',
       inputUI: { type: 'switch' },
     },
-    ...[1, 2, 3, 4].flatMap(conditionFields),
+    {
+      // The flow editor renders this as a list of rows; any other editor
+      // sees the JSON. A list, not numbered flat inputs, because inputs are
+      // declared up front and a declared set is a fixed maximum — the old
+      // field1..4 format capped a node at four conditions for that reason.
+      name: 'conditions',
+      label: 'Conditions',
+      type: 'string',
+      defaultValue: JSON.stringify([{ field: 'video.codec', operator: 'equals', value: 'hevc' }]),
+      tooltip: 'A list of { field, operator, value } rows.',
+      inputUI: { type: 'text' },
+    },
   ],
   outputs: [
     { number: 1, tooltip: 'Conditions match' },
@@ -184,22 +130,75 @@ export const compareValue = (
   }
 };
 
-export const checkConditions = (args: FlowValueArgs, inputs: Record<string, unknown>) => {
+export interface Condition {
+  field: string;
+  operator: string;
+  value: string;
+}
+
+/**
+ * The conditions a node holds.
+ *
+ * The `conditions` list when the node has one. Otherwise the flat
+ * `conditionCount` + `field{n}`/`operator{n}`/`value{n}` format every node
+ * was stored in before the list existed — read here, never rewritten here,
+ * so a stored flow keeps both its meaning and its signature until someone
+ * saves the node in the editor. That format only ever declared four slots,
+ * so its count stays capped at four; the list has no cap.
+ */
+export const conditionsFrom = (inputs: Record<string, unknown>): Condition[] => {
+  if (inputs.conditions !== undefined) {
+    // A stored flow may carry the list as JSON text (the declared default is
+    // one) or as the array the editor writes.
+    let list: unknown = inputs.conditions;
+    if (typeof list === 'string') {
+      try {
+        list = JSON.parse(list) as unknown;
+      } catch {
+        throw new Error('Conditions must be a list of { field, operator, value } rows.');
+      }
+    }
+    if (!Array.isArray(list)) {
+      throw new Error('Conditions must be a list of { field, operator, value } rows.');
+    }
+    if (list.length === 0) throw new Error('Add at least one condition.');
+    return list.map((entry: unknown, offset) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      const field = String(row.field ?? '').trim();
+      if (field === '') throw new Error(`Condition ${String(offset + 1)} has no property.`);
+      return {
+        field,
+        operator: String(row.operator ?? 'equals'),
+        value: String(row.value ?? ''),
+      };
+    });
+  }
+
   const count = numberValue(inputs.conditionCount ?? 1);
   if (!Number.isInteger(count) || count < 1 || count > 4)
     throw new Error('Choose between 1 and 4 conditions.');
+  return Array.from({ length: count }, (_, offset) => {
+    const index = offset + 1;
+    return {
+      field: String(inputs[`field${index}`] ?? 'video.codec'),
+      operator: String(inputs[`operator${index}`] ?? 'equals'),
+      value: String(inputs[`value${index}`] ?? 'hevc'),
+    };
+  });
+};
+
+export const checkConditions = (args: FlowValueArgs, inputs: Record<string, unknown>) => {
+  const conditions = conditionsFrom(inputs);
   const mode = inputs.match ?? 'all';
   if (mode !== 'all' && mode !== 'any') throw new Error('Condition match must be all or any.');
   const caseSensitive = textBoolean(inputs.caseSensitive ?? false);
-  const checks = Array.from({ length: count }, (_, offset) => {
-    const index = offset + 1;
-    const field = String(inputs[`field${index}`] ?? 'video.codec');
-    const operator = String(inputs[`operator${index}`] ?? 'equals');
+  // Every row is evaluated, never short-circuited: a misconfigured row after
+  // one that already decided the result must still fail loudly rather than
+  // wait for the one file where it finally gets reached.
+  const checks = conditions.map(({ field, operator, value }) => {
     const actual = readFlowValue(args, field);
     const expected =
-      operator === 'exists' || operator === 'is missing'
-        ? ''
-        : renderMessageTemplate(args, String(inputs[`value${index}`] ?? 'hevc'));
+      operator === 'exists' || operator === 'is missing' ? '' : renderMessageTemplate(args, value);
     const matches = compareValue(actual, operator, expected, caseSensitive);
     return {
       matches,

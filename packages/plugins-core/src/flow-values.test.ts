@@ -254,15 +254,109 @@ describe('condition comparisons', () => {
     expect(() => checkConditions(args(), { match: 'none' })).toThrow('all or any');
   });
 
-  it('describes both outputs and condition-count-driven fields for the generic editor', () => {
+  it('describes both outputs and holds its conditions in one list input', () => {
     const metadata = details();
     expect(metadata.outputs.map((output) => output.number)).toEqual([1, 2]);
-    expect(
-      metadata.inputs.find((input) => input.name === 'field4')?.inputUI.displayConditions,
-    ).toBeDefined();
-    expect(
-      metadata.inputs.find((input) => input.name === 'value1')?.inputUI.displayConditions?.sets[0]
-        ?.inputs,
-    ).toContainEqual({ name: 'operator1', condition: '!==', value: 'is missing' });
+    expect(metadata.inputs.map((input) => input.name)).toEqual([
+      'match',
+      'caseSensitive',
+      'conditions',
+    ]);
+  });
+
+  describe('a list of conditions', () => {
+    it('evaluates any number of rows, all or any', () => {
+      const conditions = [
+        { field: 'file.container', operator: 'equals', value: 'mkv' },
+        { field: 'video.codec', operator: 'equals', value: 'hevc' },
+        { field: 'video.width', operator: 'at least', value: '3840' },
+        { field: 'video.height', operator: 'at least', value: '2160' },
+        { field: 'audio.count', operator: 'at least', value: '1' },
+        { field: 'file.durationSeconds', operator: 'greater than', value: '9999' },
+      ];
+      // Six rows: past the four the flat format could hold. The last is false.
+      expect(checkConditions(args(), { match: 'all', conditions }).matches).toBe(false);
+      expect(checkConditions(args(), { match: 'any', conditions }).matches).toBe(true);
+      expect(
+        checkConditions(args(), { match: 'all', conditions: conditions.slice(0, 5) }).matches,
+      ).toBe(true);
+      expect(checkConditions(args(), { conditions }).checks).toHaveLength(6);
+    });
+
+    it('needs a value for no comparison that does not take one', () => {
+      expect(
+        checkConditions(args(), {
+          conditions: [{ field: 'error.message', operator: 'is missing', value: '' }],
+        }).matches,
+      ).toBe(true);
+    });
+
+    it('refuses an empty list, a non-list, and a row with no property', () => {
+      expect(() => checkConditions(args(), { conditions: [] })).toThrow(/at least one condition/);
+      expect(() => checkConditions(args(), { conditions: 'video.codec' })).toThrow(/list/);
+      expect(() =>
+        checkConditions(args(), { conditions: [{ operator: 'equals', value: 'x' }] }),
+      ).toThrow(/Condition 1 has no property/);
+    });
+
+    it('prefers the list when a node carries both formats', () => {
+      // A node saved by the new editor may still hold its old flat keys.
+      const result = checkConditions(args(), {
+        conditionCount: '1',
+        field1: 'video.codec',
+        value1: 'av1',
+        conditions: [{ field: 'video.codec', operator: 'equals', value: 'hevc' }],
+      });
+      expect(result.matches).toBe(true);
+    });
+  });
+
+  describe('the flat format nodes were stored in before', () => {
+    // Verbatim from the production flow, so a stored flow keeps its meaning
+    // and its signature: nothing is rewritten until someone saves the node.
+    it('evaluates check_duration exactly as stored', () => {
+      const stored = {
+        conditionCount: '1',
+        match: 'all',
+        caseSensitive: 'false',
+        field1: 'file.durationSeconds',
+        operator1: 'less than',
+        value1: '240',
+      };
+      expect(checkConditions(args(), stored).matches).toBe(true);
+      expect(checkConditions(args(), stored).matches).toBe(
+        checkConditions(args(), {
+          match: 'all',
+          caseSensitive: 'false',
+          conditions: [{ field: 'file.durationSeconds', operator: 'less than', value: '240' }],
+        }).matches,
+      );
+    });
+
+    it('evaluates check_preconditions exactly as stored', () => {
+      const stored = {
+        conditionCount: '2',
+        match: 'all',
+        caseSensitive: 'false',
+        field1: 'file.container',
+        operator1: 'equals',
+        value1: 'mkv',
+        field2: 'video.codec',
+        operator2: 'equals',
+        value2: 'hevc',
+      };
+      const asList = {
+        match: 'all',
+        caseSensitive: 'false',
+        conditions: [
+          { field: 'file.container', operator: 'equals', value: 'mkv' },
+          { field: 'video.codec', operator: 'equals', value: 'hevc' },
+        ],
+      };
+      expect(checkConditions(args(), stored).matches).toBe(true);
+      expect(checkConditions(args(), stored).checks.map((check) => check.message)).toEqual(
+        checkConditions(args(), asList).checks.map((check) => check.message),
+      );
+    });
   });
 });

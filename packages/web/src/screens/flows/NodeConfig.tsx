@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { FlowNode } from '@trawlarr/core';
 import type { PluginInput } from '@trawlarr/plugin-api';
 import { useNavigationGuard } from '../../shell/useRoute.js';
+import { ConditionListEditor, conditionEditorBlocks } from './ConditionListEditor.js';
 
 /**
  * The cap the daemon enforces on a node name, repeated here so the field
@@ -189,6 +190,10 @@ export function NodeConfig({
   const [rawError, setRawError] = useState<string | null>(initial.error);
   const fields = plugin?.details.inputs ?? [];
   const effective = effectiveInputs(fields, inputs);
+  // Check Condition gets its own row editor: its conditions are a list, which
+  // the generic one-field-per-input editor has no way to lay out.
+  const conditionNode = plugin?.id === 'trawlarr:checkCondition';
+  const blocked = rawError !== null || (conditionNode && conditionEditorBlocks(inputs));
   // A rename is a change to save too, even when no input moved: the name
   // lives in the layout rather than the definition, and losing it on
   // navigate-away would be indistinguishable from never having typed it.
@@ -250,6 +255,14 @@ export function NodeConfig({
     });
   };
 
+  /** Replaces every input at once, for an editor that owns several together. */
+  const replaceInputs = (next: Record<string, unknown>): void => {
+    setInputs(next);
+    setRaw(JSON.stringify(next, null, 2));
+    setRawError(null);
+    rememberInputs(next, JSON.stringify(next, null, 2), null);
+  };
+
   const update = (name: string, value: unknown): void => {
     const next = updatePluginInput(fields, inputs, name, value);
     setInputs(next);
@@ -284,7 +297,7 @@ export function NodeConfig({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (!disabled && !rawError) {
+          if (!disabled && !blocked) {
             inputBuffers.delete(bufferKey);
             onSave({ ...node, inputs }, name);
           }
@@ -370,36 +383,50 @@ export function NodeConfig({
           </p>
         )}
         <fieldset disabled={disabled} className="flow-config-fields">
-          <legend>Plugin inputs</legend>
-          {fields.length === 0 && <p className="detail">No configurable fields are declared.</p>}
-          {fields
-            .filter((field) => isInputVisible(field, fields, inputs))
-            .map((field, index) => {
-              const id = `${prefix}-input-${index}`;
-              return (
-                <div className="flow-config-field" key={field.name}>
-                  <label htmlFor={id}>{field.label || field.name}</label>
-                  <InputField
-                    field={field}
-                    id={id}
-                    value={effective[field.name]}
-                    onChange={(value) => update(field.name, value)}
-                  />
-                  <p id={`${id}-help`} className="help">
-                    {field.tooltip}
-                    {field.inputUI.type === 'directory' &&
-                      ' Enter a path on the daemon filesystem.'}
-                  </p>
-                  {acceptsFlowFields(field) && catalogue !== null && (
-                    <FlowFieldPicker
-                      catalogue={catalogue}
-                      id={`${id}-insert`}
-                      onInsert={(property) => insert(field.name, id, property)}
+          <legend className={conditionNode ? 'visually-hidden' : undefined}>
+            {conditionNode ? 'Conditions' : 'Plugin inputs'}
+          </legend>
+          {conditionNode && (
+            <ConditionListEditor
+              inputs={inputs}
+              catalogue={catalogue}
+              disabled={disabled === true}
+              idPrefix={prefix}
+              onChange={replaceInputs}
+            />
+          )}
+          {!conditionNode && fields.length === 0 && (
+            <p className="detail">No configurable fields are declared.</p>
+          )}
+          {!conditionNode &&
+            fields
+              .filter((field) => isInputVisible(field, fields, inputs))
+              .map((field, index) => {
+                const id = `${prefix}-input-${index}`;
+                return (
+                  <div className="flow-config-field" key={field.name}>
+                    <label htmlFor={id}>{field.label || field.name}</label>
+                    <InputField
+                      field={field}
+                      id={id}
+                      value={effective[field.name]}
+                      onChange={(value) => update(field.name, value)}
                     />
-                  )}
-                </div>
-              );
-            })}
+                    <p id={`${id}-help`} className="help">
+                      {field.tooltip}
+                      {field.inputUI.type === 'directory' &&
+                        ' Enter a path on the daemon filesystem.'}
+                    </p>
+                    {acceptsFlowFields(field) && catalogue !== null && (
+                      <FlowFieldPicker
+                        catalogue={catalogue}
+                        id={`${id}-insert`}
+                        onInsert={(property) => insert(field.name, id, property)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
           {hasFlowFieldInputs(fields) && catalogue !== null && (
             <details className="flow-config-catalogue">
               <summary>
@@ -466,7 +493,7 @@ export function NodeConfig({
           <button type="button" onClick={requestClose}>
             Cancel
           </button>
-          <button type="submit" className="btn-primary" disabled={disabled || rawError !== null}>
+          <button type="submit" className="btn-primary" disabled={disabled || blocked}>
             Apply to draft
           </button>
         </footer>
