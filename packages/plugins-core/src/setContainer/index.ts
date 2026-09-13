@@ -171,10 +171,24 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
         dropped = true;
         continue;
       }
+      // Says what would actually happen, and names the switch that fixes it.
+      // The old wording ("when remuxing to mkv") read as a CONTAINER change,
+      // which baffled an operator whose file was already mkv: the rewrite
+      // comes from the flow's other changes, not from Set Container.
+      const consequence =
+        container === 'mkv'
+          ? 'would turn the artwork into an ordinary video track'
+          : container === 'mov'
+            ? 'would silently drop the artwork'
+            : `cannot hold ${codec} artwork`;
+      const subject =
+        normaliseContainer(args.inputFileObj.container ?? '') === container
+          ? `This file is already ${container}, but this flow rewrites it, and ${container}`
+          : `Writing ${container}`;
       throw new Error(
-        `Set Container cannot preserve attached cover art (${codec}) when remuxing to ${container}. ` +
-          'Use mp4 with JPEG/PNG artwork, or preserve the original container without processing. ' +
-          'Artwork was not dropped or converted into an ordinary video track.',
+        `Set Container cannot preserve attached cover art (${codec}) in ${container}. ` +
+          `${subject} ${consequence}. Turn on Drop unsupported streams to remove it, or use ` +
+          'mp4, which keeps JPEG/PNG artwork. Nothing was changed.',
       );
     }
     const type = attachedPicture ? 'video' : stream.codec_type;
