@@ -120,3 +120,33 @@ export const filtersToQuery = (filters: FileFilters, limit: number, offset: numb
  */
 export const formatUpdated = (updatedAt: number): string =>
   toIsoInstant(updatedAt)?.slice(0, 10) ?? '—';
+
+export interface LibraryOption {
+  /** The id sent as the `library` filter; '' means every library. */
+  value: string;
+  label: string;
+}
+
+/**
+ * The Library filter's choices: every library, then each one by name.
+ *
+ * A filter id matching no loaded library — a bookmark to one since deleted,
+ * or a pasted URL — gets its own option rather than being dropped. Without
+ * it the select would fall back to "All libraries" while the rows underneath
+ * were still filtered by that id, showing one thing and doing another.
+ */
+export const libraryOptions = (
+  libraries: ReadonlyArray<{ id: string; name: string }>,
+  selectedId: string | null,
+): LibraryOption[] => {
+  const options: LibraryOption[] = [
+    { value: '', label: 'All libraries' },
+    ...[...libraries]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((library) => ({ value: library.id, label: library.name })),
+  ];
+  if (selectedId !== null && !libraries.some((library) => library.id === selectedId)) {
+    options.push({ value: selectedId, label: `Unknown library (${selectedId})` });
+  }
+  return options;
+};

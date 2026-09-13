@@ -92,8 +92,8 @@ export const LibrarySetup = (props: {
         }}
       />
       <p id="library-roots-help" className="help">
-        One per line, absolute, <strong>as the Trawlarr process sees them</strong>. In Docker that
-        is the path inside the container (<code>/library/movies</code>), not the path on the host.
+        One absolute path per line, as Trawlarr sees it: under Docker, the path inside the
+        container.
       </p>
 
       <label htmlFor="library-extensions">Extensions</label>
@@ -107,9 +107,7 @@ export const LibrarySetup = (props: {
         }}
       />
       <p id="library-extensions-help" className="help">
-        Comma-separated. Leave it empty to keep Trawlarr&rsquo;s own list — an empty list is never
-        sent, because &ldquo;match nothing&rdquo; scans as a permanently empty library with no error
-        to explain it.
+        Comma-separated. Empty uses the defaults.
       </p>
 
       <div className="switch">
@@ -128,9 +126,7 @@ export const LibrarySetup = (props: {
           a torrent client looks like nothing is happening, and nothing else
           in the UI would ever say why. */}
       <p id="library-hardlinked-help" className="help">
-        Files hardlinked into a torrent client&rsquo;s download directory are skipped by default.
-        Replacing one either breaks the link or mutates a copy that is still seeding. If your
-        library was seeded by a torrent client and Trawlarr reports nothing to do, this is why.
+        Off skips files a torrent client is still seeding, so such a library can show nothing to do.
       </p>
 
       <label htmlFor="library-staging-dir">Staging directory</label>
@@ -144,11 +140,8 @@ export const LibrarySetup = (props: {
         }}
       />
       <p id="library-staging-dir-help" className="help">
-        Optional absolute path. Leave empty to stage inside each root&rsquo;s{' '}
-        <code>.trawlarr/staging</code> directory, enabling instant atomic renames on completion.
-        Pointing to a separate filesystem (such as a local SSD cache in front of an NFS library)
-        requires <code>allowCrossDevice</code> on Replace Original File in your flow, falling back
-        to copy-then-atomic-rename.
+        Empty stages inside each root. A different filesystem needs <code>allowCrossDevice</code> on
+        Replace Original File.
       </p>
 
       {problems.length > 0 && (

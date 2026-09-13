@@ -388,11 +388,7 @@ export function NodeConfig({
                 Data fields available here ({catalogue.fields.length}), written{' '}
                 <code>{catalogue.syntax}</code>
               </summary>
-              <p className="help">
-                Read from the file this step is working on, at the moment it runs. A property this
-                file does not have — HDR metadata it never carried, an error field outside an On
-                Error branch — fails the step rather than expanding to nothing.
-              </p>
+              <p className="help">A property the file does not have fails the step.</p>
               <dl className="flow-config-fields-list">
                 {catalogue.fields.map((field) => (
                   <div key={field.name}>

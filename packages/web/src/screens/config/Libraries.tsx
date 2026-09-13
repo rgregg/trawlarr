@@ -303,10 +303,7 @@ export const Libraries = (props: {
         <p>Loading libraries…</p>
       ) : libraries.length === 0 ? (
         <div className="empty-state">
-          <p>
-            No libraries yet. A library is a set of roots Trawlarr scans, plus the flow every file
-            under them is driven toward.
-          </p>
+          <p>No libraries yet.</p>
           <button
             type="button"
             className="btn-primary"

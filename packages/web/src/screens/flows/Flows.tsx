@@ -99,12 +99,6 @@ export const Flows = (props: {
   return (
     <section className="flows-list">
       <div className="flows-list-heading">
-        <div>
-          <h2>Flows</h2>
-          <p className="help">
-            Build and publish processing flows, independently of the libraries that use them.
-          </p>
-        </div>
         <button
           type="button"
           className="btn-primary"
@@ -142,10 +136,6 @@ export const Flows = (props: {
               onChange={(event) => setName(event.target.value)}
             />
           </label>
-          <p className="help">
-            Creates an unattached flow with a Start element, then opens the editor. No library is
-            changed.
-          </p>
           <div className="row-actions">
             <button type="submit" className="btn-primary" disabled={busy || name.trim() === ''}>
               Create &amp; edit

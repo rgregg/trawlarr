@@ -575,11 +575,7 @@ function CanvasEditor({
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
-          <p className="help">
-            Drag a component onto the canvas, or use Add. Connect an output handle to an input, and
-            drag a line’s endpoint to reconnect. Double-click a node to configure it; shift-drag
-            selects several. Installed plugins run as the service user, not in a sandbox.
-          </p>
+          <p className="help">Installed plugins run as the service user, not in a sandbox.</p>
           {selectedEdge && (
             <div className="flow-palette-insert">
               <label>
