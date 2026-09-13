@@ -139,3 +139,42 @@ export const isRunStale = (
 /** The node path a walk took, as a person reads a route. */
 export const routeText = (walk: DryRunWalk | null, labels: Record<string, string>): string =>
   walk === null ? '' : walk.steps.map((step) => labels[step.nodeId] ?? step.nodeId).join(' → ');
+
+/**
+ * A file count as the panel prints it. Pinned to `en-US` grouping rather than
+ * the browser locale so the same run reads the same in every screenshot and
+ * test — `1,850 / 5,242`, never `1.850 / 5.242` beside an English label.
+ */
+export const formatCount = (value: number): string => value.toLocaleString('en-US');
+
+/** The panel heading while a run is walking: `Dry run · 1,850 / 5,242`. */
+export const progressText = (run: Pick<DryRunRun, 'processed' | 'total'>): string =>
+  `Dry run · ${formatCount(run.processed)} / ${formatCount(run.total)}`;
+
+/** One change group's summary line: `12 · No change → Remux`. */
+export const changeGroupLabel = (group: DryRunChangeGroup): string =>
+  `${formatCount(group.files.length)} · ${outcomeLabel(group.from)} → ${outcomeLabel(group.to)}`;
+
+/** How many files the canvas would send down a different outcome than the published flow. */
+export const changedFileCount = (run: Pick<DryRunRun, 'changes'>): number =>
+  run.changes.reduce((sum, group) => sum + group.files.length, 0);
+
+/**
+ * What the Publish dialog may say about a dry run, or null when it may say
+ * nothing. Only a finished run that still describes both the canvas being
+ * published and the version it replaces qualifies: a stale or partial run's
+ * numbers would be presented as the consequence of a publish they do not
+ * describe. The server orders `changes` largest first, so the first three
+ * groups are the biggest.
+ */
+export const publishDryRunSummary = (
+  run: DryRunRun | null,
+  canvasHash: string | null,
+  liveHash: string,
+): { line: string; groups: string[] } | null => {
+  if (run === null || run.status !== 'done' || isRunStale(run, canvasHash, liveHash)) return null;
+  return {
+    line: `Dry run: ${formatCount(changedFileCount(run))} file(s) change outcome.`,
+    groups: run.changes.slice(0, 3).map(changeGroupLabel),
+  };
+};

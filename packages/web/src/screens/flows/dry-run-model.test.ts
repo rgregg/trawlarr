@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  changedFileCount,
+  changeGroupLabel,
   countLabel,
+  formatCount,
   isRunStale,
   orderedCounts,
   outcomeLabel,
+  progressText,
+  publishDryRunSummary,
   routeText,
+  type DryRunChangeGroup,
+  type DryRunRun,
   type DryRunWalk,
 } from './dry-run-model.js';
 
@@ -119,5 +126,93 @@ describe('routeText', () => {
 
   it('is empty for a walk that never happened', () => {
     expect(routeText(null, labels)).toBe('');
+  });
+});
+
+const filesOf = (count: number): DryRunChangeGroup['files'] =>
+  Array.from({ length: count }, (_, index) => ({
+    fileId: `f${String(index)}`,
+    path: `/m/${String(index)}.mkv`,
+  }));
+
+const group = (
+  count: number,
+  to: DryRunChangeGroup['to'] = { kind: 'change', detail: 'streams' },
+): DryRunChangeGroup => ({ from: { kind: 'no-change' }, to, files: filesOf(count) });
+
+const doneRun = (changes: DryRunChangeGroup[], overrides: Partial<DryRunRun> = {}): DryRunRun => ({
+  runId: 'r1',
+  flowId: 'flow-1',
+  status: 'done',
+  error: null,
+  processed: 10,
+  total: 10,
+  definitionHash: 'def-1',
+  publishedHash: 'pub-1',
+  counts: {},
+  changes,
+  files: [],
+  ...overrides,
+});
+
+describe('formatting', () => {
+  it('groups thousands the same regardless of browser locale', () => {
+    expect(formatCount(5242)).toBe('5,242');
+    expect(formatCount(0)).toBe('0');
+  });
+
+  it('prints progress as processed over total', () => {
+    expect(progressText({ processed: 1850, total: 5242 })).toBe('Dry run · 1,850 / 5,242');
+  });
+
+  it('summarises a change group as count, from, to', () => {
+    expect(changeGroupLabel(group(12))).toBe('12 · No change → Remux');
+    expect(
+      changeGroupLabel({
+        from: { kind: 'change', detail: 'video' },
+        to: { kind: 'hold', detail: 'Check it' },
+        files: filesOf(1),
+      }),
+    ).toBe('1 · Re-encode video → Hold: Check it');
+  });
+
+  it('counts every file across every change group', () => {
+    expect(changedFileCount({ changes: [group(3), group(2)] })).toBe(5);
+    expect(changedFileCount({ changes: [] })).toBe(0);
+  });
+});
+
+describe('publishDryRunSummary', () => {
+  it('names the changed-file total and the top three groups for a current done run', () => {
+    const run = doneRun([
+      group(12),
+      group(5, { kind: 'change', detail: 'video' }),
+      group(2, { kind: 'change', detail: 'audio' }),
+      group(1, { kind: 'fail', detail: 'x' }),
+    ]);
+    expect(publishDryRunSummary(run, 'def-1', 'pub-1')).toEqual({
+      line: 'Dry run: 20 file(s) change outcome.',
+      groups: [
+        '12 · No change → Remux',
+        '5 · No change → Re-encode video',
+        '2 · No change → Convert audio',
+      ],
+    });
+  });
+
+  it('still speaks for a run where nothing changes', () => {
+    expect(publishDryRunSummary(doneRun([]), 'def-1', 'pub-1')).toEqual({
+      line: 'Dry run: 0 file(s) change outcome.',
+      groups: [],
+    });
+  });
+
+  it('says nothing without a run, for an unfinished run, or for a stale one', () => {
+    expect(publishDryRunSummary(null, 'def-1', 'pub-1')).toBeNull();
+    expect(publishDryRunSummary(doneRun([], { status: 'running' }), 'def-1', 'pub-1')).toBeNull();
+    expect(publishDryRunSummary(doneRun([], { status: 'cancelled' }), 'def-1', 'pub-1')).toBeNull();
+    expect(publishDryRunSummary(doneRun([]), 'def-2', 'pub-1')).toBeNull();
+    expect(publishDryRunSummary(doneRun([]), 'def-1', 'pub-2')).toBeNull();
+    expect(publishDryRunSummary(doneRun([]), null, 'pub-1')).toBeNull();
   });
 });

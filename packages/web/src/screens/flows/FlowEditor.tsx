@@ -4,8 +4,10 @@ import { ApiClientError, type ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
 import { useNavigationGuard } from '../../shell/useRoute.js';
 import { describeFailure } from '../config/library-form-model.js';
+import { DryRunPanel } from './DryRunPanel.js';
 import { FlowCanvas } from './FlowCanvas.js';
-import type { EditorPlugin, ValidationProblem } from './flow-canvas-model.js';
+import { publishDryRunSummary, type DryRunRun } from './dry-run-model.js';
+import { nodeLabels, type EditorPlugin, type ValidationProblem } from './flow-canvas-model.js';
 import { hasUnsavedLayout, layoutStoreFor, saveFlowLayout } from './flow-layout-model.js';
 import type { FlowFieldCatalogue } from './plugin-input-model.js';
 import {
@@ -125,6 +127,7 @@ function PublishDialog({
   preview,
   fromHash,
   toHash,
+  dryRun,
   note,
   busy,
   canPublish,
@@ -135,6 +138,8 @@ function PublishDialog({
   preview: NonNullable<ReturnType<typeof summarizePublish>>;
   fromHash: string | null;
   toHash: string | null;
+  /** The latest finished dry run; shown only while it still describes this publish. */
+  dryRun: DryRunRun | null;
   note: string;
   busy: boolean;
   canPublish: boolean;
@@ -148,6 +153,7 @@ function PublishDialog({
     element?.showModal();
     return () => element?.close();
   }, []);
+  const dryRunSummary = fromHash === null ? null : publishDryRunSummary(dryRun, toHash, fromHash);
   return (
     <dialog
       className="editor-publish-dialog"
@@ -163,8 +169,20 @@ function PublishDialog({
         <p>
           {preview.unchanged
             ? 'The definition is unchanged. Publishing records a version but does not invalidate any file signatures.'
-            : `${String(preview.eligible)} non-terminal file(s) across ${String(preview.libraries.length)} libraries are eligible for re-evaluation. Publishing requests a rescan; how many files will actually re-encode is not known.`}
+            : `${String(preview.eligible)} non-terminal file(s) across ${String(preview.libraries.length)} libraries are eligible for re-evaluation. Publishing requests a rescan${dryRunSummary === null ? '; how many files will actually re-encode is not known.' : '.'}`}
         </p>
+        {!preview.unchanged && dryRunSummary !== null && (
+          <>
+            <p>{dryRunSummary.line}</p>
+            {dryRunSummary.groups.length > 0 && (
+              <ul className="editor-dry-run-groups">
+                {dryRunSummary.groups.map((group) => (
+                  <li key={group}>{group}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
         {preview.terminal > 0 && (
           <p>
             {String(preview.terminal)} failed, not-converging, or held-for-review file(s) are
@@ -236,6 +254,8 @@ const Editor = (
   const [preview, setPreview] = useState<ReturnType<typeof summarizePublish> | null>(null);
   const [note, setNote] = useState('');
   const [canvasKey, setCanvasKey] = useState(0);
+  const [dryRunId, setDryRunId] = useState<string | null>(null);
+  const [lastDoneRun, setLastDoneRun] = useState<DryRunRun | null>(null);
   const key = JSON.stringify(definition);
   const dirty = hasDefinitionChanges(definition, saved);
   const stale = isDraftStale(baseHash, liveHash);
@@ -373,6 +393,21 @@ const Editor = (
     }
   };
 
+  const startDryRun = async (): Promise<void> => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      const { runId } = await client.post<{ runId: string }>(`/flows/${id}/dry-runs`, {
+        definition,
+      });
+      setDryRunId(runId);
+    } catch (error) {
+      report(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const discard = async (): Promise<void> => {
     if (
       !window.confirm(
@@ -447,6 +482,9 @@ const Editor = (
           >
             Discard draft
           </button>
+          <button type="button" disabled={busy || !valid} onClick={() => void startDryRun()}>
+            Dry run
+          </button>
           <button
             type="button"
             className="btn-primary"
@@ -510,12 +548,27 @@ const Editor = (
           preview={preview}
           fromHash={liveHash}
           toHash={hash}
+          dryRun={lastDoneRun}
           note={note}
           busy={busy}
           canPublish={valid && !stale}
           onNote={setNote}
           onPublish={() => void publish()}
           onCancel={() => setPreview(null)}
+        />
+      )}
+      {dryRunId !== null && (
+        <DryRunPanel
+          client={client}
+          flowId={id}
+          runId={dryRunId}
+          canvasHash={hash}
+          liveHash={liveHash}
+          labels={nodeLabels(definition, props.plugins, layoutState.layout)}
+          onRun={(run) => {
+            if (run.status === 'done') setLastDoneRun(run);
+          }}
+          onClose={() => setDryRunId(null)}
         />
       )}
       <FlowCanvas

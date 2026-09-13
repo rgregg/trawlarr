@@ -186,3 +186,164 @@ main:has(> .flow-editor-page) {
     width: 100%;
   }
 }
+
+/*
+ * The dry-run panel sits between the notices and the canvas. Capped and
+ * scrolling on its own, like the notices, so a library of thousands of files
+ * cannot push the canvas out of the fixed-height editor.
+ */
+.dry-run-panel {
+  min-width: 0;
+  max-height: 40dvh;
+  overflow-y: auto;
+  flex-shrink: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Sticky, so Cancel and the out-of-date badge stay in view while the
+   operator scrolls the file list inside the capped panel. */
+.dry-run-heading {
+  position: sticky;
+  top: calc(-1 * var(--space-3));
+  z-index: 1;
+  padding-block: var(--space-1);
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.dry-run-heading h2 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.dry-run-heading .badge {
+  margin: 0;
+}
+
+.dry-run-heading .row-actions {
+  margin-left: auto;
+}
+
+.dry-run-stale {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.dry-run-panel h3 {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--text-base);
+}
+
+.dry-run-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+}
+
+.dry-run-counts li {
+  display: flex;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.dry-run-counts strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.dry-run-panel summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.dry-run-files {
+  list-style: none;
+  margin: var(--space-1) 0 var(--space-2);
+  padding: 0 0 0 var(--space-4);
+}
+
+/* Paths are long and the web does not know the library root to strip, so
+   they ellipsize with the full path in `title`. */
+.dry-run-files button {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 0;
+  background: none;
+  padding: var(--space-1) 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dry-run-files button[aria-pressed='true'] {
+  font-weight: 600;
+}
+
+.dry-run-detail {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+  min-width: 0;
+}
+
+.dry-run-path {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.dry-run-walk p {
+  margin: var(--space-2) 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* A command scrolls inside its own box, never the page. */
+.dry-run-walk pre {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  max-width: 100%;
+  overflow-x: auto;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+}
+
+.dry-run-limits {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-xs);
+}
+
+/* Same breakpoint as the fixed-height editor above: once the page scrolls as
+   a document, a second scrollbar inside the panel only hides results. Kept
+   after the panel's own rule so it wins. */
+@media (max-width: 850px), (max-height: 40rem) {
+  .dry-run-panel {
+    max-height: none;
+  }
+}
+
+/* Unbulleted, so the groups do not read as part of the library list below. */
+.editor-dry-run-groups {
+  list-style: none;
+  padding: 0;
+  margin-bottom: var(--space-4);
+}
