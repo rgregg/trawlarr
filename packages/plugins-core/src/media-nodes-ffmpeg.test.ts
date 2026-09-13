@@ -375,4 +375,55 @@ describe.runIf(ffmpegAvailableSync())('first-party media nodes with generated me
       await expect(setContainer(repeat)).rejects.toThrow('cannot preserve attached cover art');
     }
   });
+
+  it('drops cover art mkv cannot hold, keeping the picture and sound untouched', async () => {
+    // The production failure, end to end: an mp4 with JPEG artwork remuxed to
+    // mkv. Without the switch Set Container refuses the file; with it, what
+    // ffmpeg writes must really lack the artwork and really keep the rest.
+    const base = join(directory, 'art-base.mkv');
+    const poster = join(directory, 'art-poster.jpg');
+    const source = join(directory, 'art-source.mp4');
+    const output = join(directory, 'art-output.mkv');
+    await generate(base);
+    await ffmpeg([
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=red:size=32x32',
+      '-frames:v',
+      '1',
+      '-c:v',
+      'mjpeg',
+      '-threads',
+      '1',
+      poster,
+    ]);
+    await ffmpeg([
+      '-i',
+      base,
+      '-i',
+      poster,
+      '-map',
+      '0',
+      '-map',
+      '1:v',
+      '-c',
+      'copy',
+      '-disposition:v:1',
+      'attached_pic',
+      source,
+    ]);
+
+    const args = await argsFor(source, 'mp4');
+    args.inputs = { container: 'mkv', dropUnsupported: 'true' };
+    await setContainer(args);
+    await encode(args, output);
+
+    const streams = (await probe(output)).streams!;
+    expect(streams.map((stream) => stream.codec_name)).not.toContain('mjpeg');
+    expect(streams.filter((stream) => stream.codec_type === 'video')).toHaveLength(1);
+    expect(streams.filter((stream) => stream.codec_type === 'audio')).toHaveLength(1);
+    // Copied, not re-encoded: the picture is byte-identical frame for frame.
+    expect(await videoHashes(output)).toEqual(await videoHashes(source));
+  });
 });

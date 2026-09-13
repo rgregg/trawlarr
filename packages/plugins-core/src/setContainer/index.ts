@@ -36,10 +36,20 @@ export const details = (): PluginDetails => ({
       tooltip:
         'Empty preserves the current container. Choose mkv, mp4, mov, or webm. Place this node AFTER ' +
         'track selection and encoder nodes, immediately before Execute, so compatibility checks see ' +
-        'the final streams. Unsupported retained codecs fail with guidance; nothing is silently ' +
-        'transcoded or dropped. Attached pictures can only be remuxed safely to mp4. ' +
+        'the final streams. Unsupported retained codecs fail with guidance unless Drop unsupported ' +
+        'streams is on; nothing is transcoded. Attached pictures can only be remuxed safely to mp4. ' +
         'An already matching container is not rewritten.',
       inputUI: { type: 'dropdown', options: ['', 'mkv', 'mp4', 'mov', 'webm'] },
+    },
+    {
+      name: 'dropUnsupported',
+      label: 'Drop unsupported streams',
+      type: 'boolean',
+      defaultValue: 'false',
+      tooltip:
+        'Remove cover art, subtitles, attachments and data the container cannot hold, instead of ' +
+        'failing the file. Video and audio are never dropped.',
+      inputUI: { type: 'switch' },
     },
   ],
   outputs: [{ number: 1, tooltip: 'Container selected and retained codecs checked' }],
@@ -138,12 +148,29 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
     );
   }
   const supported = CONTAINERS[container as keyof typeof CONTAINERS];
+  // A stored flow hands a switch over as the STRING 'false'; a test hands it
+  // the boolean. Truthy-checking the string would switch dropping ON for
+  // every flow that ever saved this node off, so only an explicit true counts.
+  const dropUnsupported = String(args.inputs.dropUnsupported ?? 'false') === 'true';
+  const drop = (stream: FfmpegCommandStream, what: string): void => {
+    stream.removed = true;
+    args.jobLog(
+      `Set Container dropped ${what} (stream ${String(stream.index ?? '?')}, ` +
+        `${stream.codec_name}), which ${container} cannot hold.`,
+    );
+  };
+  let dropped = false;
   for (const stream of mappableStreams(command.streams)) {
     const codec = outputCodec(stream);
     const attachedPicture = dispositionFlag(stream, 'attached_pic');
     // ffmpeg silently drops mapped pictures in MOV and writes them as ordinary
     // video in Matroska. A successful mux is not proof the artwork survived.
     if (attachedPicture && (container !== 'mp4' || !['mjpeg', 'png'].includes(codec))) {
+      if (dropUnsupported) {
+        drop(stream, 'cover art');
+        dropped = true;
+        continue;
+      }
       throw new Error(
         `Set Container cannot preserve attached cover art (${codec}) when remuxing to ${container}. ` +
           'Use mp4 with JPEG/PNG artwork, or preserve the original container without processing. ' +
@@ -155,6 +182,15 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
     if (type === 'attachment' && container === 'mkv') continue;
     const allowed = supported[type as keyof typeof supported];
     if (allowed?.has(codec)) continue;
+    // Never video or audio, whatever the switch says. Those ARE the
+    // programme: mkv to webm with an h264 picture would "succeed" with no
+    // picture at all, and the Replace step would install it. What a remux
+    // can shed without losing what the file is for is everything else.
+    if (dropUnsupported && type !== 'video' && type !== 'audio') {
+      drop(stream, `a ${type} stream`);
+      dropped = true;
+      continue;
+    }
     throw new Error(
       `Set Container cannot safely copy ${type} stream ${String(stream.index ?? '?')} ` +
         `(${codec}) into ${container}. Choose a compatible container (often mkv), explicitly remove ` +
@@ -166,5 +202,9 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
     command.container = container;
     command.shouldProcess = true;
   }
+  // A removal is a change to write even into a container the file already
+  // has; without this, a same-container file whose only fix was a drop would
+  // be skipped and fail the same way on its next pass.
+  if (dropped) command.shouldProcess = true;
   return passThrough(args);
 };
