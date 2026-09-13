@@ -304,13 +304,13 @@ export function NodeConfig({
         <p>
           {plugin?.description ?? 'Plugin metadata is unavailable. Edit preserved inputs as JSON.'}
         </p>
-        <div className="flow-config-name">
-          <label htmlFor={`${prefix}-name`}>Name on the canvas</label>
+        <div className="flow-config-field flow-config-name">
+          <label htmlFor={`${prefix}-name`}>Node name</label>
           {plugin?.details.nameUI?.type === 'textarea' ? (
             <textarea
               id={`${prefix}-name`}
               value={name}
-              rows={6}
+              rows={4}
               disabled={disabled}
               maxLength={FLOW_NODE_NAME_MAX}
               onChange={(event) => setName(event.target.value)}
@@ -322,16 +322,13 @@ export function NodeConfig({
               value={name}
               disabled={disabled}
               maxLength={FLOW_NODE_NAME_MAX}
+              // The placeholder IS the explanation: an empty box showing the
+              // plugin's own name says what leaving it empty does, without a
+              // paragraph saying it.
               placeholder={plugin?.name ?? node.pluginId}
               onChange={(event) => setName(event.target.value)}
             />
           )}
-          <p className="help">
-            {plugin?.details.nameUI?.type === 'textarea'
-              ? 'This node shows its name as text on the diagram. Leave it empty to hide it.'
-              : 'Only what the canvas calls this node. Leave it empty to use the plugin name.'}{' '}
-            Names are not part of the flow definition, so changing one never re-queues the library.
-          </p>
         </div>
         {initial.raw !== JSON.stringify(node.inputs, null, 2) && (
           <p className="flow-canvas-warning" role="status">

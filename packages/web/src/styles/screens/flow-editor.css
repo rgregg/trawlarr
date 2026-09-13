@@ -445,6 +445,18 @@
   gap: var(--space-2);
 }
 
+/* Sits above the plugin-inputs fieldset, which brings its own border and
+   legend; without this the name field crowds straight into it. */
+.flow-config-name {
+  margin-bottom: var(--space-4);
+}
+
+/* Sits above the plugin-inputs fieldset, so it needs the separation the
+   fieldset's own border would otherwise give it. */
+.flow-config-name {
+  margin-bottom: var(--space-4);
+}
+
 .flow-config-field label {
   font-weight: 500;
 }
