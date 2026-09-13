@@ -158,6 +158,7 @@ const main = async (): Promise<number> => {
       companionExtensions: [],
       findCompanions: async () => [],
       moveCompanions: async () => {},
+      probeFile: (path) => probe(values.ffprobe!, path),
       // The conservative default: refuse to replace a hardlinked file unless a
       // library has deliberately allowed it.
       allowHardlinked: false,

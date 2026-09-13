@@ -788,6 +788,83 @@ describe('Set Container', () => {
     },
   );
 
+  describe('with Drop unsupported streams', () => {
+    const cover = {
+      index: 2,
+      codec_type: 'video',
+      codec_name: 'mjpeg',
+      width: 50,
+      height: 50,
+      disposition: { attached_pic: 1 },
+    };
+
+    it('drops cover art mkv cannot keep, and says so, instead of failing the file', async () => {
+      // The production failure: an mp4 with JPEG artwork remuxed to mkv.
+      const args = argsFor(
+        [video, track(1, 'audio'), cover],
+        {
+          container: 'mkv',
+          dropUnsupported: true,
+        },
+        'mp4',
+      );
+
+      await container.plugin(args);
+
+      const streams = args.variables.ffmpegCommand.streams;
+      expect(streams.find((stream) => stream.index === 2)!.removed).toBe(true);
+      expect(argv(args)).not.toContain('0:2');
+      expect(args.variables.ffmpegCommand.container).toBe('mkv');
+      expect(args.jobLog).toHaveBeenCalledWith(expect.stringMatching(/cover art.*mjpeg/i));
+    });
+
+    it('drops subtitles, attachments and data the container cannot hold', async () => {
+      const args = argsFor(
+        [
+          video,
+          track(1, 'audio'),
+          track(2, 'subtitle', 'eng', { codec_name: 'hdmv_pgs_subtitle' }),
+          { index: 3, codec_type: 'attachment', codec_name: 'ttf' },
+          { index: 4, codec_type: 'data', codec_name: 'bin_data' },
+        ],
+        { container: 'mp4', dropUnsupported: 'true' },
+      );
+
+      await container.plugin(args);
+
+      const removed = args.variables.ffmpegCommand.streams
+        .filter((stream) => stream.removed)
+        .map((stream) => stream.index);
+      expect(removed).toEqual([2, 3, 4]);
+      expect(kept(args, 'video')).toHaveLength(1);
+      expect(kept(args, 'audio')).toHaveLength(1);
+    });
+
+    it('never drops the programme: an unsupported VIDEO codec still fails', async () => {
+      // mkv to webm with h264: "dropping" it would leave a file with no
+      // picture, and still report success. The fix is an encoder, not this.
+      const args = argsFor([video, track(1, 'audio', 'eng', { codec_name: 'opus' })], {
+        container: 'webm',
+        dropUnsupported: true,
+      });
+      await expect(container.plugin(args)).rejects.toThrow('video stream 0');
+      expect(args.variables.ffmpegCommand.streams[0]!.removed).toBe(false);
+    });
+
+    it('never drops the programme: an unsupported AUDIO codec still fails', async () => {
+      const args = argsFor([video, track(1, 'audio', 'eng', { codec_name: 'dts' })], {
+        container: 'mp4',
+        dropUnsupported: true,
+      });
+      await expect(container.plugin(args)).rejects.toThrow('audio stream 1');
+    });
+
+    it('is off unless switched on, including when a stored flow says "false"', async () => {
+      const args = argsFor([video, cover], { container: 'mkv', dropUnsupported: 'false' }, 'mp4');
+      await expect(container.plugin(args)).rejects.toThrow('cannot preserve attached cover art');
+    });
+  });
+
   it('rejects unsupported retained data without silently removing it', async () => {
     const args = argsFor([video, { index: 3, codec_type: 'data', codec_name: 'bin_data' }], {
       container: 'mp4',

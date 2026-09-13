@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { copyFile, link, lstat, mkdir, open, rename, unlink, utimes } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
-import type { PluginInputArgs, PluginModule, PluginOutputArgs } from '@trawlarr/plugin-api';
+import type {
+  PluginInputArgs,
+  PluginModule,
+  PluginOutputArgs,
+  ProbeData,
+} from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
 import { canonicalPath } from './encode-target.js';
 import { BYTES_PER_MEGABYTE } from '../host/file-object.js';
+import { compareDurations, type DurationComparison } from './verify-output.js';
 
 /** What the runner needs from a `stat`: size for reporting, nlink for safety. */
 export interface FileStats {
@@ -64,6 +70,13 @@ export interface ReplaceRunnerInput {
   /** Whether a file with more than one link may be replaced. */
   allowHardlinked: boolean;
   statFile: StatFileFn;
+  /**
+   * Probes a file for the duration gate. REQUIRED, not optional-with-a-skip:
+   * a gate that quietly stands down when nobody wires its probe is the
+   * silently-skipped guard this codebase has been bitten by, and the whole
+   * point of putting the check in the host is that no flow can leave it out.
+   */
+  probeFile: (path: string) => Promise<ProbeData>;
   nowMs: () => number;
   log?: (text: string) => void;
   findCompanions: FindCompanionsFn;
@@ -538,6 +551,28 @@ const booleanInput = (value: unknown, fallback: boolean): boolean => {
 export const REPLACEMENT_GROWTH_SLACK_RATIO = 0.01;
 
 /**
+ * How far a replacement's duration may drift from the original's before the
+ * host refuses to install it, as a fraction of the original's duration.
+ *
+ * A BACKSTOP for dramatic change, not a precision check. Verify Output already
+ * holds a flow to a one-second tolerance, but only a flow whose author wired
+ * it in; this gate runs for every flow and has no off switch, so it must never
+ * refuse a flow doing what it was asked. Ordinary transcodes and remuxes land
+ * within a second or two, and nothing a media flow legitimately does takes a
+ * tenth off a file's running time. A truncated encode does: the case that
+ * prompted this was a set of 45-minute episodes that came out at 1:22.
+ */
+export const REPLACEMENT_DURATION_DRIFT_RATIO = 0.1;
+
+/**
+ * ...and the floor underneath that fraction, in seconds. BOTH bounds must be
+ * exceeded before a replacement is refused — the same shape as the growth
+ * gate's, and for the same reason: on a short clip a tenth of the running
+ * time is under a second, which is container rounding, not truncation.
+ */
+export const REPLACEMENT_DURATION_DRIFT_SECONDS = 10;
+
+/**
  * ...and the floor underneath that fraction, in bytes. BOTH bounds must be
  * exceeded before a replacement is refused.
  *
@@ -592,6 +627,83 @@ export const guardSizeGrowth = (input: {
     grewByBytes <= input.originalSizeBytes * REPLACEMENT_GROWTH_SLACK_RATIO ||
     grewByBytes <= REPLACEMENT_GROWTH_SLACK_BYTES;
   return { install, grewByBytes, ratio };
+};
+
+export interface DurationVerdict {
+  /** False when the replacement's running time is not the original's. */
+  install: boolean;
+  /**
+   * True when the ORIGINAL had no readable duration, so there was nothing to
+   * judge against. Installing is then not a finding, and the log says so.
+   */
+  abstained: boolean;
+  /** Why the replacement was refused, for the log; null when installing. */
+  reason: string | null;
+  comparison: DurationComparison;
+}
+
+/** `82` as `1:22`, `2700` as `45:00`, `7322` as `2:02:02`. */
+const clock = (seconds: number): string => {
+  const whole = Math.round(seconds);
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = String(whole % 60).padStart(2, '0');
+  return h > 0 ? `${String(h)}:${String(m).padStart(2, '0')}:${s}` : `${String(m)}:${s}`;
+};
+
+/**
+ * May a replacement with this running time be installed over an original with
+ * that one?
+ *
+ * The companion to `guardSizeGrowth`, and a host gate for the same reason: a
+ * duration check in a node protects only the flows whose author remembered
+ * it. It answers differently, though. A replacement that grew is a GOOD
+ * encode of the wrong size, so that gate keeps the original and records the
+ * file as done. A replacement that lost most of its running time is a FAILED
+ * encode — the same verdict as an empty file — so this one refuses, the
+ * attempt counts, and a file that keeps producing broken output reaches a
+ * human rather than being recorded as converged.
+ *
+ * Pure over two probes, so the whole decision table is testable without
+ * ffprobe or a filesystem.
+ */
+export const guardDurationChange = (input: {
+  newProbe: ProbeData;
+  originalProbe: ProbeData;
+}): DurationVerdict => {
+  const comparison = compareDurations(input.newProbe, input.originalProbe);
+  const { outputSeconds, originalSeconds } = comparison;
+
+  if (!Number.isFinite(originalSeconds) || originalSeconds <= 0) {
+    return { install: true, abstained: true, reason: null, comparison };
+  }
+  if (!Number.isFinite(outputSeconds)) {
+    return {
+      install: false,
+      abstained: false,
+      reason:
+        `the new file has no readable duration, while the original runs ${clock(originalSeconds)}. ` +
+        `A replacement that cannot be shown to hold the whole programme is not installed.`,
+      comparison,
+    };
+  }
+
+  const drift = Math.abs(outputSeconds - originalSeconds);
+  const limit = Math.max(
+    originalSeconds * REPLACEMENT_DURATION_DRIFT_RATIO,
+    REPLACEMENT_DURATION_DRIFT_SECONDS,
+  );
+  if (drift <= limit) return { install: true, abstained: false, reason: null, comparison };
+
+  return {
+    install: false,
+    abstained: false,
+    reason:
+      `the new file runs ${clock(outputSeconds)}, against the original's ` +
+      `${clock(originalSeconds)} — ${outputSeconds < originalSeconds ? 'short' : 'long'} by ` +
+      `${clock(drift)}. That is a broken encode, not a conversion.`,
+    comparison,
+  };
 };
 
 /** `882 bytes -> 441 bytes` as `50.0% smaller`, so a log line names the direction. */
@@ -784,7 +896,36 @@ export const createReplaceOriginalRunner =
             originalPath,
           );
         }
-        // THE SIZE GATE. Asked first of every question about the original,
+        // THE DURATION GATE. Before the size gate, because the two disagree
+        // about what a bad replacement MEANS and the order decides which
+        // answer a broken file gets. The size gate reads a replacement it
+        // will not install as a good encode of the wrong size and records the
+        // file as done; a truncated encode is usually SMALLER, sails through
+        // it, and — had it been bigger — would have been parked as converged.
+        // A file that lost its running time is a failed encode, so it is
+        // refused here and counts as an attempt.
+        let probes: [ProbeData, ProbeData];
+        try {
+          probes = await Promise.all([input.probeFile(newPath), input.probeFile(originalPath)]);
+        } catch (error) {
+          return refuse(
+            `the new file's running time could not be checked against the original's ` +
+              `(${messageOf(error)}). Nothing is installed that could not be inspected.`,
+            originalPath,
+          );
+        }
+        const duration = guardDurationChange({ newProbe: probes[0], originalProbe: probes[1] });
+        if (!duration.install) {
+          return refuse(`${duration.reason!} "${originalPath}" stays where it is.`, originalPath);
+        }
+        if (duration.abstained) {
+          say(
+            `The original "${originalPath}" has no readable duration, so there is nothing to ` +
+              `hold the replacement's running time against. Proceeding on the other checks.`,
+          );
+        }
+
+        // THE SIZE GATE. Asked before every remaining question about the original,
         // because a replacement that is not worth installing makes every
         // later question moot: nothing is going to be installed either way,
         // and the answers that follow this one all end in a REFUSAL (output
