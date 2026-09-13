@@ -438,7 +438,7 @@ describe.runIf(ffmpegAvailableSync())('first-party media nodes with generated me
       '-f',
       'lavfi',
       '-i',
-      `testsrc2=size=640x360:rate=25,noise=alls=25:allf=t`,
+      `testsrc2=size=320x180:rate=25,noise=alls=25:allf=t`,
       '-t',
       String(seconds),
       '-c:v',
@@ -481,5 +481,7 @@ describe.runIf(ffmpegAvailableSync())('first-party media nodes with generated me
     // buffer allows is the only slack, and it shrinks with running time.
     expect(outputVideoBps).toBeLessThan(cap * 1.1);
     expect(outputVideoBps).toBeGreaterThan(cap * 0.5);
-  });
+    // A real software encode: seconds locally, several times that on a CI
+    // runner with coverage on, where vitest's 5-second default cut it off.
+  }, 60_000);
 });
