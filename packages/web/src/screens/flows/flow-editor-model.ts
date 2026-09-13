@@ -86,3 +86,22 @@ export const loadPublishLibraries = async (
       }),
   );
 };
+
+/**
+ * What `PATCH /flows/:id` should carry for an edit of a flow's name and
+ * description, or null when the edit changed nothing and no request is owed.
+ *
+ * That route is the one that leaves the signature alone — name and
+ * description sit outside `FlowDefinition`, so neither creates a version or
+ * re-queues a library — which is why a description edit goes through it and
+ * never through publishing.
+ */
+export const flowDetailsPatch = (
+  saved: { name: string; description: string | null },
+  draft: { name: string; description: string },
+): { name: string; description: string } | null => {
+  const name = draft.name.trim();
+  const description = draft.description.trim();
+  if (name === saved.name && description === (saved.description ?? '')) return null;
+  return { name, description };
+};

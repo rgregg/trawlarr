@@ -11,6 +11,8 @@ import {
   definitionsEqual,
   deleteSelection,
   deleteCanvasSelection,
+  EDGE_LABEL_MAX,
+  edgeLabel,
   fromCanvas,
   insertNodeOnEdge,
   nextNodeId,
@@ -206,6 +208,7 @@ describe('canvas translation and layout', () => {
       number: 99,
       tooltip: 'Output not declared by the installed plugin',
       missing: true,
+      wired: true,
     });
     expect(projected.nodes[1]!.data.plugin).toBeUndefined();
     expect(projected.nodes[1]!.data.outputs[0]!.number).toBe(7);
@@ -559,5 +562,40 @@ describe('node labels', () => {
     // the name must not travel inside it.
     expect(noteNode.position).toEqual({ x: 10, y: 20 });
     expect(canvas.nodes.find((item) => item.id === 'a')!.data.multilineName).toBe(false);
+  });
+});
+
+describe('edge labels', () => {
+  it('writes what the branch means rather than its number', () => {
+    expect(edgeLabel('Conditions match', 1)).toBe('Conditions match');
+  });
+
+  it('falls back to the number when the plugin gave no words for it', () => {
+    expect(edgeLabel(undefined, 2)).toBe('Output 2');
+    expect(edgeLabel('   ', 3)).toBe('Output 3');
+  });
+
+  it('caps a sentence-length tooltip so a wire label cannot cross its neighbours', () => {
+    const label = edgeLabel('A single stream matches every criterion', 1);
+    expect(label.length).toBeLessThanOrEqual(EDGE_LABEL_MAX);
+    expect(label.endsWith('…')).toBe(true);
+    expect(label.startsWith('A single stream')).toBe(true);
+  });
+
+  it('labels each edge from its SOURCE plugin, and marks which outputs are wired', () => {
+    const definition: FlowDefinition = {
+      nodes: [node('s', 'start'), node('b', 'branch'), node('x'), node('y')],
+      edges: [edge('s', 'b'), edge('b', 'x', 2)],
+    };
+    const canvas = toCanvas(definition, plugins);
+    // The fixture's tooltips are "Meaning <n>": output 2 of the branch node.
+    expect(canvas.edges.find((item) => item.source === 'b')!.label).toBe('Meaning 2');
+    const branch = canvas.nodes.find((item) => item.id === 'b')!;
+    // Output 2 has a wire, so its words move onto it; output 1 is still
+    // loose, so the card keeps saying what it is for.
+    expect(branch.data.outputs.map((output) => [output.number, output.wired])).toEqual([
+      [1, false],
+      [2, true],
+    ]);
   });
 });

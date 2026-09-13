@@ -5,6 +5,7 @@ import { formatRoute } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { toGraphRows, type FlowDefinition, type GraphRow } from './flow-graph-model.js';
 import { toVersionRows, type ApiVersionSummary, type VersionRow } from './flow-version-model.js';
+import { flowDetailsPatch } from './flow-editor-model.js';
 
 /**
  * `GET /flows/:id`'s shape, as `packages/server/src/api/routes/flows.ts`'s
@@ -116,6 +117,12 @@ export const FlowDetail = (props: {
   const [libraries, setLibraries] = useState<ApiLibraryStub[] | null>(null);
   const [copied, setCopied] = useState(false);
 
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   // History gets the SAME failure/loading/empty split as the flow itself —
   // not the libraries panel's quieter inline text — because a broken
   // history fetch is something an operator retries, and a Retry button that
@@ -138,6 +145,7 @@ export const FlowDetail = (props: {
     setFailure(null);
     setLibraries(null);
     setCopied(false);
+    setEditing(false);
     setVersions(null);
     setVersionsTotal(null);
     setVersionsFailure(null);
@@ -287,12 +295,99 @@ export const FlowDetail = (props: {
 
       {failure === null && !loading && flow !== null && (
         <>
-          <div className="flow-page-header">
-            <h2>{flow.name}</h2>
-          </div>
+          {editing ? (
+            <form
+              className="flow-details-edit"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const patch = flowDetailsPatch(flow, {
+                  name: draftName,
+                  description: draftDescription,
+                });
+                if (patch === null) {
+                  setEditing(false);
+                  return;
+                }
+                const editedId = id;
+                setSaving(true);
+                setEditError(null);
+                void client.patch<ApiFlowResource>(`/flows/${editedId}`, patch).then(
+                  (next) => {
+                    // The route answered for the flow this edit began on; if
+                    // the page has moved to another flow since, that answer
+                    // must not be painted over it.
+                    if (currentFlowId.current !== editedId) return;
+                    setFlow(next);
+                    setSaving(false);
+                    setEditing(false);
+                  },
+                  (error: unknown) => {
+                    if (currentFlowId.current !== editedId) return;
+                    setEditError(describeFailure(error).message);
+                    setSaving(false);
+                  },
+                );
+              }}
+            >
+              <label>
+                Name
+                <input
+                  value={draftName}
+                  autoFocus
+                  required
+                  disabled={saving}
+                  onChange={(event) => setDraftName(event.target.value)}
+                />
+              </label>
+              <label>
+                Description
+                <textarea
+                  rows={3}
+                  value={draftDescription}
+                  disabled={saving}
+                  onChange={(event) => setDraftDescription(event.target.value)}
+                />
+              </label>
+              {editError !== null && (
+                <p role="alert" className="flow-details-edit-error">
+                  {editError}
+                </p>
+              )}
+              <div className="row-actions">
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={saving || draftName.trim() === ''}
+                >
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+                <button type="button" disabled={saving} onClick={() => setEditing(false)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <div className="flow-page-header">
+                <h2>{flow.name}</h2>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => {
+                    setDraftName(flow.name);
+                    setDraftDescription(flow.description ?? '');
+                    setEditError(null);
+                    setEditing(true);
+                  }}
+                >
+                  Edit
+                </button>
+              </div>
 
-          {flow.description !== null && flow.description !== '' && (
-            <p className="flow-page-description">{flow.description}</p>
+              {flow.description !== null && flow.description !== '' && (
+                <p className="flow-page-description">{flow.description}</p>
+              )}
+            </>
           )}
 
           <dl className="flow-page-meta">
