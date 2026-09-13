@@ -1,5 +1,6 @@
 import type { PluginDetails, PluginInputArgs, PluginOutputArgs } from '@trawlarr/plugin-api';
 import { applyHardwareDecoding, assertCommandInitialised, hwaccelForEncoder } from '@trawlarr/core';
+import { bitrateCapPercentFrom, sourceVideoBitrate } from './bitrate-cap.js';
 
 /**
  * Each ffmpeg encoder exposes its own quality knob under a different flag name.
@@ -94,6 +95,16 @@ export const details = (): PluginDetails => ({
       tooltip: 'Lower is better quality and larger files. 20–24 is usually visually lossless.',
       inputUI: { type: 'slider', sliderOptions: { min: 0, max: 51 } },
     },
+    {
+      label: 'Bitrate cap (% of source)',
+      name: 'bitrateCapPercent',
+      type: 'string',
+      defaultValue: '',
+      tooltip:
+        "Never spend more on the video than this share of the source's bitrate, so an encode " +
+        'cannot come out bigger than what it replaces. Empty means no cap.',
+      inputUI: { type: 'text' },
+    },
   ],
   outputs: [{ number: 1, tooltip: 'Encoder set' }],
   requiresVersion: '1.0.0',
@@ -115,6 +126,32 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
   const quality = String(args.inputs.quality ?? '24');
   const qualityFlag = QUALITY_FLAG_BY_ENCODER[encoder] ?? DEFAULT_QUALITY_FLAG;
 
+  // Worked out once, from the file being encoded, before any stream is
+  // touched: an invalid percentage fails the node without leaving a
+  // half-configured command behind.
+  const capPercent = bitrateCapPercentFrom(args.inputs.bitrateCapPercent);
+  let capBitsPerSecond: number | null = null;
+  if (capPercent !== null) {
+    const source = sourceVideoBitrate(
+      args.inputFileObj.ffProbeData,
+      Number(args.inputFileObj.file_size ?? 0),
+    );
+    if (source === null) {
+      // Not a failure: the cap only prevents a wasted encode, and Replace
+      // Original File's size gate still refuses anything that grows.
+      args.jobLog(
+        `Bitrate cap of ${String(capPercent)}% was not applied: this file reports neither an ` +
+          'overall bitrate nor a size and duration to derive one from.',
+      );
+    } else {
+      capBitsPerSecond = Math.round((source.bitsPerSecond * capPercent) / 100);
+      args.jobLog(
+        `Capping video at ${(capBitsPerSecond / 1e6).toFixed(2)} Mbps: ${String(capPercent)}% of ` +
+          `the source's ${(source.bitsPerSecond / 1e6).toFixed(2)} Mbps (${source.basis}).`,
+      );
+    }
+  }
+
   let encodedAnyVideo = false;
 
   for (const stream of args.variables.ffmpegCommand.streams) {
@@ -129,6 +166,19 @@ export const plugin = async (args: PluginInputArgs): Promise<PluginOutputArgs> =
     // index cannot collide; the host substitutes the placeholder at compile
     // time, since a plugin cannot know its stream's final output position.
     stream.outputArgs.push('-c:{outputIndex}', encoder, qualityFlag, quality);
+    if (capBitsPerSecond !== null) {
+      // A ceiling under the quality target, not a replacement for it: the
+      // encoder still aims for the quality, and only spends less where
+      // reaching it would cost more than the source did. A buffer of twice
+      // the rate is the usual VBV shape; measured, it does not move the
+      // average away from the cap.
+      stream.outputArgs.push(
+        '-maxrate:{outputIndex}',
+        String(capBitsPerSecond),
+        '-bufsize:{outputIndex}',
+        String(capBitsPerSecond * 2),
+      );
+    }
     stream.forceEncoding = true;
     encodedAnyVideo = true;
   }
