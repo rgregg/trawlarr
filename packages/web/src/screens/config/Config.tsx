@@ -367,9 +367,7 @@ const PluginsTab = (props: { client: ApiClient }): JSX.Element => {
     <section className="plugins-tab">
       {sources.length === 0 ? (
         <p>
-          No plugin sources are configured. Add one with <code>trawlarr plugins sources add</code> —
-          this screen syncs what already exists rather than adding a new one, since adding a source
-          is the moment this host starts trusting code it did not write.
+          No plugin sources are configured. Add one with <code>trawlarr plugins sources add</code>.
         </p>
       ) : (
         <ul className="library-cards">
@@ -530,11 +528,7 @@ const ScheduleSection = (props: { client: ApiClient }): JSX.Element => {
   return (
     <div className="config-section">
       <h3>Schedule</h3>
-      <p className="help">
-        Outside any window, worker counts are whatever the Workers tab has saved. A window overrides
-        the classes it names — for example, more transcode workers overnight — for as long as the
-        current time (in {schedule.timezone}) falls inside it.
-      </p>
+      <p className="detail">Times are in {schedule.timezone}.</p>
 
       {schedule.windows.length === 0 ? (
         <p className="detail">No windows configured — the base counts always apply.</p>
@@ -734,11 +728,6 @@ const TrashSection = (props: { client: ApiClient }): JSX.Element => {
   return (
     <div className="config-section trash-section">
       <h3>Trash</h3>
-      <p className="help">
-        Retention is set per library, by the longest <code>trashRetentionDays</code> any Replace
-        Original File node in that library&rsquo;s flow declares — there is no separate retention
-        setting here to edit. This purges whatever has already outlived that window.
-      </p>
 
       {preview.kind === 'loading' && <p className="detail">Checking what is purgeable…</p>}
       {preview.kind === 'problem' && (
@@ -894,10 +883,6 @@ const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
   return (
     <div className="config-section">
       <h3>Hardware &amp; ffmpeg</h3>
-      <p className="help">
-        Read-only. Hardware here is DECLARED, never detected — this is what the startup preflight
-        found when it checked that declaration against what the configured ffmpeg can really do.
-      </p>
       {/* Name, the path it is configured as, and whether that path resolves.
           This was a `dt`/`dd` pair reading "ffmpeg" above "ffmpeg — resolves",
           which on the common setup (both binaries found on PATH) printed the
@@ -1033,11 +1018,7 @@ const AuthSection = (props: { client: ApiClient }): JSX.Element => {
   return (
     <div className="config-section auth-section">
       <h3>Single sign-on (OIDC)</h3>
-      <p className="help">
-        Password accounts always work. Filling this in and enabling it adds an SSO button to the
-        login screen, so Authentik or another OIDC provider can sign accounts in too — the first
-        login by a given subject creates that account here automatically.
-      </p>
+      <p className="help">The first SSO sign-in by someone new creates their account.</p>
 
       <label className="switch">
         <input

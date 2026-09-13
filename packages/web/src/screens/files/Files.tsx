@@ -10,6 +10,7 @@ import {
   filtersToQuery,
   formatBytes,
   formatUpdated,
+  libraryOptions,
   sortRows,
   toFileRows,
   type ApiFile,
@@ -118,15 +119,26 @@ export const Files = (props: {
   // this form — Clear filters, browser back/forward, or a pasted URL. An
   // uncontrolled `defaultValue` only reads its initial prop; since `Files`
   // is never remounted on a route change (no `key` in `App.tsx`), that left
-  // these two inputs showing stale text after such a change while the URL
-  // and the fetched rows were already correct — and clicking Apply again
-  // would silently resubmit the stale value. `state` never had this bug
-  // because its `<select>` was controlled from the start; these now match.
-  const [libraryDraft, setLibraryDraft] = useState(filters.library ?? '');
+  // the input showing stale text after such a change while the URL and the
+  // fetched rows were already correct — and clicking Apply again would
+  // silently resubmit the stale value. The library and state `<select>`s
+  // read straight from `filters`, so they cannot drift.
   const [qDraft, setQDraft] = useState(filters.q ?? '');
+  // Names for the Library filter. A failed fetch leaves it empty rather than
+  // failing the screen: the filter still works, the options just read as ids.
+  const [libraries, setLibraries] = useState<Array<{ id: string; name: string }>>([]);
   useEffect(() => {
-    setLibraryDraft(filters.library ?? '');
-  }, [filters.library]);
+    let cancelled = false;
+    client.get<Array<{ id: string; name: string }>>('/libraries').then(
+      (loaded) => {
+        if (!cancelled) setLibraries(loaded);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
   useEffect(() => {
     setQDraft(filters.q ?? '');
   }, [filters.q]);
@@ -238,25 +250,30 @@ export const Files = (props: {
       className="files-filters"
       onSubmit={(event) => {
         event.preventDefault();
-        const library = libraryDraft.trim();
         const q = qDraft.trim();
         setFilters({
-          library: library === '' ? null : library,
+          library: filters.library,
           state: filters.state,
           q: q === '' ? null : q,
         });
       }}
     >
       <label>
-        Library ID
-        <input
+        Library
+        <select
           name="library"
-          type="text"
-          value={libraryDraft}
+          value={filters.library ?? ''}
           onChange={(event) => {
-            setLibraryDraft(event.currentTarget.value);
+            const value = event.currentTarget.value;
+            setFilters({ ...filters, library: value === '' ? null : value });
           }}
-        />
+        >
+          {libraryOptions(libraries, filters.library).map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
       </label>
       <label>
         Search

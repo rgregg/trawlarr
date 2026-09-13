@@ -19,7 +19,6 @@ import { BrandMark } from './shell/BrandMark.js';
 import { ErrorBoundary } from './shell/ErrorBoundary.js';
 import { Link } from './shell/Link.js';
 
-import { PageHeader } from './shell/PageHeader.js';
 import { ThemeToggle } from './shell/ThemeToggle.js';
 import { useAttention } from './shell/useAttention.js';
 import { useAuth } from './shell/useAuth.js';
@@ -34,13 +33,8 @@ import './styles.css';
  * knows how to parse — the nav is not a second source of truth about what
  * screens exist, just labels over `route.ts`'s table.
  *
- * `subtitle` is the screen's one-line answer to "what am I looking at",
- * rendered by the shell's `PageHeader`. It says what the screen shows, in
- * the operator's words rather than the daemon's — and it must stay true of
- * an install with nothing configured, which is exactly when someone is
- * reading it.
  */
-const NAV: Array<{ to: string; label: string; matches: Route['name']; subtitle: string }> = [
+const NAV: Array<{ to: string; label: string; matches: Route['name'] }> = [
   {
     // "Status", but `Route['name']` is still `watch` — renaming the route
     // name, `Watch.tsx`, `watch-model.ts` and the `.watch-*` class names
@@ -49,25 +43,21 @@ const NAV: Array<{ to: string; label: string; matches: Route['name']; subtitle: 
     to: '/',
     label: 'Status',
     matches: 'watch',
-    subtitle: 'What the workers are doing, and how close each library is to converged.',
   },
   {
     to: '/diagnose',
     label: 'Diagnose',
     matches: 'diagnose',
-    subtitle: 'Files that are failed, held or stuck, grouped by what went wrong.',
   },
   {
     to: '/files',
     label: 'Files',
     matches: 'files',
-    subtitle: 'Every known file, its codecs, and the state the ledger has it in.',
   },
   {
     to: '/config',
     label: 'Configure',
     matches: 'config',
-    subtitle: 'Libraries, flows, workers, plugin sources and the schedule.',
   },
 ];
 
@@ -203,7 +193,11 @@ const Shell = (props: {
       </div>
 
       <main>
-        {page !== undefined && <PageHeader title={page.label} subtitle={page.subtitle} />}
+        {/* The tab already says where you are, so the title is not repeated on
+            screen. It stays in the document for assistive technology: a page
+            with no h1 leaves a screen reader's heading outline starting at
+            level 2, with each screen's sections orphaned from its name. */}
+        {page !== undefined && <h1 className="visually-hidden">{page.label}</h1>}
 
         {route.name === 'watch' && <Watch client={props.client} live={live} navigate={navigate} />}
         {route.name === 'diagnose' && <Diagnose client={props.client} navigate={navigate} />}

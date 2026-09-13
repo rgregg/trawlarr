@@ -208,31 +208,6 @@ main {
   padding: var(--space-5) var(--space-5) var(--space-7);
 }
 
-.page-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-2) var(--space-4);
-  margin-bottom: var(--space-5);
-}
-
-.page-header h1 {
-  margin: 0;
-}
-
-.page-header .page-subtitle {
-  margin: 0;
-  color: var(--ink-muted);
-  font-size: var(--text-sm);
-}
-
-.page-header .page-actions {
-  margin-left: auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
 .not-found {
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-md);

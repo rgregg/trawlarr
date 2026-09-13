@@ -4,6 +4,7 @@ import {
   filtersToQuery,
   formatBytes,
   formatUpdated,
+  libraryOptions,
   sortRows,
   toFileRows,
 } from './files-model.js';
@@ -121,5 +122,32 @@ describe('formatUpdated', () => {
   // is reached with `updatedAt`, but both end at `Date.prototype.toISOString`.
   it('says nothing for a value outside the range a Date can represent', () => {
     expect(formatUpdated(8.64e15 + 1)).toBe('—');
+  });
+});
+
+describe('libraryOptions', () => {
+  const libraries = [
+    { id: 'shows-id', name: 'Shows' },
+    { id: 'movies-id', name: 'Movies' },
+  ];
+
+  it('offers every library first, then each by name', () => {
+    expect(libraryOptions(libraries, null)).toEqual([
+      { value: '', label: 'All libraries' },
+      { value: 'movies-id', label: 'Movies' },
+      { value: 'shows-id', label: 'Shows' },
+    ]);
+  });
+
+  it('keeps a filter for a library that no longer exists visible, instead of pretending "All"', () => {
+    const options = libraryOptions(libraries, 'gone-id');
+    expect(options.at(-1)).toEqual({ value: 'gone-id', label: 'Unknown library (gone-id)' });
+  });
+
+  it('shows the current filter even before the library list has loaded', () => {
+    expect(libraryOptions([], 'movies-id').map((option) => option.value)).toEqual([
+      '',
+      'movies-id',
+    ]);
   });
 });
