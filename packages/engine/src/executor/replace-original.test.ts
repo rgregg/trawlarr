@@ -17,10 +17,13 @@ import { link, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { PluginDetails, PluginInputArgs } from '@trawlarr/plugin-api';
+import type { PluginDetails, PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
 import {
   createReplaceOriginalRunner,
+  guardDurationChange,
   guardSizeGrowth,
+  REPLACEMENT_DURATION_DRIFT_RATIO,
+  REPLACEMENT_DURATION_DRIFT_SECONDS,
   REPLACEMENT_GROWTH_SLACK_BYTES,
   REPLACEMENT_GROWTH_SLACK_RATIO,
   type ReplaceRunnerInput,
@@ -183,6 +186,13 @@ const argsFor = (input: {
     updateWorker: () => {},
   }) as unknown as PluginInputArgs;
 
+/** A probe that says only how long the file is, as the container reports it. */
+const timed = (seconds: number | null): ProbeData =>
+  ({
+    format: seconds === null ? {} : { duration: String(seconds) },
+    streams: [],
+  }) as ProbeData;
+
 const runnerFor = (input: {
   trashDir: string;
   overrides?: Partial<ReplaceRunnerInput>;
@@ -192,6 +202,11 @@ const runnerFor = (input: {
     companionExtensions: ['srt', 'nfo'],
     allowHardlinked: false,
     statFile: realStat,
+    // Every fixture here is a few bytes of text, not media, so the default
+    // probe reports the same running time for any path: the duration gate
+    // passes, and the tests about moving files stay about moving files. The
+    // gate's own tests override this.
+    probeFile: async () => timed(2700),
     nowMs: () => CLOCK_MS,
     findCompanions: findCompanionsHere,
     moveCompanions: moveCompanionsHere,
@@ -520,6 +535,71 @@ describe('createReplaceOriginalRunner', () => {
     // The original is never trashed on the strength of a file that isn't there.
     expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
     expect(existsSync(space.trashDir)).toBe(false);
+  });
+
+  it('refuses a truncated replacement: the original stays put and nothing reaches trash', async () => {
+    const space = workspace();
+    const originalDigest = sha256(space.originalPath);
+    const log: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        // The incident: a 45-minute episode whose encode came out at 1:22.
+        probeFile: async (path) => timed(path === space.newPath ? 82 : 2700),
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => log.push(text),
+      }),
+    );
+
+    // A FAILED encode, not a converged file: output 2, so the attempt counts.
+    expect(out.outputNumber).toBe(2);
+    expect(out.outputFileObj._id).toBe(space.originalPath);
+    expect(sha256(space.originalPath)).toBe(originalDigest);
+    expect(existsSync(space.trashDir) ? readdirSync(space.trashDir) : []).toEqual([]);
+    expect(log.join('\n')).toMatch(/runs 1:22, against the original's 45:00/);
+  });
+
+  it('refuses a replacement bigger AND truncated, instead of parking it as converged', async () => {
+    // The ordering matters: the size gate alone would answer "keep the
+    // original, record the file as done" — a broken encode recorded as good.
+    const space = workspace();
+    writeFile(space.newPath, 'i'.repeat(ORIGINAL_BODY.length * 2));
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: { probeFile: async (path) => timed(path === space.newPath ? 82 : 2700) },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+  });
+
+  it('refuses when the running time cannot be checked at all, rather than installing blind', async () => {
+    const space = workspace();
+    const originalDigest = sha256(space.originalPath);
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        probeFile: async () => {
+          throw new Error('ffprobe exited with code 1');
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    expect(sha256(space.originalPath)).toBe(originalDigest);
   });
 
   it('routes to output 2 when the new file is zero-length', async () => {
@@ -1436,6 +1516,57 @@ describe('createReplaceOriginalRunner', () => {
     const trashed = readdirSync(space.trashDir);
     expect(trashed).toHaveLength(1);
     expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
+  });
+});
+
+describe('guardDurationChange', () => {
+  const install = (newSeconds: number | null, originalSeconds: number | null): boolean =>
+    guardDurationChange({ newProbe: timed(newSeconds), originalProbe: timed(originalSeconds) })
+      .install;
+
+  it('refuses the real incident: a 45-minute episode that came out at 1:22', () => {
+    const verdict = guardDurationChange({ newProbe: timed(82), originalProbe: timed(2700) });
+    expect(verdict.install).toBe(false);
+    expect(verdict.reason).toMatch(/1:22/);
+    expect(verdict.reason).toMatch(/45:00/);
+  });
+
+  it('installs an ordinary transcode, which lands within a second or two', () => {
+    expect(install(2699.4, 2700)).toBe(true);
+    expect(install(2701.8, 2700)).toBe(true);
+  });
+
+  it('is a backstop for DRAMATIC change, leaving precision to Verify Output', () => {
+    // 5% short on a feature: well past Verify Output's 1-second default, and
+    // not this gate's business — an unconditional host gate with no off
+    // switch must never trap a flow doing what it was asked.
+    expect(install(7200 * 0.95, 7200)).toBe(true);
+    // Past the ratio: refused.
+    expect(install(7200 * (1 - REPLACEMENT_DURATION_DRIFT_RATIO) - 1, 7200)).toBe(false);
+  });
+
+  it('needs BOTH bounds exceeded, so a short clip is not refused over container rounding', () => {
+    // 8 seconds off a 30-second clip is 27% — past the ratio, under the floor.
+    expect(install(22, 30)).toBe(true);
+    expect(install(30 - REPLACEMENT_DURATION_DRIFT_SECONDS - 1, 30)).toBe(false);
+  });
+
+  it('refuses a replacement that grew dramatically too, since that is just as broken', () => {
+    expect(install(5400, 2700)).toBe(false);
+  });
+
+  it('refuses a replacement with no readable duration when the original has one', () => {
+    // A truncated matroska whose muxer never finalised has no duration
+    // element; "cannot tell" is not "matches".
+    const verdict = guardDurationChange({ newProbe: timed(null), originalProbe: timed(2700) });
+    expect(verdict.install).toBe(false);
+    expect(verdict.reason).toMatch(/no readable duration/);
+  });
+
+  it('abstains, rather than refusing, when the ORIGINAL has no duration to compare with', () => {
+    const verdict = guardDurationChange({ newProbe: timed(2700), originalProbe: timed(null) });
+    expect(verdict.install).toBe(true);
+    expect(verdict.abstained).toBe(true);
   });
 });
 

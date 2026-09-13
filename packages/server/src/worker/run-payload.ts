@@ -422,6 +422,9 @@ export const runPayload = async (input: {
           moveCompanions: ports.moveCompanions ?? moveCompanionsSeam,
           allowHardlinked: library.allowHardlinked,
           statFile: ports.statFile ?? statFileSeam,
+          // The same ffprobe Verify Output uses, so the host's duration gate
+          // and a flow's own verification read one clock.
+          probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
           crossDeviceError: crossDeviceErrorSeam,
           nowMs: ports.nowMs,
         }),
