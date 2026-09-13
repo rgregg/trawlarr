@@ -559,6 +559,9 @@ const Editor = (
       )}
       {dryRunId !== null && (
         <DryRunPanel
+          // Keyed by run: a new run is a fresh panel, so no frame ever shows
+          // the old run's numbers (or aims Cancel) under the new id.
+          key={dryRunId}
           client={client}
           flowId={id}
           runId={dryRunId}

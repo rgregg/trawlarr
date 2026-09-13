@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import type { ApiClient } from '../../api/client.js';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import { ApiClientError, type ApiClient } from '../../api/client.js';
 import { describeFailure } from '../config/library-form-model.js';
 import {
   changeGroupLabel,
@@ -70,11 +70,7 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
   const onRun = useRef(props.onRun);
   onRun.current = props.onRun;
 
-  useEffect(() => {
-    setRun(null);
-    setSelected(null);
-    setFailure(null);
-  }, [runId]);
+  const detailBox = useRef<HTMLLIElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,9 +85,15 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
           if (next.status === 'running') timer = window.setTimeout(poll, POLL_MS);
         },
         (error: unknown) => {
-          // Stops polling: a daemon restart forgets runs, and retrying a 404
-          // every second would never end.
-          if (!cancelled) setFailure(describeFailure(error).message);
+          if (cancelled) return;
+          setFailure(describeFailure(error).message);
+          // Only a 404 ends the poll: a daemon restart forgets runs, and
+          // retrying one every second would never end. Anything else is
+          // treated as a blip — stopping on it froze the panel at "running"
+          // and left the Publish dialog without counts for good.
+          if (!(error instanceof ApiClientError && error.status === 404)) {
+            timer = window.setTimeout(poll, POLL_MS);
+          }
         },
       );
     };
@@ -119,6 +121,14 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
       cancelled = true;
     };
   }, [client, flowId, runId, selected]);
+
+  // A group can hold thousands of files; the detail opens under the clicked
+  // row, and is scrolled to once it has content so a click never looks inert.
+  useEffect(() => {
+    if (detail !== null || detailFailure !== null) {
+      detailBox.current?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [detail, detailFailure]);
 
   const cancel = (): void => {
     void client.del(`/flows/${flowId}/dry-runs/${runId}`).then(
@@ -197,39 +207,43 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
                 <summary>{changeGroupLabel(group)}</summary>
                 <ul className="dry-run-files">
                   {group.files.map((file) => (
-                    <li key={file.fileId}>
-                      <button
-                        type="button"
-                        title={file.path}
-                        aria-pressed={selected === file.fileId}
-                        onClick={() => setSelected(file.fileId)}
-                      >
-                        {file.path}
-                      </button>
-                    </li>
+                    <Fragment key={file.fileId}>
+                      <li>
+                        <button
+                          type="button"
+                          title={file.path}
+                          aria-pressed={selected === file.fileId}
+                          aria-expanded={selected === file.fileId}
+                          onClick={() => setSelected(file.fileId)}
+                        >
+                          {file.path}
+                        </button>
+                      </li>
+                      {selected === file.fileId && (
+                        <li className="dry-run-detail" ref={detailBox}>
+                          {detailFailure !== null ? (
+                            <p role="alert" className="failure">
+                              {detailFailure}
+                            </p>
+                          ) : detail === null ? (
+                            <p aria-busy="true">Loading…</p>
+                          ) : (
+                            <>
+                              <Walk name="Canvas" walk={detail.canvas} labels={props.labels} />
+                              <Walk
+                                name="Published"
+                                walk={detail.published}
+                                labels={props.labels}
+                              />
+                            </>
+                          )}
+                        </li>
+                      )}
+                    </Fragment>
                   ))}
                 </ul>
               </details>
             ))
-          )}
-          {selected !== null && (
-            <div className="dry-run-detail">
-              {detailFailure !== null ? (
-                <p role="alert" className="failure">
-                  {detailFailure}
-                </p>
-              ) : detail === null ? (
-                <p aria-busy="true">Loading…</p>
-              ) : (
-                <>
-                  <p className="dry-run-path" title={detail.path}>
-                    {detail.path}
-                  </p>
-                  <Walk name="Canvas" walk={detail.canvas} labels={props.labels} />
-                  <Walk name="Published" walk={detail.published} labels={props.labels} />
-                </>
-              )}
-            </div>
           )}
         </>
       )}
