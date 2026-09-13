@@ -129,13 +129,14 @@ export const createFlowDryRunCoordinator = (input: {
   const walk = async (
     run: Run,
     definition: FlowDefinition,
+    published: FlowDefinition,
     snapshot: Array<{ id: string; path: string }>,
   ): Promise<void> => {
     // Binaries are read per attempt rather than once per run, so a path fixed
     // in settings mid-walk applies to the files still ahead.
     const attempt = async (
       fileId: string,
-      override: FlowDefinition | undefined,
+      override: FlowDefinition,
     ): Promise<{ result: FlowDryRunResult | null; outcome: DryRunOutcome }> => {
       try {
         const binaries = input.binaries();
@@ -143,7 +144,7 @@ export const createFlowDryRunCoordinator = (input: {
           db: input.db,
           flowId: run.flowId,
           fileId,
-          ...(override === undefined ? {} : { definition: override }),
+          definition: override,
           ffmpegPath: binaries.ffmpeg,
           ffprobePath: binaries.ffprobe,
           nowMs: input.nowMs,
@@ -161,13 +162,18 @@ export const createFlowDryRunCoordinator = (input: {
         await new Promise<void>((resolve) => setImmediate(resolve));
         if (run.cancelled) return;
         const canvas = await attempt(file.id, definition);
-        const published = await attempt(file.id, undefined);
-        run.results.set(file.id, { canvas: canvas.result, published: published.result });
+        // Checked again between the halves: a cancel that landed during the
+        // canvas walk must not spend a second walk on a run nobody wants, nor
+        // add a row to a run that already reads `cancelled`.
+        if (run.cancelled) return;
+        const publishedHalf = await attempt(file.id, published);
+        if (run.cancelled) return;
+        run.results.set(file.id, { canvas: canvas.result, published: publishedHalf.result });
         run.files.push({
           fileId: file.id,
           path: file.path,
           outcome: canvas.outcome,
-          publishedOutcome: published.outcome,
+          publishedOutcome: publishedHalf.outcome,
         });
       }
       if (!run.cancelled) run.status = 'done';
@@ -207,7 +213,11 @@ export const createFlowDryRunCoordinator = (input: {
         walking: Promise.resolve(),
       };
       runs.set(flowId, run);
-      run.walking = walk(run, definition, snapshot);
+      // The published half walks the definition as it stood at THIS moment,
+      // passed explicitly: left to re-read the stored flow per file, a publish
+      // mid-run would compare later files against a newer definition than the
+      // `publishedHash` this run reports.
+      run.walking = walk(run, definition, flow.definition, snapshot);
       // The cancelled predecessor is no longer reachable through `runs`, but
       // `stopAll` must still wait for it: its walk may be mid-file, reading
       // the database.

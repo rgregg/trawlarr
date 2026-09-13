@@ -633,7 +633,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       // A library dry run reads the database file by file, so its walk must
       // have ended before `db.close()` — a walk mid-file would otherwise throw
       // against a closed handle. It writes nothing, so the rest of the library
-      // is abandoned and only the file already in flight is waited for.
+      // is abandoned and only the single walk already in flight is waited for.
       await ctx.dryRuns.stopAll();
 
       if (lock !== null) await lock.release();

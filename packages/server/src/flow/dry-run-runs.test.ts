@@ -15,6 +15,16 @@ const DEF: FlowDefinition = {
   edges: [],
 };
 
+/**
+ * The editor's canvas: a distinct object, so a fake can tell the canvas half
+ * (called with this) from the published half (called with the stored flow's
+ * definition snapshot) by identity.
+ */
+const CANVAS: FlowDefinition = {
+  nodes: [{ id: 'canvas-start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} }],
+  edges: [],
+};
+
 const fakeResult = (over: Partial<FlowDryRunResult>): FlowDryRunResult =>
   ({
     complete: true,
@@ -77,7 +87,7 @@ const coordinator = (dryRun: DryRun): FlowDryRunCoordinator =>
   });
 
 const start = (runs: FlowDryRunCoordinator) =>
-  runs.start({ flowId: flow.id, definition: DEF, definitionHash: 'canvas-hash' });
+  runs.start({ flowId: flow.id, definition: CANVAS, definitionHash: 'canvas-hash' });
 
 beforeEach(() => {
   db = openDatabase({ file: ':memory:' });
@@ -96,7 +106,7 @@ describe('createFlowDryRunCoordinator', () => {
     const path = db.prepare('SELECT path FROM media_file WHERE id = ?').get(input.fileId) as {
       path: string;
     };
-    if (input.definition !== undefined && path.path.endsWith('b.mkv')) {
+    if (input.definition === CANVAS && path.path.endsWith('b.mkv')) {
       return Promise.resolve(
         fakeResult({ stopReason: 'held-for-review', complete: false, reviewReason: 'Short.' }),
       );
@@ -230,6 +240,63 @@ describe('createFlowDryRunCoordinator', () => {
     await runs.stopAll();
     expect(inFlight).toBe(0);
     expect(runs.get(flow.id, runId)!.status).toBe('cancelled');
+  });
+
+  it('compares against the definition published when the run started', async () => {
+    seedFile({ libraryId, path: '/a.mkv' });
+    seedFile({ libraryId, path: '/b.mkv' });
+    const republished: FlowDefinition = {
+      nodes: [
+        { id: 'newer-start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      ],
+      edges: [],
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: Array<FlowDefinition | undefined> = [];
+    const runs = coordinator(async (input) => {
+      calls.push(input.definition);
+      await gate;
+      return fakeResult({});
+    });
+    const { runId } = runs.start({ flowId: flow.id, definition: CANVAS, definitionHash: 'c' });
+    await until(() => calls.length > 0);
+    createFlowRepo(db).update({ id: flow.id, definition: republished, nowMs: NOW + 1 });
+    release();
+
+    await until(() => runs.get(flow.id, runId)?.status === 'done');
+    expect(runs.get(flow.id, runId)!.publishedHash).toBe(flow.definitionHash);
+    const publishedCalls = calls.filter((definition) => definition !== CANVAS);
+    expect(publishedCalls).toHaveLength(2);
+    for (const definition of publishedCalls) expect(definition).toEqual(DEF);
+  });
+
+  it('a cancel during the canvas half skips the published half and records nothing', async () => {
+    seedFile({ libraryId, path: '/a.mkv' });
+    seedFile({ libraryId, path: '/b.mkv' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: Array<FlowDefinition | undefined> = [];
+    const runs = coordinator(async (input) => {
+      calls.push(input.definition);
+      await gate;
+      return fakeResult({});
+    });
+    const { runId } = runs.start({ flowId: flow.id, definition: CANVAS, definitionHash: 'c' });
+    await until(() => calls.length > 0);
+    expect(runs.cancel(flow.id, runId)).toBe(true);
+    release();
+    await runs.stopAll();
+
+    expect(calls).toEqual([CANVAS]);
+    const view = runs.get(flow.id, runId)!;
+    expect(view.status).toBe('cancelled');
+    expect(view.processed).toBe(0);
+    expect(view.files).toEqual([]);
   });
 
   it('file() returns both walks', async () => {
