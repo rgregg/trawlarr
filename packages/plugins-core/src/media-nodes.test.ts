@@ -865,6 +865,29 @@ describe('Set Container', () => {
     });
   });
 
+  it('explains a same-container rewrite, and names the switch that fixes it', async () => {
+    const cover = {
+      index: 2,
+      codec_type: 'video',
+      codec_name: 'mjpeg',
+      width: 50,
+      height: 50,
+      disposition: { attached_pic: 1 },
+    };
+    // Already mkv, but another node changed something, so it will be written.
+    const args = argsFor([video, cover], { container: 'mkv' }, 'mkv');
+    args.variables.ffmpegCommand.streams[0]!.outputArgs.push(
+      '-metadata:s:{outputIndex}',
+      'title=x',
+    );
+
+    const failure = container.plugin(args);
+
+    await expect(failure).rejects.toThrow('This file is already mkv, but this flow rewrites it');
+    await expect(failure).rejects.toThrow('ordinary video track');
+    await expect(failure).rejects.toThrow('Turn on Drop unsupported streams');
+  });
+
   it('rejects unsupported retained data without silently removing it', async () => {
     const args = argsFor([video, { index: 3, codec_type: 'data', codec_name: 'bin_data' }], {
       container: 'mp4',
