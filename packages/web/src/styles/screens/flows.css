@@ -27,7 +27,38 @@
 }
 
 .flow-page-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
   margin-top: 0.4rem;
+}
+
+.flow-details-edit {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 36rem;
+  margin: 0.4rem 0 var(--space-4);
+}
+
+.flow-details-edit label {
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* Prose, not code: without this a textarea keeps the browser's monospace. */
+.flow-details-edit textarea {
+  font: inherit;
+}
+
+.flow-details-edit .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.flow-details-edit-error {
+  color: var(--bad);
+  margin: 0;
 }
 
 .flow-page-header h2 {

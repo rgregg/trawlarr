@@ -3,6 +3,7 @@ import type { FlowDefinition } from '@trawlarr/core';
 import { createApiClient } from '../../api/client.js';
 import {
   draftBase,
+  flowDetailsPatch,
   hasDefinitionChanges,
   initialEditorBuffer,
   isDraftStale,
@@ -130,5 +131,35 @@ describe('flow editor lifecycle', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 'a', name: 'A', flowId: 'f' }])))
       .mockRejectedValueOnce(new Error('offline'));
     await expect(loadPublishLibraries(client, 'f')).rejects.toThrow('offline');
+  });
+});
+
+describe('flowDetailsPatch', () => {
+  const saved = { name: 'Movies', description: 'Transcode to HEVC' };
+
+  it('owes no request when nothing changed, including whitespace-only edits', () => {
+    expect(
+      flowDetailsPatch(saved, { name: 'Movies', description: 'Transcode to HEVC' }),
+    ).toBeNull();
+    expect(
+      flowDetailsPatch(saved, { name: ' Movies ', description: 'Transcode to HEVC  ' }),
+    ).toBeNull();
+  });
+
+  it('sends both fields when either changed', () => {
+    expect(flowDetailsPatch(saved, { name: 'Movies', description: 'Remux, then HEVC' })).toEqual({
+      name: 'Movies',
+      description: 'Remux, then HEVC',
+    });
+  });
+
+  it('clears a description, and treats a missing one as empty', () => {
+    expect(flowDetailsPatch(saved, { name: 'Movies', description: '' })).toEqual({
+      name: 'Movies',
+      description: '',
+    });
+    expect(
+      flowDetailsPatch({ name: 'Shows', description: null }, { name: 'Shows', description: '' }),
+    ).toBeNull();
   });
 });

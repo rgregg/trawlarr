@@ -75,7 +75,10 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
   const warning = !plugin ? 'Plugin unavailable' : !plugin.enabled ? 'Plugin disabled' : null;
   // Metadata is only an accent. Arbitrary HTML/icons and styles never enter the page.
   const accent = plugin?.details.style.borderColor;
-  const compactOutputs = outputs.length === 1 && !outputs[0]!.missing;
+  // A lone output that is already wired says nothing the edge does not: no
+  // branch to choose, and its meaning is now written on the wire. Unwired,
+  // it keeps its label, because that is the reader deciding where to take it.
+  const compactOutputs = outputs.length === 1 && !outputs[0]!.missing && outputs[0]!.wired;
   const style = {
     '--plugin-accent': accent && CSS.supports('color', accent) ? accent : 'var(--line-strong)',
   } as CSSProperties;
@@ -159,11 +162,18 @@ function PluginNode({ data, selected }: NodeProps<EditorNode>): JSX.Element {
                     {output.number}
                     {output.missing && ' !'}
                   </b>
-                  <span className="flow-node-output-description">
-                    {output.missing
-                      ? 'Missing output'
-                      : output.tooltip || `Output ${output.number}`}
-                  </span>
+                  {/* Only while the output is still loose. Once an edge
+                      leaves it the edge carries these words, and keeping
+                      them here printed the same branch twice a few pixels
+                      apart. A missing output is not a branch to wire but a
+                      fault to read, so it always says so. */}
+                  {(!output.wired || output.missing) && (
+                    <span className="flow-node-output-description">
+                      {output.missing
+                        ? 'Missing output'
+                        : output.tooltip || `Output ${output.number}`}
+                    </span>
+                  )}
                 </>
               )}
               <Handle

@@ -36,7 +36,7 @@ export type CanvasNodeData = {
   label: string;
   /** Render `label` as prose rather than a title — see `toCanvas`. */
   multilineName: boolean;
-  outputs: Array<{ number: number; tooltip: string; missing: boolean }>;
+  outputs: Array<{ number: number; tooltip: string; missing: boolean; wired: boolean }>;
   problems: string[];
 };
 export type CanvasNode = {
@@ -213,6 +213,42 @@ export function nodeLabels(
   );
 }
 
+/**
+ * Longest edge label drawn on the canvas.
+ *
+ * An output's tooltip is written as a sentence — "A single stream matches
+ * every criterion" is wider than the node it comes out of — and an edge
+ * label is free-floating text between two boxes, so a full one crosses its
+ * neighbours. The whole sentence stays in the edge's accessible name and in
+ * the inspector below the canvas.
+ */
+export const EDGE_LABEL_MAX = 28;
+
+/**
+ * What to write on the wire: what the branch MEANS, not its number.
+ *
+ * "Output 2" tells the reader nothing they cannot already see from the
+ * handle it leaves; "No stream matches" is the thing they came to the
+ * diagram to find out.
+ */
+export const edgeLabel = (tooltip: string | undefined, outputNumber: number): string => {
+  const text = tooltip?.trim();
+  if (text === undefined || text === '') return `Output ${String(outputNumber)}`;
+  return text.length > EDGE_LABEL_MAX ? `${text.slice(0, EDGE_LABEL_MAX - 1).trimEnd()}…` : text;
+};
+
+/** The source plugin's own words for the output an edge leaves by. */
+const outputTooltip = (
+  definition: FlowDefinition,
+  plugins: EditorPlugin[],
+  edge: FlowEdge,
+): string | undefined => {
+  const from = definition.nodes.find((node) => node.id === edge.fromNodeId);
+  return plugins
+    .find((candidate) => candidate.id === from?.pluginId)
+    ?.details.outputs.find((output) => output.number === edge.outputNumber)?.tooltip;
+};
+
 export function toCanvas(
   definition: FlowDefinition,
   plugins: EditorPlugin[],
@@ -230,10 +266,15 @@ export function toCanvas(
   return {
     nodes: definition.nodes.map((node) => {
       const plugin = plugins.find((candidate) => candidate.id === node.pluginId);
+      const wired = (outputNumber: number): boolean =>
+        definition.edges.some(
+          (edge) => edge.fromNodeId === node.id && edge.outputNumber === outputNumber,
+        );
       const outputs = (plugin?.details.outputs ?? []).map((output) => ({
         number: output.number,
         tooltip: output.tooltip,
         missing: false,
+        wired: wired(output.number),
       }));
       for (const edge of definition.edges.filter((edge) => edge.fromNodeId === node.id)) {
         if (!outputs.some((output) => output.number === edge.outputNumber)) {
@@ -241,6 +282,7 @@ export function toCanvas(
             number: edge.outputNumber,
             tooltip: 'Output not declared by the installed plugin',
             missing: true,
+            wired: true,
           });
         }
       }
@@ -283,7 +325,7 @@ export function toCanvas(
       sourceHandle: String(edge.outputNumber),
       target: edge.toNodeId,
       targetHandle: 'input',
-      label: `Output ${edge.outputNumber}`,
+      label: edgeLabel(outputTooltip(definition, plugins, edge), edge.outputNumber),
       data: {
         edge,
         problems: problems
