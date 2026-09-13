@@ -10,6 +10,7 @@ import { ffmpegAvailableSync } from '../../../test-support/tool-availability.js'
 import { plugin as audioTracks } from './audioTracks/index.js';
 import { plugin as subtitleTracks } from './subtitleTracks/index.js';
 import { plugin as setContainer } from './setContainer/index.js';
+import { plugin as setVideoEncoder } from './setVideoEncoder/index.js';
 
 const exec = promisify(execFile);
 const ffmpeg = async (args: string[]): Promise<void> => {
@@ -425,5 +426,60 @@ describe.runIf(ffmpegAvailableSync())('first-party media nodes with generated me
     expect(streams.filter((stream) => stream.codec_type === 'audio')).toHaveLength(1);
     // Copied, not re-encoded: the picture is byte-identical frame for frame.
     expect(await videoHashes(output)).toEqual(await videoHashes(source));
+  });
+
+  it('caps a real encode near the requested share of the source bitrate', async () => {
+    // Deliberately hard to compress, so an uncapped constant-quality encode
+    // would spend far more than the source; the cap is what holds it down.
+    const source = join(directory, 'cap-source.mkv');
+    const output = join(directory, 'cap-output.mkv');
+    const seconds = 20;
+    await ffmpeg([
+      '-f',
+      'lavfi',
+      '-i',
+      `testsrc2=size=640x360:rate=25,noise=alls=25:allf=t`,
+      '-t',
+      String(seconds),
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-b:v',
+      '2M',
+      source,
+    ]);
+    const args = await argsFor(source, 'mkv');
+    args.inputs = { encoder: 'libx265', quality: '18', bitrateCapPercent: '25' };
+    await setVideoEncoder(args);
+
+    // The per-stream `-maxrate:{outputIndex}` form must survive compilation
+    // and be accepted by ffmpeg; a rejected flag fails this encode outright.
+    await encode(args, output);
+
+    const sourceVideoBps = Number((await probe(source)).format?.bit_rate);
+    const { stdout } = await exec('ffprobe', [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'packet=size',
+      '-of',
+      'csv=p=0',
+      output,
+    ]);
+    const outputVideoBps =
+      (stdout
+        .trim()
+        .split('\n')
+        .reduce((sum, size) => sum + Number(size), 0) *
+        8) /
+      seconds;
+    const cap = sourceVideoBps * 0.25;
+    // Within a few percent over a short clip; the start-of-stream burst the
+    // buffer allows is the only slack, and it shrinks with running time.
+    expect(outputVideoBps).toBeLessThan(cap * 1.1);
+    expect(outputVideoBps).toBeGreaterThan(cap * 0.5);
   });
 });

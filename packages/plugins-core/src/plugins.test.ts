@@ -188,6 +188,74 @@ describe('trawlarr:setVideoEncoder', () => {
     expect(out.variables.ffmpegCommand.shouldProcess).toBe(true);
   });
 
+  describe('bitrate cap', () => {
+    // 5 Mbps overall with a 0.5 Mbps audio track: a 4.5 Mbps video estimate.
+    const capped = (inputs: Record<string, unknown>, format: Record<string, unknown>) => {
+      const file = {
+        _id: '/media/movie.mkv',
+        container: 'mkv',
+        video_codec_name: 'h264',
+        file_size: 0,
+        ffProbeData: {
+          format,
+          streams: [
+            { index: 0, codec_type: 'video', codec_name: 'h264' },
+            { index: 1, codec_type: 'audio', codec_name: 'eac3', tags: { BPS: '500000' } },
+          ],
+        },
+      };
+      return { file, inputs };
+    };
+    const run = async (inputs: Record<string, unknown>, format: Record<string, unknown>) => {
+      const { file } = capped(inputs, format);
+      const begun = await FIRST_PARTY_PLUGINS['trawlarr:beginCommand']!.module.plugin(
+        argsFor({ inputFileObj: file } as unknown as Partial<PluginInputArgs>),
+      );
+      const logs: string[] = [];
+      const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
+        argsFor({
+          inputFileObj: file,
+          variables: begun.variables,
+          inputs: { encoder: 'hevc_nvenc', quality: '23', ...inputs },
+          jobLog: (text: string) => logs.push(text),
+        } as unknown as Partial<PluginInputArgs>),
+      );
+      return { video: out.variables.ffmpegCommand.streams[0]!, logs };
+    };
+
+    it('caps the video at a share of the source, beside the quality target', async () => {
+      const { video, logs } = await run({ bitrateCapPercent: '90' }, { bit_rate: '5000000' });
+      expect(video.outputArgs).toEqual([
+        '-c:{outputIndex}',
+        'hevc_nvenc',
+        '-cq',
+        '23',
+        '-maxrate:{outputIndex}',
+        '4050000',
+        '-bufsize:{outputIndex}',
+        '8100000',
+      ]);
+      expect(logs.join('\n')).toMatch(/4\.05 Mbps: 90% of the source's 4\.50 Mbps/);
+    });
+
+    it('adds nothing when no cap is set', async () => {
+      const { video } = await run({}, { bit_rate: '5000000' });
+      expect(video.outputArgs).not.toContain('-maxrate:{outputIndex}');
+    });
+
+    it('skips the cap and says why when the source bitrate cannot be worked out', async () => {
+      const { video, logs } = await run({ bitrateCapPercent: '90' }, {});
+      expect(video.outputArgs).toEqual(['-c:{outputIndex}', 'hevc_nvenc', '-cq', '23']);
+      expect(logs.join('\n')).toMatch(/was not applied/);
+    });
+
+    it('fails on a nonsense percentage instead of guessing at it', async () => {
+      await expect(run({ bitrateCapPercent: '150' }, { bit_rate: '5000000' })).rejects.toThrow(
+        /Bitrate cap/,
+      );
+    });
+  });
+
   it('leaves audio streams alone', async () => {
     const begun = await FIRST_PARTY_PLUGINS['trawlarr:beginCommand']!.module.plugin(argsFor());
     const out = await FIRST_PARTY_PLUGINS['trawlarr:setVideoEncoder']!.module.plugin(
