@@ -249,6 +249,23 @@ describe('runDryFlow', () => {
     expect(reportedOutputPath).toMatch(/^\/staging\/out\.trawlarr-tmp-.+\.mkv$/);
   });
 
+  it("plans the command WITH Execute's muxing queue size, exactly as the real run adds it", async () => {
+    const execute = { ...node('b', 'trawlarr:execute'), inputs: { muxingQueueSize: '2048' } };
+    const result = await runDryFlow({
+      ...base,
+      flow: flow(
+        [node('a', 'trawlarr:beginCommand'), execute],
+        [{ fromNodeId: 'a', outputNumber: 1, toNodeId: 'b' }],
+      ),
+      loadPlugin: (n) =>
+        loaded(n.pluginId, n.pluginId === 'trawlarr:beginCommand' ? beginAndEncode : pass),
+      buildArgs: (invocation) => ({ ...buildArgs(invocation), inputs: invocation.node.inputs }),
+    });
+
+    const planned = result.plannedCommands[0]!;
+    expect(planned.slice(-3, -1)).toEqual(['-max_muxing_queue_size', '2048']);
+  });
+
   it('plans no command when the built command has nothing to do, mirroring the real skip', async () => {
     const result = await runDryFlow({
       ...base,

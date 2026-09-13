@@ -10,7 +10,18 @@ export const details = (): PluginDetails => ({
   pType: '',
   sidebarPosition: 4,
   icon: 'faBolt',
-  inputs: [],
+  inputs: [
+    {
+      name: 'muxingQueueSize',
+      label: 'Muxing queue size',
+      type: 'number',
+      defaultValue: '',
+      tooltip:
+        'Raise if ffmpeg fails with "Too many packets buffered for output stream". ' +
+        "Does not change the output. Empty uses ffmpeg's default.",
+      inputUI: { type: 'text' },
+    },
+  ],
   outputs: [
     { number: 1, tooltip: 'Command succeeded' },
     { number: 2, tooltip: 'Command failed', outcome: 'failure' },

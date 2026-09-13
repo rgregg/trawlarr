@@ -3,6 +3,7 @@ import { closeFfmpegCommand, compileFfmpegArgs } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { resolveEncodeTarget } from './encode-target.js';
 import { decideNoopGate, type NoopGateDecision } from './noop-gate.js';
+import { muxingQueueSizeFrom, withMuxingQueueSize } from './muxing-queue.js';
 import { runFlow, type FlowRunResult, type RunFlowOptions } from './run-flow.js';
 import { classifySideEffects } from './vouchable.js';
 
@@ -103,10 +104,15 @@ export const runDryFlow = async (
           container: args.variables.ffmpegCommand.container,
           outputPathFor: options.outputPathFor,
         });
-        const compiled = compileFfmpegArgs({
-          command: args.variables.ffmpegCommand,
-          outputPath: writePath,
-        });
+        // Same post-gate step as the real Execute, so the planned command is
+        // the one that would run, flag and all.
+        const compiled = withMuxingQueueSize(
+          compileFfmpegArgs({
+            command: args.variables.ffmpegCommand,
+            outputPath: writePath,
+          }),
+          muxingQueueSizeFrom(args.inputs.muxingQueueSize),
+        );
         plannedCommands.push(compiled);
         executeDecisions.push({ ...gate, nodeId, command: compiled });
         return {
