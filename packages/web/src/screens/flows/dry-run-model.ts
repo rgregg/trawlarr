@@ -15,13 +15,6 @@ export type DryRunOutcome =
   | { kind: 'fail'; detail: string }
   | { kind: 'incomplete'; detail: string };
 
-export interface DryRunFileRow {
-  fileId: string;
-  path: string;
-  outcome: DryRunOutcome;
-  publishedOutcome: DryRunOutcome;
-}
-
 export interface DryRunChangeGroup {
   from: DryRunOutcome;
   to: DryRunOutcome;
@@ -38,14 +31,19 @@ export interface DryRunRun {
   definitionHash: string;
   publishedHash: string;
   counts: Record<string, number>;
+  /** Empty while the run is walking; filled in once it has finished. */
   changes: DryRunChangeGroup[];
-  files: DryRunFileRow[];
 }
 
-/** One file's two walks: against the canvas draft, and against the published definition. */
+/**
+ * One file's two walks: against the canvas draft, and against the published
+ * definition. The server keeps these only for files whose outcome changes.
+ */
 export interface DryRunFileDetail {
   fileId: string;
   path: string;
+  outcome: DryRunOutcome;
+  publishedOutcome: DryRunOutcome;
   canvas: DryRunWalk | null;
   published: DryRunWalk | null;
 }
@@ -57,8 +55,11 @@ export interface DryRunWalk {
   partialWalkWarning: string | null;
 }
 
-/** A terse label for a single outcome, as shown on a file row. */
-export const outcomeLabel = (outcome: DryRunOutcome): string => {
+/** Node labels by node id; an id with no label reads as itself. */
+export type NodeLabels = Record<string, string>;
+
+/** A terse label for a single outcome. Incomplete walks name the node by its label. */
+export const outcomeLabel = (outcome: DryRunOutcome, labels: NodeLabels = {}): string => {
   switch (outcome.kind) {
     case 'no-change':
       return 'No change';
@@ -77,7 +78,7 @@ export const outcomeLabel = (outcome: DryRunOutcome): string => {
     case 'fail':
       return 'Fail';
     case 'incomplete':
-      return `Stops at ${outcome.detail}`;
+      return `Stops at ${labels[outcome.detail] ?? outcome.detail}`;
   }
 };
 
@@ -95,7 +96,7 @@ const rank = (key: string): number => {
 };
 
 /** The same label an outcome of this key would carry, from the key alone. */
-export const countLabel = (key: string): string => {
+export const countLabel = (key: string, labels: NodeLabels = {}): string => {
   const colon = key.indexOf(':');
   const kind = colon === -1 ? key : key.slice(0, colon);
   const detail = colon === -1 ? '' : key.slice(colon + 1);
@@ -109,7 +110,7 @@ export const countLabel = (key: string): string => {
     case 'fail':
       return 'Fail';
     case 'incomplete':
-      return `Stops at ${detail}`;
+      return outcomeLabel({ kind: 'incomplete', detail }, labels);
     default:
       return key;
   }
@@ -118,9 +119,10 @@ export const countLabel = (key: string): string => {
 /** Counts by outcomeKey, ordered: no change, re-encode/convert/remux, holds, incomplete, fail. */
 export const orderedCounts = (
   counts: Record<string, number>,
+  labels: NodeLabels = {},
 ): Array<{ key: string; label: string; count: number }> =>
   Object.entries(counts)
-    .map(([key, count]) => ({ key, label: countLabel(key), count }))
+    .map(([key, count]) => ({ key, label: countLabel(key, labels), count }))
     .sort((a, b) => rank(a.key) - rank(b.key) || a.key.localeCompare(b.key));
 
 /**
@@ -137,7 +139,7 @@ export const isRunStale = (
   canvasHash === null || canvasHash !== run.definitionHash || run.publishedHash !== liveHash;
 
 /** The node path a walk took, as a person reads a route. */
-export const routeText = (walk: DryRunWalk | null, labels: Record<string, string>): string =>
+export const routeText = (walk: DryRunWalk | null, labels: NodeLabels): string =>
   walk === null ? '' : walk.steps.map((step) => labels[step.nodeId] ?? step.nodeId).join(' → ');
 
 /**
@@ -152,8 +154,8 @@ export const progressText = (run: Pick<DryRunRun, 'processed' | 'total'>): strin
   `Dry run · ${formatCount(run.processed)} / ${formatCount(run.total)}`;
 
 /** One change group's summary line: `12 · No change → Remux`. */
-export const changeGroupLabel = (group: DryRunChangeGroup): string =>
-  `${formatCount(group.files.length)} · ${outcomeLabel(group.from)} → ${outcomeLabel(group.to)}`;
+export const changeGroupLabel = (group: DryRunChangeGroup, labels: NodeLabels = {}): string =>
+  `${formatCount(group.files.length)} · ${outcomeLabel(group.from, labels)} → ${outcomeLabel(group.to, labels)}`;
 
 /** How many files the canvas would send down a different outcome than the published flow. */
 export const changedFileCount = (run: Pick<DryRunRun, 'changes'>): number =>
@@ -171,10 +173,21 @@ export const publishDryRunSummary = (
   run: DryRunRun | null,
   canvasHash: string | null,
   liveHash: string,
+  labels: NodeLabels = {},
 ): { line: string; groups: string[] } | null => {
   if (run === null || run.status !== 'done' || isRunStale(run, canvasHash, liveHash)) return null;
   return {
     line: `Dry run: ${formatCount(changedFileCount(run))} file(s) change outcome.`,
-    groups: run.changes.slice(0, 3).map(changeGroupLabel),
+    groups: run.changes.slice(0, 3).map((group) => changeGroupLabel(group, labels)),
   };
+};
+
+/**
+ * Why a half of a file's comparison has no route to show, or null when its
+ * route says it all. A walk that threw has no steps, and a failed walk's steps
+ * stop without saying why; either way the reason lives on the outcome.
+ */
+export const walkFailure = (walk: DryRunWalk | null, outcome: DryRunOutcome): string | null => {
+  if (outcome.kind === 'fail') return outcome.detail;
+  return walk === null ? 'Walk failed' : null;
 };

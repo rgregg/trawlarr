@@ -10,6 +10,7 @@ import {
   progressText,
   publishDryRunSummary,
   routeText,
+  walkFailure,
   type DryRunChangeGroup,
   type DryRunRun,
   type DryRunWalk,
@@ -29,6 +30,12 @@ describe('outcomeLabel', () => {
       'Stops at checkVideoCodec-1',
     );
   });
+
+  it('names the node an incomplete walk stops at by its label', () => {
+    expect(
+      outcomeLabel({ kind: 'incomplete', detail: 'node-7' }, { 'node-7': 'Custom arguments' }),
+    ).toBe('Stops at Custom arguments');
+  });
 });
 
 describe('countLabel', () => {
@@ -40,6 +47,12 @@ describe('countLabel', () => {
     expect(countLabel('hold:Needs review')).toBe('Hold: Needs review');
     expect(countLabel('fail')).toBe('Fail');
     expect(countLabel('incomplete:begin-command-1')).toBe('Stops at begin-command-1');
+  });
+
+  it('names an incomplete key’s node by its label', () => {
+    expect(countLabel('incomplete:node-7', { 'node-7': 'Custom arguments' })).toBe(
+      'Stops at Custom arguments',
+    );
   });
 });
 
@@ -74,6 +87,12 @@ describe('orderedCounts', () => {
   it('carries a label that agrees with countLabel', () => {
     const [entry] = orderedCounts({ 'change:video': 5 });
     expect(entry).toEqual({ key: 'change:video', label: 'Re-encode video', count: 5 });
+  });
+
+  it('labels incomplete counts with node names', () => {
+    expect(orderedCounts({ 'incomplete:node-7': 2 }, { 'node-7': 'Custom arguments' })).toEqual([
+      { key: 'incomplete:node-7', label: 'Stops at Custom arguments', count: 2 },
+    ]);
   });
 });
 
@@ -151,7 +170,6 @@ const doneRun = (changes: DryRunChangeGroup[], overrides: Partial<DryRunRun> = {
   publishedHash: 'pub-1',
   counts: {},
   changes,
-  files: [],
   ...overrides,
 });
 
@@ -174,6 +192,9 @@ describe('formatting', () => {
         files: filesOf(1),
       }),
     ).toBe('1 · Re-encode video → Hold: Check it');
+    expect(
+      changeGroupLabel(group(3, { kind: 'incomplete', detail: 'node-7' }), { 'node-7': 'Tagger' }),
+    ).toBe('3 · No change → Stops at Tagger');
   });
 
   it('counts every file across every change group', () => {
@@ -214,5 +235,34 @@ describe('publishDryRunSummary', () => {
     expect(publishDryRunSummary(doneRun([]), 'def-2', 'pub-1')).toBeNull();
     expect(publishDryRunSummary(doneRun([]), 'def-1', 'pub-2')).toBeNull();
     expect(publishDryRunSummary(doneRun([]), null, 'pub-1')).toBeNull();
+  });
+});
+
+describe('walkFailure', () => {
+  const walk: DryRunWalk = { steps: [], plannedCommands: [], partialWalkWarning: null };
+
+  it('gives the reason for a walk that threw', () => {
+    expect(walkFailure(null, { kind: 'fail', detail: 'No probe for this file.' })).toBe(
+      'No probe for this file.',
+    );
+  });
+
+  it('gives the reason for a walk that ran and failed', () => {
+    expect(walkFailure(walk, { kind: 'fail', detail: 'ffprobe timed out' })).toBe(
+      'ffprobe timed out',
+    );
+  });
+
+  it('says nothing when the route tells the story', () => {
+    expect(walkFailure(walk, { kind: 'change', detail: 'video' })).toBeNull();
+  });
+});
+
+describe('publishDryRunSummary labels', () => {
+  it('names nodes in its groups', () => {
+    const run = doneRun([group(4, { kind: 'incomplete', detail: 'node-7' })]);
+    expect(publishDryRunSummary(run, 'def-1', 'pub-1', { 'node-7': 'Tagger' })?.groups).toEqual([
+      '4 · No change → Stops at Tagger',
+    ]);
   });
 });

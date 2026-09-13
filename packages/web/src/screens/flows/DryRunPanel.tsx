@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useRef, useState } from 'react';
 import { ApiClientError, type ApiClient } from '../../api/client.js';
 import { describeFailure } from '../config/library-form-model.js';
 import {
@@ -8,9 +8,13 @@ import {
   orderedCounts,
   progressText,
   routeText,
+  walkFailure,
+  type DryRunChangeGroup,
   type DryRunFileDetail,
+  type DryRunOutcome,
   type DryRunRun,
   type DryRunWalk,
+  type NodeLabels,
 } from './dry-run-model.js';
 
 const POLL_MS = 1000;
@@ -21,7 +25,7 @@ interface DryRunPanelProps {
   runId: string;
   canvasHash: string | null;
   liveHash: string;
-  labels: Record<string, string>;
+  labels: NodeLabels;
   onRun: (run: DryRunRun) => void;
   onClose: () => void;
 }
@@ -30,17 +34,21 @@ interface DryRunPanelProps {
 function Walk({
   name,
   walk,
+  outcome,
   labels,
 }: {
   name: string;
   walk: DryRunWalk | null;
-  labels: Record<string, string>;
+  outcome: DryRunOutcome;
+  labels: NodeLabels;
 }): JSX.Element {
+  const failure = walkFailure(walk, outcome);
   return (
     <div className="dry-run-walk">
       <p>
-        <strong>{name}:</strong> {walk === null ? 'Walk failed' : routeText(walk, labels)}
+        <strong>{name}:</strong> {walk === null ? failure : routeText(walk, labels)}
       </p>
+      {walk !== null && failure !== null && <p className="failure">{failure}</p>}
       {walk?.plannedCommands.map((command, index) => (
         <pre key={index}>{command.join(' ')}</pre>
       ))}
@@ -48,6 +56,9 @@ function Walk({
     </div>
   );
 }
+
+const groupKey = (group: DryRunChangeGroup): string =>
+  `${JSON.stringify(group.from)}→${JSON.stringify(group.to)}`;
 
 /**
  * The library dry run of the canvas, beside the published flow.
@@ -57,7 +68,7 @@ function Walk({
  * when a new run replaces this one — a leftover poll against a replaced run
  * would hand the editor an old run's numbers as the latest.
  */
-export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
+export const DryRunPanel = memo(function DryRunPanel(props: DryRunPanelProps): JSX.Element {
   const { client, flowId, runId } = props;
   const [run, setRun] = useState<DryRunRun | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -65,6 +76,9 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<DryRunFileDetail | null>(null);
   const [detailFailure, setDetailFailure] = useState<string | null>(null);
+  // A closed group renders no file rows: a library can put thousands in one
+  // group, and every canvas edit re-renders this panel.
+  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
   // Through a ref so a new callback identity each editor render does not
   // restart the poll (and refetch) on every keystroke in the canvas.
   const onRun = useRef(props.onRun);
@@ -137,13 +151,36 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
     );
   };
 
-  const close = (): void => {
-    // Closing a walking run stops it on the daemon too: nobody is left to
-    // read the result, and it would keep probing the library for nothing.
-    if (run?.status === 'running')
-      void client.del(`/flows/${flowId}/dry-runs/${runId}`).catch(() => undefined);
-    props.onClose();
-  };
+  // Leaving the run — Close, a newer run replacing this panel, or leaving the
+  // editor — deletes it on the daemon, whatever its last known status: a
+  // walking run would keep probing the library for nobody (and the first poll
+  // may not have answered yet), and a finished one is only memory by now; the
+  // Publish dialog keeps its own copy. A replaced run is already gone there,
+  // so that DELETE's 404 is expected.
+  const mounted = useRef(0);
+  useEffect(() => {
+    mounted.current += 1;
+    return () => {
+      mounted.current -= 1;
+      // Deferred a tick: StrictMode rehearses an unmount on every mount in
+      // development, and a DELETE sent from that rehearsal would cancel the
+      // run the panel is about to show.
+      window.setTimeout(() => {
+        if (mounted.current === 0) {
+          void client.del(`/flows/${flowId}/dry-runs/${runId}`).catch(() => undefined);
+        }
+      }, 0);
+    };
+  }, [client, flowId, runId]);
+
+  const toggleGroup = (key: string, open: boolean): void =>
+    setOpenGroups((current) => {
+      if (current.has(key) === open) return current;
+      const next = new Set(current);
+      if (open) next.add(key);
+      else next.delete(key);
+      return next;
+    });
 
   const stale = run !== null && isRunStale(run, props.canvasHash, props.liveHash);
 
@@ -168,7 +205,7 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
               Cancel
             </button>
           )}
-          <button type="button" onClick={close}>
+          <button type="button" onClick={props.onClose}>
             Close
           </button>
         </div>
@@ -191,7 +228,7 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
       {run?.status === 'done' && (
         <>
           <ul className="dry-run-counts">
-            {orderedCounts(run.counts).map((entry) => (
+            {orderedCounts(run.counts, props.labels).map((entry) => (
               <li key={entry.key}>
                 <span>{entry.label}</span>
                 <strong>{formatCount(entry.count)}</strong>
@@ -203,45 +240,56 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
             <p className="detail">Same outcome as published for every file.</p>
           ) : (
             run.changes.map((group) => (
-              <details key={`${JSON.stringify(group.from)}→${JSON.stringify(group.to)}`}>
-                <summary>{changeGroupLabel(group)}</summary>
-                <ul className="dry-run-files">
-                  {group.files.map((file) => (
-                    <Fragment key={file.fileId}>
-                      <li>
-                        <button
-                          type="button"
-                          title={file.path}
-                          aria-pressed={selected === file.fileId}
-                          aria-expanded={selected === file.fileId}
-                          onClick={() => setSelected(file.fileId)}
-                        >
-                          {file.path}
-                        </button>
-                      </li>
-                      {selected === file.fileId && (
-                        <li className="dry-run-detail" ref={detailBox}>
-                          {detailFailure !== null ? (
-                            <p role="alert" className="failure">
-                              {detailFailure}
-                            </p>
-                          ) : detail === null ? (
-                            <p aria-busy="true">Loading…</p>
-                          ) : (
-                            <>
-                              <Walk name="Canvas" walk={detail.canvas} labels={props.labels} />
-                              <Walk
-                                name="Published"
-                                walk={detail.published}
-                                labels={props.labels}
-                              />
-                            </>
-                          )}
+              <details
+                key={groupKey(group)}
+                onToggle={(event) => toggleGroup(groupKey(group), event.currentTarget.open)}
+              >
+                <summary>{changeGroupLabel(group, props.labels)}</summary>
+                {openGroups.has(groupKey(group)) && (
+                  <ul className="dry-run-files">
+                    {group.files.map((file) => (
+                      <Fragment key={file.fileId}>
+                        <li>
+                          <button
+                            type="button"
+                            title={file.path}
+                            aria-pressed={selected === file.fileId}
+                            aria-expanded={selected === file.fileId}
+                            onClick={() => setSelected(file.fileId)}
+                          >
+                            {file.path}
+                          </button>
                         </li>
-                      )}
-                    </Fragment>
-                  ))}
-                </ul>
+                        {selected === file.fileId && (
+                          <li className="dry-run-detail" ref={detailBox}>
+                            {detailFailure !== null ? (
+                              <p role="alert" className="failure">
+                                {detailFailure}
+                              </p>
+                            ) : detail === null ? (
+                              <p aria-busy="true">Loading…</p>
+                            ) : (
+                              <>
+                                <Walk
+                                  name="Canvas"
+                                  walk={detail.canvas}
+                                  outcome={detail.outcome}
+                                  labels={props.labels}
+                                />
+                                <Walk
+                                  name="Published"
+                                  walk={detail.published}
+                                  outcome={detail.publishedOutcome}
+                                  labels={props.labels}
+                                />
+                              </>
+                            )}
+                          </li>
+                        )}
+                      </Fragment>
+                    ))}
+                  </ul>
+                )}
               </details>
             ))
           )}
@@ -253,4 +301,4 @@ export function DryRunPanel(props: DryRunPanelProps): JSX.Element {
       </p>
     </section>
   );
-}
+});

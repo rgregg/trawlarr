@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { FlowDefinition } from '@trawlarr/core';
 import { ApiClientError, type ApiClient } from '../../api/client.js';
 import { Link } from '../../shell/Link.js';
@@ -6,7 +6,7 @@ import { useNavigationGuard } from '../../shell/useRoute.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { DryRunPanel } from './DryRunPanel.js';
 import { FlowCanvas } from './FlowCanvas.js';
-import { publishDryRunSummary, type DryRunRun } from './dry-run-model.js';
+import { publishDryRunSummary, type DryRunRun, type NodeLabels } from './dry-run-model.js';
 import { nodeLabels, type EditorPlugin, type ValidationProblem } from './flow-canvas-model.js';
 import { hasUnsavedLayout, layoutStoreFor, saveFlowLayout } from './flow-layout-model.js';
 import type { FlowFieldCatalogue } from './plugin-input-model.js';
@@ -128,6 +128,7 @@ function PublishDialog({
   fromHash,
   toHash,
   dryRun,
+  labels,
   note,
   busy,
   canPublish,
@@ -140,6 +141,7 @@ function PublishDialog({
   toHash: string | null;
   /** The latest finished dry run; shown only while it still describes this publish. */
   dryRun: DryRunRun | null;
+  labels: NodeLabels;
   note: string;
   busy: boolean;
   canPublish: boolean;
@@ -153,7 +155,8 @@ function PublishDialog({
     element?.showModal();
     return () => element?.close();
   }, []);
-  const dryRunSummary = fromHash === null ? null : publishDryRunSummary(dryRun, toHash, fromHash);
+  const dryRunSummary =
+    fromHash === null ? null : publishDryRunSummary(dryRun, toHash, fromHash, labels);
   return (
     <dialog
       className="editor-publish-dialog"
@@ -256,6 +259,16 @@ const Editor = (
   const [canvasKey, setCanvasKey] = useState(0);
   const [dryRunId, setDryRunId] = useState<string | null>(null);
   const [lastDoneRun, setLastDoneRun] = useState<DryRunRun | null>(null);
+  // Stable across unrelated editor renders, so the memoised dry-run panel
+  // does not re-render a finished run's file lists on every canvas keystroke.
+  const labels = useMemo(
+    () => nodeLabels(definition, props.plugins, layoutState.layout),
+    [definition, props.plugins, layoutState.layout],
+  );
+  const onDryRun = useCallback((run: DryRunRun) => {
+    if (run.status === 'done') setLastDoneRun(run);
+  }, []);
+  const closeDryRun = useCallback(() => setDryRunId(null), []);
   const key = JSON.stringify(definition);
   const dirty = hasDefinitionChanges(definition, saved);
   const stale = isDraftStale(baseHash, liveHash);
@@ -549,6 +562,7 @@ const Editor = (
           fromHash={liveHash}
           toHash={hash}
           dryRun={lastDoneRun}
+          labels={labels}
           note={note}
           busy={busy}
           canPublish={valid && !stale}
@@ -567,11 +581,9 @@ const Editor = (
           runId={dryRunId}
           canvasHash={hash}
           liveHash={liveHash}
-          labels={nodeLabels(definition, props.plugins, layoutState.layout)}
-          onRun={(run) => {
-            if (run.status === 'done') setLastDoneRun(run);
-          }}
-          onClose={() => setDryRunId(null)}
+          labels={labels}
+          onRun={onDryRun}
+          onClose={closeDryRun}
         />
       )}
       <FlowCanvas
