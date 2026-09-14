@@ -69,6 +69,17 @@ export interface AuthSettings {
   oidcDisplayName: string;
 }
 
+/**
+ * A remote lease's grace period: how long a node may go quiet before its
+ * claim is released (see `@trawlarr/core`'s `leaseOnDisconnect`). Floored at
+ * five minutes -- below that, an ordinary Wi-Fi blip on a node mid-transcode
+ * would release a file that is still being encoded perfectly well, which is
+ * the exact two-workers-on-one-file hazard leases exist to prevent.
+ */
+export interface NodesSettings {
+  leaseGraceMs: number;
+}
+
 export interface SettingsRepo {
   getDaemon(): DaemonSettings;
   setDaemon(patch: Partial<DaemonSettings>): void;
@@ -82,6 +93,8 @@ export interface SettingsRepo {
   setSchedule(config: ScheduleConfig): void;
   getAuth(): AuthSettings;
   setAuth(patch: Partial<AuthSettings>): void;
+  getNodes(): NodesSettings;
+  setNodes(value: NodesSettings): void;
   isSet(key: string): boolean;
 }
 
@@ -106,7 +119,11 @@ const SETTING_KEYS = {
   hardware: 'hardware',
   schedule: 'schedule',
   auth: 'auth',
+  nodes: 'nodes',
 } as const;
+
+/** Five minutes: see `NodesSettings`. */
+export const MIN_LEASE_GRACE_MS = 300_000;
 
 const DEFAULT_DAEMON: Omit<DaemonSettings, 'apiKey'> = { bind: '127.0.0.1', port: 8265 };
 const DEFAULT_BINARIES: BinarySettings = { ffmpeg: 'ffmpeg', ffprobe: 'ffprobe' };
@@ -127,6 +144,7 @@ const DEFAULT_AUTH: Omit<AuthSettings, 'sessionSecret'> = {
   oidcScopes: 'openid profile email',
   oidcDisplayName: 'Single Sign-On',
 };
+const DEFAULT_NODES: NodesSettings = { leaseGraceMs: 3_600_000 };
 
 const requireWholeNumber = (value: unknown, label: string, min: number, max: number): number => {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
@@ -152,6 +170,15 @@ const requireBoolean = (value: unknown, label: string): boolean => {
 };
 
 const HARDWARE_TYPE_SET: ReadonlySet<string> = new Set(HARDWARE_TYPES);
+
+const validateNodes = (value: { leaseGraceMs: unknown }): NodesSettings => ({
+  leaseGraceMs: requireWholeNumber(
+    value.leaseGraceMs,
+    'nodes.leaseGraceMs',
+    MIN_LEASE_GRACE_MS,
+    Number.MAX_SAFE_INTEGER,
+  ),
+});
 
 const validateDaemon = (value: {
   bind: unknown;
@@ -448,6 +475,16 @@ export const createSettingsRepo = (input: {
     writeField(SETTING_KEYS.schedule, 'windows', config.windows);
   };
 
+  const getNodes = (): NodesSettings =>
+    validateNodes({
+      leaseGraceMs: readField(SETTING_KEYS.nodes, 'leaseGraceMs') ?? DEFAULT_NODES.leaseGraceMs,
+    });
+
+  const setNodes = (value: NodesSettings): void => {
+    const next = validateNodes(value);
+    writeField(SETTING_KEYS.nodes, 'leaseGraceMs', next.leaseGraceMs);
+  };
+
   return {
     getDaemon,
     setDaemon,
@@ -461,6 +498,8 @@ export const createSettingsRepo = (input: {
     setSchedule,
     getAuth,
     setAuth,
+    getNodes,
+    setNodes,
     isSet,
   };
 };

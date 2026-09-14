@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { leaseOnClaim } from '@trawlarr/core';
 import { openDatabase, type Db } from './connection.js';
 import { migrate } from './migrate.js';
 import { createFlowRepo } from './flow-repo.js';
 import { createLibraryRepo } from './library-repo.js';
 import { createMediaFileRepo } from './media-file-repo.js';
+import { createSettingsRepo } from './settings-repo.js';
+import { ensureLocalNode } from '../api/routes/nodes.js';
 import { createJobRepo, MAX_LOG_EXCERPT_CHARS, type JobRepo } from './job-repo.js';
 
 const NOW = 1_700_000_000_000;
@@ -183,5 +186,87 @@ describe('createJobRepo', () => {
       });
     }
     expect(repo.getSteps(jobId).map((s) => s.seq)).toEqual([1, 2, 3]);
+  });
+
+  describe('remote leases', () => {
+    beforeEach(() => {
+      // start({ nodeId }) has an FK on node(id); the local node row is the
+      // simplest one that always exists.
+      ensureLocalNode({ db, settings: createSettingsRepo({ db }), nowMs: () => NOW });
+    });
+
+    it('start writes node_id', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW, nodeId: 'local' });
+      const row = db.prepare(`SELECT node_id FROM job WHERE id = ?`).get(jobId) as {
+        node_id: string | null;
+      };
+      expect(row.node_id).toBe('local');
+    });
+
+    it('setRemote then listLeased returns the row with its lease, payload and path map', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW, nodeId: 'local' });
+      repo.setRemote({
+        jobId,
+        nodeId: 'local',
+        lease: leaseOnClaim(),
+        payloadJson: '{"a":1}',
+        pathMapJson: '[{"serverPath":"/media","nodePath":"/mnt"}]',
+      });
+      const leased = repo.listLeased();
+      expect(leased).toHaveLength(1);
+      expect(leased[0]).toEqual({
+        jobId,
+        fileId,
+        nodeId: 'local',
+        lease: { state: 'connected', expiresAtMs: null },
+        payloadJson: '{"a":1}',
+        pathMapJson: '[{"serverPath":"/media","nodePath":"/mnt"}]',
+      });
+    });
+
+    it('setLease to grace with an expiry persists both columns', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW, nodeId: 'local' });
+      repo.setRemote({
+        jobId,
+        nodeId: 'local',
+        lease: leaseOnClaim(),
+        payloadJson: '{}',
+        pathMapJson: '[]',
+      });
+      repo.setLease({ jobId, lease: { state: 'grace', expiresAtMs: NOW + 60_000 } });
+      const row = db
+        .prepare(`SELECT lease_state, lease_expires_at FROM job WHERE id = ?`)
+        .get(jobId) as { lease_state: string | null; lease_expires_at: number | null };
+      expect(row.lease_state).toBe('grace');
+      expect(row.lease_expires_at).toBe(NOW + 60_000);
+    });
+
+    it('finish removes the job from listLeased', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW, nodeId: 'local' });
+      repo.setRemote({
+        jobId,
+        nodeId: 'local',
+        lease: leaseOnClaim(),
+        payloadJson: '{}',
+        pathMapJson: '[]',
+      });
+      repo.finish({ jobId, state: 'succeeded', outcome: 'end-of-flow', nowMs: NOW + 10 });
+      expect(repo.listLeased()).toEqual([]);
+    });
+  });
+
+  describe('appendOutcome', () => {
+    it('sets the outcome when it was null', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW });
+      repo.appendOutcome({ jobId, text: 'first line' });
+      expect(repo.getById(jobId)?.outcome).toBe('first line');
+    });
+
+    it('appends a newline plus the text to an existing outcome', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW });
+      repo.appendOutcome({ jobId, text: 'first line' });
+      repo.appendOutcome({ jobId, text: 'second line' });
+      expect(repo.getById(jobId)?.outcome).toBe('first line\nsecond line');
+    });
   });
 });

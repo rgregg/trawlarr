@@ -120,4 +120,12 @@ describe('settings repo', () => {
       }),
     ).not.toThrow();
   });
+
+  it('nodes settings default to a one-hour lease grace and validate the floor', () => {
+    const repo = createSettingsRepo({ db: freshDb() });
+    expect(repo.getNodes()).toEqual({ leaseGraceMs: 3_600_000 });
+    expect(() => repo.setNodes({ leaseGraceMs: 299_999 })).toThrow(SettingValidationError);
+    repo.setNodes({ leaseGraceMs: 300_000 });
+    expect(repo.getNodes()).toEqual({ leaseGraceMs: 300_000 });
+  });
 });
