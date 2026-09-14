@@ -384,7 +384,7 @@ const PluginsTab = (props: { client: ApiClient }): JSX.Element => {
 /* --- system ----------------------------------------------------------------
    Schedule, trash retention/purge, and a read-only hardware/ffmpeg block.
    `GET /system/health` (used for a container's liveness probe) carries no
-   hardware field; the hardware findings this block shows come from
+   hardware field; the hardware problems this block shows come from
    `GET /system/version`, which is where the startup preflight actually
    records them. */
 
@@ -813,7 +813,7 @@ const TrashSection = (props: { client: ApiClient }): JSX.Element => {
 };
 
 /**
- * One entry of `GET /system/version`'s `hardware`, field for field as the
+ * One entry of `GET /system/version`'s `hardwareProblems`, field for field as the
  * daemon reports it — `HardwareFinding` in
  * `packages/server/src/daemon/hardware-preflight.ts`, carried through by
  * `routes/system.ts`. THERE IS NO `type` AND NO `reason` ON THE WIRE: this
@@ -838,7 +838,8 @@ interface VersionResource {
   version: string;
   commit: string | null;
   binaries: Record<string, { path: string; resolved: boolean }>;
-  hardware: HardwareFinding[];
+  hardwareDeclared: string[];
+  hardwareProblems: HardwareFinding[];
 }
 
 const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
@@ -902,11 +903,12 @@ const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
           </li>
         ))}
       </ul>
-      {version.hardware.length === 0 ? (
-        <p className="detail">No hardware findings — every declared type checked out.</p>
+      <p className="detail">Declared: {version.hardwareDeclared.join(', ')}</p>
+      {version.hardwareProblems.length === 0 ? (
+        <p className="detail">No hardware problems — every declared type checked out.</p>
       ) : (
         <ul className="problems">
-          {version.hardware.map((finding) => (
+          {version.hardwareProblems.map((finding) => (
             <li key={finding.hardwareType}>
               <strong>{finding.hardwareType}</strong> — this node declares {finding.hardwareType},
               but the configured ffmpeg could not be shown to encode with{' '}

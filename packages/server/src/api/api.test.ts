@@ -2716,13 +2716,26 @@ describe('system', () => {
     expect(body.commit).toBe('40e7cc102c218506a6867cb6e50e246899d288d6');
   });
 
-  it('reports no hardware findings when the preflight found nothing to report', async () => {
+  it('reports no hardware problems when the preflight found nothing to report', async () => {
     // Empty, not absent: a client checking a deployment reads this array, and
     // a missing key would read the same as "nothing wrong" on a build that
     // never checked at all.
     const { body } = await api('GET', '/system/version');
 
-    expect(body.hardware).toEqual([]);
+    expect(body.hardwareProblems).toEqual([]);
+  });
+
+  it('reports the declared hardware beside the problems, so an empty list is not read as "none found"', async () => {
+    // `hardware: []` alone read as "no GPU detected" on a host whose NVENC
+    // declaration had just passed its probe. The declaration next to it says
+    // what the empty problem list is empty OF.
+    settings.setHardware({ available: ['cpu', 'nvenc'], caps: { nvenc: 2 } });
+
+    const { body } = await api('GET', '/system/version');
+
+    expect(body.hardwareDeclared).toEqual(['cpu', 'nvenc']);
+    expect(body.hardwareProblems).toEqual([]);
+    expect(body).not.toHaveProperty('hardware');
   });
 
   it('reports what the hardware preflight found, verbatim', async () => {
@@ -2749,7 +2762,7 @@ describe('system', () => {
     const { status, body } = await api('GET', '/system/version');
 
     expect(status).toBe(200);
-    expect(body.hardware).toEqual([
+    expect(body.hardwareProblems).toEqual([
       { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
     ]);
     // The declaration itself is untouched by the finding — reporting is not

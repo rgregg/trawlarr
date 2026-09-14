@@ -264,7 +264,7 @@ scrolls away. The same finding is on the API, where an **empty array is the
 healthy answer** — this is the thing to assert, not to eyeball:
 
 ```bash
-curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardware
+curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardwareProblems
 []
 ```
 
@@ -355,7 +355,7 @@ There is no warning line above, and the API agrees — an empty array is the
 healthy answer:
 
 ```
-$ curl -fsS -H "X-Api-Key: $KEY" http://localhost:8266/api/v1/system/version | jq .hardware
+$ curl -fsS -H "X-Api-Key: $KEY" http://localhost:8266/api/v1/system/version | jq .hardwareProblems
 []
 ```
 
