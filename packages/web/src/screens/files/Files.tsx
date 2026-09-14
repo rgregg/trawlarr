@@ -9,6 +9,7 @@ import {
   fileStateLabel,
   filtersToQuery,
   formatBytes,
+  formatDuration,
   formatUpdated,
   libraryOptions,
   sortRows,
@@ -24,18 +25,18 @@ import {
  * WINDOWING NEEDS AN EXACT NUMBER, not an approximate one: it drives both
  * spacer divs and the index the scroll position maps to, so a row height
  * that is wrong by 3x makes the scrollbar wrong by 3x over 4,625 rows and
- * skips rows as you drag. Wide, `.file-row` is a five-column grid one line
- * tall. Below `48rem` the sheet turns it into a stacked card — six lines,
+ * skips rows as you drag. Wide, `.file-row` is a seven-column grid one line
+ * tall. Below `48rem` the sheet turns it into a stacked card — seven lines,
  * each with its own `::before` label — and the sheet pins that card to an
  * EXACT `height` (not a `min-height`) precisely so this constant can be
  * exact too; the name is ellipsised on one line there for the same reason.
  *
  * The alternative considered and rejected: dropping windowing below `48rem`.
  * The list is not short there — it is the same 4,625 rows — and the phone is
- * the device least able to hold 4,625 rows of six elements each in the DOM.
+ * the device least able to hold 4,625 rows of seven elements each in the DOM.
  */
 const ROW_HEIGHT_PX = 36;
-const NARROW_ROW_HEIGHT_PX = 152;
+const NARROW_ROW_HEIGHT_PX = 172;
 const PAGE_SIZE = 200;
 
 // `ALL_STATES` lives in `@trawlarr/server`, which this package does not (and
@@ -73,6 +74,7 @@ const FileRowLine = (props: {
       </span>
       <span className="file-codec">{row.video}</span>
       <span className="file-codec">{row.audio}</span>
+      <span className="file-duration">{formatDuration(row.durationMs)}</span>
       <span className="file-size">{formatBytes(row.sizeBytes)}</span>
       <span className="file-updated">{formatUpdated(row.updatedAt)}</span>
     </Link>
@@ -359,6 +361,7 @@ export const Files = (props: {
       {sortButton('state', 'State')}
       <span className="file-head-static">Video</span>
       <span className="file-head-static">Audio</span>
+      {sortButton('duration', 'Duration')}
       {sortButton('size', 'Size')}
       {sortButton('updated', 'Updated')}
     </div>

@@ -8,6 +8,7 @@ const file = (id: string, state: string, sizeBytes: number) => ({
   state,
   videoCodec: 'hevc',
   audioCodec: 'aac',
+  durationMs: 1_000,
   sizeBytes,
   updatedAt: 1,
 });

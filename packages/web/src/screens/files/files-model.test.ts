@@ -3,6 +3,7 @@ import {
   fileStateLabel,
   filtersToQuery,
   formatBytes,
+  formatDuration,
   formatUpdated,
   libraryOptions,
   sortRows,
@@ -16,6 +17,7 @@ const apiFile = {
   state: 'good',
   videoCodec: 'hevc',
   audioCodec: 'aac,eac3',
+  durationMs: 3_231_457,
   sizeBytes: 1_900_000_000,
   updatedAt: 1_000,
 };
@@ -79,6 +81,16 @@ describe('sortRows', () => {
     expect(sortRows(rows, 'name', 'desc').map((r) => r.id)).toEqual(['c', 'b', 'a']);
   });
 
+  it('sorts by duration with unprobed files last in either direction', () => {
+    const timed = toFileRows([
+      { ...apiFile, id: 'long', path: '/x/long.mkv', durationMs: 7_200_000 },
+      { ...apiFile, id: 'none', path: '/x/none.mkv', durationMs: null },
+      { ...apiFile, id: 'short', path: '/x/short.mkv', durationMs: 60_000 },
+    ]);
+    expect(sortRows(timed, 'duration', 'asc').map((r) => r.id)).toEqual(['short', 'long', 'none']);
+    expect(sortRows(timed, 'duration', 'desc').map((r) => r.id)).toEqual(['long', 'short', 'none']);
+  });
+
   it('does not mutate the array it was given', () => {
     const before = rows.map((r) => r.id);
     sortRows(rows, 'size', 'desc');
@@ -91,6 +103,20 @@ describe('formatBytes', () => {
     expect(formatBytes(0)).toBe('0 B');
     expect(formatBytes(1_900_000_000)).toBe('1.9 GB');
     expect(formatBytes(8_400_000_000_000)).toBe('8.4 TB');
+  });
+});
+
+describe('formatDuration', () => {
+  it('always prints hours, so a column of lengths is fixed-width', () => {
+    expect(formatDuration(3_231_457)).toBe('0:53:51');
+    expect(formatDuration(7_450_000)).toBe('2:04:10');
+    expect(formatDuration(0)).toBe('0:00:00');
+  });
+
+  it('renders an unprobed or nonsensical duration as a dash', () => {
+    expect(formatDuration(null)).toBe('—');
+    expect(formatDuration(Number.NaN)).toBe('—');
+    expect(formatDuration(-1)).toBe('—');
   });
 });
 
