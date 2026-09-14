@@ -1647,6 +1647,12 @@ describe('library dry runs', () => {
     });
     expect(done.body).not.toHaveProperty('files');
 
+    // Cancel after it finished answers with the finished run and keeps it.
+    const late = await api('POST', `/flows/${flow.id}/dry-runs/${runId}/cancel`);
+    expect(late.status).toBe(200);
+    expect(late.body).toMatchObject({ status: 'done', counts: { 'hold:Canvas.': 1 } });
+    expect((await api('GET', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(200);
+
     // Deleting a finished run frees it rather than being a no-op.
     expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(204);
     expect((await api('GET', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(404);
@@ -1672,6 +1678,7 @@ describe('library dry runs', () => {
     const { runId } = (await api('POST', `/flows/${flow.id}/dry-runs`, { definition: VALID_FLOW }))
       .body as { runId: string };
     expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(204);
+    expect((await api('POST', `/flows/${flow.id}/dry-runs/nope/cancel`)).status).toBe(404);
   });
 });
 

@@ -618,6 +618,21 @@ export const flowRoutes: Route[] = [
   },
 
   {
+    method: 'POST',
+    path: '/flows/:id/dry-runs/:runId/cancel',
+    handler: ({ params, ctx }) => {
+      const flow = requireFlow(ctx, params.id!);
+      // Not DELETE: a run can finish between the editor's last poll and the
+      // click, and DELETE drops a finished run — the panel was left on
+      // "running" with a 404. This stops a walking run and leaves a finished
+      // one readable, answering with the run either way.
+      const run = ctx.dryRuns.stop(flow.id, params.runId!);
+      if (run === null) throw new ApiError(404, 'not-found', 'No such dry run.');
+      return run;
+    },
+  },
+
+  {
     method: 'DELETE',
     path: '/flows/:id/dry-runs/:runId',
     handler: ({ params, ctx }) => {

@@ -365,6 +365,26 @@ describe('createFlowDryRunCoordinator', () => {
     expect(runs.cancel(flow.id, runId)).toBe(false);
   });
 
+  it('stop cancels a walking run and leaves a finished one readable', async () => {
+    for (const name of ['a', 'b', 'c', 'd', 'e']) seedFile({ libraryId, path: `/${name}.mkv` });
+    const slow = coordinator(
+      () => new Promise((resolve) => setTimeout(() => resolve(fakeResult({})), 5)),
+    );
+    const walking = start(slow);
+    await until(() => slow.get(flow.id, walking.runId)!.processed > 0);
+    expect(slow.stop(flow.id, walking.runId)!.status).toBe('cancelled');
+    expect(slow.stop(flow.id, 'another-run')).toBeNull();
+
+    // The race behind this method: the run finished before Cancel landed.
+    const runs = coordinator(holdB);
+    const { runId } = start(runs);
+    await until(() => runs.get(flow.id, runId)?.status === 'done');
+    const stopped = runs.stop(flow.id, runId)!;
+    expect(stopped.status).toBe('done');
+    expect(stopped.changes).toHaveLength(1);
+    expect(runs.get(flow.id, runId)).toEqual(stopped);
+  });
+
   it('forgets the run of a flow that no longer exists', async () => {
     seedFile({ libraryId, path: '/b.mkv' });
     const runs = coordinator(holdB);

@@ -72,7 +72,6 @@ export const DryRunPanel = memo(function DryRunPanel(props: DryRunPanelProps): J
   const { client, flowId, runId } = props;
   const [run, setRun] = useState<DryRunRun | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<DryRunFileDetail | null>(null);
   const [detailFailure, setDetailFailure] = useState<string | null>(null);
@@ -85,6 +84,9 @@ export const DryRunPanel = memo(function DryRunPanel(props: DryRunPanelProps): J
   onRun.current = props.onRun;
 
   const detailBox = useRef<HTMLLIElement>(null);
+  // A run never goes back to running, so a poll that was in flight when
+  // Cancel answered carries an older state and must not overwrite it.
+  const settled = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,7 +94,8 @@ export const DryRunPanel = memo(function DryRunPanel(props: DryRunPanelProps): J
     const poll = (): void => {
       void client.get<DryRunRun>(`/flows/${flowId}/dry-runs/${runId}`).then(
         (next) => {
-          if (cancelled) return;
+          if (cancelled || settled.current) return;
+          settled.current = next.status !== 'running';
           setRun(next);
           setFailure(null);
           onRun.current(next);
@@ -116,7 +119,7 @@ export const DryRunPanel = memo(function DryRunPanel(props: DryRunPanelProps): J
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [client, flowId, runId, refresh]);
+  }, [client, flowId, runId]);
 
   useEffect(() => {
     if (selected === null) return;
@@ -144,9 +147,16 @@ export const DryRunPanel = memo(function DryRunPanel(props: DryRunPanelProps): J
     }
   }, [detail, detailFailure]);
 
+  // The answer is the run as it now stands: `cancelled`, or `done` when it
+  // finished before the click landed, in which case its results are shown.
   const cancel = (): void => {
-    void client.del(`/flows/${flowId}/dry-runs/${runId}`).then(
-      () => setRefresh((value) => value + 1),
+    void client.post<DryRunRun>(`/flows/${flowId}/dry-runs/${runId}/cancel`).then(
+      (next) => {
+        settled.current = next.status !== 'running';
+        setRun(next);
+        setFailure(null);
+        onRun.current(next);
+      },
       (error: unknown) => setFailure(describeFailure(error).message),
     );
   };
