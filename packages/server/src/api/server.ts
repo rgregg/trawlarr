@@ -12,6 +12,8 @@ import { SCHEMA_VERSION } from '../db/migrate.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
+import { createNoopNodeHub, type NodeHub } from '../nodes/hub.js';
+import type { NodeHttpHandler } from '../nodes/node-http.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
 import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from './session.js';
 import { createAccountRepo, type AccountRepo } from '../db/account-repo.js';
@@ -109,6 +111,16 @@ export interface CreateApiHandlerOptions {
    * is how a test asks for a daemon that serves the API and nothing else.
    */
   webRoot?: string | null;
+  /**
+   * The node-facing surface (enrollment, authenticated bundle downloads),
+   * awaited BEFORE the ordinary router and its operator auth: those
+   * endpoints authenticate with a node's own secret, never the daemon's API
+   * key or a session cookie, and `nodeHttp` resolves `false` and writes
+   * nothing for every path that isn't one of its own. Defaults to a handler
+   * that resolves `false` unconditionally, so a context built without one
+   * (chiefly tests of the rest of this file) behaves exactly as before.
+   */
+  nodeHttp?: NodeHttpHandler;
 }
 
 /**
@@ -195,9 +207,16 @@ export const createApiHandler = (
     return input.ctx.accounts.getById(accountId) !== null;
   };
 
+  const nodeHttp = options?.nodeHttp ?? (async () => false);
+
   return (req, res) => {
-    if (serveStatic(req, res)) return;
     void (async () => {
+      // Awaited FIRST: a node authenticates with its own secret, not the
+      // operator API key or session the router enforces below, so this must
+      // get first refusal on every request before anything else decides.
+      if (await nodeHttp(req, res)) return;
+      if (serveStatic(req, res)) return;
+
       const method = req.method ?? 'GET';
       const url = new URL(req.url ?? '/', 'http://localhost');
       const pathname = url.pathname;
@@ -340,6 +359,8 @@ export interface CreateApiContextInput {
   dryRuns?: FlowDryRunCoordinator;
   /** Seam for tests; production always gets the real repo built here. */
   accounts?: AccountRepo;
+  /** Seam for tests; production defaults to the no-op hub until Task 9. */
+  nodes?: NodeHub;
 }
 
 /**
@@ -382,6 +403,7 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     checkBinary: input.checkBinary,
     envApplications: input.envApplications ?? [],
     hardwareFindings: input.hardwareFindings ?? [],
+    nodes: input.nodes ?? createNoopNodeHub(),
   };
 };
 

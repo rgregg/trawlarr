@@ -33,6 +33,7 @@ import {
 import { createApiContext, createApiServer } from './server.js';
 import { createPluginLoader } from '@trawlarr/engine';
 import { dryRunFlow } from '../flow/dry-run.js';
+import { fakeNodeHub, type FakeNodeHub } from './test-doubles.js';
 
 /**
  * A data directory for the context these suites build.
@@ -178,6 +179,7 @@ let scans: FakeScans;
 let events: TrawlarrEvent[];
 let server: Server;
 let baseUrl: string;
+let nodeHub: FakeNodeHub;
 
 /**
  * A parsed JSON response body, deliberately loose. These tests assert the
@@ -272,6 +274,7 @@ beforeEach(async () => {
   const bus = createEventBus();
   events = [];
   bus.subscribe((event) => events.push(event));
+  nodeHub = fakeNodeHub();
 
   const ctx = createApiContext({
     db,
@@ -285,6 +288,7 @@ beforeEach(async () => {
     // A seam, so this suite never depends on what is installed on the
     // machine running it.
     checkBinary: async (path) => await Promise.resolve(path.includes('ffmpeg')),
+    nodes: nodeHub,
   });
 
   server = createApiServer(ctx, { onError: () => {} });
@@ -2677,6 +2681,112 @@ describe('nodes and workers', () => {
     const resumed = await api('POST', '/workers/resume');
     expect(resumed.body.paused).toBe(false);
     expect(supervisor.status().paused).toBe(false);
+  });
+});
+
+describe('node management', () => {
+  const createNode = async (name = `remote-${randomUUID().slice(0, 8)}`): Promise<ResponseBody> =>
+    (await api('POST', '/nodes', { name })).body;
+
+  it('creates a node and shows the enrollment token exactly once, in the create response', async () => {
+    const response = await api('POST', '/nodes', { name: 'edge-1' });
+
+    expect(response.status).toBe(201);
+    expect(response.body.node).toMatchObject({ name: 'edge-1', enrolled: false });
+    expect(typeof response.body.enrollToken).toBe('string');
+    expect(response.body.enrollExpiresAt).toBe(response.body.node.enrollExpiresAt);
+
+    // The listing reports the same node, unenrolled, with no secret or
+    // token anywhere in it.
+    const list = await api('GET', '/nodes');
+    const created = list.body.find((node: ResponseBody) => node.id === response.body.node.id);
+    expect(created).toMatchObject({ enrolled: false, online: false, local: false });
+    expect(JSON.stringify(created)).not.toContain(response.body.enrollToken);
+  });
+
+  it('refuses a bad path map on PUT with 400 and the repo message', async () => {
+    const node = await createNode();
+
+    const response = await api('PUT', `/nodes/${node.node.id}`, {
+      pathMap: [{ serverPath: 'not-absolute', nodePath: '/x' }],
+    });
+
+    expect(response.status).toBe(400);
+    expect(typeof response.body.error.message).toBe('string');
+    expect(response.body.error.message.length).toBeGreaterThan(0);
+  });
+
+  it('updates a node and pushes the new config to it', async () => {
+    const node = await createNode();
+
+    const response = await api('PUT', `/nodes/${node.node.id}`, { paused: true, tags: 'gpu' });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ paused: true, tags: 'gpu' });
+    expect(nodeHub.pushConfigCalls).toEqual([node.node.id]);
+  });
+
+  it('revokes a node and disconnects it through the hub', async () => {
+    const node = await createNode();
+
+    const response = await api('POST', `/nodes/${node.node.id}/revoke`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.revokedAt).toBe(NOW);
+    expect(nodeHub.disconnectCalls).toEqual([{ nodeId: node.node.id, reason: 'revoked' }]);
+  });
+
+  it('deletes a node with 204, and 409s while it has an unended job', async () => {
+    const node = await createNode();
+    const deleted = await api('DELETE', `/nodes/${node.node.id}`);
+    expect(deleted.status).toBe(204);
+    expect((await api('GET', '/nodes')).body).not.toContainEqual(
+      expect.objectContaining({ id: node.node.id }),
+    );
+
+    const busy = await createNode();
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/busy.mkv' });
+    const flow = createFlowRepo(db).create({
+      name: 'busy-flow',
+      definition: VALID_FLOW,
+      nowMs: NOW,
+    });
+    const jobId = createJobRepo(db).start({
+      fileId,
+      flowId: flow.id,
+      flowHash: flowDefinitionHash(VALID_FLOW),
+      nowMs: NOW,
+    });
+    createJobRepo(db).setRemote({
+      jobId,
+      nodeId: busy.node.id,
+      lease: { state: 'connected', expiresAtMs: null },
+      payloadJson: '{}',
+      pathMapJson: '[]',
+    });
+
+    const refused = await api('DELETE', `/nodes/${busy.node.id}`);
+    expect(refused.status).toBe(409);
+  });
+
+  it('refuses to enroll-token, revoke or delete the local node', async () => {
+    const enrollToken = await api('POST', '/nodes/local/enroll-token');
+    const revoke = await api('POST', '/nodes/local/revoke');
+    const deleted = await api('DELETE', '/nodes/local');
+
+    expect(enrollToken.status).toBe(400);
+    expect(revoke.status).toBe(400);
+    expect(deleted.status).toBe(400);
+  });
+
+  it('409s a second enroll-token request for an already-enrolled node', async () => {
+    const node = await createNode();
+    await db.prepare(`UPDATE node SET secret_hash = 'x' WHERE id = ?`).run(node.node.id);
+
+    const response = await api('POST', `/nodes/${node.node.id}/enroll-token`);
+
+    expect(response.status).toBe(409);
   });
 });
 

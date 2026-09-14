@@ -8,6 +8,7 @@ import type { Supervisor } from '../daemon/supervisor.js';
 import type { FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
+import type { NodeHub } from '../nodes/hub.js';
 
 /**
  * Everything a route handler is allowed to reach.
@@ -62,6 +63,14 @@ export interface ApiContext {
    * on what is installed on the machine running it.
    */
   checkBinary?: (path: string) => Promise<boolean>;
+  /**
+   * Remote-node connection state and control — is a node online, tell it to
+   * re-pull config, force it off. `createApiContext` defaults this to a
+   * no-op (see `nodes/hub.ts`) until Task 9 wires the real one in; a node's
+   * ROW (name, path map, enrollment) lives in `NodeRepo`, constructed per
+   * request the same way every other repo here is.
+   */
+  nodes: NodeHub;
 }
 
 export interface RouteInput {
