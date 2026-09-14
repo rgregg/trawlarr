@@ -131,7 +131,7 @@ export interface CreateNodeHubInput {
   onError?: (context: string, error: unknown) => void;
 }
 
-/** The only implementation until the daemon wires the real one (Task 9). */
+/** A hub with no nodes: what an API context built without the daemon's real hub gets. */
 export const createNoopNodeHub = (): NodeHub => ({
   attach: () => {},
   isOnline: () => false,

@@ -85,7 +85,7 @@ export interface FakeNodeHub extends NodeHub {
 /**
  * A `NodeHub` a test can both drive (mark a node online) and inspect (did
  * `PUT`/`revoke` really call through). Never used for anything but
- * assertions — production always gets `createNoopNodeHub` until Task 9.
+ * assertions — the daemon always passes the real hub (`createNodeHub`).
  */
 export const fakeNodeHub = (): FakeNodeHub => {
   const online = new Set<string>();

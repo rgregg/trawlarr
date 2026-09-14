@@ -66,7 +66,7 @@ export interface ApiContext {
   /**
    * Remote-node connection state and control — is a node online, tell it to
    * re-pull config, force it off. `createApiContext` defaults this to a
-   * no-op (see `nodes/hub.ts`) until Task 9 wires the real one in; a node's
+   * no-op (see `nodes/hub.ts`); the daemon passes the real hub. A node's
    * ROW (name, path map, enrollment) lives in `NodeRepo`, constructed per
    * request the same way every other repo here is.
    */

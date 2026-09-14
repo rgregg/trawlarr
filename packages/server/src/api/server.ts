@@ -409,7 +409,7 @@ export interface CreateApiContextInput {
   dryRuns?: FlowDryRunCoordinator;
   /** Seam for tests; production always gets the real repo built here. */
   accounts?: AccountRepo;
-  /** Seam for tests; production defaults to the no-op hub until Task 9. */
+  /** The daemon passes its real hub; a context built without one gets the no-op hub. */
   nodes?: NodeHub;
 }
 
