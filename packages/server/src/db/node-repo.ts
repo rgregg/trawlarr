@@ -204,8 +204,17 @@ export const createNodeRepo = (db: Db): NodeRepo => {
     `UPDATE node SET enroll_token_hash = ?, enroll_expires_at = ? WHERE id = ?`,
   );
 
+  // The WHERE clause repeats every condition `selectEnrollCandidates` used to
+  // pick this row, plus `enroll_expires_at > ?` again with the SAME nowMs:
+  // two concurrent `enroll()` calls for the same token both pass the SELECT
+  // and both verify the password (verifyPassword does no locking), so
+  // without this the second UPDATE would silently overwrite the first
+  // caller's secret_hash -- both callers get a `{nodeId, secret}` back, but
+  // only the second caller's secret would ever authenticate. Checking
+  // `changes` below is what lets the loser learn it lost.
   const clearEnrollAndSetSecret = db.prepare(
-    `UPDATE node SET secret_hash = ?, enroll_token_hash = NULL, enroll_expires_at = NULL WHERE id = ?`,
+    `UPDATE node SET secret_hash = ?, enroll_token_hash = NULL, enroll_expires_at = NULL
+     WHERE id = ? AND secret_hash IS NULL AND revoked_at IS NULL AND enroll_expires_at > ?`,
   );
 
   const selectEnrollCandidates = db.prepare(
@@ -277,7 +286,12 @@ export const createNodeRepo = (db: Db): NodeRepo => {
         if (await verifyPassword({ password: input.token, hash: candidate.enroll_token_hash })) {
           const secret = generateToken('tnode_');
           const secretHash = await hashPassword(secret);
-          clearEnrollAndSetSecret.run(secretHash, candidate.id);
+          const result = clearEnrollAndSetSecret.run(secretHash, candidate.id, input.nowMs);
+          // A concurrent `enroll()` for the same token could have consumed
+          // it (or a `revoke()` landed) during the two awaits above; the
+          // conditional UPDATE then matches no row, and this caller lost the
+          // race rather than the token being unknown.
+          if (result.changes === 0) return null;
           return { nodeId: candidate.id, secret };
         }
       }
@@ -290,6 +304,10 @@ export const createNodeRepo = (db: Db): NodeRepo => {
       return await verifyPassword({ password: input.secret, hash: row.secret_hash });
     },
 
+    // Throws `PathMapError` for an invalid `pathMap`, `ScheduleConfigError`
+    // for an invalid `schedule`, and `NodeRepoError` for a name conflict --
+    // three distinct error classes, deliberately not collapsed into one, so
+    // a caller (the Task 7 route) can map each to its own 400 message.
     update(id, patch) {
       const current = requireRow(id);
       const name = patch.name === undefined ? current.name : patch.name.trim();

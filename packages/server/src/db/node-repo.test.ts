@@ -40,6 +40,19 @@ describe('createNodeRepo', () => {
     expect(await repo.authenticate({ nodeId: node.id, secret: first!.secret })).toBe(true);
   });
 
+  it('two concurrent enrolls with the same token yield exactly one usable secret', async () => {
+    const { enrollToken, node } = await repo.create({ name: 'n', nowMs: 0 });
+    const [first, second] = await Promise.all([
+      repo.enroll({ token: enrollToken, nowMs: 1 }),
+      repo.enroll({ token: enrollToken, nowMs: 1 }),
+    ]);
+    const results = [first, second].filter((r) => r !== null);
+    expect(results).toHaveLength(1);
+    const winner = results[0]!;
+    expect(winner.nodeId).toBe(node.id);
+    expect(await repo.authenticate({ nodeId: node.id, secret: winner.secret })).toBe(true);
+  });
+
   it('an expired token does not enroll', async () => {
     const { enrollToken } = await repo.create({ name: 'n', nowMs: 0 });
     expect(await repo.enroll({ token: enrollToken, nowMs: 24 * 3_600_000 })).toBeNull();
