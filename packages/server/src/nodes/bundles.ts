@@ -36,19 +36,38 @@ export class BundleLimitError extends Error {
   }
 }
 
+/**
+ * A directory or file could not be listed/stat'd for a reason other than
+ * "it vanished between readdir and lstat" (that one race is tolerated —
+ * see `walkTree`). Thrown rather than swallowed: a bundle that silently
+ * dropped an unreadable subtree would ship a node incomplete code with no
+ * sign anything was missing, which is worse than failing the sync/job that
+ * asked for the bundle.
+ */
+export class BundleWalkError extends Error {
+  constructor(path: string, code: string) {
+    super(`Cannot read "${path}" while building a bundle (${code}).`);
+    this.name = 'BundleWalkError';
+  }
+}
+
 const DEFAULT_MAX_FILES = 20_000;
 const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
 
+const errorCode = (error: unknown): string =>
+  typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : 'UNKNOWN';
+
 /**
- * Byte-order comparison, not `localeCompare`: the manifest's canonical form
- * has to be identical on every host regardless of locale, and a locale-aware
- * sort can reorder strings differently between two otherwise-identical
- * builds of the same code.
+ * True UTF-8 byte-order comparison via `Buffer.compare`, not `<`/`>` on the
+ * JS strings (which compares UTF-16 code units) and not `localeCompare`
+ * (locale-dependent): the manifest's canonical form has to be identical on
+ * every host regardless of locale or string encoding quirks, since it feeds
+ * a hash two builds of the same tree must agree on byte-for-byte.
  */
-const compareRelPath = (a: string, b: string): number => {
-  if (a === b) return 0;
-  return a < b ? -1 : 1;
-};
+const compareRelPath = (a: string, b: string): number =>
+  Buffer.compare(Buffer.from(a), Buffer.from(b));
 
 /**
  * sha256 hex of `JSON.stringify(manifest)`, with each file's keys in the
@@ -84,6 +103,14 @@ interface WalkedFile {
  * the tree (or in a circle) and ship code from wherever it points. `.git`
  * is excluded at any depth — it is never part of a plugin tree and can be
  * large enough on its own to blow the file/byte limits for no benefit.
+ *
+ * A `readdirSync`/`lstatSync` failure is a named `BundleWalkError`, not a
+ * silently-skipped subtree: a bundle that dropped part of a tree without
+ * saying so would ship a node incomplete plugin code with nothing to show
+ * for it. The one exception is `lstatSync` failing with `ENOENT` on an
+ * entry `readdirSync` just returned — that is a legitimate race (the entry
+ * was deleted between the two calls), not an access problem, so only that
+ * one entry is skipped.
  */
 const walkTree = (root: string, limits: { maxFiles: number; maxBytes: number }): WalkedFile[] => {
   const files: WalkedFile[] = [];
@@ -93,16 +120,18 @@ const walkTree = (root: string, limits: { maxFiles: number; maxBytes: number }):
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      throw new BundleWalkError(dir, errorCode(error));
     }
     for (const entry of entries) {
       const abs = join(dir, entry.name);
       let stat;
       try {
         stat = lstatSync(abs);
-      } catch {
-        continue;
+      } catch (error) {
+        const code = errorCode(error);
+        if (code === 'ENOENT') continue; // vanished between readdir and lstat
+        throw new BundleWalkError(abs, code);
       }
       if (stat.isSymbolicLink()) continue;
       if (stat.isDirectory()) {
@@ -133,11 +162,40 @@ const walkTree = (root: string, limits: { maxFiles: number; maxBytes: number }):
   return files;
 };
 
+/**
+ * A signature of the whole walked file list — sha256 of the sorted
+ * `(relPath, sizeBytes, mtimeMs)` triples — used as the cache key instead of
+ * a bare max-mtime.
+ *
+ * A max-mtime alone is wrong: deleting the file that happened to hold the
+ * tree's newest mtime, or rewriting a NON-newest file and leaving its mtime
+ * unchanged or set to something still below the max, both leave the
+ * tree-wide max exactly as it was, so a max-mtime-keyed cache would keep
+ * serving a manifest that no longer matches what's on disk. Hashing every
+ * file's identity (path + size + mtime) catches an add, a delete, and any
+ * per-file size or mtime change, not just "did the newest file change".
+ */
+const walkSignature = (files: readonly WalkedFile[]): string => {
+  const sorted = [...files].sort((a, b) => compareRelPath(a.relPath, b.relPath));
+  const hash = createHash('sha256');
+  for (const file of sorted) {
+    hash.update(file.relPath);
+    hash.update('\0');
+    hash.update(String(file.sizeBytes));
+    hash.update('\0');
+    hash.update(String(file.mtimeMs));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+};
+
 export interface BundleStore {
   /**
-   * Manifest for the tree at `root`, cached by (root, max mtime of its
-   * files). A sync that overwrites a file bumps that file's mtime, which is
-   * what invalidates the cache — nothing here watches the filesystem.
+   * Manifest for the tree at `root`, cached by (root, signature of the
+   * walked file list — see `walkSignature`). Any add, delete, or per-file
+   * size/mtime change invalidates the cache; nothing here watches the
+   * filesystem, so this is re-derived from a fresh (cheap, lstat-only) walk
+   * on every call.
    */
   manifestFor(root: string): Promise<{ hash: string; manifest: BundleManifest }>;
   /** The root registered under `hash` by a prior `manifestFor` call, or null. */
@@ -154,7 +212,7 @@ export interface BundleStore {
 }
 
 interface CacheEntry {
-  maxMtimeMs: number;
+  signature: string;
   hash: string;
   manifest: BundleManifest;
 }
@@ -177,10 +235,10 @@ export const createBundleStore = (limits?: {
   return {
     async manifestFor(root) {
       const walked = walkTree(root, resolvedLimits);
-      const maxMtimeMs = walked.reduce((max, file) => Math.max(max, file.mtimeMs), 0);
+      const signature = walkSignature(walked);
 
       const cached = cacheByRoot.get(root);
-      if (cached !== undefined && cached.maxMtimeMs === maxMtimeMs) {
+      if (cached !== undefined && cached.signature === signature) {
         return { hash: cached.hash, manifest: cached.manifest };
       }
 
@@ -197,7 +255,7 @@ export const createBundleStore = (limits?: {
       const manifest: BundleManifest = { files };
       const hash = bundleHash(manifest);
 
-      cacheByRoot.set(root, { maxMtimeMs, hash, manifest });
+      cacheByRoot.set(root, { signature, hash, manifest });
       rootByHash.set(hash, root);
       filesByHash.set(hash, pathIndex);
 
