@@ -24,17 +24,10 @@ import { acquireDaemonLock, type DaemonLock } from './lockfile.js';
 import { listEncodersWith, preflightHardware, runEncodeProbe } from './hardware-preflight.js';
 import { createScanCoordinator, type ScanCoordinator } from './scan-coordinator.js';
 import { createSupervisor, type CreateAgentFn, type Supervisor } from './supervisor.js';
+import { DAEMON_VERSION } from './version.js';
 import type { WatchPort } from './watcher.js';
 
-/**
- * The version this build reports through `GET /system/version`, kept equal to
- * `packages/server/package.json` (asserted by `build-info.test.ts`; a release
- * tag must match that file before the image workflow publishes). A literal rather than a runtime read of
- * `package.json`: the built `dist/` is what a real install runs, and
- * resolving a sibling file from it is a path that breaks differently in a
- * bundle, a global install and a test.
- */
-export const DAEMON_VERSION = '0.0.0';
+export { DAEMON_VERSION };
 
 /** How often the supervisor reconciles the pool with the schedule and the queue. */
 export const SUPERVISOR_TICK_MS = 30_000;

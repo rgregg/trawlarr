@@ -825,6 +825,22 @@ describe('the agent process reaches no database', () => {
     expect(bare.filter((name) => name.includes('sqlite'))).toEqual([]);
   });
 
+  it('holds for the remote node host too, which runs jobs on a machine with no database', () => {
+    // A value import only: `worker/protocol.ts` TYPE-imports `job-payload.ts`,
+    // which value-imports the repositories, and that edge is erased at
+    // runtime (`verbatimModuleSyntax`), so the walk skips it rather than
+    // flagging a database the node never loads.
+    const { files } = runtimeClosure(join(here, '../node/node-host.ts'));
+    const local = files.map((file) => relative(join(here, '..'), file));
+
+    // Sanity: the walk reached the pieces the host really runs.
+    expect(local).toContain('worker/agent-handle.ts');
+    expect(local).toContain('node/journal.ts');
+    expect(local).toContain('nodes/node-frames.ts');
+
+    expect(local.filter((file) => file.startsWith('db/'))).toEqual([]);
+  });
+
   it('is a claim that can fail: the same walk over agent-handle.ts is the DAEMON side', () => {
     // The handle holds the DocumentPort the agent talks to, so it lives on
     // the side of the boundary that may hold a database — proving the walk
