@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { FlowDefinition } from '@trawlarr/core';
+import { createPluginLoader } from '@trawlarr/engine';
 import type { Db } from '../db/connection.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { dryRunFlow, DryRunInputError, type FlowDryRunResult } from './dry-run.js';
@@ -174,6 +175,10 @@ export const createFlowDryRunCoordinator = (input: {
     published: FlowDefinition,
     snapshot: Array<{ id: string; path: string }>,
   ): Promise<void> => {
+    // One loader for the whole run, both halves of every file: see
+    // `dryRunFlow`'s `loader`. Per run rather than per daemon, so a finished
+    // run's compiled plugins are freed with it.
+    const loader = createPluginLoader();
     // Binaries are read per attempt rather than once per run, so a path fixed
     // in settings mid-walk applies to the files still ahead.
     const attempt = async (
@@ -190,6 +195,7 @@ export const createFlowDryRunCoordinator = (input: {
           ffmpegPath: binaries.ffmpeg,
           ffprobePath: binaries.ffprobe,
           nowMs: input.nowMs,
+          loader,
         });
         return { result, outcome: classifyDryRun(result) };
       } catch (error) {

@@ -385,6 +385,25 @@ describe('createFlowDryRunCoordinator', () => {
     expect(runs.get(flow.id, runId)).toEqual(stopped);
   });
 
+  it('hands every walk in a run the same plugin loader, and a new run a new one', async () => {
+    for (const name of ['a', 'b']) seedFile({ libraryId, path: `/${name}.mkv` });
+    const loaders: unknown[] = [];
+    const runs = coordinator((input) => {
+      loaders.push(input.loader);
+      return Promise.resolve(fakeResult({}));
+    });
+
+    const first = start(runs);
+    await until(() => runs.get(flow.id, first.runId)?.status === 'done');
+    expect(loaders).toHaveLength(4);
+    expect(loaders[0]).toBeDefined();
+    expect(new Set(loaders).size).toBe(1);
+
+    const second = start(runs);
+    await until(() => runs.get(flow.id, second.runId)?.status === 'done');
+    expect(loaders[4]).not.toBe(loaders[0]);
+  });
+
   it('forgets the run of a flow that no longer exists', async () => {
     seedFile({ libraryId, path: '/b.mkv' });
     const runs = coordinator(holdB);
