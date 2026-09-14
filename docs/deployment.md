@@ -114,6 +114,24 @@ That is the designed behaviour, not a bug: it fails loudly instead of quietly
 corrupting. If you want a second instance, give it a second `/config`. If you
 want more throughput, raise `NUMBER_OF_WORKERS` on the one you have.
 
+### Updating while files are being processed
+
+Both compose files set `hostname: trawlarr` and `stop_grace_period: 5m`. Keep
+both if you write your own.
+
+- **`stop_grace_period`**: on `docker stop` or an image update the daemon
+  waits up to 5 minutes for running jobs before cancelling them. Docker's
+  default kills it after 10 seconds.
+- **`hostname`**: a job whose worker was killed is recognised as abandoned by
+  its hostname and process id, and requeued on the next start. The default
+  hostname is the container id, which changes with every image update, so
+  without a fixed one an interrupted file stays in "running" for a day and
+  then counts as a failed attempt.
+
+A killed job never damages the library file: ffmpeg writes to staging, and
+Replace Original File moves the original to trash before installing the new
+file.
+
 ### After an unclean stop, nothing to clear
 
 A clean `docker stop` removes the record (`SIGTERM` reaches the daemon as PID
