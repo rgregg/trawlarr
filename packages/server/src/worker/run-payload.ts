@@ -396,6 +396,11 @@ export const runPayload = async (input: {
       // `job_step.log_excerpt` column.
       let currentArgs: PluginInputArgs | null = null;
 
+      // The display name of the step currently running, which is what every
+      // progress message carries as its stage. See `buildArgs` for why each
+      // step announces itself.
+      let currentStage = 'starting';
+
       const runners = [
         createExecuteRunner({
           ffmpegPath: payload.ffmpegPath,
@@ -404,7 +409,7 @@ export const runPayload = async (input: {
           // around it: a worker asked to stop must not leave an encode running
           // for another hour.
           signal: ports.signal,
-          onProgress: (percent) => ports.onProgress({ percent, stage: 'execute' }),
+          onProgress: (percent) => ports.onProgress({ percent, stage: currentStage }),
           // Without this, `execute-node.ts`'s `ffmpeg failed (code N):
           // <stderrTail>` — the ONLY record of why an encode failed — went
           // nowhere, and the Execute step's log excerpt was empty: an
@@ -429,6 +434,10 @@ export const runPayload = async (input: {
           probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
           crossDeviceError: crossDeviceErrorSeam,
           nowMs: ports.nowMs,
+          // Only the cross-device fallback reports this: a same-filesystem
+          // replacement is a rename and has nothing to wait on, while a copy
+          // of a finished encode onto a NAS can take minutes.
+          onProgress: (percent) => ports.onProgress({ percent, stage: `${currentStage}: copying` }),
         }),
       ];
 
@@ -513,6 +522,14 @@ export const runPayload = async (input: {
       let lastFileObject: PluginFileObject = originalFileObject;
 
       const buildArgs = (invocation: NodeInvocation) => {
+        // Announce the step BEFORE it runs, with no percentage. Progress used
+        // to come from the Execute step alone, so once an encode reached 100%
+        // the job read "100% — execute" through Verify Output, Replace
+        // Original File (a full copy, when staging is on another filesystem)
+        // and cleanup, however long those took. Liveness only, like every
+        // progress message: nothing may depend on this one arriving.
+        currentStage = invocation.plugin.details.name;
+        ports.onProgress({ percent: null, stage: currentStage });
         const args = buildPluginInputArgs({
           fileObject: {
             ...lastFileObject,

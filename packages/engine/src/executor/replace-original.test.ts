@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  appendFileSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -673,6 +674,47 @@ describe('createReplaceOriginalRunner', () => {
     expect(existsSync(space.newPath)).toBe(false);
     expect(readdirSync(space.stagingDir)).toEqual([]);
     expect(logged.join('\n')).toMatch(/cross-device/i);
+  });
+
+  it('reports how much of a cross-device copy has landed, finishing at 100', async () => {
+    const space = workspace();
+    const seen: number[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) {
+            const error: NodeJS.ErrnoException = new Error(
+              'EXDEV: cross-device link not permitted',
+            );
+            error.code = 'EXDEV';
+            throw error;
+          }
+          await link(from, to);
+        },
+        // A copy that lands in two halves with a pause between them, standing
+        // in for a multi-GB copy onto a NAS that takes minutes.
+        copyFile: async (from, to) => {
+          const body = readFileSync(from);
+          const half = Math.floor(body.length / 2);
+          writeFileSync(to, body.subarray(0, half));
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          appendFileSync(to, body.subarray(half));
+        },
+        copyProgressIntervalMs: 5,
+        onProgress: (percent) => seen.push(percent),
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
+    expect(seen.some((percent) => percent > 0 && percent < 100)).toBe(true);
+    expect(seen.at(-1)).toBe(100);
+    expect([...seen].sort((a, b) => a - b)).toEqual(seen);
   });
 
   it('refuses the cross-device fallback when allowCrossDevice is false, and restores the original', async () => {

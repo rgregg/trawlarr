@@ -91,7 +91,7 @@ describe('runFfmpeg', () => {
     expect(seen).toEqual([null]);
   });
 
-  it('clamps the percentage to 100 when ffmpeg overshoots the probed duration', async () => {
+  it('holds at 99 until ffmpeg reports the end, even when it overshoots the probed duration', async () => {
     const { child, spawnFn } = harness();
     const seen: Array<number | null> = [];
     const run = runFfmpeg({
@@ -102,11 +102,15 @@ describe('runFfmpeg', () => {
       spawnFn,
     });
     setImmediate(() => {
+      child.stdout.emit('data', 'out_time_ms=1000000\nprogress=continue\n');
       child.stdout.emit('data', 'out_time_ms=9000000\nprogress=continue\n');
+      child.stdout.emit('data', 'out_time_ms=9000000\nprogress=end\n');
       child.emit('close', 0, null);
     });
     await run;
-    expect(seen).toEqual([100]);
+    // Reaching the duration is not being done: the trailer (and a faststart
+    // rewrite of the whole file) is still to come.
+    expect(seen).toEqual([99, 99, 100]);
   });
 
   it('keeps only the tail of stderr, so a chatty run cannot exhaust memory', async () => {

@@ -125,10 +125,16 @@ export const runFfmpeg: RunFfmpegFn = (input) =>
       if (input.onProgress === undefined) return;
       for (const progress of parser.push(chunk)) {
         const duration = input.durationMs ?? null;
-        const percent =
-          duration === null || duration <= 0 || progress.outTimeMs === null
+        // 100 is reserved for ffmpeg's own `progress=end`. Its position
+        // reaches the probed duration well before it is finished: the
+        // trailer, and for `+faststart` a rewrite of the entire output, still
+        // follow, and on a large file over NFS that took minutes during which
+        // the job read "100%" as though it were done.
+        const percent = progress.done
+          ? 100
+          : duration === null || duration <= 0 || progress.outTimeMs === null
             ? null
-            : Math.min(100, Math.round((progress.outTimeMs / duration) * 100));
+            : Math.min(99, Math.round((progress.outTimeMs / duration) * 100));
         input.onProgress({ ...progress, percent });
       }
     });

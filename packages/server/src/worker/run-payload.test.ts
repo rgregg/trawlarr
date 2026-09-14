@@ -549,6 +549,29 @@ describe('runPayload', () => {
     expect(report.steps.at(-1)?.outputNumber).toBe(2);
   });
 
+  it('names each step as it starts, so progress never outlives the step that reported it', async () => {
+    const events: string[] = [];
+
+    await runPayload({
+      payload: payloadForFixture('two-node-flow'),
+      ports: {
+        ...quietPorts(),
+        onProgress: ({ percent, stage }) => events.push(`progress ${String(percent)} ${stage}`),
+        onStep: (step) => events.push(`step ${step.pluginId}`),
+      },
+    });
+
+    // A null percentage with each step's own name, sent BEFORE the step runs:
+    // without it a job whose encode reached 100% kept showing "100% — execute"
+    // through Verify, Replace and cleanup, however long they took.
+    expect(events).toEqual([
+      'progress null Start',
+      'step trawlarr:start',
+      'progress null Check Video Codec',
+      'step trawlarr:checkVideoCodec',
+    ]);
+  });
+
   it('heartbeats before the first step and again after every one', async () => {
     const beats: number[] = [];
     let tick = NOW;
