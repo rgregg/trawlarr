@@ -480,11 +480,11 @@ export interface NodeLibraryProbe { libraryId: string; reachable: boolean; detai
 export interface NodeRepo {
   list(): NodeRecord[];
   getById(id: string): NodeRecord | null;
-  create(input: { name: string; nowMs: number }): { node: NodeRecord; enrollToken: string };
-  regenerateEnrollToken(input: { id: string; nowMs: number }): { enrollToken: string; expiresAt: number };
+  create(input: { name: string; nowMs: number }): Promise<{ node: NodeRecord; enrollToken: string }>;
+  regenerateEnrollToken(input: { id: string; nowMs: number }): Promise<{ enrollToken: string; expiresAt: number }>;
   /** Consumes the token. Returns null for unknown/expired/used/revoked. */
   enroll(input: { token: string; nowMs: number }): Promise<{ nodeId: string; secret: string } | null>;
-  /** Returns the node id the secret belongs to, or null. Never for a revoked node. */
+  /** True only for the right secret of an enrolled, unrevoked node. */
   authenticate(input: { nodeId: string; secret: string }): Promise<boolean>;
   update(id: string, patch: { name?: string; pathMap?: unknown; schedule?: ScheduleConfig; paused?: boolean; tags?: string }): NodeRecord;
   recordHello(id: string, hello: { buildVersion: string; hardwareTypes: HardwareType[]; hardwareCaps: Partial<Record<HardwareType, number>>; ffmpegPath: string; ffprobePath: string; nowMs: number }): void;
@@ -615,7 +615,7 @@ Expected: FAIL, cannot resolve `./node-repo.js`.
 - [ ] **Step 4: Implement `node-repo.ts`**
 
 Implement exactly the interface above. Notes:
-- `create` checks name uniqueness in a transaction (there is no DB constraint; add the check rather than a migration so the local row named `local` keeps working). It inserts `access_mode='direct'`, `path_map_json='[]'`, `hardware_types_json='["cpu"]'`, `enroll_expires_at = nowMs + 24h`. Hashing is async while better-sqlite3 is sync, so compute the hash first (`await hashPassword(token)`), then insert. `create` therefore returns a `Promise`; update the interface to `create(...): Promise<{ node; enrollToken }>`, and likewise `regenerateEnrollToken`.
+- `create` checks name uniqueness in a transaction (there is no DB constraint; add the check rather than a migration so the local row named `local` keeps working). It inserts `access_mode='direct'`, `path_map_json='[]'`, `hardware_types_json='["cpu"]'`, `enroll_expires_at = nowMs + 24h`. Hashing is async while better-sqlite3 is sync, so compute the hash first (`await hashPassword(token)`), then insert, which is why `create` and `regenerateEnrollToken` return promises.
 - `schedule` reads `worker_config_json` through `JSON.parse` then `validateSchedule`. Fall back to `DEFAULT_SCHEDULE` when null.
 - Row-to-record mapping lives in one `toRecord(row)` function.
 
@@ -909,7 +909,7 @@ Fields rewritten by `payloadToNode`:
 - `library.stagingDir` and `library.trashDir`, when non-null;
 - `logPath` set to `null`. The node host assigns its own log path, and the server writes its copy from frames (Task 8).
 
-`pluginPaths` is not touched here; the node host rewrites it from `pluginBundles` (Task 11). `ffmpegPath`/`ffprobePath` are also left alone, because the node host overrides them with its own.
+`configVars.config.nodeType` needs no change: `pluginConfigVars` already reports `'mapped'`, which is correct for Direct access. `pluginPaths` is not touched here; the node host rewrites it from `pluginBundles` (Task 11). `ffmpegPath`/`ffprobePath` are also left alone, because the node host overrides them with its own.
 
 `reportToServer` rewrites `replaced.path` only. Step records carry no persisted paths; `StepRecord.logExcerpt` is free text and stays as written.
 
