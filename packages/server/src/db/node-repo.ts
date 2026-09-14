@@ -9,12 +9,9 @@ import {
 } from '@trawlarr/core';
 import { hashPassword, verifyPassword } from '../api/password.js';
 import type { Db } from './connection.js';
+import type { NodeLibraryProbe } from '../nodes/node-frames.js';
 
-export interface NodeLibraryProbe {
-  libraryId: string;
-  reachable: boolean;
-  detail: string;
-}
+export type { NodeLibraryProbe };
 
 export interface NodeRecord {
   id: string;
