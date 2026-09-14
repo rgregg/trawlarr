@@ -1659,6 +1659,42 @@ describe('library dry runs', () => {
     expect((await api('DELETE', `/flows/${flow.id}/dry-runs/${runId}`)).status).toBe(404);
   });
 
+  it('compiles a community plugin as often for a whole library as for one file', async () => {
+    // Each file's two walks used to build a loader of their own, so a plugin
+    // was recompiled twice per file just to read details() — a dry run never
+    // calls it. Compared against a one-file run rather than a fixed number:
+    // creating and validating the flow compile it too, and that is not this.
+    const counter = `__trawlarrDryRunCompiles_${randomUUID().replace(/-/g, '')}`;
+    const compiles = (): number =>
+      ((globalThis as Record<string, unknown>)[counter] as number) ?? 0;
+    const pluginDir = await mkdtemp(join(tmpdir(), 'trawlarr-plugin-'));
+    const pluginPath = join(pluginDir, 'index.js');
+    await writeFile(
+      pluginPath,
+      `globalThis.${counter} = (globalThis.${counter} ?? 0) + 1;\n${THIRD_PARTY_PLUGIN_CODE}`,
+    );
+    const definition = chain([
+      ['start', 'trawlarr:start'],
+      ['mystery', pluginPath],
+    ]);
+
+    const compilesForRun = async (name: string, files: number): Promise<number> => {
+      const before = compiles();
+      const flow = createFlowRepo(db).create({ name, definition, nowMs: NOW });
+      const library = seedLibrary({ flowId: flow.id });
+      for (let i = 0; i < files; i += 1) await seedProbedFile(library.id);
+      const { runId } = (await api('POST', `/flows/${flow.id}/dry-runs`, { definition })).body as {
+        runId: string;
+      };
+      const done = await waitForRun(flow.id, runId);
+      expect(done.body).toMatchObject({ status: 'done', processed: files });
+      return compiles() - before;
+    };
+
+    const one = await compilesForRun('compile-one', 1);
+    expect(await compilesForRun('compile-three', 3)).toBe(one);
+  });
+
   it('refuses a definition that does not validate', async () => {
     const flow = createFlowRepo(db).create({ name: 'bad-dry', definition: VALID_FLOW, nowMs: NOW });
     const response = await api('POST', `/flows/${flow.id}/dry-runs`, {
