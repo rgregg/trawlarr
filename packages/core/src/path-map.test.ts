@@ -56,4 +56,13 @@ describe('validatePathMap', () => {
       ]),
     ).toThrow(PathMapError);
   });
+
+  it('rejects a duplicate node path, naming the path, so toServer lookups do not depend on array order', () => {
+    expect(() =>
+      validatePathMap([
+        { serverPath: '/media', nodePath: '/mnt/nas' },
+        { serverPath: '/other', nodePath: '/mnt/nas' },
+      ]),
+    ).toThrow(/\/mnt\/nas/);
+  });
 });

@@ -34,7 +34,8 @@ const checkAbsolute = (label: string, path: unknown): string => {
 
 export const validatePathMap = (map: unknown): PathMapping[] => {
   if (!Array.isArray(map)) throw new PathMapError('A path map must be a list.');
-  const seen = new Set<string>();
+  const seenServer = new Set<string>();
+  const seenNode = new Set<string>();
   return map.map((entry: unknown, index) => {
     const record = (entry ?? {}) as Record<string, unknown>;
     const serverPath = checkAbsolute(
@@ -42,10 +43,19 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
       record['serverPath'],
     );
     const nodePath = checkAbsolute(`Entry ${String(index + 1)}: node path`, record['nodePath']);
-    if (seen.has(serverPath)) {
+    if (seenServer.has(serverPath)) {
       throw new PathMapError(`Server path "${serverPath}" is mapped more than once.`);
     }
-    seen.add(serverPath);
+    // `reportToServer` maps a node path back via `mapPath(..., 'toServer')`,
+    // which picks the longest matching `nodePath` prefix — that lookup must
+    // not depend on array order, so a duplicate `nodePath` (two server paths
+    // claiming the same node path) is rejected here rather than silently
+    // resolved by "whichever entry came first".
+    if (seenNode.has(nodePath)) {
+      throw new PathMapError(`Node path "${nodePath}" is mapped more than once.`);
+    }
+    seenServer.add(serverPath);
+    seenNode.add(nodePath);
     return { serverPath, nodePath };
   });
 };
