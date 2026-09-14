@@ -122,6 +122,20 @@ describe('parseServerFrame', () => {
     expect(parseServerFrame(JSON.stringify(frame))).toEqual(frame);
   });
 
+  it('rejects a config frame with a malformed schedule', () => {
+    const frame = { ...config, schedule: { garbage: true } };
+    expect(parseServerFrame(JSON.stringify(frame))).toBeNull();
+  });
+
+  it('rejects a welcome frame whose config has a malformed schedule', () => {
+    const frame = {
+      type: 'welcome',
+      config: { ...config, schedule: { garbage: true } },
+      jobs: [],
+    };
+    expect(parseServerFrame(JSON.stringify(frame))).toBeNull();
+  });
+
   it('parses a refused frame', () => {
     const frame = { type: 'refused', reason: 'unknown node', retryAfterMs: 5000 };
     expect(parseServerFrame(JSON.stringify(frame))).toEqual(frame);

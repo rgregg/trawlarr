@@ -1,5 +1,6 @@
 import {
   HARDWARE_TYPES,
+  validateSchedule,
   type HardwareType,
   type PathMapping,
   type ScheduleConfig,
@@ -187,12 +188,31 @@ const parseLibraryProbes = (value: unknown): NodeLibraryProbe[] | null => {
   return libraries;
 };
 
-const parseConfigFrame = (raw: Record<string, unknown>): NodeConfigFrame | null => {
-  if (typeof raw['nodeId'] !== 'string') return null;
-  if (!isRecord(raw['schedule'])) return null;
-  if (typeof raw['paused'] !== 'boolean') return null;
-  if (!Array.isArray(raw['pathMap'])) return null;
-  for (const entry of raw['pathMap']) {
+/**
+ * Validate a schedule with core's own `validateSchedule` rather than
+ * `isRecord` duck-typing — the config frame's schedule is opaque data as
+ * far as this module is concerned, so it must fail the same way a
+ * hand-edited row would, not merely look object-shaped. `validateSchedule`
+ * throws rather than returning a bool, and it also assumes its argument is
+ * already `ScheduleConfig`-shaped (a missing `baseCounts`/`windows` throws
+ * a plain `TypeError` from inside its own loops, not a `ScheduleConfigError`),
+ * so both failure modes are caught here.
+ */
+const parseSchedule = (value: unknown): ScheduleConfig | null => {
+  if (!isRecord(value)) return null;
+  const schedule = value as unknown as ScheduleConfig;
+  try {
+    validateSchedule(schedule);
+  } catch {
+    return null;
+  }
+  return schedule;
+};
+
+const parsePathMap = (value: unknown): PathMapping[] | null => {
+  if (!Array.isArray(value)) return null;
+  const pathMap: PathMapping[] = [];
+  for (const entry of value) {
     if (
       !isRecord(entry) ||
       typeof entry['serverPath'] !== 'string' ||
@@ -200,7 +220,18 @@ const parseConfigFrame = (raw: Record<string, unknown>): NodeConfigFrame | null 
     ) {
       return null;
     }
+    pathMap.push({ serverPath: entry['serverPath'], nodePath: entry['nodePath'] });
   }
+  return pathMap;
+};
+
+const parseConfigFrame = (raw: Record<string, unknown>): NodeConfigFrame | null => {
+  if (typeof raw['nodeId'] !== 'string') return null;
+  const schedule = parseSchedule(raw['schedule']);
+  if (schedule === null) return null;
+  if (typeof raw['paused'] !== 'boolean') return null;
+  const pathMap = parsePathMap(raw['pathMap']);
+  if (pathMap === null) return null;
   if (!Array.isArray(raw['libraries'])) return null;
   const libraries: NodeConfigFrame['libraries'] = [];
   for (const entry of raw['libraries']) {
@@ -213,18 +244,22 @@ const parseConfigFrame = (raw: Record<string, unknown>): NodeConfigFrame | null 
     ) {
       return null;
     }
+    const nodeRoots: (string | null)[] = [];
+    for (const root of entry['nodeRoots']) {
+      nodeRoots.push(root === null ? null : (root as string));
+    }
     libraries.push({
       libraryId: entry['libraryId'],
       name: entry['name'],
-      nodeRoots: entry['nodeRoots'] as (string | null)[],
+      nodeRoots,
     });
   }
   return {
     type: 'config',
     nodeId: raw['nodeId'],
-    schedule: raw['schedule'] as unknown as ScheduleConfig,
+    schedule,
     paused: raw['paused'],
-    pathMap: raw['pathMap'] as PathMapping[],
+    pathMap,
     libraries,
   };
 };
