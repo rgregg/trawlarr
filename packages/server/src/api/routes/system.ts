@@ -138,13 +138,20 @@ export const systemRoutes: Route[] = [
         `client that reads a level trawlarr does not honour would silently enable plugins this ` +
         `build cannot run correctly.`,
       binaries: await binariesReport(ctx),
+      // What this node says it has. Trawlarr never detects hardware, so this
+      // is `hardware.available` as the operator set it. Reported beside the
+      // problems because the problem list alone, once named `hardware`, read
+      // as "no GPU found" on a host whose NVENC had just passed its probe.
+      hardwareDeclared: ctx.settings.getHardware().available,
       // What the startup preflight found, reported rather than acted on:
       // each entry is a hardware type this node DECLARES and whose encoder
       // it could not be shown to have. Empty is the healthy answer, and the
-      // one to assert in a deployment check. Note the asymmetry with
-      // `binaries` above — that says a path can be spawned; this says a
-      // declaration was checked against what that binary can really do.
-      hardware: ctx.hardwareFindings,
+      // one to assert in a deployment check. It was checked against the
+      // declaration at START, so a declaration patched since is unchecked
+      // until the next restart. Note the asymmetry with `binaries` above —
+      // that says a path can be spawned; this says a declaration was checked
+      // against what that binary can really do.
+      hardwareProblems: ctx.hardwareFindings,
     }),
   },
 

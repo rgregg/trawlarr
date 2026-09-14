@@ -327,9 +327,12 @@ The same finding is on the API, which is the thing to assert in a deployment
 check — **an empty array is the healthy answer**:
 
 ```bash
-curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardware
+curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardwareProblems
 []
 ```
+
+`hardwareDeclared` beside it is what that empty list was checked against — the
+`hardware.available` you declared, not anything trawlarr detected.
 
 Note what the preflight deliberately does **not** do. It does not go looking
 for GPUs, it does not edit `hardware.available`, and it does not pause
@@ -399,7 +402,7 @@ docker exec trawlarr ffmpeg -hide_banner -encoders | grep nvenc
 
 # 2. What this machine can actually do, which is the question you have.
 #    Empty means every declaration checked out.
-curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardware
+curl -fsS -H "X-Api-Key: $KEY" http://localhost:8265/api/v1/system/version | jq .hardwareProblems
 
 # 3. If it is not empty, the daemon already said why, once, at start:
 docker logs trawlarr | grep hardware.available
@@ -664,6 +667,6 @@ configuration at all.
 | Nothing is ever queued                                | The library has no flow (`library set-flow`), is paused because its flow is invalid (`trawlarr status` says so), or is empty. |
 | Files sit at `unknown` with `attempts 0`, nothing is queued | Hardlinks — the scanner skipped them. See §9.                                                                            |
 | Files probe fine but every replacement fails          | `PUID`/`PGID` do not own the *directory*. See §7.                                                                            |
-| Every job fails immediately on an NVIDIA host         | `TRAWLARR_HARDWARE=nvenc` declared without the GPU actually reaching the container — most often `NVIDIA_DRIVER_CAPABILITIES` without `video`. The daemon said so once at start: `docker logs trawlarr \| grep hardware.available`, or read `.hardware` from `GET /api/v1/system/version`. See §6. |
+| Every job fails immediately on an NVIDIA host         | `TRAWLARR_HARDWARE=nvenc` declared without the GPU actually reaching the container — most often `NVIDIA_DRIVER_CAPABILITIES` without `video`. The daemon said so once at start: `docker logs trawlarr \| grep hardware.available`, or read `.hardwareProblems` from `GET /api/v1/system/version`. See §6. |
 | Replacements are slow and the disk churns             | A `stagingDir` was pointed at another filesystem. See §3.                                                                    |
 | `docker logs` no longer shows the API key             | By design; it is printed only on the run that minted it. Read it from `GET /api/v1/system/settings`, or set it explicitly.    |

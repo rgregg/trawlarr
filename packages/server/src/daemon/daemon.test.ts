@@ -531,7 +531,7 @@ describe('the hardware preflight', () => {
 
     const daemon = await start({ dataDir });
 
-    expect((await versionBody(dataDir, daemon.port)).hardware).toEqual([
+    expect((await versionBody(dataDir, daemon.port)).hardwareProblems).toEqual([
       { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
     ]);
     // The declaration is the operator's, and it stands: nothing was rewritten
@@ -551,7 +551,7 @@ describe('the hardware preflight', () => {
 
     const daemon = await start({ dataDir });
 
-    expect((await versionBody(dataDir, daemon.port)).hardware).toEqual([]);
+    expect((await versionBody(dataDir, daemon.port)).hardwareProblems).toEqual([]);
   });
 
   it('starts, and reports the declaration as unproven, when ffmpeg cannot be run at all', async () => {
@@ -561,7 +561,7 @@ describe('the hardware preflight', () => {
 
     const daemon = await start({ dataDir });
 
-    expect((await versionBody(dataDir, daemon.port)).hardware).toEqual([
+    expect((await versionBody(dataDir, daemon.port)).hardwareProblems).toEqual([
       { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
     ]);
     expect((await health(daemon.port)).status).toBe(200);
