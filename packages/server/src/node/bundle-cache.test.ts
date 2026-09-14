@@ -164,4 +164,43 @@ describe('createBundleCache', () => {
     expect(existsSync(join(cacheDir, hashA))).toBe(false);
     expect(existsSync(join(cacheDir, hashB))).toBe(true);
   });
+
+  it('shares one download across concurrent ensure() calls for the same hash', async () => {
+    const root = makeSourceTree({ 'index.js': 'concurrent', 'lib/a.js': 'a' });
+    const { hash } = await store.manifestFor(root);
+    const fetchers = fetchersFor(root);
+    const cache = createBundleCache({ dir: cacheDir, ...fetchers });
+
+    const [first, second] = await Promise.allSettled([cache.ensure(hash), cache.ensure(hash)]);
+
+    expect(first.status).toBe('fulfilled');
+    expect(second.status).toBe('fulfilled');
+    const dirA = first.status === 'fulfilled' ? first.value : null;
+    const dirB = second.status === 'fulfilled' ? second.value : null;
+    expect(dirA).toBe(dirB);
+    expect(dirA).toBe(join(cacheDir, hash));
+    expect(fetchers.manifestCalls).toBe(1);
+  });
+
+  it('prune sweeps a leftover partial dir that is not in flight', async () => {
+    const root = makeSourceTree({ 'index.js': 'x' });
+    const { hash } = await store.manifestFor(root);
+    const cache = createBundleCache({
+      dir: cacheDir,
+      fetchManifest: async () => {
+        throw new Error('should not be called for a stale-partial sweep');
+      },
+      fetchFile: async () => {
+        throw new Error('should not be called for a stale-partial sweep');
+      },
+    });
+
+    const stalePartial = join(cacheDir, `${hash}.partial-deadbeef`);
+    mkdirSync(stalePartial, { recursive: true });
+    writeFileSync(join(stalePartial, 'index.js'), 'x');
+
+    await cache.prune(0);
+
+    expect(existsSync(stalePartial)).toBe(false);
+  });
 });

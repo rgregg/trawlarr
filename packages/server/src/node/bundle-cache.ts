@@ -116,6 +116,83 @@ export const createBundleCache = (input: {
     await writeFile(lastUsedPath(hash), String(Date.now()));
   };
 
+  /**
+   * Downloads shared across concurrent `ensure(hash)` calls for the same
+   * hash. Without this, two callers racing an uncached hash each build their
+   * own `<hash>.partial-<random>/`, both verify successfully, and the loser
+   * of the `rename` race gets `ENOTEMPTY`/`EEXIST` — a spurious failure for
+   * a caller that asked for a bundle that DOES end up present. Keyed by
+   * hash, not by call: the entry is removed once the shared promise settles
+   * (success or failure), so a later `ensure` for the same hash tries again
+   * rather than replaying a stale rejection.
+   */
+  const inFlight = new Map<string, Promise<string>>();
+
+  const downloadAndInstall = async (hash: string, finalDir: string): Promise<string> => {
+    const rawManifest = await fetchManifest(hash);
+    const manifest = validateManifestShape(rawManifest);
+    const computedHash = bundleHash(manifest);
+    if (computedHash !== hash) {
+      throw new BundleCacheError(
+        `Bundle manifest hash mismatch: expected "${hash}", computed "${computedHash}".`,
+      );
+    }
+
+    await mkdir(dir, { recursive: true });
+    const partialDir = join(dir, `${hash}${PARTIAL_INFIX}${randomBytes(6).toString('hex')}`);
+    await mkdir(partialDir, { recursive: true });
+
+    try {
+      for (const file of manifest.files) {
+        if (!isSafeRelPath(file.relPath)) {
+          throw new BundleCacheError(`Bundle manifest relPath "${file.relPath}" is unsafe.`);
+        }
+        const absPath = resolveWithinRoot(partialDir, file.relPath);
+
+        const bytes = await fetchFile(hash, file.relPath);
+        if (bytes.length !== file.sizeBytes) {
+          throw new BundleCacheError(
+            `Bundle file "${file.relPath}" size mismatch: expected ${file.sizeBytes}, got ${bytes.length}.`,
+          );
+        }
+        const actualSha256 = createHash('sha256').update(bytes).digest('hex');
+        if (actualSha256 !== file.sha256) {
+          throw new BundleCacheError(
+            `Bundle file "${file.relPath}" sha256 mismatch: expected ${file.sha256}, got ${actualSha256}.`,
+          );
+        }
+
+        await mkdir(dirname(absPath), { recursive: true });
+        await writeFile(absPath, bytes);
+      }
+
+      await writeFile(manifestPath(hash), JSON.stringify(manifest));
+
+      try {
+        await rename(partialDir, finalDir);
+      } catch (renameError) {
+        // A single node process can only race itself here (the `inFlight`
+        // map above already dedupes that); a second node process racing the
+        // same download is prevented by the daemon's kernel file lock over
+        // its data dir (see AGENTS.md). Checked anyway, cheaply: if the
+        // target now exists, someone else finished first, and that is a
+        // successful outcome for this caller too, not a failure.
+        if (existsSync(finalDir)) {
+          await rm(partialDir, { recursive: true, force: true });
+          await touch(hash);
+          return finalDir;
+        }
+        throw renameError;
+      }
+    } catch (error) {
+      await rm(partialDir, { recursive: true, force: true });
+      throw error;
+    }
+
+    await touch(hash);
+    return finalDir;
+  };
+
   return {
     async ensure(hash) {
       if (!HEX64.test(hash)) {
@@ -127,52 +204,14 @@ export const createBundleCache = (input: {
         return finalDir;
       }
 
-      const rawManifest = await fetchManifest(hash);
-      const manifest = validateManifestShape(rawManifest);
-      const computedHash = bundleHash(manifest);
-      if (computedHash !== hash) {
-        throw new BundleCacheError(
-          `Bundle manifest hash mismatch: expected "${hash}", computed "${computedHash}".`,
-        );
-      }
+      const existing = inFlight.get(hash);
+      if (existing !== undefined) return existing;
 
-      await mkdir(dir, { recursive: true });
-      const partialDir = join(dir, `${hash}${PARTIAL_INFIX}${randomBytes(6).toString('hex')}`);
-      await mkdir(partialDir, { recursive: true });
-
-      try {
-        for (const file of manifest.files) {
-          if (!isSafeRelPath(file.relPath)) {
-            throw new BundleCacheError(`Bundle manifest relPath "${file.relPath}" is unsafe.`);
-          }
-          const absPath = resolveWithinRoot(partialDir, file.relPath);
-
-          const bytes = await fetchFile(hash, file.relPath);
-          if (bytes.length !== file.sizeBytes) {
-            throw new BundleCacheError(
-              `Bundle file "${file.relPath}" size mismatch: expected ${file.sizeBytes}, got ${bytes.length}.`,
-            );
-          }
-          const actualSha256 = createHash('sha256').update(bytes).digest('hex');
-          if (actualSha256 !== file.sha256) {
-            throw new BundleCacheError(
-              `Bundle file "${file.relPath}" sha256 mismatch: expected ${file.sha256}, got ${actualSha256}.`,
-            );
-          }
-
-          await mkdir(dirname(absPath), { recursive: true });
-          await writeFile(absPath, bytes);
-        }
-
-        await writeFile(manifestPath(hash), JSON.stringify(manifest));
-        await rename(partialDir, finalDir);
-      } catch (error) {
-        await rm(partialDir, { recursive: true, force: true });
-        throw error;
-      }
-
-      await touch(hash);
-      return finalDir;
+      const promise = downloadAndInstall(hash, finalDir).finally(() => {
+        inFlight.delete(hash);
+      });
+      inFlight.set(hash, promise);
+      return promise;
     },
 
     async prune(maxBytes) {
@@ -183,6 +222,20 @@ export const createBundleCache = (input: {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
         throw error;
       }
+
+      // A partial dir survives only for the lifetime of one download; one
+      // left on disk with no matching in-flight hash is dead weight from a
+      // process that died mid-download (a normal failure already cleans its
+      // own partial up in `downloadAndInstall`'s catch). Never touch one
+      // whose hash IS in flight — that's a live download, not litter.
+      for (const name of names) {
+        const infixAt = name.indexOf(PARTIAL_INFIX);
+        if (infixAt === -1) continue;
+        const hash = name.slice(0, infixAt);
+        if (inFlight.has(hash)) continue;
+        await rm(join(dir, name), { recursive: true, force: true });
+      }
+
       const hashes = names.filter(isBundleDirName);
 
       const entries: { hash: string; sizeBytes: number; lastUsedMs: number }[] = [];
