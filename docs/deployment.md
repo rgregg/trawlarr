@@ -612,8 +612,9 @@ CI publishes `ghcr.io/rgregg/trawlarr` only after its checks pass:
 | -------------- | ------------------------------------------------------------ |
 | `:latest`      | The newest release.                                          |
 | `:X.Y.Z`       | A release, from the git tag `vX.Y.Z`.                        |
-| `:X.Y.Z-rc.N`  | A pre-release. Never moves `:X.Y` or `:latest`.              |
+| `:X.Y.Z-rc.N`  | A pre-release. Never moves `:X.Y`, `:X` or `:latest`.        |
 | `:X.Y`         | The newest release in that minor series.                     |
+| `:X`           | The newest release in that major series, from `1.0.0` on.    |
 | `:main`        | The newest commit on `main`.                                 |
 | `:sha-<short>` | One exact commit. Pin this to deploy a specific unreleased build. |
 

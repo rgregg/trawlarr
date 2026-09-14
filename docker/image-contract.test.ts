@@ -35,4 +35,10 @@ describe('the image workflow', () => {
 
     expect(latest).toBe(`startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')`);
   });
+
+  it('publishes a major-version tag, but not :0, which would promise a stable 0.x line', () => {
+    expect(ci).toMatch(
+      /^\s+type=semver,pattern=\{\{major\}\},enable=\$\{\{ !startsWith\(github\.ref, 'refs\/tags\/v0\.'\) \}\}$/m,
+    );
+  });
 });
