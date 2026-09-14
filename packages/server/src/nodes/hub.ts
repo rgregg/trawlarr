@@ -124,6 +124,11 @@ export interface CreateNodeHubInput {
   pingIntervalMs?: number;
   offlineAfterMs?: number;
   helloTimeoutMs?: number;
+  /**
+   * Where a failure that must not take a node's connection down is reported
+   * (an unwritable job log, a rejected upgrade). Defaults to stderr.
+   */
+  onError?: (context: string, error: unknown) => void;
 }
 
 /** The only implementation until the daemon wires the real one (Task 9). */
@@ -203,6 +208,13 @@ const countLogLines = (path: string | null): number => {
  */
 export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
   const { db, nodes, bundles, settings, bus, nowMs } = input;
+  const reportError =
+    input.onError ??
+    ((context: string, error: unknown) => {
+      console.error(
+        `[nodes] ${context}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   const jobRepo = createJobRepo(db);
   const mediaFileRepo = createMediaFileRepo(db);
   const libraryRepo = createLibraryRepo(db);
@@ -254,29 +266,53 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
 
   // ---- job logs -----------------------------------------------------------
 
+  /** Jobs whose server log could not be written: reported once, then skipped. */
+  const failedLogs = new Set<string>();
+
+  /**
+   * NEVER THROWS. Logs are liveness only (worker/protocol.ts), and this runs
+   * inside a node's frame handler: a full disk or an unwritable log directory
+   * that escaped here would close the node's socket, which moves every one of
+   * its leases to grace and stalls work that has nothing wrong with it.
+   */
   const appendLogLines = (jobId: string, lines: readonly string[]): void => {
-    if (lines.length === 0) return;
+    if (lines.length === 0 || failedLogs.has(jobId)) return;
     let writer = logWriters.get(jobId);
     let transient = false;
-    if (writer === undefined) {
-      const path = logPaths.get(jobId) ?? jobRepo.getById(jobId)?.logPath ?? null;
-      if (path === null) return;
-      writer = createJobLogWriter({ path });
-      // A live job keeps its writer until it settles; a backfill for a job
-      // with no live handle opens, writes and closes.
-      if (handles.has(jobId)) logWriters.set(jobId, writer);
-      else transient = true;
-    }
     try {
+      if (writer === undefined) {
+        const path = logPaths.get(jobId) ?? jobRepo.getById(jobId)?.logPath ?? null;
+        if (path === null) return;
+        writer = createJobLogWriter({ path });
+        // A live job keeps its writer until it settles; a backfill for a job
+        // with no live handle opens, writes and closes.
+        if (handles.has(jobId)) logWriters.set(jobId, writer);
+        else transient = true;
+      }
       for (const line of lines) writer.append(line);
+    } catch (error) {
+      failedLogs.add(jobId);
+      closeLogWriter(jobId);
+      reportError(`the server log for job ${jobId} could not be written`, error);
     } finally {
-      if (transient) writer.close();
+      if (transient) {
+        try {
+          writer?.close();
+        } catch {
+          // already reported, or nothing left to close
+        }
+      }
     }
   };
 
   const closeLogWriter = (jobId: string): void => {
-    logWriters.get(jobId)?.close();
+    const writer = logWriters.get(jobId);
     logWriters.delete(jobId);
+    try {
+      writer?.close();
+    } catch (error) {
+      reportError(`the server log for job ${jobId} could not be closed`, error);
+    }
   };
 
   // ---- leases -------------------------------------------------------------
@@ -322,6 +358,14 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     if (row === null || row.endedAt !== null || lease === null) {
       return { granted: false, reason: 'This job is no longer running on the server.' };
     }
+    // Read from the row, not only the handle's memory: a cancel made before
+    // a daemon restart must still stop the install after it.
+    if (row.cancelRequestedAt !== null) {
+      return {
+        granted: false,
+        reason: 'This job was cancelled, so it may not write to the library.',
+      };
+    }
     const file = mediaFileRepo.getById(row.fileId);
     const latest = jobRepo.listForFile(row.fileId)[0];
     const stillClaimed =
@@ -332,6 +376,10 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       latest.endedAt === null;
     const decision = decideCommit({ lease, nowMs: nowMs(), stillClaimed, kind: request.kind });
     if (!decision.granted) return { granted: false, reason: decision.reason };
+    // A granted `committing` lease is never expired by grace. If the node
+    // vanishes mid-install it is reclaimed only by the 24 h floor, BY DESIGN:
+    // it may be halfway through swapping the file, and handing that file to
+    // another worker on a shorter clock is exactly the two-writer case.
     setLeaseIfChanged(jobId, lease, decision.lease);
     return { granted: true, reason: null };
   };
@@ -349,13 +397,18 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     const { jobId } = payload;
     handles.set(jobId, handle);
     logPaths.set(jobId, payload.logPath);
-    void handle.exited.then(() => {
-      // Only unsettled handles live here, so a frame for a settled job is
-      // routed by its row (a late result, or a duplicate) instead.
-      if (handles.get(jobId) === handle) handles.delete(jobId);
-      logPaths.delete(jobId);
-      closeLogWriter(jobId);
-    });
+    handle.exited
+      .then(() => {
+        // Only unsettled handles live here, so a frame for a settled job is
+        // routed by its row (a late result, or a duplicate) instead.
+        if (handles.get(jobId) === handle) handles.delete(jobId);
+        logPaths.delete(jobId);
+        failedLogs.delete(jobId);
+        closeLogWriter(jobId);
+      })
+      .catch((error: unknown) => {
+        reportError(`cleaning up after job ${jobId} failed`, error);
+      });
   };
 
   const prepareFor = async (
@@ -382,6 +435,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       nodeId: string;
       fresh: boolean;
       pathMap?: readonly PathMapping[];
+      cancelRequested?: boolean;
     },
   ): RemoteAgentHandle => {
     const remoteInput: RemoteAgentInput = {
@@ -389,6 +443,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       nodeId: options.nodeId,
       fresh: options.fresh,
       ...(options.pathMap === undefined ? {} : { pathMap: options.pathMap }),
+      cancelRequested: options.cancelRequested === true,
       jobs: jobRepo,
       channel: () => channelFor(options.nodeId),
       decideCommit: (request) =>
@@ -434,9 +489,10 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     nodeId: string,
     journal: HelloFrame['jobs'],
     now: number,
-  ): { jobs: WelcomeJob[]; reconnect: RemoteAgentHandle[] } => {
+  ): { jobs: WelcomeJob[]; reconnect: RemoteAgentHandle[]; cancelWithoutHandle: string[] } => {
     const jobs: WelcomeJob[] = [];
     const reconnect: RemoteAgentHandle[] = [];
+    const cancelWithoutHandle: string[] = [];
     const mentioned = new Set<string>();
 
     for (const entry of journal) {
@@ -459,6 +515,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
             if (next.state !== 'expired') {
               setLeaseIfChanged(row.id, lease, next);
               if (handle !== undefined) reconnect.push(handle);
+              else if (row.cancelRequestedAt !== null) cancelWithoutHandle.push(row.id);
               jobs.push({ jobId: row.id, action: 'continue', logLinesHave });
               break;
             }
@@ -474,6 +531,11 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
           // made was granted), so a still-claimed job's report is applied.
           // An ENDED job's report is also requested: it arrives as a late
           // result, appended to the closed row with no ledger change.
+          // No clock check before moving grace → connected: the report is
+          // already finished, and every commit it made was granted under a
+          // then-valid lease. What remains is delivering it, and a grace
+          // lease that ran out mid-delivery must not refuse a result whose
+          // file is still claimed by this very job.
           if (live && lease.state === 'grace') {
             jobRepo.setLease({ jobId: row.id, lease: { state: 'connected', expiresAtMs: null } });
           }
@@ -496,7 +558,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       release(leased, lostMessage(nodeId));
     }
 
-    return { jobs, reconnect };
+    return { jobs, reconnect, cancelWithoutHandle };
   };
 
   const handleHello = (conn: Connection, hello: HelloFrame): void => {
@@ -532,12 +594,15 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       return;
     }
 
-    const { jobs, reconnect } = reconcile(conn.nodeId, hello.jobs, now);
+    const { jobs, reconnect, cancelWithoutHandle } = reconcile(conn.nodeId, hello.jobs, now);
     conn.welcomed = true;
     sendFrame(conn, { type: 'welcome', config: configFrame(node), jobs });
     // After the welcome, so a cancel queued while the node was away reaches
     // a node that already knows the job continues.
     for (const handle of reconnect) handle.reconnected();
+    for (const jobId of cancelWithoutHandle) {
+      sendFrame(conn, { type: 'agent', jobId, message: { type: 'cancel' } });
+    }
     input.onNodesChanged();
     bus.emit({ type: 'nodes.changed', nodeId: conn.nodeId, online: true });
   };
@@ -606,6 +671,10 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
   };
 
   const handleMessage = (conn: Connection, data: RawData): void => {
+    // Checked before ANYTHING, hello included: a replaced socket no longer
+    // speaks for its node, and a hello it sent late would otherwise record its
+    // stale journal and reconcile leases over the current connection's.
+    if (connections.get(conn.nodeId) !== conn) return;
     const frame = parseNodeFrame(rawToString(data));
     if (!conn.helloSeen) {
       if (frame === null || frame.type !== 'hello') {
@@ -615,9 +684,8 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       handleHello(conn, frame);
       return;
     }
-    // A replaced socket no longer speaks for its node, and nothing but a
-    // welcomed one may act on jobs.
-    if (frame === null || !conn.welcomed || connections.get(conn.nodeId) !== conn) return;
+    // Nothing but a welcomed socket may act on jobs.
+    if (frame === null || !conn.welcomed) return;
 
     switch (frame.type) {
       case 'hello':
@@ -773,7 +841,12 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       wss.handleUpgrade(req, socket, head, (ws) => {
         onConnection(ws, nodeId);
       });
-    })();
+    })().catch((error: unknown) => {
+      // A backstop: nothing above should throw, but an upgrade handler's
+      // rejection would be unhandled, and that takes the whole daemon down.
+      reportError('a node socket upgrade failed', error);
+      socket.destroy();
+    });
   };
 
   const pingAll = (): void => {
@@ -849,6 +922,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
           nodeId: leased.nodeId,
           fresh: false,
           pathMap,
+          cancelRequested: jobRepo.getById(leased.jobId)?.cancelRequestedAt != null,
         });
         register(handle, payload);
         if (next.state === 'expired') {

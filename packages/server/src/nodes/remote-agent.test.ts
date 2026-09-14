@@ -8,6 +8,8 @@ import { payloadToNode } from './map-payload.js';
 import type { ServerFrame } from './node-frames.js';
 import { createRemoteAgentHandle, type RemoteAgentInput } from './remote-agent.js';
 
+const SERVER_NOW = 1_700_000_000_000;
+
 const MAP: PathMapping[] = [{ serverPath: '/media', nodePath: '/mnt/nas' }];
 
 const payloadFixture = (): JobPayload =>
@@ -59,6 +61,8 @@ const noDocuments: DocumentPort = {
 const harness = (over: Partial<RemoteAgentInput> = {}) => {
   const sent: ServerFrame[] = [];
   const setRemoteCalls: Parameters<RemoteAgentInput['jobs']['setRemote']>[0][] = [];
+  const cancelRequests: { jobId: string; nowMs: number }[] = [];
+  const heartbeats: number[] = [];
   const state = { online: true, decision: { granted: true, reason: null as string | null } };
   const handle = createRemoteAgentHandle({
     id: 'worker-1',
@@ -66,13 +70,18 @@ const harness = (over: Partial<RemoteAgentInput> = {}) => {
     fresh: true,
     documents: noDocuments,
     onStep: () => {},
-    onHeartbeat: () => {},
+    onHeartbeat: (at) => {
+      heartbeats.push(at);
+    },
     onProgress: () => {},
     onLog: () => {},
-    nowMs: () => 0,
+    nowMs: () => SERVER_NOW,
     jobs: {
       setRemote: (input) => {
         setRemoteCalls.push(input);
+      },
+      requestCancel: (input) => {
+        cancelRequests.push(input);
       },
     },
     channel: () =>
@@ -97,7 +106,7 @@ const harness = (over: Partial<RemoteAgentInput> = {}) => {
     appendLog: () => {},
     ...over,
   });
-  return { handle, sent, setRemoteCalls, state };
+  return { handle, sent, setRemoteCalls, state, cancelRequests, heartbeats };
 };
 
 describe('createRemoteAgentHandle', () => {
@@ -233,5 +242,51 @@ describe('createRemoteAgentHandle', () => {
     await flush();
     handle.receive({ type: 'failed', error: 'refused', superseded: true });
     await expect(run).rejects.toMatchObject({ reported: true, superseded: true });
+  });
+  it("stamps a heartbeat with the server clock, never the node's own", async () => {
+    // The 24 h floor compares heartbeat_at against the SERVER clock; a node
+    // whose clock is a day behind would otherwise be released on first sweep.
+    const { handle, heartbeats } = harness();
+    void handle.run(payloadFixture());
+    await flush();
+    handle.receive({ type: 'heartbeat', nowMs: 5 });
+    expect(heartbeats).toEqual([SERVER_NOW]);
+  });
+
+  it('settles run as a reported failure when recording the lease throws, sending nothing', async () => {
+    const { handle, sent } = harness({
+      jobs: {
+        setRemote: () => {
+          throw new Error('database is locked');
+        },
+        requestCancel: () => {},
+      },
+    });
+    const error = await handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect(error).toMatchObject({ reported: true });
+    expect((error as Error).message).toContain('database is locked');
+    expect(sent).toEqual([]);
+  });
+
+  it('persists a cancel on the job row, so a daemon restart cannot forget it', async () => {
+    const { handle, cancelRequests, state } = harness();
+    void handle.run(payloadFixture()).catch(() => {});
+    await flush();
+    state.online = false;
+    handle.kill();
+    expect(cancelRequests).toEqual([{ jobId: 'job-1', nowMs: SERVER_NOW }]);
+  });
+
+  it('an adopted handle whose row was cancelled sends cancel on reconnect and refuses commits', async () => {
+    const { handle, sent, state } = harness({ fresh: false, pathMap: MAP, cancelRequested: true });
+    state.online = false;
+    void handle.run(payloadFixture()).catch(() => {});
+    await flush();
+    state.online = true;
+    handle.reconnected();
+    expect(sent).toEqual([{ type: 'agent', jobId: 'job-1', message: { type: 'cancel' } }]);
+    handle.receive({ type: 'commit-request', id: 2, kind: 'replace', pluginId: 'x' });
+    expect(sent.at(-1)).toMatchObject({ message: { type: 'commit-result', granted: false } });
   });
 });

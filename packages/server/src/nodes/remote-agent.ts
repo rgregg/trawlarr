@@ -1,4 +1,4 @@
-import type { PathMapping } from '@trawlarr/core';
+import { leaseOnClaim, type PathMapping } from '@trawlarr/core';
 import type { AgentFactoryInput } from '../daemon/supervisor.js';
 import type { JobRepo } from '../db/job-repo.js';
 import { AgentFailure, answerDocRequest, type AgentHandle } from '../worker/agent-handle.js';
@@ -17,8 +17,17 @@ export interface RemoteAgentInput extends AgentFactoryInput {
   nodeId: string;
   /** True for a job claimed now; false for one adopted from the job table after a daemon restart. */
   fresh: boolean;
-  /** Where the lease and the server-view payload are recorded before the job is sent. */
-  jobs: Pick<JobRepo, 'setRemote'>;
+  /**
+   * Where the lease and the server-view payload are recorded before the job
+   * is sent, and where an operator's cancel is made durable.
+   */
+  jobs: Pick<JobRepo, 'setRemote' | 'requestCancel'>;
+  /**
+   * The job row already carries a cancel request (`job.cancel_requested_at`):
+   * an adopted job cancelled before a daemon restart. Its commits are refused
+   * and the cancel is re-sent when the node reconnects.
+   */
+  cancelRequested?: boolean;
   /**
    * The path map an ADOPTED job was sent through (`job.path_map_json`). A
    * fresh job takes its map from `prepare` instead, so the map that
@@ -75,8 +84,8 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
   let jobId: string | null = null;
   let pathMap: readonly PathMapping[] = input.pathMap ?? [];
   let started = false;
-  let cancelled = false;
-  let pendingCancel = false;
+  let cancelled = input.cancelRequested === true;
+  let pendingCancel = cancelled;
   /** An abandon that arrived before `run` (an adopted job whose lease had already expired). */
   let earlyFailure: AgentFailure | null = null;
   let settle: ((outcome: Outcome) => void) | null = null;
@@ -122,6 +131,13 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
     // Before the job frame has gone out there is nothing on the node to
     // stop; `run` sees `cancelled` after `prepare` and never sends it.
     if (!started || jobId === null) return;
+    try {
+      // Durable first: a cancel held only in memory is forgotten by a daemon
+      // restart, and the node would then be granted its commit on reconnect.
+      input.jobs.requestCancel({ jobId, nowMs: input.nowMs() });
+    } catch {
+      // The in-memory flag still refuses every commit this handle answers.
+    }
     sendCancel();
   };
 
@@ -163,7 +179,11 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
         input.onStepLease();
         return;
       case 'heartbeat':
-        input.onHeartbeat(message.nowMs);
+        // The SERVER's clock, never the node's: the 24 h floor compares
+        // `heartbeat_at` against the server clock, so a node whose clock is a
+        // day behind would be released on the first sweep, and one ahead
+        // would never be caught.
+        input.onHeartbeat(input.nowMs());
         return;
       case 'progress':
         input.onProgress({ percent: message.percent, stage: message.stage });
@@ -239,7 +259,7 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
     input.jobs.setRemote({
       jobId: payload.jobId,
       nodeId: input.nodeId,
-      lease: { state: 'connected', expiresAtMs: null },
+      lease: leaseOnClaim(),
       payloadJson: JSON.stringify(payload),
       pathMapJson: JSON.stringify(prepared.pathMap),
     });
@@ -252,6 +272,24 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
         ),
       });
     }
+  };
+
+  /**
+   * Nothing thrown while starting a fresh run may escape: it is called as
+   * `void`, so a throw (a database error in `setRemote`) would be an
+   * unhandled rejection that takes the daemon down AND a `run` that never
+   * settles, stranding the file in `running`.
+   */
+  const startFresh = (payload: JobPayload): void => {
+    runFresh(payload).catch((error: unknown) => {
+      finish({
+        ok: false,
+        error: new AgentFailure(
+          `This job could not be sent to node ${input.nodeId}: ${messageOf(error)}`,
+          { reported: true, cancelled },
+        ),
+      });
+    });
   };
 
   return {
@@ -281,7 +319,7 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
           return;
         }
         if (input.fresh) {
-          void runFresh(payload);
+          startFresh(payload);
           return;
         }
         // Adopted: the node already has this job. A cancel requested before

@@ -78,6 +78,7 @@ let logDir: string;
 let pluginRoot: string;
 let clients: WebSocket[];
 let extraHubs: NodeHub[];
+let hubErrors: string[];
 
 const makeHub = (over: { pingIntervalMs?: number; offlineAfterMs?: number } = {}): NodeHub => {
   const bus = createEventBus();
@@ -93,6 +94,9 @@ const makeHub = (over: { pingIntervalMs?: number; offlineAfterMs?: number } = {}
     onNodesChanged: () => {
       nodesChanged += 1;
     },
+    onError: (context, error) => {
+      hubErrors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`);
+    },
     ...over,
   });
 };
@@ -105,6 +109,7 @@ beforeEach(async () => {
   events = [];
   clients = [];
   extraHubs = [];
+  hubErrors = [];
   nodes = createNodeRepo(db);
   jobs = createJobRepo(db);
   files = createMediaFileRepo(db);
@@ -295,12 +300,21 @@ const connectNode = async (
   });
 
 /** Online node with one running job the hub has sent it. */
-const startRemoteJob = async () => {
+const startRemoteJob = async (over: { logPath?: string } = {}) => {
   const client = await connectNode();
   await client.hello();
-  const payload = claimJob();
+  const claimed = claimJob();
+  const payload = over.logPath === undefined ? claimed : { ...claimed, logPath: over.logPath };
   const sinks: Sinks = { steps: [], logs: [], heartbeats: [] };
-  const agent = hub.createAgent({ ...factoryInput(sinks), nodeId: creds.nodeId });
+  const agent = hub.createAgent({
+    ...factoryInput(sinks),
+    // What the supervisor's sink does with a heartbeat.
+    onHeartbeat: (at) => {
+      sinks.heartbeats.push(at);
+      jobs.heartbeat({ jobId: payload.jobId, nowMs: at });
+    },
+    nodeId: creds.nodeId,
+  });
   const run = agent.run(payload);
   const outcome: { settled: boolean; error: unknown; report: JobReport | null } = {
     settled: false,
@@ -651,5 +665,85 @@ describe('createNodeHub', () => {
     });
     await waitFor(() => outcome.settled, 'report applied');
     expect(outcome.report?.replaced?.path).toBe(payload.path);
+  });
+  it('stamps remote heartbeats with the server clock, so a node clock a day behind releases nothing', async () => {
+    const { client, payload, outcome } = await startRemoteJob();
+    now += 60 * 60 * 1000;
+    client.send({ type: 'agent', jobId: payload.jobId, message: { type: 'heartbeat', nowMs: 1 } });
+    await waitFor(() => jobs.getById(payload.jobId)?.heartbeatAt === now, 'heartbeat');
+    hub.sweepLeases();
+    expect(leaseOf(payload.jobId).state).toBe('connected');
+    expect(outcome.settled).toBe(false);
+  });
+
+  it('keeps the node connected when its job log cannot be written, reporting the failure once', async () => {
+    const { client, payload } = await startRemoteJob({ logPath: '/dev/null/not-a-dir/job.log' });
+    client.send({ type: 'agent', jobId: payload.jobId, message: { type: 'log', text: 'one' } });
+    client.send({ type: 'agent', jobId: payload.jobId, message: { type: 'log', text: 'two' } });
+    client.send({ type: 'log-backfill', jobId: payload.jobId, fromLine: 0, lines: ['three'] });
+    client.send({
+      type: 'agent',
+      jobId: payload.jobId,
+      message: { type: 'commit-request', id: 5, kind: 'replace', pluginId: 'x' },
+    });
+    const result = await client.next('agent', (f) => f.message.type === 'commit-result');
+    expect(result.message).toMatchObject({ id: 5, granted: true });
+    expect(client.closed).toBeNull();
+    expect(hubErrors).toHaveLength(1);
+    expect(hubErrors[0]).toContain(payload.jobId);
+  });
+
+  it('remembers a cancel made while the node was offline across a daemon restart', async () => {
+    const { client, payload, agent } = await startRemoteJob();
+    client.ws.close();
+    await waitFor(() => leaseOf(payload.jobId).state === 'grace', 'grace');
+    agent.cancel();
+    expect(jobs.getById(payload.jobId)?.cancelRequestedAt).toBe(now);
+
+    // Restart: the old hub (and its in-memory handle) is gone.
+    await hub.close();
+    now += 60_000;
+    hub = makeHub();
+    hub.attach(server);
+    const adopted = hub.adoptLeasedJobs(() =>
+      factoryInput({ steps: [], logs: [], heartbeats: [] }),
+    );
+    expect(adopted).toHaveLength(1);
+    void adopted[0]!.agent.run(adopted[0]!.payload).catch(() => {});
+
+    const again = await connectNode();
+    const welcome = (await again.hello([
+      { jobId: payload.jobId, state: 'running', logLineCount: 0 },
+    ])) as Extract<ServerFrame, { type: 'welcome' }>;
+    expect(welcome.jobs[0]?.action).toBe('continue');
+    await again.next('agent', (f) => f.jobId === payload.jobId && f.message.type === 'cancel');
+
+    again.send({
+      type: 'agent',
+      jobId: payload.jobId,
+      message: { type: 'commit-request', id: 8, kind: 'replace', pluginId: 'x' },
+    });
+    const refused = await again.next('agent', (f) => f.message.type === 'commit-result');
+    expect(refused.message).toMatchObject({ id: 8, granted: false });
+  });
+
+  it('ignores a hello from a socket that has already been replaced', async () => {
+    const ghost = await connectNode();
+    // Stop the ghost reading, so it never sees its 4000 close and can still send.
+    (ghost.ws as unknown as { _socket: { pause(): void } })._socket.pause();
+    const current = await connectNode();
+    ghost.send({
+      type: 'hello',
+      protocolVersion: PROTOCOL_VERSION,
+      buildVersion: 'ghost',
+      hardwareTypes: ['cpu'],
+      hardwareCaps: {},
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      jobs: [],
+    });
+    await current.hello([], { buildVersion: 'current' });
+    expect(nodes.getById(creds.nodeId)?.buildVersion).toBe('current');
+    expect(events.filter((event) => event.type === 'nodes.changed')).toHaveLength(1);
   });
 });
