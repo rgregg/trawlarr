@@ -2,10 +2,10 @@
    A windowed table of every known file. The grid template is declared ONCE,
    as `--file-columns`, and read by both the header row and every data row:
    they are two elements that have to agree to the pixel, and before this
-   they agreed only by both happening to say the same six values. */
+   they agreed only by both happening to say the same seven values. */
 
 .files {
-  --file-columns: minmax(0, 2fr) 6rem 5rem 8rem 6rem 6rem;
+  --file-columns: minmax(0, 2fr) 6rem 5rem 8rem 5rem 6rem 6rem;
   --file-gutter: var(--space-3);
 }
 
@@ -82,9 +82,15 @@
 
 /* Right-aligned over the values, which are right-aligned because they are
    quantities. */
+.file-head-duration,
 .file-head-size,
 .file-head-updated {
   justify-content: flex-end;
+}
+
+/* Tabular figures, so `0:42:07` and `2:04:10` line up digit for digit. */
+.file-duration {
+  font-variant-numeric: tabular-nums;
 }
 
 /* --- the windowed list ---------------------------------------------------- */
@@ -146,6 +152,7 @@
 
 .file-state,
 .file-codec,
+.file-duration,
 .file-size,
 .file-updated {
   color: var(--ink-muted);
@@ -163,6 +170,7 @@
   font-size: var(--text-xs);
 }
 
+.file-duration,
 .file-size,
 .file-updated {
   text-align: right;
@@ -221,10 +229,10 @@
    THE CARD'S HEIGHT IS EXACT, not a minimum, and that is load-bearing:
    `Files.tsx` windows 4,625 rows on a constant row height, so a card whose
    height depends on how long the filename happens to be would put the
-   scrollbar and the scroll position at odds with the content. Six lines
-   at `line-height: 1.35` (1.35rem for the name, 1.215rem each for the five
-   labelled lines), five 0.15rem gaps and 1.2rem of padding come to just
-   under 9.5rem, which is `NARROW_ROW_HEIGHT_PX = 152` there. Change one and
+   scrollbar and the scroll position at odds with the content. Seven lines
+   at `line-height: 1.35` (1.35rem for the name, 1.215rem each for the six
+   labelled lines), six 0.15rem gaps and 1.2rem of padding come to just
+   under 10.75rem, which is `NARROW_ROW_HEIGHT_PX = 172` there. Change one and
    change the other. The name stays on ONE line here for the same reason —
    ellipsised, not wrapped; the full path is in its `title` and on the file's
    own screen, and an ellipsis does not scroll the viewport sideways. */
@@ -266,7 +274,7 @@
     grid-template-columns: 1fr;
     gap: 0.15rem;
     padding: 0.6rem var(--space-3);
-    height: 9.5rem;
+    height: 10.75rem;
     line-height: 1.35;
     overflow: hidden;
   }
@@ -277,6 +285,7 @@
 
   .file-state,
   .file-codec,
+  .file-duration,
   .file-size,
   .file-updated {
     text-align: left;
@@ -293,6 +302,10 @@
 
   .file-codec:nth-of-type(4)::before {
     content: 'Audio: ';
+  }
+
+  .file-duration::before {
+    content: 'Duration: ';
   }
 
   .file-size::before {

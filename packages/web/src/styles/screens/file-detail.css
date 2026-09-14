@@ -25,6 +25,8 @@
 /* `display: none` removes a grid item from the flow entirely, so the header
    and the rows both fall back to three columns and stay aligned. */
 .file-detail-layout > .files .file-codec,
+.file-detail-layout > .files .file-duration,
+.file-detail-layout > .files .file-head-duration,
 .file-detail-layout > .files .file-updated,
 .file-detail-layout > .files .file-head-static,
 .file-detail-layout > .files .file-head-updated {

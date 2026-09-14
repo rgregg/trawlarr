@@ -18,6 +18,7 @@ export interface ApiFile {
   reviewReason?: string | null;
   videoCodec: string | null;
   audioCodec: string | null;
+  durationMs: number | null;
   sizeBytes: number;
   updatedAt: number;
 }
@@ -30,11 +31,12 @@ export interface FileRow {
   reviewReason?: string | null;
   video: string;
   audio: string;
+  durationMs: number | null;
   sizeBytes: number;
   updatedAt: number;
 }
 
-export type SortColumn = 'name' | 'state' | 'size' | 'updated';
+export type SortColumn = 'name' | 'state' | 'duration' | 'size' | 'updated';
 
 const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
@@ -49,6 +51,7 @@ export const toFileRows = (items: ApiFile[]): FileRow[] =>
     // "null" — a dash says "not known" without inventing a fact.
     video: item.videoCodec ?? '—',
     audio: item.audioCodec ?? '—',
+    durationMs: item.durationMs,
     sizeBytes: item.sizeBytes,
     updatedAt: item.updatedAt,
   }));
@@ -72,6 +75,15 @@ export const sortRows = (
         return sign * left.name.localeCompare(right.name);
       case 'state':
         return sign * left.state.localeCompare(right.state);
+      case 'duration':
+        // Unprobed files sort LAST in both directions. Sorting by length
+        // is how an operator finds the longest (or shortest) titles, and a
+        // block of dashes at the top of either end would push them out of
+        // view.
+        if (left.durationMs === null || right.durationMs === null) {
+          return (left.durationMs === null ? 1 : 0) - (right.durationMs === null ? 1 : 0);
+        }
+        return sign * (left.durationMs - right.durationMs);
       case 'size':
         return sign * (left.sizeBytes - right.sizeBytes);
       case 'updated':
@@ -92,6 +104,22 @@ export const formatBytes = (bytes: number): string => {
   }
   const rounded = unit === 0 ? String(Math.round(value)) : value.toFixed(1);
   return `${rounded} ${UNITS[unit]}`;
+};
+
+/**
+ * A media length as `H:MM:SS`, always with the hours.
+ *
+ * Fixed-width for the same reason `formatUpdated` is: a 42-minute episode
+ * printed as `42:00` beside a film's `2:04:10` reads as the longer of the
+ * two when scanned down a column. `null` is a file not yet probed.
+ */
+export const formatDuration = (durationMs: number | null): string => {
+  if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) return '—';
+  const total = Math.floor(durationMs / 1000);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total / 60) % 60;
+  const seconds = total % 60;
+  return `${String(hours)}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
 /**
