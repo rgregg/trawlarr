@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, link, lstat, mkdir, open, rename, unlink, utimes } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, open, rename, stat, unlink, utimes } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import type {
   PluginInputArgs,
@@ -64,6 +64,11 @@ export type OpenExclusiveFn = (path: string) => Promise<void>;
  */
 export type CrossDeviceErrorFn = (input: { stagingDir: string; filePath: string }) => Error;
 
+export type CopyFileFn = (from: string, to: string) => Promise<void>;
+
+/** How often a cross-device copy's destination is measured for progress. */
+const COPY_PROGRESS_INTERVAL_MS = 2000;
+
 export interface ReplaceRunnerInput {
   /** Where this file's replaced original should be kept. */
   trashDirFor: (originalPath: string) => string;
@@ -91,6 +96,15 @@ export interface ReplaceRunnerInput {
   unlinkFile?: UnlinkFileFn;
   /** Seam for tests: the exclusive reservation used where linking is absent. */
   openExclusive?: OpenExclusiveFn;
+  /** Seam for tests: the byte copy behind the cross-device fallback. */
+  copyFile?: CopyFileFn;
+  /**
+   * Percentage of a cross-device copy that has landed, 0-100. Liveness only;
+   * a same-filesystem replacement is a rename and reports nothing.
+   */
+  onProgress?: (percent: number) => void;
+  /** Seam for tests: how often the copy is measured. */
+  copyProgressIntervalMs?: number;
 }
 
 const messageOf = (error: unknown): string =>
@@ -719,6 +733,7 @@ export const createReplaceOriginalRunner =
     const renameFile: RenameFileFn = input.renameFile ?? ((from, to) => rename(from, to));
     const linkFile: LinkFileFn = input.linkFile ?? ((from, to) => link(from, to));
     const unlinkFile: UnlinkFileFn = input.unlinkFile ?? ((path) => unlink(path));
+    const copy: CopyFileFn = input.copyFile ?? ((from, to) => copyFile(from, to));
     const openExclusive: OpenExclusiveFn =
       input.openExclusive ??
       (async (path) => {
@@ -991,6 +1006,9 @@ export const createReplaceOriginalRunner =
             linkFile,
             unlinkFile,
             openExclusive,
+            copy,
+            onCopyProgress: input.onProgress,
+            copyProgressIntervalMs: input.copyProgressIntervalMs ?? COPY_PROGRESS_INTERVAL_MS,
             nowMs: input.nowMs,
             say,
             noteLinkFallback,
@@ -1090,6 +1108,68 @@ export const createReplaceOriginalRunner =
   };
 
 /**
+ * Copy `from` to `to`, reporting how much has landed by measuring the
+ * destination on a timer rather than by copying in userland chunks.
+ * `copyFile` stays the kernel's copy (`copy_file_range`, and a server-side
+ * copy on NFS 4.2 — both far faster than streaming bytes through this
+ * process), and a measurement that fails simply reports nothing: progress is
+ * liveness, never a reason for a replacement to fail.
+ */
+const copyReportingProgress = async (input: {
+  copy: CopyFileFn;
+  from: string;
+  to: string;
+  onProgress: ((percent: number) => void) | undefined;
+  intervalMs: number;
+}): Promise<void> => {
+  const report = input.onProgress;
+  const totalBytes =
+    report === undefined
+      ? null
+      : await stat(input.from).then(
+          (s) => s.size,
+          () => null,
+        );
+  if (report === undefined || totalBytes === null || totalBytes <= 0) {
+    await input.copy(input.from, input.to);
+    return;
+  }
+
+  let finished = false;
+  let measuring = false;
+  let lastPercent = 0;
+  const timer = setInterval(() => {
+    if (measuring) return;
+    measuring = true;
+    stat(input.to)
+      .then(
+        (landed) => {
+          // A measurement that resolves after the copy has finished must not
+          // report a smaller number after the final 100.
+          if (finished) return;
+          const percent = Math.min(99, Math.floor((landed.size / totalBytes) * 100));
+          if (percent > lastPercent) {
+            lastPercent = percent;
+            report(percent);
+          }
+        },
+        () => {},
+      )
+      .finally(() => {
+        measuring = false;
+      });
+  }, input.intervalMs);
+
+  try {
+    await input.copy(input.from, input.to);
+  } finally {
+    finished = true;
+    clearInterval(timer);
+  }
+  report(100);
+};
+
+/**
  * Put the new file at `finalPath` without ever overwriting what is there.
  *
  * Two separate hazards, and both cost a user their data if handled loosely:
@@ -1113,6 +1193,9 @@ const swapIntoPlace = async (input: {
   linkFile: LinkFileFn;
   unlinkFile: UnlinkFileFn;
   openExclusive: OpenExclusiveFn;
+  copy: CopyFileFn;
+  onCopyProgress: ((percent: number) => void) | undefined;
+  copyProgressIntervalMs: number;
   nowMs: () => number;
   crossDeviceError: CrossDeviceErrorFn;
   allowCrossDevice: boolean;
@@ -1166,7 +1249,13 @@ const swapIntoPlace = async (input: {
   );
   input.state.stagedPath = stagedPath;
   try {
-    await copyFile(input.newPath, stagedPath);
+    await copyReportingProgress({
+      copy: input.copy,
+      from: input.newPath,
+      to: stagedPath,
+      onProgress: input.onCopyProgress,
+      intervalMs: input.copyProgressIntervalMs,
+    });
     await moveExclusively({
       from: stagedPath,
       to: input.finalPath,

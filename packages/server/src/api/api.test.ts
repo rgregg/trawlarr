@@ -2495,6 +2495,9 @@ describe('jobs', () => {
 
     expect(list.body.total).toBe(1);
     expect(detail.body.job.id).toBe(jobId);
+    // The job page names the file it ran on; a bare file id is not
+    // something a person can recognise.
+    expect(detail.body.file).toEqual({ id: fileId, path: '/media/a.mkv' });
     expect(detail.body.steps).toHaveLength(1);
     expect(detail.body.steps[0].pluginId).toBe('trawlarr:start');
   });
