@@ -1676,11 +1676,13 @@ const cmdNode = async (args: string[]): Promise<number> => {
     options: {
       server: { type: 'string' },
       token: { type: 'string' },
-      // Not the daemon's default: a node's `logs/jobs/<id>.log` beside a
-      // daemon's on the same machine would be two writers on one job log.
+      // Not the daemon's directory, nor its variable: a node's
+      // `logs/jobs/<id>.log` beside a daemon's on the same machine (or in a
+      // container that inherited TRAWLARR_DATA_DIR) would be two writers on
+      // one job log.
       'data-dir': {
         type: 'string',
-        default: process.env.TRAWLARR_DATA_DIR ?? './trawlarr-node-data',
+        default: process.env.TRAWLARR_NODE_DATA_DIR ?? './trawlarr-node-data',
       },
       ffmpeg: { type: 'string' },
       ffprobe: { type: 'string' },
@@ -2410,7 +2412,7 @@ const cmdPluginSource = async (argv: string[]): Promise<number> => {
 
 const USAGE = `Usage:
   trawlarr daemon [--port <n>] [--bind <addr>]
-  trawlarr node [--server <url>] [--token <token>] [--ffmpeg <path>] [--ffprobe <path>] [--hardware cpu,nvenc] [--cap nvenc=2...]
+  trawlarr node [--server <url>] [--token <token>] [--data-dir <dir>] [--ffmpeg <path>] [--ffprobe <path>] [--hardware cpu,nvenc] [--cap nvenc=2...]
   trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked] [--staging-dir <dir>] [--trash-dir <dir>]
   trawlarr flow add --name <name> --file <flow.json>
   trawlarr flow add --name <name> --template <id> [--set key=value...]
@@ -2441,7 +2443,8 @@ Flow templates: transcode-hevc, conform-library
 
 Installing a plugin runs its author's code as the user trawlarr runs as.
 
-All commands accept --data-dir <path> (default ./trawlarr-data).
+All commands accept --data-dir <path> (default ./trawlarr-data; for "node",
+./trawlarr-node-data or TRAWLARR_NODE_DATA_DIR).
 While a daemon owns that directory, every command talks to it over its API
 instead of opening the database — the daemon is the only writer.`;
 

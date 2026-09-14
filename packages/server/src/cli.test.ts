@@ -1645,6 +1645,22 @@ describe('cli: node', () => {
     }
   });
 
+  it('takes its data directory from TRAWLARR_NODE_DATA_DIR, never the daemon variable', async () => {
+    const nodeDir = newDataDir();
+    const daemonDir = newDataDir();
+    vi.stubEnv('TRAWLARR_SERVER', undefined);
+    vi.stubEnv('TRAWLARR_NODE_TOKEN', undefined);
+    vi.stubEnv('TRAWLARR_NODE_DATA_DIR', nodeDir);
+    vi.stubEnv('TRAWLARR_DATA_DIR', daemonDir);
+    try {
+      expect(await main(['node'])).toBe(2);
+      expect(existsSync(join(nodeDir, 'node.lock'))).toBe(true);
+      expect(existsSync(join(daemonDir, 'node.lock'))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('rejects an unknown hardware type before starting anything', async () => {
     const dataDir = newDataDir();
     const code = await main([

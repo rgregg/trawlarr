@@ -21,7 +21,7 @@ import {
 import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION, type AgentToDaemon, type DaemonToAgent } from '../worker/protocol.js';
 import { createBundleCache } from './bundle-cache.js';
-import { createJournal } from './journal.js';
+import { createJournal, type Journal } from './journal.js';
 import { readNodeState, writeNodeState, type NodeState } from './node-state.js';
 
 /**
@@ -73,7 +73,7 @@ export interface NodeHost {
   /** Resolves once connected at least once, or rejects on a refusal it cannot retry (enrollment refused). */
   started: Promise<void>;
   status(): { connected: boolean; nodeId: string | null; running: string[] };
-  /** Cancels running agents, closes the socket, releases the lock. */
+  /** Kills running agents (their jobs are reported lost on the next start), closes the socket, releases the lock. */
   stop(): Promise<void>;
 }
 
@@ -115,11 +115,11 @@ const DEFAULT_LIBRARY_PROBE_INTERVAL_MS = 300_000;
 const SERVER_SILENCE_MS = 60_000;
 
 /**
- * How long `stop()` waits for cancelled agents to settle. Longer than the
- * handle's own ladder (30 s cancel grace, then 5 s of SIGTERM before SIGKILL),
- * so a stop normally sees every run end and journals its report.
+ * How long `stop()` waits for killed agents to exit. A SIGKILLed group exits
+ * at once; this bounds a worker whose exit is somehow never observed, so a
+ * stop cannot hang a container's shutdown.
  */
-const STOP_GRACE_MS = 40_000;
+const STOP_GRACE_MS = 5_000;
 
 const API_PREFIX = '/api/v1/nodes';
 
@@ -200,6 +200,11 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
   const releaseLock = attempt.status === 'acquired' ? attempt.lock.release : (): void => {};
 
   let state: NodeState | null;
+  let journal: Journal;
+  let startupEntries: ReturnType<Journal['load']>;
+  // Everything between taking the lock and returning a host is inside this
+  // try: a start that fails while still holding the lock would keep the data
+  // directory locked against the very retry that might succeed.
   try {
     state = await readNodeState(dataDir);
     if (state === null && (input.serverUrl === undefined || input.enrollToken === undefined)) {
@@ -208,18 +213,17 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
           `(or TRAWLARR_SERVER and TRAWLARR_NODE_TOKEN); the server's Nodes page shows both.`,
       );
     }
+    journal = createJournal(join(dataDir, 'journal'));
+    /**
+     * `load()` runs ONCE: it is the only moment a `running` entry means "no
+     * agent survives" (lost). Every later hello is built from memory, where a
+     * `running` entry has a live agent behind it.
+     */
+    startupEntries = journal.load();
   } catch (error) {
     releaseLock();
     throw error;
   }
-
-  const journal = createJournal(join(dataDir, 'journal'));
-  /**
-   * `load()` runs ONCE: it is the only moment a `running` entry means "no
-   * agent survives" (lost). Every later hello is built from memory, where a
-   * `running` entry has a live agent behind it.
-   */
-  const startupEntries = journal.load();
   /** Every job the journal holds, in the order hello lists them. */
   const known = new Set(startupEntries.map((entry) => entry.jobId));
   const lostAtStartup = new Set(
@@ -419,9 +423,21 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
     // the server has already decided this job, and a report would only be
     // appended to a row that is closed.
     if (journal.get(jobId) === null) return;
+    // A node that is stopping reports nothing it did not finish: the kill in
+    // `stop()` ends runs with a vanished-worker failure, and sending that (or
+    // holding it) would record a node restart as an ordinary failed attempt or
+    // an operator cancel. Left `running`, the entry is reported `lost` on the
+    // next start — stalled as a vanished child, which is what happened. A
+    // `done` that raced the stop is still held: that run really completed, and
+    // it may have replaced the file.
+    if (stopping && final.type !== 'done') return;
     try {
       journal.hold(jobId, final);
     } catch (error) {
+      // Sent anyway. `hold` updates the in-memory entry before it writes, so
+      // an `ack-report` still clears it; and a report withheld because the
+      // disk refused it would, after a crash, turn a job that may have
+      // replaced its file into `lost` — the report is the only record of that.
       log(`[node] Could not journal the report for job ${jobId}: ${messageOf(error)}`);
     }
     sendAgent(jobId, final);
@@ -640,10 +656,19 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
     for (const job of frame.jobs) {
       if (!known.has(job.jobId)) continue;
       switch (job.action) {
-        case 'continue':
+        case 'continue': {
           backfill(job.jobId, job.logLinesHave);
           resendPending(job.jobId);
+          // The run can finish between `hello` (which listed it running) and
+          // this welcome: its report was held, but its send was dropped on an
+          // unwelcomed socket. Nothing else would ever send it while this
+          // connection lasts, and the server would wait for the 24 h floor.
+          const entry = journal.get(job.jobId);
+          if (entry?.state === 'held-report' && entry.final !== null) {
+            sendAgent(job.jobId, entry.final);
+          }
           break;
+        }
         case 'apply-report': {
           backfill(job.jobId, job.logLinesHave);
           // Re-sent every time it is asked for, even for a job the server
@@ -851,6 +876,20 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
         continue;
       }
       if (response.status === 401) throw new NodeSetupError(ENROLLMENT_REFUSED_MESSAGE);
+      // Any other 4xx will not change by asking again — a wrong URL (404), a
+      // proxy refusing the request (403) — so it is an error to fix, not a
+      // loop to sit in silently. 408 and 429 are the two that mean "later".
+      if (
+        response.status >= 400 &&
+        response.status < 500 &&
+        response.status !== 408 &&
+        response.status !== 429
+      ) {
+        throw new NodeSetupError(
+          `Enrolling with ${base} failed: POST ${base}${API_PREFIX}/enroll answered HTTP ` +
+            `${String(response.status)}. Check that --server is this trawlarr server's address.`,
+        );
+      }
       if (!response.ok) {
         const delay = nextBackoff();
         log(`[node] Enrolling with ${base} failed with HTTP ${String(response.status)}; retrying.`);
@@ -874,7 +913,10 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
     if (reconnectTimer !== null) clearTimeout(reconnectTimer);
     reconnectTimer = null;
 
-    for (const agent of agents.values()) agent.cancel();
+    // Killed, not cancelled: a cancel would make the server treat a node
+    // restart as an operator's cancel. The group kill takes a plugin's own
+    // ffmpeg with it, and `holdAndSend` records nothing for the runs it ends.
+    for (const agent of agents.values()) agent.kill();
     const settled = Promise.all(runs.values()).then(() => {});
     const grace = sleep(STOP_GRACE_MS);
     await Promise.race([settled, grace]);

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,7 @@ import { AgentFailure, type AgentHandle, type AgentHandleDeps } from '../worker/
 import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION } from '../worker/protocol.js';
 import type { JobReport } from '../worker/run-payload.js';
+import { createJournal } from './journal.js';
 import { startNodeHost, type NodeHost, type NodeHostInput } from './node-host.js';
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,7 @@ interface FakeAgent {
   deps: AgentHandleDeps & { id: string };
   payload: JobPayload | null;
   cancels: number;
+  kills: number;
   resolve(report: JobReport): void;
   reject(error: AgentFailure): void;
 }
@@ -225,6 +227,7 @@ const fakeAgentFactory = () => {
       deps,
       payload: null,
       cancels: 0,
+      kills: 0,
       resolve: (report) => {
         resolveRun(report);
         resolveExited(0);
@@ -251,7 +254,13 @@ const fakeAgentFactory = () => {
       cancel: () => {
         agent.cancels += 1;
       },
-      kill: () => {},
+      kill: () => {
+        agent.kills += 1;
+        // What a SIGKILLed group looks like to the handle: an exit with no report.
+        agent.reject(
+          new AgentFailure(`Worker ${deps.id} exited on SIGKILL`, { signal: 'SIGKILL' }),
+        );
+      },
     };
   }) as unknown as NonNullable<NodeHostInput['createAgent']>;
   return { agents, createAgent };
@@ -680,5 +689,135 @@ describe('startNodeHost', () => {
     );
     const failed = await conn.next('agent', (f) => f.message.type === 'failed');
     expect(failed.message).toMatchObject({ type: 'failed', error: 'stopped' });
+  });
+
+  /** Drop the welcomed socket and return the reconnect, once its hello has arrived. */
+  const reconnect = async (server: FakeServer, conn: FakeConnection, host: NodeHost) => {
+    const next = server.nextConnection();
+    conn.ws.terminate();
+    await waitFor(() => !host.status().connected);
+    const conn2 = server.connections.at(-1) !== conn ? server.connections.at(-1)! : await next;
+    const hello = await conn2.next('hello');
+    return { conn2, hello };
+  };
+
+  it('delivers a report held between hello and welcome once the welcome continues the job', async () => {
+    const { server, factory, dataDir, start } = await setup();
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+    conn.send({ type: 'job', jobId: 'job-9', payload: payloadFor('job-9', server.bundle) });
+    await waitFor(() => factory.agents[0]?.payload != null);
+
+    const { conn2, hello } = await reconnect(server, conn, host);
+    expect(hello.jobs).toEqual([{ jobId: 'job-9', state: 'running', logLineCount: 0 }]);
+
+    // The run finishes after hello and before welcome: held, but not sendable yet.
+    factory.agents[0]!.resolve(reportFor('job-9'));
+    await waitFor(
+      () =>
+        (
+          JSON.parse(readFileSync(join(dataDir, 'journal', 'job-9.json'), 'utf8')) as {
+            state: string;
+          }
+        ).state === 'held-report',
+    );
+    expect(conn2.frames.some((f) => f.type === 'agent')).toBe(false);
+
+    conn2.send({
+      type: 'welcome',
+      config: config(),
+      jobs: [{ jobId: 'job-9', action: 'continue', logLinesHave: 0 }],
+    });
+    const done = await conn2.next('agent', (f) => f.message.type === 'done');
+    expect(done.jobId).toBe('job-9');
+  });
+
+  it('stops by killing agents, sending no final, and leaving the job to be reported lost', async () => {
+    const { server, factory, dataDir, start } = await setup();
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+    conn.send({ type: 'job', jobId: 'job-10', payload: payloadFor('job-10', server.bundle) });
+    await waitFor(() => factory.agents[0]?.payload != null);
+
+    await host.stop();
+
+    expect(factory.agents[0]!.kills).toBe(1);
+    expect(factory.agents[0]!.cancels).toBe(0);
+    expect(
+      conn.frames.some(
+        (f) => f.type === 'agent' && (f.message.type === 'failed' || f.message.type === 'done'),
+      ),
+    ).toBe(false);
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'journal', 'job-10.json'), 'utf8')) as {
+      state: string;
+      final: unknown;
+    };
+    expect(onDisk).toMatchObject({ state: 'running', final: null });
+    expect(createJournal(join(dataDir, 'journal')).load()).toEqual([
+      { jobId: 'job-10', state: 'lost', logLineCount: 0 },
+    ]);
+  });
+
+  it("acts on a welcome's abandon: cancels, forgets the entry, refuses commits, sends nothing later", async () => {
+    const { server, factory, dataDir, start } = await setup();
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+    conn.send({ type: 'job', jobId: 'job-11', payload: payloadFor('job-11', server.bundle) });
+    await waitFor(() => factory.agents[0]?.payload != null);
+    const agent = factory.agents[0]!;
+
+    const { conn2 } = await reconnect(server, conn, host);
+    conn2.send({
+      type: 'welcome',
+      config: config(),
+      jobs: [{ jobId: 'job-11', action: 'abandon', logLinesHave: 0 }],
+    });
+    await waitFor(() => agent.cancels === 1);
+    expect(existsSync(join(dataDir, 'journal', 'job-11.json'))).toBe(false);
+    expect((await agent.deps.commits!({ kind: 'replace', pluginId: 'x' })).granted).toBe(false);
+
+    agent.reject(new AgentFailure('Worker job-11 reported failure: cancelled', { reported: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(conn2.frames.some((f) => f.type === 'agent')).toBe(false);
+    expect(existsSync(join(dataDir, 'journal', 'job-11.json'))).toBe(false);
+  });
+
+  it("acts on a welcome's lost: removes a job this node lost in a restart", async () => {
+    const dataDir = newDataDir();
+    createJournal(join(dataDir, 'journal')).begin('job-12', 1);
+    const { server, start } = await setup({ dataDir });
+    const connecting = server.nextConnection();
+    await start();
+    const conn = await connecting;
+    const hello = await conn.next('hello');
+    expect(hello.jobs).toEqual([{ jobId: 'job-12', state: 'lost', logLineCount: 0 }]);
+
+    conn.send({
+      type: 'welcome',
+      config: config(),
+      jobs: [{ jobId: 'job-12', action: 'lost', logLinesHave: 0 }],
+    });
+    await waitFor(() => !existsSync(join(dataDir, 'journal', 'job-12.json')));
+  });
+
+  it('treats an enroll 4xx other than 401 as a setup error naming the status and URL', async () => {
+    const { server, start } = await setup();
+    const host = await start({ serverUrl: `${server.url}/not-trawlarr` });
+    await expect(host.started).rejects.toThrow(/HTTP 404/);
+    await expect(host.started).rejects.toThrow(`${server.url}/not-trawlarr/api/v1/nodes/enroll`);
+  });
+
+  it('releases the lock when start fails after taking it', async () => {
+    const { start, dataDir } = await setup();
+    // A file where the journal directory belongs makes the journal fail to open.
+    writeFileSync(join(dataDir, 'journal'), 'not a directory');
+    await expect(start()).rejects.toThrow();
+
+    rmSync(join(dataDir, 'journal'));
+    // Would reject with the lock error had the failed start kept the lock.
+    await expect(start()).resolves.toBeDefined();
   });
 });
