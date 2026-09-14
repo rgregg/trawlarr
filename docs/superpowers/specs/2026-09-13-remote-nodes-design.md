@@ -121,7 +121,7 @@ type ServerFrame =
   | { type: 'ack-report'; jobId: string };
 ```
 
-`AgentToDaemon` gains `{ type: 'commit-request'; id: number }` and
+`AgentToDaemon` gains `{ type: 'commit-request'; id: number; kind: 'replace' | 'plugin'; pluginId: string }` and
 `DaemonToAgent` gains `{ type: 'commit-result'; id: number; granted: boolean;
 reason?: string }`. Both travel inside the `agent` envelope like any other
 agent message.
@@ -137,8 +137,10 @@ the IPC channel is. `PROTOCOL_VERSION` is bumped to 2.
   filtered by the target node's eligibility:
   - libraries the node reported reachable;
   - hardware the node declared;
-  - that node's own worker target from its schedule;
-  - tags.
+  - that node's own worker target from its schedule.
+
+  Tags are recorded but are not a claim filter: libraries have no tag
+  affinity yet.
 - `job.node_id` is set on every job, local and remote.
 - A node that is offline, paused, or has no reachable libraries is never
   claimed for.
@@ -149,7 +151,9 @@ the IPC channel is. `PROTOCOL_VERSION` is bumped to 2.
 ### Leases
 
 A remote claim holds a **lease**, recorded on the job row (migration:
-`job.lease_state`, `job.lease_expires_at`).
+`job.lease_state`, `job.lease_expires_at`, and `job.payload_json` — the
+payload exactly as sent, so a report arriving after a daemon restart can
+still be applied).
 
 | `lease_state` | Meaning | Reclaimed when |
 | --- | --- | --- |
@@ -196,9 +200,10 @@ Mechanism:
 - A refusal (`granted: false`) throws a distinguished `Superseded` error. The
   run unwinds and removes its staging directory, the original file is
   untouched, and the agent reports the failure as superseded.
-- The server applies it as a no-op on the file (it was already reclaimed) and
-  closes the job row as `superseded`, a new job state (migration). No attempt
-  is spent.
+- A refusal can only follow a lease expiry, and expiry already closed the job
+  row (`failed`, outcome naming the offline node) and stalled the attempt. A
+  superseded report therefore changes no ledger state; it only appends to
+  the closed row's outcome. There is no new job state.
 
 `committing` returns to `connected` when the step completes (the next `step`
 message).
@@ -215,7 +220,7 @@ On `hello` the node lists every journaled job, and the server answers each:
 | `running` | lease `grace`, still claimed | Lease → `connected`; the job continues |
 | `running` | reclaimed / closed | `abandon` → node cancels the agent; the commit gate refuses if reached |
 | `held-report` | still claimed | Applies the report, sends `ack-report`; node deletes the journal entry |
-| `held-report` | reclaimed / closed | Records it on the job row as `superseded`; `ack-report` |
+| `held-report` | reclaimed / closed | Appends the late result to the closed row's outcome; no ledger change; `ack-report` |
 | `lost` (node restarted mid-job) | still claimed | `applyThrownFailure` path, as a vanished local child |
 
 - A report is deleted from the journal only after `ack-report`, so a report
@@ -244,14 +249,29 @@ On `hello` the node lists every journaled job, and the server answers each:
 
 ### Plugin shipping
 
-- The payload's `pluginPaths: Record<id, path>` gains
-  `pluginHashes: Record<id, sha256>` for every plugin the daemon resolved.
-- `GET /api/v1/nodes/plugins/:sha256` (node-secret auth) serves the plugin's
-  directory as a tar stream.
-- The node caches plugins content-addressed under `<data>/plugins/<sha>/` and
-  rewrites `pluginPaths` to the cached copies before forking the agent.
-- A hash mismatch after download is a failed download, never a run.
+The unit shipped is a plugin's whole **source tree**, not the plugin's own
+directory: community flow plugins `require('../../../../FlowHelpers/…')`
+from elsewhere in their source.
+
+- A **bundle** is a source's installed tree, described by a manifest: sorted
+  `{relPath, sha256, sizeBytes}` for every regular file. Symlinks are skipped,
+  as `syncSource` does, and `.git` is excluded. The bundle hash is the sha256
+  of the canonical JSON manifest.
+- The payload's `pluginPaths` gains
+  `pluginBundles: Record<id, {bundle: sha256, relPath}>` for every installed
+  plugin the daemon resolved.
+- Endpoints (node-secret auth):
+  - `GET /api/v1/nodes/bundles/:sha` serves the manifest;
+  - `GET /api/v1/nodes/bundles/:sha/files/*` serves one file.
+- The node caches bundles content-addressed under `<data>/bundles/<sha>/`. It
+  verifies every file's hash and the manifest's before marking the bundle
+  complete, then rewrites `pluginPaths` to the cached copies before forking
+  the agent.
+- A hash mismatch is a failed download, never a run.
 - The cache is pruned by LRU at a size cap.
+- A plugin named by bare path (no source) cannot be shipped; on a remote node
+  it fails to load with the error naming it, as a missing plugin does
+  locally.
 
 ### Job logs
 
@@ -350,7 +370,7 @@ Designed now so phase 1 does not block it; not built in phase 1.
 | Protocol version mismatch | `refused`, both versions named; node retries slowly |
 | Node offline mid-job | Lease `grace`; job continues on the node; no commit until reconnect |
 | Grace expires | Attempt stalled with normal backoff; node gets `abandon` on return |
-| Commit refused | Output discarded, original untouched, job `superseded`, no attempt spent |
+| Commit refused | Output discarded, original untouched; the row was already closed at expiry, so nothing further is spent |
 | Node restarts mid-job | Journal says `lost`; attempt stalled as a vanished child |
 | Daemon restarts | Remote jobs enter `grace` from startup; nodes reconnect with backoff |
 | Library unreachable on node | Library ineligible for that node; reason shown |
@@ -379,7 +399,7 @@ Designed now so phase 1 does not block it; not built in phase 1.
   5. revoke mid-job;
   6. protocol version mismatch refused;
   7. cancel while offline, delivered on reconnect;
-  8. plugin fetched by hash and cached; second job does not re-download.
+  8. plugin bundle fetched and cached; second job does not re-download.
 - Real-ffmpeg cases gate on `test-support/tool-availability.ts` as usual;
   media is generated with `lavfi testsrc`.
 - Docker contract tests cover `TRAWLARR_MODE=node` and `compose.node.yml`.
@@ -389,6 +409,6 @@ Designed now so phase 1 does not block it; not built in phase 1.
 - TLS termination (reverse proxy, as for the UI today; the enrollment dialog
   shows `wss://` when the server is behind one).
 - Nodes connecting to more than one server.
-- Scheduling beyond per-node counts, tags, hardware and reachability (e.g.
+- Scheduling beyond per-node counts, hardware and reachability (e.g.
   data locality scoring).
 - Extracting `@trawlarr/node-agent` as its own package.
