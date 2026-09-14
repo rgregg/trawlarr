@@ -36,6 +36,7 @@ jobs:
   #
   #   push to main  -> :main, :sha-<short>
   #   tag vX.Y.Z    -> :X.Y.Z, :X.Y, :latest, :sha-<short>
+  #   tag vX.Y.Z-rc.N -> :X.Y.Z-rc.N, :sha-<short> (never :X.Y or :latest)
   image:
     needs: check
     if: github.event_name == 'push'
@@ -69,13 +70,17 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           # `latest` is set explicitly below rather than by the action's own
-          # rules, so it can only ever mean "the newest release".
+          # rules, so it can only ever mean "the newest release". A semver
+          # pre-release always has a `-` (v0.2.0-rc.1) and a release never
+          # does; without that check a release candidate took :latest from
+          # every server tracking it. (The {{major}}.{{minor}} pattern already
+          # skips pre-releases on its own.)
           flavor: latest=false
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
             type=sha,prefix=sha-,format=short
       - uses: docker/build-push-action@v6
         with:

@@ -29,4 +29,10 @@ describe('the image workflow', () => {
   it('publishes only after the checks pass', () => {
     expect(ci).toMatch(/^ {2}image:\n {4}needs: check$/m);
   });
+
+  it('gives :latest only to a release tag, never to a pre-release', () => {
+    const latest = /type=raw,value=latest,enable=\$\{\{ (.+) \}\}$/m.exec(ci)?.[1];
+
+    expect(latest).toBe(`startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')`);
+  });
 });
