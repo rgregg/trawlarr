@@ -32,6 +32,16 @@ describe('compose files', () => {
     expect(declared.filter((name) => !known.has(name))).toEqual([]);
   });
 
+  // A killed worker is recognised as gone by (hostname, pid). Without a fixed
+  // hostname, every image update changes it and an interrupted file waits a
+  // day in "running"; without the grace period, Docker kills the daemon 10s
+  // into a drain that is built to wait 5 minutes.
+  it.each(composeFiles)('%s keeps the hostname fixed and lets the daemon drain', (file) => {
+    const body = readFileSync(file, 'utf8');
+    expect(body).toMatch(/^\s+hostname:\s+\S+/m);
+    expect(body).toMatch(/^\s+stop_grace_period:\s+5m\b/m);
+  });
+
   it('publish the daemon port the image binds', () => {
     for (const file of composeFiles) {
       expect(readFileSync(file, 'utf8')).toContain('8265');

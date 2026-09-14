@@ -10,6 +10,14 @@ services:
   trawlarr:
     image: ghcr.io/rgregg/trawlarr:latest
     container_name: trawlarr
+    # Fixed, because trawlarr recognises a worker a killed daemon left behind by
+    # (hostname, pid), and the default hostname is the container id, which
+    # changes on every image update: an interrupted file would otherwise sit
+    # in "running" for a day before it is retried.
+    hostname: trawlarr
+    # The daemon drains running jobs for up to 5 minutes on SIGTERM; Docker's
+    # default is to kill it after 10 seconds.
+    stop_grace_period: 5m
     restart: unless-stopped
     runtime: nvidia
     ports:
