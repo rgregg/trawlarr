@@ -16,7 +16,12 @@ import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { AgentFailure, type AgentHandle } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
-import { startDaemon, type Daemon } from './daemon.js';
+import {
+  LEASE_SWEEP_INTERVAL_MS,
+  leaseSweepIntervalMs,
+  startDaemon,
+  type Daemon,
+} from './daemon.js';
 import {
   DAEMON_LOCK_FILENAME,
   DaemonAlreadyRunningError,
@@ -267,6 +272,26 @@ afterEach(async () => {
 
 const health = async (port: number): Promise<Response> =>
   await fetch(`http://127.0.0.1:${String(port)}/api/v1/system/health`);
+
+describe('leaseSweepIntervalMs', () => {
+  it('honours the test override only in a test process', () => {
+    // A stray variable in a production container must not change when
+    // remote claims are released.
+    expect(leaseSweepIntervalMs({ TRAWLARR_TEST_LEASE_SWEEP_MS: '500' })).toBe(
+      LEASE_SWEEP_INTERVAL_MS,
+    );
+    expect(
+      leaseSweepIntervalMs({ NODE_ENV: 'production', TRAWLARR_TEST_LEASE_SWEEP_MS: '500' }),
+    ).toBe(LEASE_SWEEP_INTERVAL_MS);
+    expect(leaseSweepIntervalMs({ NODE_ENV: 'test' })).toBe(LEASE_SWEEP_INTERVAL_MS);
+    expect(leaseSweepIntervalMs({ NODE_ENV: 'test', TRAWLARR_TEST_LEASE_SWEEP_MS: '0' })).toBe(
+      LEASE_SWEEP_INTERVAL_MS,
+    );
+    expect(leaseSweepIntervalMs({ NODE_ENV: 'test', TRAWLARR_TEST_LEASE_SWEEP_MS: '500' })).toBe(
+      500,
+    );
+  });
+});
 
 describe('startDaemon', () => {
   it('starts, serves the API on the recorded port, and stops cleanly', async () => {

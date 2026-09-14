@@ -43,6 +43,22 @@ export const REAP_INTERVAL_MS = 60 * 60 * 1000;
  */
 export const LEASE_SWEEP_INTERVAL_MS = 60_000;
 
+/**
+ * The lease sweep's interval for this process.
+ *
+ * TEST-ONLY SEAM. The remote-node end-to-end suite has to prove that a file
+ * released at grace expiry is never installed over by the node that lost it,
+ * against a REAL daemon process; waiting out a minute-long sweep (on top of
+ * the grace window) per case would make that suite take many minutes. Gated
+ * on `NODE_ENV === 'test'` so a stray `TRAWLARR_TEST_LEASE_SWEEP_MS` in a
+ * production container can never change when claims are released.
+ */
+export const leaseSweepIntervalMs = (env: NodeJS.ProcessEnv = process.env): number => {
+  if (env.NODE_ENV !== 'test') return LEASE_SWEEP_INTERVAL_MS;
+  const raw = env.TRAWLARR_TEST_LEASE_SWEEP_MS;
+  return raw !== undefined && /^[1-9]\d*$/.test(raw) ? Number(raw) : LEASE_SWEEP_INTERVAL_MS;
+};
+
 /** How often each library's trash is swept against its own flow-declared retention. */
 export const TRASH_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -518,7 +534,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     await supervisor.tick();
   });
 
-  every(LEASE_SWEEP_INTERVAL_MS, 'lease sweep', () => {
+  every(leaseSweepIntervalMs(), 'lease sweep', () => {
     hub.sweepLeases();
   });
 

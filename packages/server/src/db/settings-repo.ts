@@ -171,11 +171,24 @@ const requireBoolean = (value: unknown, label: string): boolean => {
 
 const HARDWARE_TYPE_SET: ReadonlySet<string> = new Set(HARDWARE_TYPES);
 
+/**
+ * The floor `nodes.leaseGraceMs` is validated against.
+ *
+ * TEST-ONLY SEAM. The remote-node end-to-end suite runs a real daemon and has
+ * to watch a grace window run out; five real minutes per case is not a test
+ * anyone runs. Below the floor is allowed only when BOTH `NODE_ENV === 'test'`
+ * and `TRAWLARR_TEST_ALLOW_SHORT_GRACE=1`, so a production setting can never
+ * be written (or read back) short enough to release a file mid-encode over an
+ * ordinary network blip — the hazard the floor exists for.
+ */
+export const minLeaseGraceMs = (env: NodeJS.ProcessEnv = process.env): number =>
+  env.NODE_ENV === 'test' && env.TRAWLARR_TEST_ALLOW_SHORT_GRACE === '1' ? 1 : MIN_LEASE_GRACE_MS;
+
 const validateNodes = (value: { leaseGraceMs: unknown }): NodesSettings => ({
   leaseGraceMs: requireWholeNumber(
     value.leaseGraceMs,
     'nodes.leaseGraceMs',
-    MIN_LEASE_GRACE_MS,
+    minLeaseGraceMs(),
     Number.MAX_SAFE_INTEGER,
   ),
 });
