@@ -73,6 +73,34 @@ export const DEFAULT_MAX_STEPS = 500;
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/**
+ * A throw that ends the RUN, not the step: `runFlow` re-throws it to its
+ * caller instead of recording a plugin error and routing to the flow's
+ * `onFlowError` node.
+ *
+ * Every other throw is a plugin failure, and a flow is entitled to handle
+ * those — that is what On Error is for. This is the host saying something no
+ * flow may handle: the canonical case is a commit gate refusing because this
+ * worker's claim on the file was released and another worker may now own it.
+ * Routing that to an error handler would run arbitrary plugin code (a
+ * notifier, a cleanup, a second Replace) against a file this run no longer
+ * holds, which is exactly the two-writers-on-one-file hazard the gate exists
+ * to prevent. No step is recorded for the aborted node either: nothing about
+ * it ran, and the caller owns reporting why.
+ *
+ * Only host code is meant to throw this. Plugins are unsandboxed, so one
+ * that went out of its way to reach this class could throw it too; all that
+ * buys is its own run ending early as a failure, with no replacement and no
+ * error handler — the safe direction. A look-alike with the same `name` is
+ * not an instance and is routed as an ordinary error.
+ */
+export class FlowAbort extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FlowAbort';
+  }
+}
+
 export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> => {
   const nowMs = options.nowMs ?? (() => Date.now());
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -137,6 +165,7 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
       try {
         return loadPluginOnce(node).details.isStartPlugin === true;
       } catch (error) {
+        if (error instanceof FlowAbort) throw error;
         startDiscoveryLoadErrors.push({
           nodeId: node.id,
           pluginId: node.pluginId,
@@ -151,7 +180,10 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
     options.flow.nodes.find((node) => {
       try {
         return loadPluginOnce(node).details.pType === 'onFlowError';
-      } catch {
+      } catch (error) {
+        // Discovery tolerates a broken node, but never swallows an abort:
+        // that would turn "stop now" into "this node is not the handler".
+        if (error instanceof FlowAbort) throw error;
         return false;
       }
     });
@@ -195,6 +227,7 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
     try {
       plugin = loadPluginOnce(node);
     } catch (error) {
+      if (error instanceof FlowAbort) throw error;
       const step: StepRecord = {
         seq,
         nodeId: node.id,
@@ -256,6 +289,9 @@ export const runFlow = async (options: RunFlowOptions): Promise<FlowRunResult> =
       }
       if (output.variables !== undefined) variables = output.variables;
     } catch (error) {
+      // Before anything is recorded or routed: see `FlowAbort`. The error
+      // handler must never run once the host has withdrawn the file.
+      if (error instanceof FlowAbort) throw error;
       if (error instanceof ReviewHoldSignal) {
         reviewReason = error.reason;
         held = true;

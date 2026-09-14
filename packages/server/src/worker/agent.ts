@@ -26,10 +26,10 @@
  * (the plugin document store) is a round trip to the daemon over the IPC
  * channel.
  */
-import { runPayload } from './run-payload.js';
+import { runPayload, SupersededError, type CommitGate } from './run-payload.js';
 import { PROTOCOL_VERSION, PROTOCOL_VERSION_ENV, parseDaemonMessage } from './protocol.js';
 import type { DocumentPort } from '@trawlarr/engine';
-import type { AgentToDaemon } from './protocol.js';
+import type { AgentToDaemon, DaemonToAgent } from './protocol.js';
 import type { JobPayload } from './job-payload.js';
 
 const send = (message: AgentToDaemon): void => {
@@ -59,11 +59,17 @@ const sendAndExit = (message: AgentToDaemon, code: number): void => {
 const messageOf = (error: unknown): string =>
   error instanceof Error ? (error.stack ?? error.message) : String(error);
 
-/** Outstanding document round trips, by request id. */
-const waiters = new Map<
-  number,
-  { resolve: (value: unknown) => void; reject: (error: Error) => void }
->();
+type ResultMessage = Extract<DaemonToAgent, { type: 'doc-result' } | { type: 'commit-result' }>;
+
+/**
+ * Outstanding round trips to the daemon, by request id.
+ *
+ * Document and commit requests share one id space, so each waiter carries
+ * its OWN handler for the reply rather than the pump deciding what a result
+ * means. A handler also checks the reply's type: a `doc-result` that
+ * somehow answered a commit id must never be read as a grant.
+ */
+const waiters = new Map<number, (message: ResultMessage) => void>();
 let nextRequestId = 0;
 
 const request = (
@@ -76,8 +82,44 @@ const request = (
     }
     nextRequestId += 1;
     const id = nextRequestId;
-    waiters.set(id, { resolve, reject });
+    waiters.set(id, (message) => {
+      if (message.type !== 'doc-result') {
+        reject(new Error(`doc-request ${String(id)} was answered with a ${message.type}.`));
+      } else if (message.ok) {
+        resolve(message.value);
+      } else {
+        reject(new Error(message.error));
+      }
+    });
     send({ type: 'doc-request', id, ...body });
+  });
+
+/**
+ * The commit gate, seen from here: ask the daemon before every library
+ * write, and stop if it says no.
+ *
+ * Only an explicit `granted: true` lets the step run. A refusal rejects with
+ * `SupersededError`, which `runFlow` lets escape rather than routing to the
+ * flow's error handler, and which the outcome handler below reports as
+ * `superseded`. No channel at all rejects with an ordinary error, which
+ * `runPayload` still turns into a stop before the write: a question that
+ * could not be asked has not been answered yes.
+ */
+const commitGate: CommitGate = (body) =>
+  new Promise<void>((resolve, reject) => {
+    if (typeof process.send !== 'function') {
+      reject(new Error('The worker agent has no IPC channel; it cannot ask to commit.'));
+      return;
+    }
+    nextRequestId += 1;
+    const id = nextRequestId;
+    waiters.set(id, (message) => {
+      if (message.type === 'commit-result' && message.granted) resolve();
+      else if (message.type === 'commit-result')
+        reject(new SupersededError(message.reason ?? 'refused'));
+      else reject(new Error(`commit-request ${String(id)} was answered with a ${message.type}.`));
+    });
+    send({ type: 'commit-request', id, ...body });
   });
 
 /**
@@ -115,6 +157,7 @@ const runJobPayload = (payload: JobPayload): void => {
       onLog: (text) => send({ type: 'log', text }),
       nowMs: () => Date.now(),
       signal: controller.signal,
+      commitGate,
     },
   }).then(
     (report) => {
@@ -123,7 +166,16 @@ const runJobPayload = (payload: JobPayload): void => {
     },
     (error: unknown) => {
       ending = true;
-      sendAndExit({ type: 'failed', error: messageOf(error) }, 1);
+      // `superseded` tells the daemon this run stopped because it lost the
+      // file, not because the file or the flow failed: a distinction only
+      // the agent can draw, and one the daemon must not have to parse out
+      // of the error text.
+      sendAndExit(
+        error instanceof SupersededError
+          ? { type: 'failed', error: messageOf(error), superseded: true }
+          : { type: 'failed', error: messageOf(error) },
+        1,
+      );
     },
   );
 };
@@ -145,12 +197,12 @@ process.on('message', (raw: unknown) => {
         process.exit(0);
       }
       return;
-    case 'doc-result': {
+    case 'doc-result':
+    case 'commit-result': {
       const waiter = waiters.get(message.id);
       if (waiter === undefined) return;
       waiters.delete(message.id);
-      if (message.ok) waiter.resolve(message.value);
-      else waiter.reject(new Error(message.error));
+      waiter(message);
       return;
     }
   }

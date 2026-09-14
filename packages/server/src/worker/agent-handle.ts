@@ -41,6 +41,30 @@ const DEFAULT_REPORT_DRAIN_MS = 30_000;
 const DEFAULT_KILL_GRACE_MS = 5_000;
 
 /**
+ * The daemon's answer to "may this worker write to the library now?".
+ *
+ * Asked by the agent's commit gate (see `CommitGate` in `run-payload.ts`)
+ * immediately before Replace Original File and before every plugin the
+ * engine cannot vouch for. `granted: false` means this worker's claim on the
+ * file is no longer its own, and `reason` says why.
+ */
+export type CommitPort = (request: {
+  kind: 'replace' | 'plugin';
+  pluginId: string;
+}) => Promise<{ granted: boolean; reason: string | null }>;
+
+/**
+ * Every commit granted: the default, and what a local fork gets.
+ *
+ * The gate exists for remote nodes, whose leases can be released while they
+ * are disconnected and handed to another worker; their daemon-side handle
+ * passes a port that actually checks the lease. A local fork's claim has no
+ * such release path, so granting everything keeps its behaviour exactly what
+ * it was before the gate existed.
+ */
+export const GRANT_ALL: CommitPort = () => Promise.resolve({ granted: true, reason: null });
+
+/**
  * Why a run did not produce a report.
  *
  * `reported` is the distinction the daemon acts on, and it is the reason
@@ -65,6 +89,14 @@ const DEFAULT_KILL_GRACE_MS = 5_000;
 export class AgentFailure extends Error {
   readonly cancelled: boolean;
   readonly reported: boolean;
+  /**
+   * The agent stopped before a library write because its commit was
+   * refused: the file's claim was released, and another worker may own it
+   * now. Always `reported`. Kept distinct from an ordinary failure because
+   * the file and the flow did nothing wrong, so the supervisor can tell a
+   * lost claim from a failed attempt without reading the error text.
+   */
+  readonly superseded: boolean;
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
 
@@ -73,6 +105,7 @@ export class AgentFailure extends Error {
     options: {
       cancelled?: boolean;
       reported?: boolean;
+      superseded?: boolean;
       exitCode?: number | null;
       signal?: NodeJS.Signals | null;
     } = {},
@@ -81,6 +114,7 @@ export class AgentFailure extends Error {
     this.name = 'AgentFailure';
     this.cancelled = options.cancelled ?? false;
     this.reported = options.reported ?? false;
+    this.superseded = options.superseded ?? false;
     this.exitCode = options.exitCode ?? null;
     this.signal = options.signal ?? null;
   }
@@ -96,6 +130,14 @@ export interface AgentHandle {
   kill(): void;
   /** The child's exit code, or null when it was killed by a signal. */
   readonly exited: Promise<number | null>;
+  /**
+   * Called by the supervisor once the run's outcome has been written to the
+   * database. A local fork has nothing to acknowledge — it exits as soon as
+   * it has reported, holding nothing — so this handle does not implement it;
+   * a remote node's handle uses it to tell the node it may forget the report
+   * it has been holding.
+   */
+  settled?(): void;
 }
 
 export interface AgentHandleDeps {
@@ -105,6 +147,8 @@ export interface AgentHandleDeps {
   onProgress: (progress: { percent: number | null; stage: string }) => void;
   onLog: (text: string) => void;
   nowMs: () => number;
+  /** Answers the agent's commit requests. Defaults to {@link GRANT_ALL}. */
+  commits?: CommitPort;
   /** Seam for tests: substitute the fork. Production never sets it. */
   forkFn?: (modulePath: string) => ChildProcess;
   /** Seam for tests: substitute the kill used on this worker's group. */
@@ -299,6 +343,34 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     }
   };
 
+  const commits = input.commits ?? GRANT_ALL;
+
+  /**
+   * Every commit-request is answered, as every doc-request is: an agent
+   * waiting on a reply that never comes holds its worker slot until the
+   * stall reaper, a day later. A port that throws or rejects answers
+   * `granted: false` — an error is never a grant, and the agent then stops
+   * before writing rather than guessing it still owns the file.
+   */
+  const answerCommitRequest = (
+    request: Extract<AgentToDaemon, { type: 'commit-request' }>,
+  ): void => {
+    const refuse = (error: unknown) =>
+      post({ type: 'commit-result', id: request.id, granted: false, reason: messageOf(error) });
+    let answer: ReturnType<CommitPort>;
+    try {
+      answer = commits({ kind: request.kind, pluginId: request.pluginId });
+    } catch (error) {
+      refuse(error);
+      return;
+    }
+    void answer.then(
+      ({ granted, reason }) =>
+        post({ type: 'commit-result', id: request.id, granted, reason: reason ?? null }),
+      refuse,
+    );
+  };
+
   child.on('message', (raw: unknown) => {
     const message = parseAgentMessage(raw);
     // Unrecognised traffic is dropped, not duck-typed: this channel belongs
@@ -339,6 +411,9 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
       case 'doc-request':
         answerDocRequest(message);
         return;
+      case 'commit-request':
+        answerCommitRequest(message);
+        return;
       case 'done':
         disarmGrace();
         finish({ ok: true, report: message.report });
@@ -349,6 +424,7 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
           ok: false,
           error: new AgentFailure(`Worker ${input.id} reported failure: ${message.error}`, {
             reported: true,
+            superseded: message.superseded === true,
             cancelled,
           }),
         });

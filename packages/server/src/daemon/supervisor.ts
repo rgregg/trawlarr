@@ -301,6 +301,10 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         state = applyJobCancelled({ db, payload, nowMs }).state;
         text = 'Cancelled by an operator; the file was requeued unpenalised.';
       } else {
+        // Includes `AgentFailure.superseded`: a local fork is granted every
+        // commit, so it cannot be superseded today, and folding the case into
+        // an ordinary failed attempt is the conservative answer until remote
+        // leases give "this worker lost the file" a handling of its own.
         text = messageOf(outcome.error);
         state = applyJobFailure({ db, payload, reason: text, nowMs }).state;
       }

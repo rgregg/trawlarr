@@ -19,6 +19,8 @@ import {
   createCheckSizeChangeRunner,
   createReplaceOriginalRunner,
   createVerifyOutputRunner,
+  classifySideEffects,
+  FlowAbort,
   runFlow,
   toPluginFileObject,
   type DocumentPort,
@@ -74,6 +76,57 @@ export interface RunPayloadPorts {
    */
   moveCompanions?: MoveCompanionsFn;
   statFile?: StatFileFn;
+  /**
+   * Asked before every step that can write to the library. Absent means
+   * "grant immediately", and then nothing is wrapped at all, so the
+   * in-process `trawlarr run` path behaves exactly as it did before the gate
+   * existed. See `CommitGate`.
+   */
+  commitGate?: CommitGate;
+}
+
+/**
+ * Permission to perform a step that can change the library, asked for
+ * immediately before that step runs.
+ *
+ * Resolving grants; rejecting refuses, and a refusal is a `SupersededError`.
+ * The gate exists for remote workers: a node whose connection dropped can
+ * have its claim released and the file handed to another worker, and the
+ * node may not know yet. Two workers installing over one file is how a
+ * replacement destroys data, so the LAST moment before a write asks the
+ * daemon whether this worker still owns the file.
+ *
+ * `kind` says why the step asks. `'replace'` is Replace Original File, the
+ * one first-party node that installs into the library. `'plugin'` is any
+ * node the engine cannot vouch for (`classifySideEffects` answers
+ * `unknown`): a community plugin can rename, delete or overwrite library
+ * files directly, so it asks before every invocation. Execute writes only
+ * into this run's scratch directory and Verify/Check Size only read, so
+ * they never ask — gating an hour-long encode would refuse nothing useful.
+ */
+export type CommitGate = (request: {
+  kind: 'replace' | 'plugin';
+  pluginId: string;
+}) => Promise<void>;
+
+/**
+ * The commit gate refused: this worker no longer owns the file.
+ *
+ * A `FlowAbort`, not an ordinary error, and that is load-bearing: `runFlow`
+ * routes every other throw to the flow's `onFlowError` node, and a flow's
+ * error handler is arbitrary plugin code that must never run against a file
+ * another worker may now be installing over. `FlowAbort` escapes the walk
+ * instead, and `runPayload` lets it escape too — after its `finally` blocks
+ * have removed the scratch directory.
+ */
+export class SupersededError extends FlowAbort {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(`This worker's claim on the file was released: ${reason}`);
+    this.name = 'SupersededError';
+    this.reason = reason;
+  }
 }
 
 /**
@@ -472,7 +525,7 @@ export const runPayload = async (input: {
       // least being written to make that reasoning explicit.
       const replaceOutputs: { _id: string }[] = [];
 
-      const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
+      const resolvePlugin = (node: { pluginId: string }): LoadedPlugin => {
         const firstParty = FIRST_PARTY_PLUGINS[node.pluginId];
         if (firstParty !== undefined) {
           const base: LoadedPlugin = {
@@ -509,6 +562,58 @@ export const runPayload = async (input: {
         // must keep working — and how an id that is no longer installed fails
         // here, naming the plugin, exactly as an unknown path always has.
         return loader.load(payload.pluginPaths[node.pluginId] ?? node.pluginId);
+      };
+
+      // THE COMMIT GATE, applied at the one place every node's code is
+      // reached: the `plugin()` function `runFlow` invokes. Wrapping the
+      // function rather than checking in `buildArgs` or `onStep` means the
+      // ask happens immediately before the node runs, every time it runs — a
+      // flow that loops through Replace twice asks twice — and never during
+      // `runFlow`'s start/error-handler discovery, which loads nodes without
+      // running them.
+      //
+      // Which nodes ask is decided by what the engine can vouch for, not by a
+      // list of dangerous ids: Replace Original File by name, because it is
+      // engine-controlled yet is the install itself; and everything
+      // `classifySideEffects` calls `unknown`, which is every installed or
+      // path-named plugin and any first-party node nobody has classified yet.
+      // An unclassified node asking is the safe direction.
+      const commitGate = ports.commitGate;
+      const loadPlugin = (node: { pluginId: string }): LoadedPlugin => {
+        const loaded = resolvePlugin(node);
+        if (commitGate === undefined) return loaded;
+        const kind =
+          node.pluginId === REPLACE_ORIGINAL_PLUGIN_ID
+            ? 'replace'
+            : classifySideEffects(loaded) === 'unknown'
+              ? 'plugin'
+              : null;
+        if (kind === null) return loaded;
+        const request = { kind, pluginId: node.pluginId } as const;
+        return {
+          ...loaded,
+          module: {
+            ...loaded.module,
+            plugin: async (args) => {
+              try {
+                await commitGate(request);
+              } catch (error) {
+                if (error instanceof FlowAbort) throw error;
+                // A gate that could not ANSWER has not granted. Without this
+                // conversion the failure is an ordinary plugin error, which
+                // `runFlow` routes to the flow's On Error node — running more
+                // plugin code on a file whose ownership nobody could confirm.
+                // Not a `SupersededError`: nothing says the claim was
+                // released, only that the question failed.
+                throw new FlowAbort(
+                  `Could not confirm this worker still owns the file before ` +
+                    `"${node.pluginId}" (${messageOf(error)}); nothing was written.`,
+                );
+              }
+              return loaded.module.plugin(args);
+            },
+          },
+        };
       };
 
       // Carries a node's mutations to the file object (container, file_size,
@@ -566,6 +671,14 @@ export const runPayload = async (input: {
         return args;
       };
 
+      // A `FlowAbort` (a refused or unanswerable commit) comes out of
+      // `runFlow` as a rejection, not a result, and deliberately leaves this
+      // function the same way: there is no honest `JobReport` for a run that
+      // could not commit, and the agent reports it as `failed` — marked
+      // `superseded` when it is a `SupersededError`. It is caught only to put
+      // the reason in this job's own log, and re-thrown through the `finally`
+      // blocks below, which still remove the scratch directory holding the
+      // encode that will now never be installed.
       const result = await runFlow({
         flow: payload.flow.definition,
         initialPath: payload.path,
@@ -587,6 +700,11 @@ export const runPayload = async (input: {
           // granularity.
           ports.onHeartbeat(ports.nowMs());
         },
+      }).catch((error: unknown) => {
+        if (error instanceof FlowAbort) {
+          onLog(`The run stopped before a library write: ${error.message}`);
+        }
+        throw error;
       });
 
       // THE RULE: a terminal output the flow author did not route, on a node

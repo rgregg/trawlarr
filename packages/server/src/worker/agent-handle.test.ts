@@ -431,6 +431,119 @@ describe('createAgentHandle', () => {
     expect(failure.message).toContain('ffmpeg exited 1');
   });
 
+  it('grants a commit-request immediately when no commits port is given', async () => {
+    const child = fakeChild();
+    const handle = createAgentHandle(depsFor(child));
+
+    void handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', {
+      type: 'commit-request',
+      id: 3,
+      kind: 'replace',
+      pluginId: 'trawlarr:replaceOriginal',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(child.sent.at(-1)).toEqual({
+      type: 'commit-result',
+      id: 3,
+      granted: true,
+      reason: null,
+    });
+  });
+
+  it('answers a commit-request from the commits port, passing the request through', async () => {
+    const child = fakeChild();
+    const asked: unknown[] = [];
+    const handle = createAgentHandle(
+      depsFor(child, {
+        commits: async (request) => {
+          asked.push(request);
+          return { granted: false, reason: 'gone' };
+        },
+      }),
+    );
+
+    void handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', {
+      type: 'commit-request',
+      id: 11,
+      kind: 'plugin',
+      pluginId: 'tdarr:thing',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(asked).toEqual([{ kind: 'plugin', pluginId: 'tdarr:thing' }]);
+    expect(child.sent.at(-1)).toEqual({
+      type: 'commit-result',
+      id: 11,
+      granted: false,
+      reason: 'gone',
+    });
+  });
+
+  it.each([
+    {
+      name: 'throws',
+      commits: () => {
+        throw new Error('hub unreachable');
+      },
+    },
+    { name: 'rejects', commits: () => Promise.reject(new Error('hub unreachable')) },
+  ])('still answers, refusing, when the commits port $name', async ({ commits }) => {
+    const child = fakeChild();
+    const handle = createAgentHandle(depsFor(child, { commits }));
+
+    void handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', {
+      type: 'commit-request',
+      id: 12,
+      kind: 'replace',
+      pluginId: 'trawlarr:replaceOriginal',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Never unanswered — a worker blocked on a missing reply sits until the
+    // stall reaper, a day later — and never a grant: an error is not a yes.
+    expect(child.sent.at(-1)).toEqual({
+      type: 'commit-result',
+      id: 12,
+      granted: false,
+      reason: 'hub unreachable',
+    });
+  });
+
+  it('rejects a superseded failure as a REPORTED AgentFailure marked superseded', async () => {
+    const child = fakeChild();
+    const handle = createAgentHandle(depsFor(child));
+
+    const running = handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', { type: 'failed', error: 'claim released', superseded: true });
+
+    const failure = await failureOf(running);
+    expect(failure).toBeInstanceOf(AgentFailure);
+    expect(failure.superseded).toBe(true);
+    expect(failure.reported).toBe(true);
+  });
+
+  it('marks an ordinary reported failure as not superseded', async () => {
+    const child = fakeChild();
+    const handle = createAgentHandle(depsFor(child));
+
+    const running = handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', { type: 'failed', error: 'ffmpeg exited 1' });
+
+    expect((await failureOf(running)).superseded).toBe(false);
+  });
+
   it('rejects a run whose child was never even reachable', async () => {
     const child = fakeChild();
     const handle = createAgentHandle(depsFor(child));
