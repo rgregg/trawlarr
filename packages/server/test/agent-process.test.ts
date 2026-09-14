@@ -236,6 +236,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   logPath: null,
   // Only first-party plugins here: nothing installed to resolve.
   pluginPaths: {},
+  pluginBundles: {},
 });
 
 /** The daemon side of the document store: a plain map, in THIS process. */

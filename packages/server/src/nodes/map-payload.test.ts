@@ -65,6 +65,7 @@ const fixturePayload = (
     ffprobePath: 'ffprobe',
     logPath: '/data/logs/jobs/job-1.log',
     pluginPaths: {},
+    pluginBundles: {},
     ...rest,
   };
 };

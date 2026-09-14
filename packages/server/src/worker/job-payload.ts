@@ -76,6 +76,16 @@ export interface JobPayload {
    * has always produced.
    */
   pluginPaths: Record<string, string>;
+  /**
+   * Installed plugin id -> the content-addressed bundle its source tree
+   * hashes to, plus the plugin's relPath inside that bundle.
+   *
+   * `buildJobPayload` is synchronous — hashing a tree is not — so this is
+   * always `{}` here; the hub (Task 8) fills it from `BundleStore.manifestFor`
+   * for each root `resolveBundleRoots` names, right before it ships a job to
+   * a remote node. A local worker (this fork) never reads this field at all.
+   */
+  pluginBundles: Record<string, { bundle: string; relPath: string }>;
 }
 
 export interface BuildJobPayloadInput {
@@ -170,5 +180,8 @@ export const buildJobPayload = (input: BuildJobPayloadInput): JobPayload => {
     pluginPaths: createPluginRegistry(input.db).resolveMany(
       flow.definition.nodes.map((node) => node.pluginId),
     ),
+    // Filled by the hub before a job ships to a remote node (Task 8); a
+    // local fork never reads it.
+    pluginBundles: {},
   };
 };

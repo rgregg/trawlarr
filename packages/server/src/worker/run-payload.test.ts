@@ -90,6 +90,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   logPath: null,
   // Only first-party plugins here: nothing installed to resolve.
   pluginPaths: {},
+  pluginBundles: {},
 });
 
 const payloadForFixture = (name: 'two-node-flow'): JobPayload => {
