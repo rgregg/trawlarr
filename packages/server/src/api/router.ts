@@ -44,6 +44,8 @@ export interface ApiContext {
   dataDir: string;
   nowMs: () => number;
   version: string;
+  /** The commit this build was made from; `null` when none was recorded. */
+  commit: string | null;
   schemaVersion: number;
   /** What each seed-once environment variable did on this start. */
   envApplications: EnvApplication[];

@@ -13,6 +13,7 @@ import { sweepLibraryTrash } from '../library/trash-sweep.js';
 import { sweepLibraryStaging } from '../library/staging-sweep.js';
 import { sweepJobLogs } from '../job-log/job-log-store.js';
 import { reapStalled } from '../worker/reap-stalled.js';
+import { buildCommitFrom } from './build-info.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
 import { acquireDaemonLock, type DaemonLock } from './lockfile.js';
@@ -23,7 +24,8 @@ import type { WatchPort } from './watcher.js';
 
 /**
  * The version this build reports through `GET /system/version`, kept equal to
- * `packages/server/package.json`. A literal rather than a runtime read of
+ * `packages/server/package.json` (asserted by `build-info.test.ts`; a release
+ * tag must match that file before the image workflow publishes). A literal rather than a runtime read of
  * `package.json`: the built `dist/` is what a real install runs, and
  * resolving a sibling file from it is a path that breaks differently in a
  * bundle, a global install and a test.
@@ -316,6 +318,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     dataDir,
     nowMs,
     version: DAEMON_VERSION,
+    commit: buildCommitFrom(process.env),
     envApplications,
     hardwareFindings,
   });

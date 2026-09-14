@@ -122,6 +122,9 @@ export const systemRoutes: Route[] = [
     path: '/system/version',
     handler: async ({ ctx }) => ({
       version: ctx.version,
+      // Which code is running, which `version` alone cannot say between
+      // releases. Null for a build that recorded none, never omitted.
+      commit: ctx.commit,
       schemaVersion: ctx.schemaVersion,
       // Reported as null, deliberately. Spec 2.10 defines a contract level a
       // plugin can require; trawlarr does not implement version reporting

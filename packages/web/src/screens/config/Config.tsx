@@ -20,6 +20,7 @@ import {
   type PurgeSweep,
   type WorkerClass,
 } from './config-model.js';
+import { buildLabel } from './build-label.js';
 import { Libraries } from './Libraries.js';
 import { Flows } from '../flows/Flows.js';
 import { describeFailure } from './library-form-model.js';
@@ -834,6 +835,8 @@ interface HardwareFinding {
 }
 
 interface VersionResource {
+  version: string;
+  commit: string | null;
   binaries: Record<string, { path: string; resolved: boolean }>;
   hardware: HardwareFinding[];
 }
@@ -882,6 +885,7 @@ const HardwareSection = (props: { client: ApiClient }): JSX.Element => {
 
   return (
     <div className="config-section">
+      <p className="detail">Trawlarr {buildLabel(version)}</p>
       <h3>Hardware &amp; ffmpeg</h3>
       {/* Name, the path it is configured as, and whether that path resolves.
           This was a `dt`/`dd` pair reading "ffmpeg" above "ffmpeg — resolves",

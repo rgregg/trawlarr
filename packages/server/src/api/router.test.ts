@@ -31,6 +31,7 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   dataDir: '/nonexistent-data-dir',
   nowMs: () => 1_700_000_000_000,
   version: '0.0.0-test',
+  commit: null,
   schemaVersion: 4,
   envApplications: [],
   hardwareFindings: [],

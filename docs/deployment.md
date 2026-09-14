@@ -604,6 +604,27 @@ than killing it, so an upgrade during a transcode does not leave debris.
 Database migrations are forward-only and run on start. Back up `/config`
 (container stopped) before a major-version upgrade.
 
+### Image tags
+
+CI publishes `ghcr.io/rgregg/trawlarr` only after its checks pass:
+
+| Tag            | What it is                                                   |
+| -------------- | ------------------------------------------------------------ |
+| `:latest`      | The newest release.                                          |
+| `:X.Y.Z`       | A release, from the git tag `vX.Y.Z`.                        |
+| `:X.Y`         | The newest release in that minor series.                     |
+| `:main`        | The newest commit on `main`.                                 |
+| `:sha-<short>` | One exact commit. Pin this to deploy a specific unreleased build. |
+
+To see which build a container is running, open **Config** in the UI (it
+shows e.g. `Trawlarr 0.1.0 (40e7cc1)`), or read `version` and `commit` from
+`GET /api/v1/system/version`.
+
+To cut a release, set the same version in `packages/server/package.json` and
+`DAEMON_VERSION` (`packages/server/src/daemon/daemon.ts`), merge, then push a
+matching tag: `git tag v0.1.0 && git push origin v0.1.0`. A tag that does not
+match the package version fails the publish.
+
 ## 11. Licensing of the image
 
 Trawlarr's own code is **MIT** — see [`LICENSE`](../LICENSE).
