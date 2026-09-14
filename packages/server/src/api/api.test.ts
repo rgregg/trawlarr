@@ -2645,6 +2645,32 @@ describe('system', () => {
     expect(body.note).toContain('2.10');
     expect(body.binaries.ffmpeg).toEqual({ path: 'ffmpeg', resolved: true });
     expect(body.binaries.ffprobe).toEqual({ path: 'ffprobe', resolved: false });
+    // A daemon started without a recorded commit says so, rather than omitting it.
+    expect(body.commit).toBeNull();
+  });
+
+  it('reports the commit this build was made from', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    server = createApiServer(
+      createApiContext({
+        db,
+        settings,
+        bus: createEventBus(),
+        supervisor,
+        scans,
+        nowMs: () => NOW,
+        version: '0.0.0-test',
+        commit: '40e7cc102c218506a6867cb6e50e246899d288d6',
+        dataDir: API_TEST_DATA_DIR,
+      }),
+    );
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const { body } = await api('GET', '/system/version');
+
+    expect(body.version).toBe('0.0.0-test');
+    expect(body.commit).toBe('40e7cc102c218506a6867cb6e50e246899d288d6');
   });
 
   it('reports no hardware findings when the preflight found nothing to report', async () => {

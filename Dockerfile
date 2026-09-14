@@ -105,5 +105,15 @@ EXPOSE 8265
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8265/api/v1/system/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+# The commit this image was built from, reported by `GET /system/version` and
+# shown in the UI — between releases every build reports the same version, and
+# without this nothing said which code a running container was. Declared LAST:
+# a build argument's value is part of the cache key of every RUN after it, so
+# declaring it earlier would rebuild the apt layers on every commit. Empty for
+# a local build that passes no --build-arg, which the daemon reports as null.
+ARG TRAWLARR_COMMIT=
+ENV TRAWLARR_COMMIT=${TRAWLARR_COMMIT}
+LABEL org.opencontainers.image.revision="${TRAWLARR_COMMIT}"
+
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["trawlarr", "daemon"]

@@ -323,6 +323,8 @@ export interface CreateApiContextInput {
   dataDir: string;
   nowMs?: () => number;
   version: string;
+  /** The commit this build was made from; `null` (the default) when none was recorded. */
+  commit?: string | null;
   checkBinary?: (path: string) => Promise<boolean>;
   /** What each seed-once environment variable did on this start. Defaults to none. */
   envApplications?: EnvApplication[];
@@ -375,6 +377,7 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     dataDir: input.dataDir,
     nowMs,
     version: input.version,
+    commit: input.commit ?? null,
     schemaVersion: SCHEMA_VERSION,
     checkBinary: input.checkBinary,
     envApplications: input.envApplications ?? [],
