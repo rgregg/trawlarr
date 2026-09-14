@@ -160,6 +160,29 @@ describe('rootFor / filePath', () => {
     expect(store.filePath(hash, 'nope.js')).toBeNull();
     expect(store.rootFor('deadbeef')).toBeNull();
   });
+
+  /**
+   * Without this eviction, a node holding the OLD hash could keep pulling
+   * `files/<oldHash>/...` after the tree changed underneath it and get
+   * CURRENT content back under a hash that no longer names that content —
+   * the exact substitution a content-addressed hash exists to rule out.
+   */
+  it('evicts the previous hash once a root is re-walked to a different one', async () => {
+    const root = makeTree({ 'plugin.js': 'v1' });
+    const store = createBundleStore();
+    const { hash: oldHash } = await store.manifestFor(root);
+    expect(store.filePath(oldHash, 'plugin.js')).toBe(join(root, 'plugin.js'));
+
+    writeFileSync(join(root, 'plugin.js'), 'v2');
+    utimesSync(join(root, 'plugin.js'), new Date(), new Date(Date.now() + 60_000));
+    const { hash: newHash } = await store.manifestFor(root);
+
+    expect(newHash).not.toBe(oldHash);
+    expect(store.rootFor(oldHash)).toBeNull();
+    expect(store.filePath(oldHash, 'plugin.js')).toBeNull();
+    expect(store.rootFor(newHash)).toBe(root);
+    expect(store.filePath(newHash, 'plugin.js')).toBe(join(root, 'plugin.js'));
+  });
 });
 
 describe('limits', () => {

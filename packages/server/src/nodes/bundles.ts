@@ -255,6 +255,18 @@ export const createBundleStore = (limits?: {
       const manifest: BundleManifest = { files };
       const hash = bundleHash(manifest);
 
+      // The PREVIOUS hash for this root, if any, no longer names a bundle
+      // anyone should be able to fetch: `rootFor`/`filePath` resolve purely
+      // off these maps, so leaving its entries in place would let a node
+      // that still has the old hash pull CURRENT file content while
+      // presenting it as the bundle it originally resolved that hash to —
+      // the exact substitution a content-addressed hash exists to rule out.
+      const previous = cacheByRoot.get(root);
+      if (previous !== undefined && previous.hash !== hash) {
+        rootByHash.delete(previous.hash);
+        filesByHash.delete(previous.hash);
+      }
+
       cacheByRoot.set(root, { signature, hash, manifest });
       rootByHash.set(hash, root);
       filesByHash.set(hash, pathIndex);

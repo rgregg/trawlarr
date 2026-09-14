@@ -7,7 +7,15 @@ import {
   type NodeRepo,
 } from '../../db/node-repo.js';
 import type { SettingsRepo } from '../../db/settings-repo.js';
-import { ApiError, created, noContent, requireString, type Route } from '../router.js';
+import {
+  ApiError,
+  created,
+  noContent,
+  optionalBoolean,
+  optionalString,
+  requireString,
+  type Route,
+} from '../router.js';
 
 /** The id the local node always has. v1 has exactly one node; v1.2 adds remote ones. */
 export const LOCAL_NODE_ID = 'local';
@@ -45,16 +53,26 @@ export const ensureLocalNode = (input: {
     .run(LOCAL_NODE_ID, LOCAL_NODE_ID, JSON.stringify(hardware.available), input.nowMs());
 };
 
-/** `PUT /nodes/:id`'s `pathMap`/`schedule`/etc are all optional; unknown keys are ignored. */
-interface NodePatchBody {
-  name?: string;
-  pathMap?: unknown;
-  schedule?: ScheduleConfig;
-  paused?: boolean;
-  tags?: string;
-}
-
-const asPatchBody = (body: unknown): NodePatchBody => (body as NodePatchBody | null) ?? {};
+/**
+ * `PUT /nodes/:id`'s fields are all optional; unknown keys are ignored.
+ * `name`/`paused`/`tags` are type-checked here (400 on the wrong type,
+ * same as every other route's body validation); `pathMap`/`schedule` are
+ * left to `NodeRepo.update`'s own `validatePathMap`/`validateSchedule`,
+ * which already produce a caller-facing message for a bad shape and would
+ * otherwise be duplicated here.
+ */
+const asPatchBody = (
+  body: unknown,
+): { name?: string; pathMap?: unknown; schedule?: unknown; paused?: boolean; tags?: string } => {
+  const raw = (body as Record<string, unknown> | null | undefined) ?? {};
+  return {
+    name: optionalString(body, 'name'),
+    pathMap: raw.pathMap,
+    schedule: raw.schedule as ScheduleConfig | undefined,
+    paused: optionalBoolean(body, 'paused'),
+    tags: optionalString(body, 'tags'),
+  };
+};
 
 /**
  * The `node` resource every management route returns, camel-cased straight
@@ -199,7 +217,9 @@ export const nodeRoutes: Route[] = [
         throw new ApiError(
           409,
           'already-enrolled',
-          `Node "${id}" is already enrolled; revoke it before issuing it a new enrollment token.`,
+          `Node "${id}" is already enrolled and has a secret; a new enrollment token would ` +
+            `never match it (enrollment only ever targets a node with no secret yet). Delete ` +
+            `this node and create a new one to issue it a fresh enrollment token.`,
         );
       }
       const { enrollToken, expiresAt } = await repo.regenerateEnrollToken({
@@ -222,7 +242,10 @@ export const nodeRoutes: Route[] = [
         const updated = repo.update(id, {
           name: patch.name,
           pathMap: patch.pathMap,
-          schedule: patch.schedule,
+          // Validated (or rejected) by `NodeRepo.update` itself via
+          // `validateSchedule` — this cast is just shape, not a claim of
+          // safety.
+          schedule: patch.schedule as ScheduleConfig | undefined,
           paused: patch.paused,
           tags: patch.tags,
         });

@@ -98,6 +98,20 @@ const RESERVED_NODE_NAME = 'local';
 
 const ENROLL_TOKEN_TTL_MS = 24 * 3_600_000;
 
+/**
+ * A precomputed argon2 hash of a password nothing will ever supply.
+ *
+ * `authenticate` runs argon2 (deliberately expensive) only for a KNOWN,
+ * enrolled, unrevoked node — every other branch (unknown id, never
+ * enrolled, revoked) returns immediately. Without this, those two response
+ * times would differ by however long argon2 takes, and a caller trying node
+ * ids could enumerate which ones exist purely by timing. Verifying against
+ * this fixed hash on every early-return branch keeps the cost — and
+ * therefore the timing — the same on every path, known ids included.
+ */
+const DUMMY_SECRET_HASH =
+  '$argon2id$v=19$m=65536,p=4,t=3$jK4OWaUnDacGKeWvyH4Btw$k+uM0TUJeHaa+5E7zoDh1SORQFAPxhtQxsf26fZxs/M';
+
 const NODE_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 
 /**
@@ -297,7 +311,13 @@ export const createNodeRepo = (db: Db): NodeRepo => {
 
     async authenticate(input) {
       const row = getRow(input.nodeId);
-      if (row === undefined || row.secret_hash === null || row.revoked_at !== null) return false;
+      if (row === undefined || row.secret_hash === null || row.revoked_at !== null) {
+        // A dummy verify against a fixed hash, purely for constant time —
+        // see DUMMY_SECRET_HASH. The result is never meaningful: this path
+        // always answers false regardless of what verifyPassword returns.
+        await verifyPassword({ password: input.secret, hash: DUMMY_SECRET_HASH });
+        return false;
+      }
       return await verifyPassword({ password: input.secret, hash: row.secret_hash });
     },
 

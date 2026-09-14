@@ -280,6 +280,24 @@ export const requireString = (body: unknown, field: string): string => {
   return value;
 };
 
+/**
+ * An optional string field — unlike `requireString`, an empty string is
+ * valid (e.g. clearing a node's free-text `tags`), only the TYPE is
+ * enforced.
+ */
+export const optionalString = (body: unknown, field: string): string | undefined => {
+  const value = (body as Record<string, unknown> | null | undefined)?.[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new ApiError(
+      400,
+      'invalid-body',
+      `"${field}" must be a string, got ${JSON.stringify(value)}.`,
+    );
+  }
+  return value;
+};
+
 export const optionalBoolean = (body: unknown, field: string): boolean | undefined => {
   const value = (body as Record<string, unknown> | null | undefined)?.[field];
   if (value === undefined) return undefined;

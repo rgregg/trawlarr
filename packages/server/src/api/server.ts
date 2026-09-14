@@ -211,12 +211,6 @@ export const createApiHandler = (
 
   return (req, res) => {
     void (async () => {
-      // Awaited FIRST: a node authenticates with its own secret, not the
-      // operator API key or session the router enforces below, so this must
-      // get first refusal on every request before anything else decides.
-      if (await nodeHttp(req, res)) return;
-      if (serveStatic(req, res)) return;
-
       const method = req.method ?? 'GET';
       const url = new URL(req.url ?? '/', 'http://localhost');
       const pathname = url.pathname;
@@ -224,6 +218,16 @@ export const createApiHandler = (
       const secure = isSecureRequest(req);
 
       try {
+        // Awaited FIRST, and INSIDE this try: a node authenticates with its
+        // own secret, not the operator API key or session the router
+        // enforces below, so it must get first refusal on every request —
+        // but a rejection from it (a client aborting mid-body, a read
+        // stream erroring after headers were already written) must land in
+        // the same catch as everything else, or it becomes an unhandled
+        // rejection that takes the whole daemon down with it.
+        if (await nodeHttp(req, res)) return;
+        if (serveStatic(req, res)) return;
+
         const matched = router.match(method, pathname);
 
         if (matched.kind === 'not-found') {
@@ -326,7 +330,18 @@ export const createApiHandler = (
         // Everything else is flattened. The detail goes to the log, never
         // to the client — see INTERNAL_ERROR_MESSAGE.
         onError(error, { method, path: pathname });
-        send(res, 500, errorBody('internal-error', INTERNAL_ERROR_MESSAGE));
+        if (res.headersSent) {
+          // `nodeHttp`'s bundle-file stream can fail (the file vanished
+          // between the manifest walk and the read) after it has already
+          // written a 200 and started piping bytes — `send` would then
+          // throw trying to call `writeHead` a second time. The only
+          // honest thing left to do is end the connection: whatever
+          // partial body the client already has is not a response it can
+          // trust, so more bytes at this point would only make that worse.
+          res.destroy();
+        } else {
+          send(res, 500, errorBody('internal-error', INTERNAL_ERROR_MESSAGE));
+        }
       }
     })();
   };

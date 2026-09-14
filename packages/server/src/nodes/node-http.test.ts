@@ -1,14 +1,25 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createEventBus } from '../daemon/events.js';
+import type { ScanCoordinator } from '../daemon/scan-coordinator.js';
+import type { Supervisor } from '../daemon/supervisor.js';
+import type { PluginSyncCoordinator } from '../plugins/sync-coordinator.js';
+import type { FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
+import type { AccountRepo } from '../db/account-repo.js';
+import type { SettingsRepo } from '../db/settings-repo.js';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createNodeRepo, type NodeRepo } from '../db/node-repo.js';
+import type { ApiContext } from '../api/router.js';
+import { createApiHandler } from '../api/server.js';
 import { createBundleStore, type BundleStore } from './bundles.js';
+import { createNoopNodeHub } from './hub.js';
 import { createNodeHttpHandler } from './node-http.js';
 
 const NOW = 1_700_000_000_000;
@@ -147,5 +158,164 @@ describe('createNodeHttpHandler', () => {
   it('resolves false and writes nothing for a request to a non-node path', async () => {
     const response = await fetch(`${baseUrl}/api/v1/libraries`);
     expect(response.status).toBe(UNHANDLED_STATUS);
+  });
+
+  it('404s a manifest requested under a hash the tree has since moved on from', async () => {
+    const { nodeId, secret } = await enrollFreshNode();
+    const authHeaders = { 'x-trawlarr-node': nodeId, authorization: `Bearer ${secret}` };
+    const { hash: oldHash } = await bundles.manifestFor(bundleDir);
+
+    await writeFile(join(bundleDir, 'plugin.js'), 'module.exports = { changed: true };');
+    const { hash: newHash } = await bundles.manifestFor(bundleDir);
+    expect(newHash).not.toBe(oldHash);
+
+    const stale = await fetch(`${baseUrl}/api/v1/nodes/bundles/${oldHash}`, {
+      headers: authHeaders,
+    });
+    expect(stale.status).toBe(404);
+
+    // The daemon is still healthy, and the CURRENT hash still resolves.
+    const fresh = await fetch(`${baseUrl}/api/v1/nodes/bundles/${newHash}`, {
+      headers: authHeaders,
+    });
+    expect(fresh.status).toBe(200);
+  });
+
+  it('404s an oversized enroll body with the fixed refusal, rather than resetting the connection', async () => {
+    const oversized = JSON.stringify({ token: 'x'.repeat(1024 * 1024) });
+
+    const response = await enrollViaHttp(oversized);
+
+    expect(response.status).toBe(401);
+    expect((await response.json()) as { error: string }).toMatchObject({
+      error: 'enrollment_refused',
+    });
+  });
+
+  /**
+   * The manifest still lists this file — it just cannot be read any more.
+   * Before the fix, this raced a `writeHead(200)` in ahead of the read
+   * actually failing, so the client got a "successful" 200 whose body
+   * never arrived; now the file's `open` never fires, so a clean 404 goes
+   * out instead.
+   */
+  it('404s a bundle file that vanished after the manifest was built, and keeps serving', async () => {
+    const { nodeId, secret } = await enrollFreshNode();
+    const authHeaders = { 'x-trawlarr-node': nodeId, authorization: `Bearer ${secret}` };
+    const { hash } = await bundles.manifestFor(bundleDir);
+
+    await rm(join(bundleDir, 'sub', 'helper.js'));
+
+    const response = await fetch(`${baseUrl}/api/v1/nodes/bundles/${hash}/files/sub/helper.js`, {
+      headers: authHeaders,
+    });
+    expect(response.status).toBe(404);
+
+    // The server is still alive and answers a completely unrelated request.
+    const stillAlive = await fetch(`${baseUrl}/api/v1/nodes/bundles/${hash}/files/plugin.js`, {
+      headers: authHeaders,
+    });
+    expect(stillAlive.status).toBe(200);
+  });
+});
+
+/**
+ * These prove the fix for the daemon-crashing defect: `nodeHttp` is awaited
+ * INSIDE `createApiHandler`'s own try/catch (server.ts), so nothing it does
+ * — a client aborting mid-body, a read-stream error — can become an
+ * unhandled rejection that takes the whole process down. Exercised through
+ * `createApiHandler` itself, not the bare handler, because that wrapping is
+ * exactly what changed.
+ */
+describe('mounted through createApiHandler', () => {
+  let ctx: ApiContext;
+  let mountedServer: Server;
+  let mountedUrl: string;
+
+  const stubSettings = (): SettingsRepo =>
+    ({
+      getDaemon: () => ({ bind: '127.0.0.1', port: 0, apiKey: 'the-operator-api-key-000000' }),
+    }) as unknown as SettingsRepo;
+
+  beforeEach(async () => {
+    ctx = {
+      db: {} as Db,
+      settings: stubSettings(),
+      bus: createEventBus(),
+      supervisor: {} as Supervisor,
+      scans: {} as ScanCoordinator,
+      accounts: {} as AccountRepo,
+      pluginSyncs: {} as PluginSyncCoordinator,
+      dryRuns: {} as FlowDryRunCoordinator,
+      dataDir: '/nonexistent-data-dir',
+      nowMs: () => NOW,
+      version: '0.0.0-test',
+      commit: null,
+      schemaVersion: 1,
+      envApplications: [],
+      hardwareFindings: [],
+      nodes: createNoopNodeHub(),
+    };
+    const nodeHttp = createNodeHttpHandler({ nodes: nodeRepo, bundles, nowMs: () => NOW });
+    mountedServer = createServer(
+      createApiHandler(ctx, { nodeHttp, webRoot: null, onError: () => {} }),
+    );
+    await new Promise<void>((resolve) => mountedServer.listen(0, '127.0.0.1', resolve));
+    mountedUrl = `http://127.0.0.1:${(mountedServer.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => mountedServer.close(() => resolve()));
+  });
+
+  it('runs nodeHttp before the router, so the operator API key does not authenticate a bundle request', async () => {
+    const { nodeId } = await enrollFreshNode();
+    const { hash } = await bundles.manifestFor(bundleDir);
+
+    // Valid operator credential -- but this is a NODE-facing path, which
+    // nodeHttp claims before the router (and its API-key check) ever runs.
+    const response = await fetch(`${mountedUrl}/api/v1/nodes/bundles/${hash}`, {
+      headers: { 'x-api-key': 'the-operator-api-key-000000', 'x-trawlarr-node': nodeId },
+    });
+
+    expect(response.status).toBe(401);
+    expect((await response.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: 'unauthorized' },
+    });
+  });
+
+  it('survives a client aborting an enroll body mid-write, and keeps answering afterwards', async () => {
+    const port = (mountedServer.address() as AddressInfo).port;
+    const body = JSON.stringify({ token: 'a'.repeat(200) });
+
+    await new Promise<void>((resolve) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        const head =
+          `POST /api/v1/nodes/enroll HTTP/1.1\r\n` +
+          `Host: 127.0.0.1\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Content-Length: ${String(body.length)}\r\n` +
+          `Connection: close\r\n\r\n`;
+        // Only the head plus HALF the declared body, then the socket is cut
+        // — the server is left mid-`readCappedBody` with no 'end' coming.
+        socket.write(head + body.slice(0, Math.floor(body.length / 2)), () => {
+          socket.destroy();
+          resolve();
+        });
+      });
+      socket.on('error', () => resolve());
+    });
+
+    // Give the aborted request's handler a turn to run (and, before the
+    // fix, to throw an unhandled rejection that would kill the process
+    // before this next request ever got a chance to prove anything).
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // `GET /system/health` is the one anonymous route, needing only
+    // `ctx.version`/`ctx.schemaVersion` -- both present on the stub -- so a
+    // 200 here proves the process is still alive and still routing
+    // ordinary requests through `createApiHandler` after the abort.
+    const health = await fetch(`${mountedUrl}/api/v1/system/health`);
+    expect(health.status).toBe(200);
   });
 });

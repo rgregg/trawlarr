@@ -24,14 +24,29 @@ const MAX_ENROLL_BODY_BYTES = 4096;
  * written a full response; resolves `false` and writes NOTHING for every
  * other path, which is what lets `createApiHandler` fall through to the
  * normal router unharmed.
+ *
+ * NEVER rejects. Every failure this handler can hit — a client aborting
+ * mid-body, a bundle file vanishing between the manifest walk and the read,
+ * argon2/db errors bubbling out of `NodeRepo` — is caught and turned into a
+ * response (or, once headers are already on the wire, a destroyed
+ * connection) rather than a rejected promise: `createApiHandler` awaits this
+ * inside its own try/catch, but a REJECTION that somehow still escaped would
+ * be an unhandled one, and on Node 22 that kills the process — taking every
+ * running transcode down with it. See `server.ts`'s call site.
  */
 export type NodeHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 
-const sendJson = (res: ServerResponse, status: number, body: unknown): void => {
+const sendJson = (
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers?: Record<string, string>,
+): void => {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': String(Buffer.byteLength(payload)),
+    ...headers,
   });
   res.end(payload);
 };
@@ -53,15 +68,28 @@ const sendNodeUnauthorized = (res: ServerResponse): void => {
 
 /**
  * ONE fixed body for every way an enrollment token fails — unknown,
- * expired, already consumed, or naming a node that has since been revoked —
- * so a caller learns nothing about which of those it hit.
+ * expired, already consumed, naming a node that has since been revoked, or
+ * simply too large a body to ever have been a real token — so a caller
+ * learns nothing about which of those it hit.
  */
 const ENROLLMENT_REFUSED_MESSAGE =
   'This enrollment token is invalid, expired, already used, or its node has been revoked. ' +
   `Issue a new one from the operator UI or "POST ${NODES_PREFIX}/:id/enroll-token".`;
 
+/**
+ * `Connection: close` on this one response: an oversized/malformed body may
+ * have left bytes on the wire this handler never fully read (see
+ * `readCappedBody`'s early-reject-and-drain), and asking the client to open
+ * a fresh connection for its next request is simpler and safer than
+ * reasoning about where keep-alive framing landed after an abandoned read.
+ */
 const sendEnrollmentRefused = (res: ServerResponse): void => {
-  sendJson(res, 401, { error: 'enrollment_refused', message: ENROLLMENT_REFUSED_MESSAGE });
+  sendJson(
+    res,
+    401,
+    { error: 'enrollment_refused', message: ENROLLMENT_REFUSED_MESSAGE },
+    { connection: 'close' },
+  );
 };
 
 const BUNDLE_NOT_FOUND_MESSAGE = 'No such bundle, or no such file inside it.';
@@ -70,23 +98,48 @@ const sendBundleNotFound = (res: ServerResponse): void => {
   sendJson(res, 404, { error: { code: 'not-found', message: BUNDLE_NOT_FOUND_MESSAGE } });
 };
 
+/** The body was never going to be a real token; the caller stops reading and drains the rest. */
 class BodyTooLargeError extends Error {}
+/** The client went away mid-read. There is nobody left to answer. */
+class ClientAbortedError extends Error {}
 
+/**
+ * Reads the body up to `maxBytes`, NEVER throwing a raw client-abort out to
+ * the caller as an unhandled rejection: an abort resolves to
+ * `ClientAbortedError` the same way an oversized body resolves to
+ * `BodyTooLargeError` — both are just different reasons to stop reading and
+ * answer (or, for an abort, not bother).
+ *
+ * An oversized body does NOT `req.destroy()` — it stops buffering
+ * (`req.resume()` discards the remainder without holding it in memory) and
+ * lets the caller send the fixed refusal on the still-open connection; only
+ * a genuine client abort ends with nothing left to write to.
+ */
 const readCappedBody = async (req: IncomingMessage, maxBytes: number): Promise<string> =>
   await new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let settled = false;
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
     req.on('data', (chunk: Buffer) => {
+      if (settled) return;
       size += chunk.length;
       if (size > maxBytes) {
-        reject(new BodyTooLargeError());
-        req.destroy();
+        settle(() => reject(new BodyTooLargeError()));
+        req.resume(); // drain the rest rather than buffer it; do not destroy the socket
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => settle(() => resolve(Buffer.concat(chunks).toString('utf8'))));
+    req.on('aborted', () => settle(() => reject(new ClientAbortedError())));
+    req.on('close', () => settle(() => reject(new ClientAbortedError())));
+    req.on('error', () => settle(() => reject(new ClientAbortedError())));
   });
 
 /** A malformed percent-escape is not a path segment; treated as itself, never thrown. */
@@ -115,6 +168,109 @@ const authenticateNode = async (req: IncomingMessage, nodes: NodeRepo): Promise<
   return await nodes.authenticate({ nodeId, secret });
 };
 
+const handleEnroll = async (
+  req: IncomingMessage,
+  res: ServerResponse,
+  input: { nodes: NodeRepo; nowMs: () => number },
+): Promise<void> => {
+  // Refused up front, before reading a byte, when the client announced a
+  // body too large to ever hold a real token — the streaming cap below is
+  // the backstop for a body that lied about (or omitted) its length.
+  const declaredLength = Number(req.headers['content-length'] ?? '0');
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_ENROLL_BODY_BYTES) {
+    // Drain rather than ignore: the client is still writing up to
+    // `declaredLength` bytes, and leaving them unread on the socket while
+    // we write a response risks backpressure errors on some platforms.
+    req.resume();
+    sendEnrollmentRefused(res);
+    return;
+  }
+
+  let raw: string;
+  try {
+    raw = await readCappedBody(req, MAX_ENROLL_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof ClientAbortedError) return; // nobody left to answer
+    if (!(error instanceof BodyTooLargeError)) throw error;
+    sendEnrollmentRefused(res);
+    return;
+  }
+
+  let token: unknown;
+  try {
+    token = raw === '' ? undefined : (JSON.parse(raw) as { token?: unknown }).token;
+  } catch {
+    sendEnrollmentRefused(res);
+    return;
+  }
+  if (typeof token !== 'string' || token === '') {
+    sendEnrollmentRefused(res);
+    return;
+  }
+
+  const result = await input.nodes.enroll({ token, nowMs: input.nowMs() });
+  if (result === null) {
+    sendEnrollmentRefused(res);
+    return;
+  }
+  sendJson(res, 200, { nodeId: result.nodeId, secret: result.secret });
+};
+
+/**
+ * Streams `filePath` as `application/octet-stream`, and NEVER rejects: a
+ * read error (the file vanished between the manifest walk and this read) or
+ * the client hanging up mid-stream both end the promise via `resolve`, with
+ * the response either completed, 404'd, or destroyed.
+ *
+ * Headers are written only once the file has actually `open`ed — not
+ * eagerly before the read even starts — so the common race (the manifest
+ * still lists a file that has since been deleted) 404s cleanly instead of
+ * committing a 200 status the body can never back up. Once `open` HAS
+ * fired, a later read error (truncated mid-stream, permissions yanked) has
+ * no such option: the 200 is already on the wire, so the only honest move
+ * left is to destroy the connection rather than let the client believe it
+ * got a complete file.
+ */
+const streamBundleFile = async (res: ServerResponse, filePath: string): Promise<void> =>
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let opened = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    const stream = createReadStream(filePath);
+    stream.on('open', () => {
+      opened = true;
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    });
+    stream.on('error', () => {
+      stream.destroy();
+      if (opened || res.headersSent) {
+        res.destroy();
+      } else {
+        sendBundleNotFound(res);
+      }
+      finish();
+    });
+    res.on('error', () => {
+      stream.destroy();
+      finish();
+    });
+    // The client disconnecting mid-stream fires 'close' (usually alongside
+    // 'finish' on a clean completion, never after it on an early hangup) —
+    // either way the read stream must stop, and the promise must settle.
+    res.on('close', () => {
+      stream.destroy();
+      finish();
+    });
+    res.on('finish', finish);
+
+    stream.pipe(res);
+  });
+
 /**
  * Builds the node-facing HTTP surface: enrollment, and authenticated bundle
  * downloads. Mounted by `createApiHandler` (server.ts) ahead of the ordinary
@@ -132,36 +288,7 @@ export const createNodeHttpHandler = (input: {
     const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
 
     if (method === 'POST' && pathname === ENROLL_PATH) {
-      let raw: string;
-      try {
-        raw = await readCappedBody(req, MAX_ENROLL_BODY_BYTES);
-      } catch (error) {
-        if (!(error instanceof BodyTooLargeError)) throw error;
-        // A body this large cannot be a real token either way — refused
-        // with the same single message as any other bad token, so an
-        // oversized body tells a prober nothing it did not already know.
-        sendEnrollmentRefused(res);
-        return true;
-      }
-
-      let token: unknown;
-      try {
-        token = raw === '' ? undefined : (JSON.parse(raw) as { token?: unknown }).token;
-      } catch {
-        sendEnrollmentRefused(res);
-        return true;
-      }
-      if (typeof token !== 'string' || token === '') {
-        sendEnrollmentRefused(res);
-        return true;
-      }
-
-      const result = await input.nodes.enroll({ token, nowMs: input.nowMs() });
-      if (result === null) {
-        sendEnrollmentRefused(res);
-        return true;
-      }
-      sendJson(res, 200, { nodeId: result.nodeId, secret: result.secret });
+      await handleEnroll(req, res, input);
       return true;
     }
 
@@ -182,8 +309,18 @@ export const createNodeHttpHandler = (input: {
           sendBundleNotFound(res);
           return true;
         }
-        const { manifest } = await input.bundles.manifestFor(root);
-        sendJson(res, 200, manifest);
+        const rewalked = await input.bundles.manifestFor(root);
+        // The tree may have changed since `hash` was handed out. A rewalk
+        // that lands on a DIFFERENT hash means the bundle `hash` named no
+        // longer exists — `manifestFor` has already evicted its entries —
+        // so answering with today's manifest under yesterday's hash would
+        // tell a node it has the exact bytes that hash designates when it
+        // does not.
+        if (rewalked.hash !== hash) {
+          sendBundleNotFound(res);
+          return true;
+        }
+        sendJson(res, 200, rewalked.manifest);
         return true;
       }
 
@@ -198,20 +335,19 @@ export const createNodeHttpHandler = (input: {
       const rawRelPath = rest.slice(filesIndex + FILES_MARKER.length);
       const relPath = rawRelPath.split('/').map(decodeSegment).join('/');
 
+      // Deliberately NOT a re-walk: `filePath` is an O(1) lookup against
+      // whatever `manifestFor` last cached for this hash. A hash whose root
+      // has since been re-walked to something else was already evicted from
+      // these maps by `manifestFor` (see bundles.ts), so this still refuses
+      // a stale hash — it just does not pay for a filesystem walk on every
+      // single file a node pulls out of a bundle it already resolved.
       const filePath = input.bundles.filePath(hash, relPath);
       if (filePath === null) {
         sendBundleNotFound(res);
         return true;
       }
 
-      await new Promise<void>((resolve, reject) => {
-        res.writeHead(200, { 'content-type': 'application/octet-stream' });
-        const stream = createReadStream(filePath);
-        stream.on('error', reject);
-        res.on('close', resolve);
-        res.on('finish', resolve);
-        stream.pipe(res);
-      });
+      await streamBundleFile(res, filePath);
       return true;
     }
 

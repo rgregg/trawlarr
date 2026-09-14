@@ -2716,6 +2716,21 @@ describe('node management', () => {
     expect(response.body.error.message.length).toBeGreaterThan(0);
   });
 
+  it('rejects a PUT whose name, paused, or tags is the wrong type, before touching the row', async () => {
+    const node = await createNode();
+
+    const badName = await api('PUT', `/nodes/${node.node.id}`, { name: 123 });
+    const badPaused = await api('PUT', `/nodes/${node.node.id}`, { paused: 'yes' });
+    const badTags = await api('PUT', `/nodes/${node.node.id}`, { tags: ['gpu'] });
+
+    expect(badName.status).toBe(400);
+    expect(badPaused.status).toBe(400);
+    expect(badTags.status).toBe(400);
+    expect(
+      (await api('GET', `/nodes`)).body.find((n: ResponseBody) => n.id === node.node.id),
+    ).toMatchObject({ name: node.node.name, paused: false, tags: '' });
+  });
+
   it('updates a node and pushes the new config to it', async () => {
     const node = await createNode();
 
