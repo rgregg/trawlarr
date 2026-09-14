@@ -110,7 +110,6 @@ type NodeFrame =
   | { type: 'agent'; jobId: string; message: AgentToDaemon }
   | { type: 'hello'; ... }
   | { type: 'libraries'; ... }
-  | { type: 'commit-request'; jobId: string; requestId: number }
   | { type: 'job-state'; jobId: string; state: 'running' | 'held-report' | 'lost' }
   | { type: 'log-backfill'; jobId: string; fromLine: number; lines: string[] };
 
@@ -118,10 +117,14 @@ type ServerFrame =
   | { type: 'agent'; jobId: string; message: DaemonToAgent }
   | { type: 'welcome'; ... } | { type: 'refused'; reason: string }
   | { type: 'config'; ... }
-  | { type: 'commit-result'; jobId: string; requestId: number; granted: boolean; reason?: string }
   | { type: 'abandon'; jobId: string; reason: string }
   | { type: 'ack-report'; jobId: string };
 ```
+
+`AgentToDaemon` gains `{ type: 'commit-request'; id: number }` and
+`DaemonToAgent` gains `{ type: 'commit-result'; id: number; granted: boolean;
+reason?: string }`. Both travel inside the `agent` envelope like any other
+agent message.
 
 Jobs are addressed by `jobId`, not by a worker slot: the job id is what
 survives a reconnect. Both parsers stay strict (drop what does not validate),
@@ -178,10 +181,12 @@ commit:
 
 Mechanism:
 
-- `runPayload` gains a `commitGate: (jobId) => Promise<void>` port. The local
-  agent's gate resolves immediately. The remote agent's gate sends a
-  `doc-request`-style round trip (a new agent message, `commit-request`) that
-  the node host forwards as a `commit-request` frame.
+- `runPayload` gains a `commitGate: () => Promise<void>` port. `agent.ts`
+  implements it as a `commit-request` round trip, identical on both kinds of
+  node, so the gate is not a remote-only code path.
+- A local `AgentHandle` grants every request. The in-process `trawlarr run`
+  path passes a gate that resolves immediately.
+- `RemoteAgentHandle` answers from the lease, as follows.
 - The server grants only if the job's lease is `connected` or `committing` and
   the media file is still claimed by this job. It moves the lease to
   `committing` for the Replace node; for an unvouchable node the lease stays
@@ -190,9 +195,10 @@ Mechanism:
   locally and never times out into a grant.
 - A refusal (`granted: false`) throws a distinguished `Superseded` error. The
   run unwinds and removes its staging directory, the original file is
-  untouched, and the report is `superseded`.
-- The server applies `superseded` as a no-op on the file (it was already
-  reclaimed) and closes the job row as `superseded`. No attempt is spent.
+  untouched, and the agent reports the failure as superseded.
+- The server applies it as a no-op on the file (it was already reclaimed) and
+  closes the job row as `superseded`, a new job state (migration). No attempt
+  is spent.
 
 `committing` returns to `connected` when the step completes (the next `step`
 message).
