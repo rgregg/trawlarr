@@ -25,14 +25,18 @@ const MAX_ENROLL_BODY_BYTES = 4096;
  * other path, which is what lets `createApiHandler` fall through to the
  * normal router unharmed.
  *
- * NEVER rejects. Every failure this handler can hit — a client aborting
- * mid-body, a bundle file vanishing between the manifest walk and the read,
- * argon2/db errors bubbling out of `NodeRepo` — is caught and turned into a
- * response (or, once headers are already on the wire, a destroyed
- * connection) rather than a rejected promise: `createApiHandler` awaits this
- * inside its own try/catch, but a REJECTION that somehow still escaped would
- * be an unhandled one, and on Node 22 that kills the process — taking every
- * running transcode down with it. See `server.ts`'s call site.
+ * The two failure modes this module exists to make impossible to get wrong
+ * by accident — a client aborting an enroll body mid-write, and a bundle
+ * file vanishing between the manifest walk and the read — are caught HERE
+ * and turned into a response or a destroyed connection, never a rejected
+ * promise. This does NOT extend to every failure this handler can hit: an
+ * `argon2`/db error out of `NodeRepo.enroll`/`authenticate`, or a
+ * `BundleWalkError`/`BundleLimitError` out of `BundleStore.manifestFor`, are
+ * left to reject — `createApiHandler` (server.ts) awaits this call inside
+ * its OWN try/catch (with a trailing `.catch` backstop beyond that), so an
+ * escaping rejection still lands as a 500 rather than an unhandled
+ * rejection. It is that outer wrapping, not a guarantee made in this file,
+ * that keeps a node request from ever taking the daemon down with it.
  */
 export type NodeHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 

@@ -181,7 +181,7 @@ describe('createNodeHttpHandler', () => {
     expect(fresh.status).toBe(200);
   });
 
-  it('404s an oversized enroll body with the fixed refusal, rather than resetting the connection', async () => {
+  it('answers an oversized enroll body (known up front via Content-Length) with the fixed refusal, rather than resetting the connection', async () => {
     const oversized = JSON.stringify({ token: 'x'.repeat(1024 * 1024) });
 
     const response = await enrollViaHttp(oversized);
@@ -190,6 +190,52 @@ describe('createNodeHttpHandler', () => {
     expect((await response.json()) as { error: string }).toMatchObject({
       error: 'enrollment_refused',
     });
+  });
+
+  /**
+   * `enrollViaHttp` (via `fetch`) always knows its body's length up front and
+   * sends `Content-Length`, so it only ever exercises the up-front check in
+   * `handleEnroll`. A CHUNKED body with no `Content-Length` at all is what
+   * exercises `readCappedBody`'s own streaming cap -- the body arrives as
+   * several `data` events and the cap has to be enforced as bytes accumulate,
+   * not known ahead of time.
+   */
+  it('refuses a chunked enroll body over the cap with no Content-Length, via the streaming cap', async () => {
+    const port = (server.address() as AddressInfo).port;
+    const payload = JSON.stringify({ token: 'a'.repeat(4096) }); // > MAX_ENROLL_BODY_BYTES once wrapped
+    const half = Math.floor(payload.length / 2);
+    const chunk = (data: string): string => `${data.length.toString(16)}\r\n${data}\r\n`;
+
+    const response = await new Promise<{ status: number; raw: string }>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(
+          `POST /api/v1/nodes/enroll HTTP/1.1\r\n` +
+            `Host: 127.0.0.1\r\n` +
+            `Content-Type: application/json\r\n` +
+            `Transfer-Encoding: chunked\r\n` +
+            `Connection: close\r\n\r\n`,
+        );
+        socket.write(chunk(payload.slice(0, half)));
+        socket.write(chunk(payload.slice(half)));
+        socket.write('0\r\n\r\n');
+      });
+      let raw = '';
+      socket.on('data', (data: Buffer) => {
+        raw += data.toString('utf8');
+      });
+      socket.on('end', () => {
+        const [headPart, ...bodyParts] = raw.split('\r\n\r\n');
+        const statusLine = headPart!.split('\r\n')[0]!;
+        resolve({
+          status: Number(statusLine.split(' ')[1]),
+          raw: bodyParts.join('\r\n\r\n'),
+        });
+      });
+      socket.on('error', reject);
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.raw).toContain('enrollment_refused');
   });
 
   /**
@@ -315,6 +361,33 @@ describe('mounted through createApiHandler', () => {
     // `ctx.version`/`ctx.schemaVersion` -- both present on the stub -- so a
     // 200 here proves the process is still alive and still routing
     // ordinary requests through `createApiHandler` after the abort.
+    const health = await fetch(`${mountedUrl}/api/v1/system/health`);
+    expect(health.status).toBe(200);
+  });
+
+  /**
+   * The HTTP parser is more permissive than the WHATWG `URL` constructor:
+   * `req.url` can come out as something like `http://[` — a request line
+   * nothing that goes through `fetch`/a browser would ever produce, but a
+   * raw socket can send it directly. Before the fix, `new URL(...)` threw
+   * OUTSIDE `createApiHandler`'s try/catch, so this took the whole server
+   * down; now it is caught (400) inside it, or (belt and suspenders) by the
+   * IIFE's trailing `.catch`.
+   */
+  it('survives a request whose URL the HTTP parser accepts but new URL() rejects', async () => {
+    const port = (mountedServer.address() as AddressInfo).port;
+
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(`GET http://[ HTTP/1.1\r\nHost: x\r\n\r\n`);
+      });
+      socket.on('data', () => resolve());
+      socket.on('close', () => resolve());
+      socket.on('end', () => resolve());
+      socket.on('error', reject);
+    });
+
+    // The process (and this server) is still up and answering normally.
     const health = await fetch(`${mountedUrl}/api/v1/system/health`);
     expect(health.status).toBe(200);
   });

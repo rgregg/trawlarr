@@ -210,21 +210,33 @@ export const createApiHandler = (
   const nodeHttp = options?.nodeHttp ?? (async () => false);
 
   return (req, res) => {
-    void (async () => {
-      const method = req.method ?? 'GET';
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      const pathname = url.pathname;
-      const cookies = parseCookies(req.headers.cookie);
-      const secure = isSecureRequest(req);
+    // `method`/`pathname` are also what the catch block logs with, so they
+    // get placeholder values BEFORE the try — a malformed `req.url` (a raw
+    // socket can send one the HTTP parser lets through, e.g. `GET
+    // http://[ HTTP/1.1`) throws out of `new URL` below, and that throw must
+    // still have something to log, not a ReferenceError of its own.
+    let method = req.method ?? 'GET';
+    let pathname = req.url ?? '/';
 
+    void (async () => {
       try {
-        // Awaited FIRST, and INSIDE this try: a node authenticates with its
-        // own secret, not the operator API key or session the router
-        // enforces below, so it must get first refusal on every request —
-        // but a rejection from it (a client aborting mid-body, a read
-        // stream erroring after headers were already written) must land in
-        // the same catch as everything else, or it becomes an unhandled
-        // rejection that takes the whole daemon down with it.
+        // `new URL` and everything that reads it are INSIDE this try along
+        // with `nodeHttp`/`serveStatic`/the router: a request whose URL the
+        // HTTP parser accepted but the WHATWG URL parser rejects must land
+        // in the same catch as every other failure, or it becomes an
+        // unhandled rejection that takes the whole daemon down with it.
+        method = req.method ?? 'GET';
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        pathname = url.pathname;
+        const cookies = parseCookies(req.headers.cookie);
+        const secure = isSecureRequest(req);
+
+        // Awaited FIRST: a node authenticates with its own secret, not the
+        // operator API key or session the router enforces below, so it must
+        // get first refusal on every request — but a rejection from it (a
+        // client aborting mid-body, a read stream erroring after headers
+        // were already written) must land in the same catch as everything
+        // else, for the same reason as above.
         if (await nodeHttp(req, res)) return;
         if (serveStatic(req, res)) return;
 
@@ -327,6 +339,18 @@ export const createApiHandler = (
           );
           return;
         }
+        if (
+          error instanceof TypeError &&
+          (error as NodeJS.ErrnoException).code === 'ERR_INVALID_URL'
+        ) {
+          // The HTTP parser accepts request lines the WHATWG URL parser
+          // then rejects (e.g. a raw `GET http://[ HTTP/1.1` from a socket
+          // that never goes near `fetch`/a browser) — a malformed URL, not
+          // an internal failure, so it gets its own diagnosable 400 rather
+          // than falling into the generic 500 below.
+          send(res, 400, errorBody('bad-url', `Could not parse "${req.url ?? ''}" as a URL path.`));
+          return;
+        }
         // Everything else is flattened. The detail goes to the log, never
         // to the client — see INTERNAL_ERROR_MESSAGE.
         onError(error, { method, path: pathname });
@@ -343,7 +367,18 @@ export const createApiHandler = (
           send(res, 500, errorBody('internal-error', INTERNAL_ERROR_MESSAGE));
         }
       }
-    })();
+    })().catch((error: unknown) => {
+      // The try/catch above is meant to be exhaustive, but this is the
+      // backstop for anything that still escapes it (a throw from `onError`
+      // itself, a `send`/`res.destroy()` call throwing because the socket
+      // is already gone). An unhandled rejection here EXITS THE PROCESS on
+      // Node 22 — taking every running transcode down with it — so the only
+      // acceptable response to "something I didn't expect happened" is to
+      // log it and end this one connection, never to let the promise reject
+      // unobserved.
+      onError(error, { method, path: pathname });
+      res.destroy();
+    });
   };
 };
 
