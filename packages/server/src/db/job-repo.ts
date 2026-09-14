@@ -30,6 +30,11 @@ export interface JobRow {
    */
   leaseState: LeaseState | null;
   leaseExpiresAt: number | null;
+  /**
+   * When an operator asked to cancel this job, or null. Durable so a remote
+   * job's cancel survives a daemon restart (`013_job_cancel_requested.sql`).
+   */
+  cancelRequestedAt: number | null;
 }
 
 /**
@@ -196,6 +201,11 @@ export interface JobRepo {
    * result) and each arrival should be visible, not just the last one.
    */
   appendOutcome(input: { jobId: string; text: string }): void;
+  /**
+   * Records an operator's cancel on an open job. The first request wins, and
+   * an ended job is left alone: there is nothing left to cancel.
+   */
+  requestCancel(input: { jobId: string; nowMs: number }): void;
 }
 
 interface JobRowRaw {
@@ -215,6 +225,7 @@ interface JobRowRaw {
   worker_host: string | null;
   lease_state: string | null;
   lease_expires_at: number | null;
+  cancel_requested_at: number | null;
   payload_json: string | null;
   path_map_json: string | null;
 }
@@ -247,6 +258,7 @@ const toJobRow = (row: JobRowRaw): JobRow => ({
   workerHost: row.worker_host,
   leaseState: row.lease_state as LeaseState | null,
   leaseExpiresAt: row.lease_expires_at,
+  cancelRequestedAt: row.cancel_requested_at,
 });
 
 const toJobStepRow = (row: JobStepRowRaw): JobStepRow => ({
@@ -331,6 +343,11 @@ export const createJobRepo = (db: Db): JobRepo => {
   const selectLeased = db.prepare(
     `SELECT id, file_id, node_id, lease_state, lease_expires_at, payload_json, path_map_json
      FROM job WHERE ended_at IS NULL AND lease_state IS NOT NULL`,
+  );
+
+  const requestCancelJob = db.prepare(
+    `UPDATE job SET cancel_requested_at = ?
+     WHERE id = ? AND ended_at IS NULL AND cancel_requested_at IS NULL`,
   );
 
   const appendOutcomeJob = db.prepare(
@@ -450,6 +467,10 @@ export const createJobRepo = (db: Db): JobRepo => {
         payloadJson: row.payload_json as string,
         pathMapJson: row.path_map_json as string,
       }));
+    },
+
+    requestCancel(input) {
+      requestCancelJob.run(input.nowMs, input.jobId);
     },
 
     appendOutcome(input) {

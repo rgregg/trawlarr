@@ -269,4 +269,21 @@ describe('createJobRepo', () => {
       expect(repo.getById(jobId)?.outcome).toBe('first line\nsecond line');
     });
   });
+
+  describe('requestCancel', () => {
+    it('records when a cancel was requested, keeping the first request', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW });
+      expect(repo.getById(jobId)?.cancelRequestedAt).toBeNull();
+      repo.requestCancel({ jobId, nowMs: NOW + 5 });
+      repo.requestCancel({ jobId, nowMs: NOW + 9 });
+      expect(repo.getById(jobId)?.cancelRequestedAt).toBe(NOW + 5);
+    });
+
+    it('does not mark a job that has already ended', () => {
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW });
+      repo.finish({ jobId, state: 'succeeded', outcome: 'done', nowMs: NOW + 1 });
+      repo.requestCancel({ jobId, nowMs: NOW + 2 });
+      expect(repo.getById(jobId)?.cancelRequestedAt).toBeNull();
+    });
+  });
 });
