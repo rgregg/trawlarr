@@ -32,8 +32,12 @@ interface ApiJobRow {
 
 interface ApiJobDetail {
   job: ApiJobRow;
+  /** The file's current path; `null` when the daemon no longer has its row. */
+  file: { id: string; path: string } | null;
   steps: ApiStep[];
 }
+
+const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
 const formatDuration = (ms: number): string => {
   const seconds = Math.round(ms / 1000);
@@ -297,7 +301,7 @@ export const JobDetail = (props: {
       {failure === null && !loading && detail !== null && (
         <>
           <div className={`job-page-header job-page-state-${detail.job.state}`}>
-            <h2>Job {detail.job.id}</h2>
+            <h2>{detail.file === null ? `Job ${detail.job.id}` : basename(detail.file.path)}</h2>
             <span className="job-page-state">
               {liveJob !== undefined
                 ? liveJob.percent === null
@@ -307,18 +311,20 @@ export const JobDetail = (props: {
             </span>
           </div>
 
-          {/* This screen fetches only `GET /jobs/:id` and `GET
-              /jobs/:id/log` — the job record carries a file id and no path,
-              so the link back is by id rather than a basename a third fetch
-              would be needed to know. */}
+          {/* The path, not the file id: a UUID tells nobody which film this
+              was. The id is only the fallback for a file whose row is gone. */}
           <p className="job-page-file">
             File:{' '}
             <Link to={`/files/${detail.job.fileId}`} navigate={navigate}>
-              {detail.job.fileId}
+              {detail.file === null ? detail.job.fileId : detail.file.path}
             </Link>
           </p>
 
           <dl className="job-page-meta">
+            <div>
+              <dt>Job</dt>
+              <dd>{detail.job.id}</dd>
+            </div>
             <div>
               {/* The LIVE flow, by id — "why did this file get rewritten" is
                   usually a question about the graph, and this screen holds

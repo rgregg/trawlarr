@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { createJobRepo } from '../../db/job-repo.js';
+import { createMediaFileRepo } from '../../db/media-file-repo.js';
 import { JOB_LOG_RETENTION_DAYS } from '../../job-log/job-log-store.js';
 import { accepted, ApiError, parsePaging, type Route } from '../router.js';
 
@@ -29,7 +30,16 @@ export const jobRoutes: Route[] = [
       // The step trace is the point of a job detail: it is the record of
       // which node made which decision, and it is the only thing that
       // answers "why did this file get this outcome?" after the fact.
-      return { job, steps: repo.getSteps(job.id) };
+      //
+      // The file's CURRENT path rides along because the job row holds only an
+      // id, and a job page labelled with a UUID tells a person nothing about
+      // which film it ran on. `null` when the file row is gone.
+      const file = createMediaFileRepo(ctx.db).getById(job.fileId);
+      return {
+        job,
+        file: file === null ? null : { id: file.id, path: file.path },
+        steps: repo.getSteps(job.id),
+      };
     },
   },
 
