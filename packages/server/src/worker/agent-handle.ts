@@ -194,6 +194,59 @@ const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   typeof (value as { then?: unknown } | null)?.then === 'function';
 
 /**
+ * Answer one plugin document-store request through `post`.
+ *
+ * Shared by the local fork's handle and the remote node's handle
+ * (`nodes/remote-agent.ts`), so a plugin's `crudTransDBN` behaves the same
+ * wherever it runs. Every branch answers: a daemon-side throw with no reply
+ * is a worker blocked until the stall reaper notices, a day later, for what
+ * is a one-line error.
+ */
+export const answerDocRequest = (
+  documents: DocumentPort,
+  request: Extract<AgentToDaemon, { type: 'doc-request' }>,
+  post: (message: DaemonToAgent) => void,
+): void => {
+  const ok = (value: unknown) => {
+    post({ type: 'doc-result', id: request.id, ok: true, value });
+  };
+  const fail = (error: unknown) => {
+    post({ type: 'doc-result', id: request.id, ok: false, error: messageOf(error) });
+  };
+
+  try {
+    let result: unknown;
+    switch (request.method) {
+      case 'get':
+        result = documents.get(request.collection, request.docId);
+        break;
+      case 'insert':
+        if (request.data === undefined || request.nowMs === undefined) {
+          throw new Error(`doc-request ${request.id}: insert requires data and nowMs.`);
+        }
+        result = documents.insert(request.collection, request.docId, request.data, request.nowMs);
+        break;
+      case 'update':
+        if (request.data === undefined || request.nowMs === undefined) {
+          throw new Error(`doc-request ${request.id}: update requires data and nowMs.`);
+        }
+        result = documents.update(request.collection, request.docId, request.data, request.nowMs);
+        break;
+      case 'removeOne':
+        result = documents.removeOne(request.collection, request.docId);
+        break;
+    }
+    if (isThenable(result)) {
+      void Promise.resolve(result).then(ok, fail);
+      return;
+    }
+    ok(result);
+  } catch (error) {
+    fail(error);
+  }
+};
+
+/**
  * One worker process, as the daemon sees it.
  *
  * The child is forked immediately so its pid exists before any job is
@@ -293,56 +346,6 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
     untrackProcessGroupLeader(groupPid());
   };
 
-  const answerDocRequest = (request: Extract<AgentToDaemon, { type: 'doc-request' }>): void => {
-    const ok = (value: unknown) => post({ type: 'doc-result', id: request.id, ok: true, value });
-    const fail = (error: unknown) =>
-      post({ type: 'doc-result', id: request.id, ok: false, error: messageOf(error) });
-
-    try {
-      // Every branch answers. A daemon-side throw with no reply is a worker
-      // blocked until the stall reaper notices, half an hour later, for what
-      // is a one-line error.
-      let result: unknown;
-      switch (request.method) {
-        case 'get':
-          result = input.documents.get(request.collection, request.docId);
-          break;
-        case 'insert':
-          if (request.data === undefined || request.nowMs === undefined) {
-            throw new Error(`doc-request ${request.id}: insert requires data and nowMs.`);
-          }
-          result = input.documents.insert(
-            request.collection,
-            request.docId,
-            request.data,
-            request.nowMs,
-          );
-          break;
-        case 'update':
-          if (request.data === undefined || request.nowMs === undefined) {
-            throw new Error(`doc-request ${request.id}: update requires data and nowMs.`);
-          }
-          result = input.documents.update(
-            request.collection,
-            request.docId,
-            request.data,
-            request.nowMs,
-          );
-          break;
-        case 'removeOne':
-          result = input.documents.removeOne(request.collection, request.docId);
-          break;
-      }
-      if (isThenable(result)) {
-        void Promise.resolve(result).then(ok, fail);
-        return;
-      }
-      ok(result);
-    } catch (error) {
-      fail(error);
-    }
-  };
-
   const commits = input.commits ?? GRANT_ALL;
 
   /**
@@ -409,7 +412,7 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
         input.onLog(message.text);
         return;
       case 'doc-request':
-        answerDocRequest(message);
+        answerDocRequest(input.documents, message, post);
         return;
       case 'commit-request':
         answerCommitRequest(message);

@@ -1,0 +1,237 @@
+import { describe, expect, it } from 'vitest';
+import type { PathMapping } from '@trawlarr/core';
+import type { DocumentPort } from '@trawlarr/engine';
+import { AgentFailure } from '../worker/agent-handle.js';
+import type { JobPayload } from '../worker/job-payload.js';
+import type { JobReport } from '../worker/run-payload.js';
+import { payloadToNode } from './map-payload.js';
+import type { ServerFrame } from './node-frames.js';
+import { createRemoteAgentHandle, type RemoteAgentInput } from './remote-agent.js';
+
+const MAP: PathMapping[] = [{ serverPath: '/media', nodePath: '/mnt/nas' }];
+
+const payloadFixture = (): JobPayload =>
+  ({
+    jobId: 'job-1',
+    fileId: 'file-1',
+    libraryId: 'lib-1',
+    path: '/media/movies/a.mkv',
+    library: {
+      id: 'lib-1',
+      name: 'Movies',
+      roots: ['/media/movies'],
+      stagingDir: null,
+      trashDir: null,
+    },
+    flow: { id: 'flow-1', definition: { nodes: [], edges: [] }, definitionHash: 'h' },
+    logPath: '/data/logs/jobs/job-1.log',
+    pluginPaths: {},
+    pluginBundles: {},
+  }) as unknown as JobPayload;
+
+const reportFixture = (path: string): JobReport =>
+  ({
+    jobId: 'job-1',
+    fileId: 'file-1',
+    steps: [],
+    stopReason: 'end-of-flow',
+    failed: false,
+    error: null,
+    success: true,
+    outcome: 'ok',
+    replaced: { path, container: 'mkv', sizeBytes: 1 },
+    preFacts: {},
+    postFacts: null,
+    cancelled: false,
+  }) as unknown as JobReport;
+
+const flush = async (): Promise<void> => {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve();
+};
+
+const noDocuments: DocumentPort = {
+  get: () => undefined,
+  insert: () => {},
+  update: () => {},
+  removeOne: () => {},
+};
+
+const harness = (over: Partial<RemoteAgentInput> = {}) => {
+  const sent: ServerFrame[] = [];
+  const setRemoteCalls: Parameters<RemoteAgentInput['jobs']['setRemote']>[0][] = [];
+  const state = { online: true, decision: { granted: true, reason: null as string | null } };
+  const handle = createRemoteAgentHandle({
+    id: 'worker-1',
+    nodeId: 'node-a',
+    fresh: true,
+    documents: noDocuments,
+    onStep: () => {},
+    onHeartbeat: () => {},
+    onProgress: () => {},
+    onLog: () => {},
+    nowMs: () => 0,
+    jobs: {
+      setRemote: (input) => {
+        setRemoteCalls.push(input);
+      },
+    },
+    channel: () =>
+      state.online
+        ? {
+            send: (frame) => {
+              sent.push(frame);
+              return true;
+            },
+          }
+        : null,
+    decideCommit: () => state.decision,
+    onStepLease: () => {},
+    prepare: (payload) =>
+      Promise.resolve({
+        payload: payloadToNode(
+          { ...payload, pluginBundles: { 'a:b': { bundle: 'sha', relPath: 'p/index.js' } } },
+          MAP,
+        ),
+        pathMap: MAP,
+      }),
+    appendLog: () => {},
+    ...over,
+  });
+  return { handle, sent, setRemoteCalls, state };
+};
+
+describe('createRemoteAgentHandle', () => {
+  it('sends exactly one mapped job frame with bundles, after recording a connected lease and the server-view payload', async () => {
+    const { handle, sent, setRemoteCalls } = harness();
+    void handle.run(payloadFixture());
+    await flush();
+
+    expect(sent).toHaveLength(1);
+    const frame = sent[0] as Extract<ServerFrame, { type: 'job' }>;
+    expect(frame.type).toBe('job');
+    expect(frame.payload.path).toBe('/mnt/nas/movies/a.mkv');
+    expect(frame.payload.library.roots).toEqual(['/mnt/nas/movies']);
+    expect(frame.payload.pluginBundles).toEqual({
+      'a:b': { bundle: 'sha', relPath: 'p/index.js' },
+    });
+
+    expect(setRemoteCalls).toHaveLength(1);
+    expect(setRemoteCalls[0]).toMatchObject({
+      jobId: 'job-1',
+      nodeId: 'node-a',
+      lease: { state: 'connected', expiresAtMs: null },
+      pathMapJson: JSON.stringify(MAP),
+    });
+    expect((JSON.parse(setRemoteCalls[0]!.payloadJson) as JobPayload).path).toBe(
+      '/media/movies/a.mkv',
+    );
+  });
+
+  it('rejects as a reported failure when prepare throws, and sends nothing', async () => {
+    const { handle, sent, setRemoteCalls } = harness({
+      prepare: () =>
+        Promise.reject(new Error('Path "/elsewhere" is outside the node\'s path map.')),
+    });
+    const error = await handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect((error as AgentFailure).reported).toBe(true);
+    expect((error as AgentFailure).message).toContain('outside the node');
+    expect(sent).toEqual([]);
+    expect(setRemoteCalls).toEqual([]);
+  });
+
+  it('resolves done with the report mapped back to server paths', async () => {
+    const { handle } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    const report = await run;
+    expect(report.replaced?.path).toBe('/media/movies/a.mkv');
+  });
+
+  it('sends commit-result granted:false when the decision refuses', async () => {
+    const { handle, sent, state } = harness();
+    void handle.run(payloadFixture());
+    await flush();
+    state.decision = { granted: false, reason: 'lease expired' };
+    handle.receive({ type: 'commit-request', id: 7, kind: 'replace', pluginId: 'x' });
+    expect(sent.at(-1)).toEqual({
+      type: 'agent',
+      jobId: 'job-1',
+      message: { type: 'commit-result', id: 7, granted: false, reason: 'lease expired' },
+    });
+  });
+
+  it('refuses a commit once cancelled, even when the lease would grant it', async () => {
+    const { handle, sent, state } = harness();
+    void handle.run(payloadFixture()).catch(() => {});
+    await flush();
+    state.online = false;
+    handle.cancel();
+    state.online = true;
+    handle.receive({ type: 'commit-request', id: 3, kind: 'replace', pluginId: 'x' });
+    const commit = sent.find(
+      (frame) => frame.type === 'agent' && frame.message.type === 'commit-result',
+    ) as Extract<ServerFrame, { type: 'agent' }>;
+    expect(commit.message).toMatchObject({ type: 'commit-result', id: 3, granted: false });
+  });
+
+  it('delivers a cancel made while offline once reconnected', async () => {
+    const { handle, sent, state } = harness();
+    void handle.run(payloadFixture()).catch(() => {});
+    await flush();
+    state.online = false;
+    handle.cancel();
+    expect(sent.filter((frame) => frame.type === 'agent')).toEqual([]);
+
+    state.online = true;
+    handle.reconnected();
+    expect(sent.at(-1)).toEqual({ type: 'agent', jobId: 'job-1', message: { type: 'cancel' } });
+
+    // Flushed once, not on every later reconnect.
+    handle.reconnected();
+    expect(sent.filter((frame) => frame.type === 'agent')).toHaveLength(1);
+  });
+
+  it('rejects once on abandon, tells the node, and ignores a later done', async () => {
+    const { handle, sent } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    handle.abandon(new AgentFailure('released', { reported: false }));
+    await expect(run).rejects.toMatchObject({ message: 'released', reported: false });
+    expect(sent.at(-1)).toEqual({ type: 'abandon', jobId: 'job-1', reason: 'released' });
+
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    handle.abandon(new AgentFailure('again', { reported: false }));
+    expect(sent.filter((frame) => frame.type === 'abandon')).toHaveLength(1);
+    await expect(handle.exited).resolves.toBeNull();
+  });
+
+  it('settled() sends ack-report', async () => {
+    const { handle, sent } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    await run;
+    handle.settled?.();
+    expect(sent.at(-1)).toEqual({ type: 'ack-report', jobId: 'job-1' });
+  });
+
+  it('an adopted handle sends nothing on run and reports through its stored map', async () => {
+    const { handle, sent, setRemoteCalls } = harness({ fresh: false, pathMap: MAP });
+    const run = handle.run(payloadFixture());
+    await flush();
+    expect(sent).toEqual([]);
+    expect(setRemoteCalls).toEqual([]);
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    expect((await run).replaced?.path).toBe('/media/movies/a.mkv');
+  });
+
+  it('a failed frame rejects as reported, carrying superseded', async () => {
+    const { handle } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    handle.receive({ type: 'failed', error: 'refused', superseded: true });
+    await expect(run).rejects.toMatchObject({ reported: true, superseded: true });
+  });
+});

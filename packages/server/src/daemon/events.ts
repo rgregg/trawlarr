@@ -63,7 +63,13 @@ export type TrawlarrEvent =
   | { type: 'plugin.sync.failed'; sourceId: string; runId: number; code: string; message: string }
   | { type: 'library.paused'; libraryId: string; reason: string }
   | { type: 'library.resumed'; libraryId: string }
-  | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number };
+  | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number }
+  /**
+   * A remote node connected (after a successful handshake), disconnected, or
+   * reported which libraries it can reach. The node's row is the record;
+   * this only tells a UI to re-fetch `GET /nodes`.
+   */
+  | { type: 'nodes.changed'; nodeId: string; online: boolean };
 
 export interface EventBus {
   emit(event: TrawlarrEvent): void;

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Writable } from 'node:stream';
-import type { NodeHub } from '../nodes/hub.js';
+import { createNoopNodeHub, type NodeHub } from '../nodes/hub.js';
 
 /**
  * Minimal `IncomingMessage`/`ServerResponse` doubles for handlers that are
@@ -92,6 +92,7 @@ export const fakeNodeHub = (): FakeNodeHub => {
   const pushConfigCalls: string[] = [];
   const disconnectCalls: { nodeId: string; reason: string }[] = [];
   return {
+    ...createNoopNodeHub(),
     online,
     pushConfigCalls,
     disconnectCalls,

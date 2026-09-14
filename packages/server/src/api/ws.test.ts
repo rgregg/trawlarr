@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
+import type { Duplex } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
@@ -20,6 +21,7 @@ import { createApiContext, createApiServer } from './server.js';
 import { SESSION_COOKIE_NAME, issueSessionToken } from './session.js';
 import {
   attachWebSocket,
+  claimUpgradePath,
   SLOW_CLIENT_DROP_BYTES,
   SLOW_CLIENT_TERMINATE_BYTES,
   WS_OPEN,
@@ -324,6 +326,26 @@ describe('over a real socket', () => {
     await expect(connect(`ws://127.0.0.1:${String(port)}/api/v1/elsewhere`)).rejects.toMatchObject({
       message: expect.stringContaining('404'),
     });
+  });
+
+  it('leaves an upgrade on a path another listener claimed to that listener', async () => {
+    // The node socket (`nodes/hub.ts`) shares this server: if this listener
+    // 404ed every path but its own, a node could never connect at all.
+    const otherPath = '/api/v1/other-socket';
+    claimUpgradePath(server, otherPath);
+    const other = (req: IncomingMessage, socket: Duplex): void => {
+      if (new URL(req.url ?? '/', 'http://localhost').pathname !== otherPath) return;
+      socket.write('HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n');
+      socket.destroy();
+    };
+    server.on('upgrade', other);
+    try {
+      await expect(connect(`ws://127.0.0.1:${String(port)}${otherPath}`)).rejects.toMatchObject({
+        message: expect.stringContaining('403'),
+      });
+    } finally {
+      server.removeListener('upgrade', other);
+    }
   });
 
   it('delivers events published on the bus, in order', async () => {
