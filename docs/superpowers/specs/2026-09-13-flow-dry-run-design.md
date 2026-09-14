@@ -93,6 +93,10 @@ like `pluginSyncs`:
   publishedOutcome, canvas, published }`, the last two the full
   `FlowDryRunResult`s (null for a walk that threw; the reason is the
   outcome's `detail`). Only for files in `changes`; any other is `404`.
+- `POST /flows/:id/dry-runs/:runId/cancel` → the run view: stops a running
+  run, leaves a finished one as it is. `404` for no such run. The editor's
+  Cancel sends it, so a run that finishes just before the click still shows
+  its results.
 - `DELETE /flows/:id/dry-runs/:runId` → `204`: cancels a running run, drops a
   finished one. `404` for no such run. The editor sends it when the panel
   closes or unmounts.

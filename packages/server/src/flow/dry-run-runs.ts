@@ -72,6 +72,14 @@ export interface FlowDryRunCoordinator {
    * readable (as `cancelled`); a run that is no longer running is dropped.
    */
   cancel(flowId: string, runId: string): boolean;
+  /**
+   * The editor's Cancel: stops the run if it is still walking and returns it as
+   * it now stands, null when there is no such run. Unlike `cancel` it never
+   * drops a finished run — a Cancel clicked in the second after a run finished
+   * used to delete the result it was about to show, leaving the panel on
+   * "running" behind a 404.
+   */
+  stop(flowId: string, runId: string): DryRunRunView | null;
   /** Cancels every run and resolves when none is walking. Daemon shutdown awaits this before closing the db. */
   stopAll(): Promise<void>;
 }
@@ -105,6 +113,19 @@ const groupChanges = (changed: Iterable<FlowDryRunDetail>): DryRunChangeGroup[] 
   }
   return [...groups.values()].sort((a, b) => b.files.length - a.files.length);
 };
+
+const view = (run: Run): DryRunRunView => ({
+  runId: run.runId,
+  flowId: run.flowId,
+  status: run.status,
+  error: run.error,
+  processed: run.processed,
+  total: run.total,
+  definitionHash: run.definitionHash,
+  publishedHash: run.publishedHash,
+  counts: { ...run.counts },
+  changes: run.status === 'running' ? [] : groupChanges(run.changed.values()),
+});
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -253,19 +274,14 @@ export const createFlowDryRunCoordinator = (input: {
 
     get(flowId, runId) {
       const run = find(flowId, runId);
+      return run === null ? null : view(run);
+    },
+
+    stop(flowId, runId) {
+      const run = find(flowId, runId);
       if (run === null) return null;
-      return {
-        runId: run.runId,
-        flowId: run.flowId,
-        status: run.status,
-        error: run.error,
-        processed: run.processed,
-        total: run.total,
-        definitionHash: run.definitionHash,
-        publishedHash: run.publishedHash,
-        counts: { ...run.counts },
-        changes: run.status === 'running' ? [] : groupChanges(run.changed.values()),
-      };
+      cancelRun(run);
+      return view(run);
     },
 
     file(flowId, runId, fileId) {
