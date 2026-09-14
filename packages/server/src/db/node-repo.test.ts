@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SCHEDULE } from '@trawlarr/core';
 import { openDatabase, type Db } from './connection.js';
 import { migrate } from './migrate.js';
@@ -8,6 +8,13 @@ import { createMediaFileRepo } from './media-file-repo.js';
 import { createSettingsRepo } from './settings-repo.js';
 import { ensureLocalNode } from '../api/routes/nodes.js';
 import { createNodeRepo, NodeRepoError, type NodeRepo } from './node-repo.js';
+import { verifyPassword } from '../api/password.js';
+
+// Counted, not replaced: every test still verifies with real argon2.
+vi.mock('../api/password.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/password.js')>();
+  return { ...actual, verifyPassword: vi.fn(actual.verifyPassword) };
+});
 
 const NOW = 1_700_000_000_000;
 
@@ -63,6 +70,41 @@ describe('createNodeRepo', () => {
     const { secret } = (await repo.enroll({ token: enrollToken, nowMs: 1 }))!;
     repo.revoke(node.id, 5);
     expect(await repo.authenticate({ nodeId: node.id, secret })).toBe(false);
+  });
+
+  it('runs argon2 once for a secret it already verified, and never skips it for a wrong one', async () => {
+    // A node fetches a plugin bundle one authenticated request per file. At
+    // ~50 ms of argon2 each, the 626-file community corpus held a job's first
+    // step for close to a minute while the daemon burned a core on it.
+    const { enrollToken, node } = await repo.create({ name: 'n', nowMs: 0 });
+    const { secret } = (await repo.enroll({ token: enrollToken, nowMs: 1 }))!;
+    const verify = vi.mocked(verifyPassword);
+    verify.mockClear();
+
+    for (let i = 0; i < 5; i += 1) {
+      expect(await repo.authenticate({ nodeId: node.id, secret })).toBe(true);
+    }
+    expect(verify).toHaveBeenCalledTimes(1);
+
+    // A wrong secret still pays the full cost every time, and still fails.
+    expect(await repo.authenticate({ nodeId: node.id, secret: `${secret}x` })).toBe(false);
+    expect(await repo.authenticate({ nodeId: node.id, secret: `${secret}x` })).toBe(false);
+    expect(verify).toHaveBeenCalledTimes(3);
+
+    // And a revocation is honoured on the very next request, remembered or not.
+    repo.revoke(node.id, 5);
+    expect(await repo.authenticate({ nodeId: node.id, secret })).toBe(false);
+  });
+
+  it('does not let a remembered verification for one node authenticate another', async () => {
+    const a = await repo.create({ name: 'a', nowMs: 0 });
+    const b = await repo.create({ name: 'b', nowMs: 0 });
+    const secretA = (await repo.enroll({ token: a.enrollToken, nowMs: 1 }))!.secret;
+    const secretB = (await repo.enroll({ token: b.enrollToken, nowMs: 1 }))!.secret;
+    expect(await repo.authenticate({ nodeId: a.node.id, secret: secretA })).toBe(true);
+    // A's secret, remembered for A, opens nothing for B.
+    expect(await repo.authenticate({ nodeId: b.node.id, secret: secretA })).toBe(false);
+    expect(await repo.authenticate({ nodeId: b.node.id, secret: secretB })).toBe(true);
   });
 
   it('update validates the path map and schedule', async () => {

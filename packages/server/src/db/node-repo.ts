@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   DEFAULT_SCHEDULE,
   validateSchedule,
@@ -188,6 +188,31 @@ export const createNodeRepo = (db: Db): NodeRepo => {
   const getRow = (id: string): NodeRowRaw | undefined =>
     selectById.get(id) as NodeRowRaw | undefined;
 
+  /**
+   * Per node, the stored `secret_hash` a secret was last verified against and
+   * the sha256 of that secret — so the SAME correct secret is not put through
+   * argon2 again on every request.
+   *
+   * A node fetches a plugin bundle with one authenticated request per file.
+   * Argon2 costs ~50 ms a call by design, so the pinned community corpus
+   * (626 files) held a remote job's first step for close to a minute while
+   * the daemon spent a core re-proving a secret it had proven on the first
+   * request.
+   *
+   * What this does not weaken: a WRONG secret never matches the remembered
+   * digest and still pays full argon2 every time; a secret is only ever
+   * remembered after argon2 accepted it; the row is re-read on every call, so
+   * a revoked or removed node is refused on its next request; and keying on
+   * `secret_hash` forgets the entry if the node's secret is ever replaced. A
+   * sha256 is a sound verifier here because a node secret is 32 random bytes,
+   * not a guessable password — argon2 guards the stored hash, not this
+   * in-memory digest that exists only after the secret was presented. Nor
+   * does the fast path reopen the timing question `DUMMY_SECRET_HASH`
+   * closes: only a caller who already holds a node's correct secret can
+   * reach it, and that caller learns nothing by timing it.
+   */
+  const verifiedSecrets = new Map<string, { secretHash: string; digest: Buffer }>();
+
   const requireRow = (id: string): NodeRowRaw => {
     const row = getRow(id);
     if (row === undefined) throw new NodeRepoError(`Unknown node "${id}".`);
@@ -318,7 +343,20 @@ export const createNodeRepo = (db: Db): NodeRepo => {
         await verifyPassword({ password: input.secret, hash: DUMMY_SECRET_HASH });
         return false;
       }
-      return await verifyPassword({ password: input.secret, hash: row.secret_hash });
+      // Revocation and removal are read from the row above on EVERY call;
+      // only the argon2 comparison is remembered. See `verifiedSecrets`.
+      const digest = createHash('sha256').update(input.secret).digest();
+      const remembered = verifiedSecrets.get(row.id);
+      if (
+        remembered !== undefined &&
+        remembered.secretHash === row.secret_hash &&
+        timingSafeEqual(remembered.digest, digest)
+      ) {
+        return true;
+      }
+      const ok = await verifyPassword({ password: input.secret, hash: row.secret_hash });
+      if (ok) verifiedSecrets.set(row.id, { secretHash: row.secret_hash, digest });
+      return ok;
     },
 
     // Throws `PathMapError` for an invalid `pathMap`, `ScheduleConfigError`
@@ -369,6 +407,7 @@ export const createNodeRepo = (db: Db): NodeRepo => {
 
     revoke(id, nowMs) {
       revokeNode.run(nowMs, id);
+      verifiedSecrets.delete(id);
     },
 
     remove(id) {
@@ -379,6 +418,7 @@ export const createNodeRepo = (db: Db): NodeRepo => {
         );
       }
       deleteNode.run(id);
+      verifiedSecrets.delete(id);
     },
   };
 };
