@@ -1,12 +1,11 @@
 import { PathMapError, ScheduleConfigError, type ScheduleConfig } from '@trawlarr/core';
-import type { Db } from '../../db/connection.js';
 import {
   createNodeRepo,
   NodeRepoError,
   type NodeRecord,
   type NodeRepo,
 } from '../../db/node-repo.js';
-import type { SettingsRepo } from '../../db/settings-repo.js';
+import { LOCAL_NODE_ID } from '../../nodes/local-node.js';
 import {
   ApiError,
   created,
@@ -17,41 +16,9 @@ import {
   type Route,
 } from '../router.js';
 
-/** The id the local node always has. v1 has exactly one node; v1.2 adds remote ones. */
-export const LOCAL_NODE_ID = 'local';
-
-/**
- * Write the local node's row.
- *
- * The `node` table has existed since the first migration and nothing has ever
- * written it, which has two consequences worth stating: `GET /nodes` would
- * report an empty list on a perfectly healthy daemon, and `job.node_id` — the
- * column that records WHERE a job ran — has been null on every job ever
- * recorded, so a job's origin cannot be reconstructed. Both are fixed by the
- * row existing.
- *
- * Called when the API context is built, so a daemon that has served a single
- * request has a node row. `last_seen_at` is stamped at that moment; it is a
- * fact about this process starting, not a liveness heartbeat, and nothing
- * reads it as one.
- */
-export const ensureLocalNode = (input: {
-  db: Db;
-  settings: SettingsRepo;
-  nowMs: () => number;
-}): void => {
-  const hardware = input.settings.getHardware();
-  input.db
-    .prepare(
-      `INSERT INTO node (id, name, access_mode, path_map_json, hardware_types_json, tags, last_seen_at)
-       VALUES (?, ?, 'direct', '[]', ?, '', ?)
-       ON CONFLICT(id) DO UPDATE SET
-         access_mode = excluded.access_mode,
-         hardware_types_json = excluded.hardware_types_json,
-         last_seen_at = excluded.last_seen_at`,
-    )
-    .run(LOCAL_NODE_ID, LOCAL_NODE_ID, JSON.stringify(hardware.available), input.nowMs());
-};
+// Re-exported from their own module (which the supervisor and the reaper
+// import, rather than a route file); existing callers import them from here.
+export { ensureLocalNode, LOCAL_NODE_ID } from '../../nodes/local-node.js';
 
 /**
  * `PUT /nodes/:id`'s fields are all optional; unknown keys are ignored.

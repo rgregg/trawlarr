@@ -35,6 +35,9 @@ beforeEach(() => {
   ]) {
     db.prepare(`INSERT INTO library (id, name, created_at) VALUES (?, ?, ?)`).run(id, name, NOW);
   }
+  for (const nodeId of ['local', 'node-x']) {
+    db.prepare(`INSERT INTO node (id, name) VALUES (?, ?)`).run(nodeId, nodeId);
+  }
   repo = createMediaFileRepo(db);
 });
 
@@ -70,12 +73,15 @@ const runningJob = (input: {
   fileId: string;
   startedAtMs: number;
   heartbeatAtMs: number | null;
+  /** Omitted: a legacy row from before `job.node_id` was written (NULL). */
+  nodeId?: string;
 }): string => {
   const jobId = createJobRepo(db).start({
     fileId: input.fileId,
     flowId: 'flow',
     flowHash: 'hash',
     nowMs: input.startedAtMs,
+    nodeId: input.nodeId ?? null,
   });
   if (input.heartbeatAtMs !== null) {
     createJobRepo(db).heartbeat({ jobId, nowMs: input.heartbeatAtMs });
@@ -226,7 +232,12 @@ describe('reapStalled', () => {
     // process that was doing the work does not exist. Against the threshold
     // alone this row is `live` and stays claimed until a human notices.
     const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
-    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    const jobId = runningJob({
+      fileId,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: NOW - 60_000,
+      nodeId: 'local',
+    });
     createJobRepo(db).setWorker({ jobId, pid: deadPid(), host: hostname() });
 
     const summary = reapStalled({ db, nowMs: NOW });
@@ -242,7 +253,12 @@ describe('reapStalled', () => {
     // is not evidence of anything except "do not use the fast path", so the
     // row falls back to the threshold — which protects it.
     const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
-    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    const jobId = runningJob({
+      fileId,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: NOW - 60_000,
+      nodeId: 'local',
+    });
     createJobRepo(db).setWorker({ jobId, pid: process.pid, host: hostname() });
 
     expect(reapStalled({ db, nowMs: NOW }).live).toBe(1);
@@ -256,11 +272,67 @@ describe('reapStalled', () => {
     // recorded host that is not this one disables the fast path entirely and
     // the row is protected by the threshold like any other.
     const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
-    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    const jobId = runningJob({
+      fileId,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: NOW - 60_000,
+      nodeId: 'local',
+    });
     createJobRepo(db).setWorker({ jobId, pid: deadPid(), host: `${hostname()}-somewhere-else` });
 
     expect(reapStalled({ db, nowMs: NOW }).live).toBe(1);
     expect(repo.getById(fileId)?.state).toBe('running');
+  });
+
+  it("still fast-paths a legacy row with no node id, whose pid is this host's", () => {
+    // Rows written before `job.node_id` was recorded keep today's behaviour.
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    const jobId = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: NOW - 60_000 });
+    createJobRepo(db).setWorker({ jobId, pid: deadPid(), host: hostname() });
+
+    expect(reapStalled({ db, nowMs: NOW }).reclaimed).toBe(1);
+    expect(repo.getById(fileId)?.state).toBe('held');
+  });
+
+  it("never judges a remote node's worker by this host's pid table, even under the same hostname", () => {
+    // Two machines can share a hostname, and containers often do. A pid
+    // recorded against a remote node means nothing here.
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    const jobId = runningJob({
+      fileId,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: NOW - 60_000,
+      nodeId: 'node-x',
+    });
+    createJobRepo(db).setWorker({ jobId, pid: deadPid(), host: hostname() });
+
+    expect(reapStalled({ db, nowMs: NOW }).live).toBe(1);
+    expect(repo.getById(fileId)?.state).toBe('running');
+    expect(jobRow(jobId).ended_at).toBeNull();
+  });
+
+  it('leaves a leased remote job to the lease sweep, however old its heartbeat', () => {
+    // A daemon restart puts every remote lease in grace; the node has until
+    // grace runs out to reconnect. Reaping it here, before any node could
+    // reconnect, would hand a file that is being encoded to a second worker.
+    const fileId = runningFile({ claimedAtMs: NOW - 25 * HOUR_MS });
+    const jobId = runningJob({
+      fileId,
+      startedAtMs: NOW - 25 * HOUR_MS,
+      heartbeatAtMs: NOW - 25 * HOUR_MS,
+      nodeId: 'node-x',
+    });
+    createJobRepo(db).setLease({
+      jobId,
+      lease: { state: 'grace', expiresAtMs: NOW + HOUR_MS },
+    });
+
+    const summary = reapStalled({ db, nowMs: NOW });
+
+    expect(summary.live).toBe(1);
+    expect(summary.reclaimed).toBe(0);
+    expect(repo.getById(fileId)?.state).toBe('running');
+    expect(jobRow(jobId).ended_at).toBeNull();
   });
 
   it('does not treat a scan of the file as a sign that its worker is alive', () => {

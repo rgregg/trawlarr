@@ -4,6 +4,7 @@ import type { Db } from '../db/connection.js';
 import { createJobRepo, type JobRow } from '../db/job-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
 import { processIsAlive } from '../daemon/process-alive.js';
+import { LOCAL_NODE_ID } from '../nodes/local-node.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -146,6 +147,12 @@ const lastActivityOf = (row: MediaFileRow, latest: JobRow | undefined): number =
  *  - a job that has ENDED: its row is not what is holding the file, and
  *    reclaiming on the strength of it would race whatever is writing the
  *    outcome right now.
+ *  - a job that ran on a REMOTE node: its worker's pid belongs to another
+ *    machine's process table, whatever hostname was recorded beside it. Two
+ *    machines can share a hostname (containers very often do), so a host
+ *    match alone must never let this host's pids judge a remote worker. Only
+ *    `node_id = 'local'`, or NULL on a row written before `node_id` was
+ *    recorded, is ever checked.
  *  - a pid recorded on a DIFFERENT host: this host's process table says
  *    nothing about it. Without this check a second node would read its own
  *    pids and conclude that a worker transcoding perfectly well elsewhere
@@ -158,9 +165,26 @@ const workerProvablyGone = (latest: JobRow | undefined): boolean => {
   if (latest === undefined) return false;
   if (latest.endedAt !== null) return false;
   if (latest.workerPid === null) return false;
+  if (latest.nodeId !== LOCAL_NODE_ID && latest.nodeId !== null) return false;
   if (latest.workerHost !== hostname()) return false;
   return !processIsAlive(latest.workerPid);
 };
+
+/**
+ * A remote job that still holds a lease: the node hub owns its liveness.
+ *
+ * A lease is released by `NodeHub.sweepLeases` (grace running out, or the
+ * same 24 h floor measured by the hub), which rejects the job's handle so the
+ * supervisor stalls the attempt through the normal path. Reaping it here
+ * instead would break that in two ways: a daemon restart puts every remote
+ * lease into grace so its node has time to reconnect, and the startup reaper
+ * runs before any node can — so a long encode whose heartbeat is old would be
+ * handed to a second worker while the first is still writing. And a row
+ * closed behind the hub's back leaves a live handle whose lease still reads
+ * as held.
+ */
+const leasedRemotely = (latest: JobRow | undefined): boolean =>
+  latest !== undefined && latest.leaseState !== null && latest.endedAt === null;
 
 /**
  * Recover rows stranded in `running` by a worker that died.
@@ -219,6 +243,10 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
   for (const row of rows) {
     const latest = jobRepo.listForFile(row.id)[0];
     const lastActivityMs = lastActivityOf(row, latest);
+    if (leasedRemotely(latest)) {
+      summary.live += 1;
+      continue;
+    }
     // Two independent routes to "abandoned", and the row needs only one.
     // The pid route is the fast one and is a FACT; the threshold is the slow
     // one and is an inference, and it remains the only route for every row
@@ -240,6 +268,9 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
         // overwriting THAT with a stall would erase a real outcome.
         const current = mediaFileRepo.getById(row.id);
         if (current === null || current.state !== 'running') return;
+        // The same re-read for a lease: a job handed to a node since the
+        // decision above belongs to the hub.
+        if (leasedRemotely(jobRepo.listForFile(row.id)[0])) return;
         mediaFileRepo.setLedger({ fileId: row.id, record: stalled });
 
         // Close the job row the dead worker left open, so it stops reading
