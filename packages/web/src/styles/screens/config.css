@@ -482,6 +482,156 @@
   }
 }
 
+/* --- the nodes tab --------------------------------------------------------
+   Follows the libraries tab's own shapes (`.libraries-toolbar`, `.card`) so
+   the two "list of things this daemon manages" screens read as one family
+   rather than each inventing its own layout. */
+
+.nodes-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.nodes-toolbar .detail {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.node-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+}
+
+.node-card {
+  padding: var(--space-4) var(--space-4) var(--space-3);
+}
+
+.node-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+.node-card-head h3 {
+  font-size: var(--text-md);
+}
+
+.node-card-head .badge {
+  margin: 0;
+}
+
+/* The detail panel spans the full width of whichever card it opens under —
+   a node's path table needs more room than the 24rem grid cell it lives in
+   would otherwise give it. */
+.node-cards li:has(.node-detail) {
+  grid-column: 1 / -1;
+}
+
+.node-detail {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.node-detail-section h4 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+}
+
+.node-worker-count {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.node-worker-count input {
+  width: 6rem;
+}
+
+.node-path-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-2);
+}
+
+.node-path-table th {
+  text-align: left;
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+  font-weight: 500;
+  padding: var(--space-1) var(--space-2);
+}
+
+.node-path-table td {
+  padding: var(--space-1) var(--space-2);
+}
+
+.node-path-table input {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.node-library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.node-lib-ok {
+  color: var(--good);
+}
+
+.node-lib-bad {
+  color: var(--bad);
+}
+
+.node-add-form,
+.node-join-dialog {
+  max-width: 44rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.node-add-form input {
+  width: 100%;
+}
+
+.node-command {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.node-command code {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+}
+
 /* --- the account tab ---------------------------------------------------- */
 
 .account-facts {

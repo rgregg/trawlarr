@@ -117,4 +117,9 @@ describe('reduceLive', () => {
     ]);
     expect(state.staleness.workers).toBe(1);
   });
+
+  it('flags nodes stale when a node connects or disconnects', () => {
+    const state = fold([{ type: 'nodes.changed', nodeId: 'node-1', online: true }]);
+    expect(state.staleness.nodes).toBe(1);
+  });
 });

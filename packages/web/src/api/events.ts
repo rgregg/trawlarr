@@ -44,7 +44,8 @@ export type TrawlarrEvent =
   | { type: 'scan.finished'; libraryId: string; summary: unknown }
   | { type: 'library.paused'; libraryId: string; reason: string }
   | { type: 'library.resumed'; libraryId: string }
-  | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number };
+  | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number }
+  | { type: 'nodes.changed'; nodeId: string; online: boolean };
 
 /**
  * How many log lines a running job keeps in memory.
@@ -90,14 +91,14 @@ export interface LiveState {
    * Monotonic counters, one per durable view. Every increment means "what you
    * fetched is out of date"; nothing here is ever the answer itself.
    */
-  staleness: { libraries: number; jobs: number; workers: number };
+  staleness: { libraries: number; jobs: number; workers: number; nodes: number };
 }
 
 export const initialLiveState: LiveState = {
   jobs: {},
   finishedJobIds: new Set(),
   scanning: {},
-  staleness: { libraries: 0, jobs: 0, workers: 0 },
+  staleness: { libraries: 0, jobs: 0, workers: 0, nodes: 0 },
 };
 
 const bump = (state: LiveState, ...views: Array<keyof LiveState['staleness']>): LiveState => {
@@ -234,5 +235,8 @@ export const reduceLive = (state: LiveState, event: TrawlarrEvent): LiveState =>
 
     case 'workers.changed':
       return bump(state, 'workers');
+
+    case 'nodes.changed':
+      return bump(state, 'nodes');
   }
 };
