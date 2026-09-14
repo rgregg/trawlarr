@@ -15,6 +15,8 @@ import { createLibraryRepo } from '../db/library-repo.js';
 import { createMediaFileRepo, type ClaimedFile } from '../db/media-file-repo.js';
 import { createPluginDocumentRepo } from '../db/plugin-document-repo.js';
 import type { HardwareSettings, SettingsRepo } from '../db/settings-repo.js';
+import type { OnlineNode } from '../nodes/hub.js';
+import { ensureLocalNode, LOCAL_NODE_ID } from '../nodes/local-node.js';
 import {
   applyJobCancelled,
   applyJobFailure,
@@ -59,6 +61,8 @@ export interface SupervisorWorkerStatus {
   path: string | null;
   startedAtMs: number | null;
   pid: number | undefined;
+  /** `local`, or the remote node running this job. */
+  nodeId: string;
 }
 
 export interface SupervisorStatus {
@@ -75,10 +79,31 @@ export interface Supervisor {
   pause(): void;
   resume(): void;
   cancelJob(jobId: string): boolean;
-  /** Stop starting work and wait for every running job to finish. */
-  drain(): Promise<void>;
-  /** Cancel everything and wait. Used only by daemon shutdown after drain's deadline. */
+  /**
+   * Stop starting work and wait for every running job to finish.
+   *
+   * `includeRemote: false` waits on local runs only — what daemon shutdown
+   * does, because a remote run does not end with this daemon (see `stop`).
+   */
+  drain(options?: { includeRemote?: boolean }): Promise<void>;
+  /**
+   * Cancel every LOCAL run and wait for them. Used only by daemon shutdown
+   * after drain's deadline. Remote runs are neither cancelled nor waited on.
+   */
   stop(): Promise<void>;
+  /**
+   * The sinks an agent for `payload` reports through, with a fresh worker id:
+   * what `createAgent` is handed for a fresh claim, for a caller that builds
+   * the agent itself (the node hub adopting leased jobs after a restart).
+   */
+  agentInputFor(payload: JobPayload): AgentFactoryInput;
+  /**
+   * Track a run that was already claimed and started before this process
+   * (daemon restart). Claims nothing and starts no job row; the agent must
+   * have been built from `agentInputFor(payload)`, and its `run` is called
+   * here, immediately.
+   */
+  adopt(input: { payload: JobPayload; agent: AgentHandle; nodeId: string }): void;
 }
 
 export interface CreateSupervisorInput {
@@ -95,6 +120,10 @@ export interface CreateSupervisorInput {
   dataDir?: string;
   /** Seam for tests: substitute the worker process. Production never sets it. */
   createAgent?: CreateAgentFn;
+  /** Remote nodes currently online. Absent in tests that only exercise the local node. */
+  remoteNodes?: () => OnlineNode[];
+  /** Builds the handle for a job claimed onto a remote node. Required with `remoteNodes`. */
+  createRemoteAgent?: (input: AgentFactoryInput & { nodeId: string }) => AgentHandle;
 }
 
 /**
@@ -110,6 +139,7 @@ export const QUEUED_WORKER_CLASSES: readonly WorkerClass[] = ['transcode'];
 
 interface WorkerSlot {
   id: string;
+  nodeId: string;
   workerClass: WorkerClass;
   hardwareType: HardwareType;
   agent: AgentHandle;
@@ -119,6 +149,20 @@ interface WorkerSlot {
   startedAtMs: number | null;
   /** Resolves when this worker's job has been fully folded into the database. */
   done: Promise<void>;
+}
+
+/**
+ * One node as `reconcile` schedules it: the local daemon, or an online
+ * remote node. Each has its OWN target, hardware and headroom — a remote
+ * node's GPU is not this machine's, and its schedule is its own.
+ */
+interface NodeView {
+  nodeId: string;
+  target: Record<WorkerClass, number>;
+  hardware: HardwareSettings;
+  /** Libraries the node reported reachable; null for local, which reaches every library. */
+  reachable: ReadonlySet<string> | null;
+  paused: boolean;
 }
 
 /** A library this node could legitimately claim from right now, and on what. */
@@ -217,6 +261,11 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
   const mediaFileRepo = createMediaFileRepo(db);
   const jobRepo = createJobRepo(db);
 
+  // Every job this starts records `node_id`, a foreign key to the node row:
+  // the local row must exist before the first claim, whether or not an API
+  // context (which also writes it) was ever built.
+  ensureLocalNode({ db, settings, nowMs });
+
   const workers = new Map<string, WorkerSlot>();
   let nextWorkerNumber = 0;
   let paused = false;
@@ -226,12 +275,16 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
   let tickAgain = false;
   let lastAnnounced: { target: Record<WorkerClass, number>; active: number } | null = null;
 
-  const activeOf = (workerClass: WorkerClass): number =>
-    [...workers.values()].filter((worker) => worker.workerClass === workerClass).length;
+  const activeOf = (nodeId: string, workerClass: WorkerClass): number =>
+    [...workers.values()].filter(
+      (worker) => worker.nodeId === nodeId && worker.workerClass === workerClass,
+    ).length;
 
-  const usedHardware = (): Partial<Record<HardwareType, number>> => {
+  /** Hardware in use ON ONE NODE: a remote node's encodes never spend this machine's caps. */
+  const usedHardware = (nodeId: string): Partial<Record<HardwareType, number>> => {
     const used: Partial<Record<HardwareType, number>> = {};
     for (const worker of workers.values()) {
+      if (worker.nodeId !== nodeId) continue;
       used[worker.hardwareType] = (used[worker.hardwareType] ?? 0) + 1;
     }
     return used;
@@ -271,6 +324,42 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
       }));
 
   /**
+   * A run that stopped because its commit was refused: its claim on the file
+   * is no longer its own, and another worker may hold the file now.
+   *
+   * THE ATTEMPT WAS ALREADY COUNTED. A refusal follows a release, and the
+   * release stalled the attempt and closed the job row (the hub rejects the
+   * handle; this supervisor folds that through `applyJobFailure`). Writing the
+   * ledger again would spend a second attempt for one run — or, worse,
+   * overwrite whatever the NEXT worker's claim has done to the row since. So
+   * the refusal is appended to the closed row's outcome, and the file is only
+   * read, for the event.
+   *
+   * Two shapes do not match that premise, and neither may strand anything:
+   *
+   *  - the job row is still open AND still holds the file (`running`, latest
+   *    job): nothing released it, so nothing else is ever going to end it.
+   *    Folded as an ordinary failed attempt, with backoff — a refusal that
+   *    keeps recurring must not become a claim/refuse loop.
+   *  - the job row is still open but the file is no longer claimed by it: the
+   *    row is closed as failed, and the file (someone else's now) is left alone.
+   */
+  const settleSuperseded = (payload: JobPayload, text: string): FileState => {
+    const job = jobRepo.getById(payload.jobId);
+    const file = mediaFileRepo.getById(payload.fileId);
+    if (job !== null && job.endedAt !== null) {
+      jobRepo.appendOutcome({ jobId: payload.jobId, text });
+      return file?.state ?? 'failed';
+    }
+    const latest = jobRepo.listForFile(payload.fileId)[0];
+    if (file !== null && file.state === 'running' && latest?.id === payload.jobId) {
+      return applyJobFailure({ db, payload, reason: text, nowMs }).state;
+    }
+    jobRepo.finish({ jobId: payload.jobId, state: 'failed', outcome: text, nowMs: nowMs() });
+    return file?.state ?? 'failed';
+  };
+
+  /**
    * Fold one finished run into the database and emit its ending.
    *
    * EVERY ending arrives here as a value — a report, or a thrown
@@ -300,11 +389,20 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         // file's fault: requeue rather than count an attempt.
         state = applyJobCancelled({ db, payload, nowMs }).state;
         text = 'Cancelled by an operator; the file was requeued unpenalised.';
+      } else if (outcome.error instanceof AgentFailure && outcome.error.superseded) {
+        // Checked AFTER cancelled: a commit refused because an operator
+        // cancelled the job is still the operator's decision.
+        text = messageOf(outcome.error);
+        state = settleSuperseded(payload, text);
       } else {
-        // Includes `AgentFailure.superseded`: a local fork is granted every
-        // commit, so it cannot be superseded today, and folding the case into
-        // an ordinary failed attempt is the conservative answer until remote
-        // leases give "this worker lost the file" a handling of its own.
+        // Every other failure is an ordinary failed attempt — including a
+        // commit gate that could not get an answer at all (the daemon
+        // unreachable mid-request): the agent aborts that as a plain failure,
+        // not `superseded`, because nothing has shown that the claim was
+        // lost, and a stalled attempt with backoff is the conservative fold.
+        // A remote lease that expired arrives here too (`reported: false`,
+        // from the hub's release), and is stalled exactly as a vanished local
+        // child is.
         text = messageOf(outcome.error);
         state = applyJobFailure({ db, payload, reason: text, nowMs }).state;
       }
@@ -342,9 +440,11 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
     claimed: ClaimedFile;
     workerClass: WorkerClass;
     hardwareType: HardwareType;
+    nodeId: string;
   }): void => {
-    const { claimed, workerClass, hardwareType } = start;
+    const { claimed, workerClass, hardwareType, nodeId } = start;
     const binaries = settings.getBinaries();
+    const local = nodeId === LOCAL_NODE_ID;
 
     let payload: JobPayload;
     try {
@@ -371,29 +471,87 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         flowHash: draft.flow.definitionHash,
         nowMs: nowMs(),
         workerClass,
+        nodeId,
         logPath: draft.logPath,
       });
       payload = draft;
     } catch (error) {
-      const row = mediaFileRepo.getById(claimed.fileId);
-      if (row !== null) {
-        const failure = applyThrownFailure({ db, row, payload: null, error, nowMs });
-        bus.emit({
-          type: 'job.finished',
-          jobId: failure.jobId,
-          fileId: row.id,
-          state: failure.state,
-          outcome: failure.outcome,
-        });
-      }
+      foldStartFailure(claimed.fileId, null, error);
       return;
     }
 
-    nextWorkerNumber += 1;
-    const id = `worker-${String(nextWorkerNumber)}`;
+    const factoryInput = agentInputFor(payload);
+    let agent: AgentHandle;
+    try {
+      agent = local
+        ? makeAgent(factoryInput)
+        : requireRemoteAgentFactory()({ ...factoryInput, nodeId });
+    } catch (error) {
+      // The job row exists and the file is `running`: an agent that could
+      // not even be built must still take both out of it.
+      foldStartFailure(claimed.fileId, payload, error);
+      return;
+    }
 
-    const agent = makeAgent({
-      id,
+    if (local) {
+      // WHICH PROCESS IS RUNNING THIS JOB, recorded the instant it exists.
+      //
+      // The row had to be inserted before the fork (the scanner's
+      // in-flight-output guard depends on the claim being committed before
+      // any replacement byte can land), so this is the earliest moment the
+      // pid is knowable. It is what lets the stall reaper reclaim a claim
+      // whose worker is PROVABLY gone instead of waiting out a day of silence
+      // — see `reapStalled`. `os.hostname()` travels with it because a pid
+      // means nothing without the pid table it belongs to. Local only: a
+      // remote node's worker has no pid in any table this daemon can read,
+      // and its liveness is its lease.
+      jobRepo.setWorker({ jobId: payload.jobId, pid: agent.pid ?? null, host: hostname() });
+    }
+
+    const slot = occupy({ id: factoryInput.id, agent, payload, nodeId, startedAtMs: nowMs() });
+
+    bus.emit({
+      type: 'job.started',
+      jobId: payload.jobId,
+      fileId: payload.fileId,
+      libraryId: payload.libraryId,
+      path: payload.path,
+      workerId: slot.id,
+      // The fork's own pid, straight from the daemon's own knowledge of
+      // what it created — never `ready.pid`, the agent's self-report over a
+      // channel a plugin can write to. `agent.pid` is set synchronously by
+      // `createAgentHandle`'s `fork()` call, before `ready` ever arrives.
+      pid: agent.pid ?? null,
+    });
+
+    trackRun(slot, payload);
+  };
+
+  const foldStartFailure = (fileId: string, payload: JobPayload | null, error: unknown): void => {
+    const row = mediaFileRepo.getById(fileId);
+    if (row === null) return;
+    const failure = applyThrownFailure({ db, row, payload, error, nowMs });
+    bus.emit({
+      type: 'job.finished',
+      jobId: failure.jobId,
+      fileId: row.id,
+      state: failure.state,
+      outcome: failure.outcome,
+    });
+  };
+
+  const requireRemoteAgentFactory = (): NonNullable<CreateSupervisorInput['createRemoteAgent']> => {
+    if (input.createRemoteAgent === undefined) {
+      throw new Error('This supervisor was given remote nodes but no way to build a remote agent.');
+    }
+    return input.createRemoteAgent;
+  };
+
+  /** The sinks for one job, under a fresh worker id. */
+  const agentInputFor = (payload: JobPayload): AgentFactoryInput => {
+    nextWorkerNumber += 1;
+    return {
+      id: `worker-${String(nextWorkerNumber)}`,
       documents: createPluginDocumentRepo(db),
       onStep: (step) => {
         jobRepo.recordStep({
@@ -432,52 +590,49 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         bus.emit({ type: 'job.log', jobId: payload.jobId, text });
       },
       nowMs,
-    });
+    };
+  };
 
-    // WHICH PROCESS IS RUNNING THIS JOB, recorded the instant it exists.
-    //
-    // The row had to be inserted before the fork (the scanner's
-    // in-flight-output guard depends on the claim being committed before any
-    // replacement byte can land), so this is the earliest moment the pid is
-    // knowable. It is what lets the stall reaper reclaim a claim whose
-    // worker is PROVABLY gone instead of waiting out a day of silence — see
-    // `reapStalled`. `os.hostname()` travels with it because a pid means
-    // nothing without the pid table it belongs to.
-    jobRepo.setWorker({ jobId: payload.jobId, pid: agent.pid ?? null, host: hostname() });
-
+  /**
+   * Register a slot for a run, keyed by its JOB: one slot per job is the
+   * invariant, and a worker id is only a label (a test's fake agents may
+   * all share one).
+   */
+  const occupy = (run: {
+    id: string;
+    agent: AgentHandle;
+    payload: JobPayload;
+    nodeId: string;
+    startedAtMs: number;
+  }): WorkerSlot & { resolveDone: () => void } => {
     let resolveDone: () => void = () => {};
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
     });
-
-    const slot: WorkerSlot = {
-      id,
-      workerClass,
-      hardwareType,
-      agent,
-      jobId: payload.jobId,
-      fileId: payload.fileId,
-      path: payload.path,
-      startedAtMs: nowMs(),
+    const slot = {
+      id: run.id,
+      nodeId: run.nodeId,
+      workerClass: run.payload.workerClass,
+      hardwareType: run.payload.hardwareType,
+      agent: run.agent,
+      jobId: run.payload.jobId,
+      fileId: run.payload.fileId,
+      path: run.payload.path,
+      startedAtMs: run.startedAtMs,
       done,
+      resolveDone,
     };
-    workers.set(id, slot);
+    workers.set(slot.jobId, slot);
+    return slot;
+  };
 
-    bus.emit({
-      type: 'job.started',
-      jobId: payload.jobId,
-      fileId: payload.fileId,
-      libraryId: payload.libraryId,
-      path: payload.path,
-      workerId: id,
-      // The fork's own pid, straight from the daemon's own knowledge of
-      // what it created — never `ready.pid`, the agent's self-report over a
-      // channel a plugin can write to. `agent.pid` is set synchronously by
-      // `createAgentHandle`'s `fork()` call, before `ready` ever arrives.
-      pid: agent.pid ?? null,
-    });
-
-    void agent
+  /**
+   * Run the agent and fold its ending in. Shared by a fresh claim and an
+   * adopted run, so an adopted remote job settles through exactly the path
+   * a fresh one does.
+   */
+  const trackRun = (slot: WorkerSlot & { resolveDone: () => void }, payload: JobPayload): void => {
+    void slot.agent
       .run(payload)
       .then(
         (report) => {
@@ -488,11 +643,17 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         },
       )
       .then(() => {
+        // Only once the outcome is written: a remote node deletes the report
+        // it has been holding when told, so telling it before the write
+        // could lose the report entirely if the write then failed.
+        slot.agent.settled?.();
+      })
+      .then(() => {
         // The slot is released only after the outcome is written, so a tick
         // triggered by this completion can never claim a second file into a
         // pool that still believes this one is running.
-        workers.delete(id);
-        resolveDone();
+        workers.delete(payload.jobId);
+        slot.resolveDone();
         // Refill immediately rather than waiting for the next timer tick:
         // an idle slot between a finished encode and the next poll is the
         // difference between converging overnight and not.
@@ -500,34 +661,73 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
       });
   };
 
+  /**
+   * Every node this supervisor schedules, local first.
+   *
+   * A remote node is only here while it is ONLINE (welcomed by the hub): an
+   * offline node is never claimed for, because a claim it cannot receive
+   * would sit in grace for an hour doing nothing.
+   */
+  const nodeViews = (localTarget: Record<WorkerClass, number>): NodeView[] => {
+    const views: NodeView[] = [
+      {
+        nodeId: LOCAL_NODE_ID,
+        target: localTarget,
+        hardware: settings.getHardware(),
+        reachable: null,
+        paused: false,
+      },
+    ];
+    // Without a way to build a remote agent there is nothing to schedule
+    // remotely: a claim made anyway could only be stalled, spending an attempt.
+    if (input.createRemoteAgent === undefined) return views;
+    for (const node of input.remoteNodes?.() ?? []) {
+      if (node.nodeId === LOCAL_NODE_ID) continue;
+      views.push({
+        nodeId: node.nodeId,
+        target: evaluateSchedule({ schedule: node.schedule, nowMs: nowMs() }),
+        hardware: { available: node.hardware.available, caps: node.hardware.caps },
+        reachable: node.reachableLibraryIds,
+        paused: node.paused,
+      });
+    }
+    return views;
+  };
+
   const reconcile = (): void => {
     const target = currentTarget();
 
     if (!paused && !draining) {
-      for (const workerClass of QUEUED_WORKER_CLASSES) {
-        for (;;) {
-          // Re-read on every iteration: the target of a class already at or
-          // over its count starts nothing, and a pool that SHRANK because a
-          // window closed simply never refills.
-          if (activeOf(workerClass) >= target[workerClass]) break;
+      for (const view of nodeViews(target)) {
+        if (view.paused) continue;
+        for (const workerClass of QUEUED_WORKER_CLASSES) {
+          for (;;) {
+            // Re-read on every iteration: the target of a class already at or
+            // over its count starts nothing, and a pool that SHRANK because a
+            // window closed simply never refills. A draining flag set by a
+            // completion mid-loop is honoured too.
+            if (paused || draining) break;
+            if (activeOf(view.nodeId, workerClass) >= view.target[workerClass]) break;
 
-          const eligible = eligibleLibrariesFor({
-            db,
-            hardware: settings.getHardware(),
-            used: usedHardware(),
-          });
-          if (eligible.length === 0) break;
+            const eligible = eligibleLibrariesFor({
+              db,
+              hardware: view.hardware,
+              used: usedHardware(view.nodeId),
+            }).filter((entry) => view.reachable === null || view.reachable.has(entry.libraryId));
+            if (eligible.length === 0) break;
 
-          const claimed = mediaFileRepo.claimNext({
-            workerClass,
-            nowMs: nowMs(),
-            libraryIds: eligible.map((entry) => entry.libraryId),
-          });
-          if (claimed === null) break;
+            const claimed = mediaFileRepo.claimNext({
+              workerClass,
+              nowMs: nowMs(),
+              libraryIds: eligible.map((entry) => entry.libraryId),
+            });
+            if (claimed === null) break;
 
-          const hardwareType =
-            eligible.find((entry) => entry.libraryId === claimed.libraryId)?.hardwareType ?? 'cpu';
-          startWorker({ claimed, workerClass, hardwareType });
+            const hardwareType =
+              eligible.find((entry) => entry.libraryId === claimed.libraryId)?.hardwareType ??
+              'cpu';
+            startWorker({ claimed, workerClass, hardwareType, nodeId: view.nodeId });
+          }
         }
       }
     }
@@ -561,15 +761,26 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
     }
   };
 
-  /** Every job still in flight, as promises that resolve once written back. */
-  const inFlight = (): Promise<void>[] => [...workers.values()].map((worker) => worker.done);
+  /**
+   * The slots daemon SHUTDOWN may wait on or cancel: local runs only.
+   *
+   * A remote run does not end with this daemon, by design. Its node keeps
+   * encoding, and the next daemon start adopts the job and puts its lease in
+   * grace until the node reconnects. Cancelling it here would be worse than
+   * pointless: a remote cancel is DURABLE (`job.cancel_requested_at`), so
+   * every restart would permanently cancel every remote job in flight. And
+   * waiting on it would hold shutdown for the whole remaining encode.
+   */
+  const localSlots = (): WorkerSlot[] =>
+    [...workers.values()].filter((worker) => worker.nodeId === LOCAL_NODE_ID);
 
-  const awaitAll = async (): Promise<void> => {
+  const awaitAll = async (includeRemote: boolean): Promise<void> => {
     // A loop rather than one `Promise.all`: a completion can start nothing
     // new while draining, but a worker that was mid-`startWorker` when
     // `drain()` was called still has to be waited for.
     for (;;) {
-      const pending = inFlight();
+      const slots = includeRemote ? [...workers.values()] : localSlots();
+      const pending = slots.map((worker) => worker.done);
       if (pending.length === 0) return;
       await Promise.all(pending);
     }
@@ -589,6 +800,7 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         path: worker.path,
         startedAtMs: worker.startedAtMs,
         pid: worker.agent.pid,
+        nodeId: worker.nodeId,
       })),
       paused,
     }),
@@ -608,15 +820,36 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
       return true;
     },
 
-    drain: async (): Promise<void> => {
+    drain: async (options?: { includeRemote?: boolean }): Promise<void> => {
       draining = true;
-      await awaitAll();
+      await awaitAll(options?.includeRemote ?? true);
     },
 
     stop: async (): Promise<void> => {
       draining = true;
-      for (const worker of workers.values()) worker.agent.cancel();
-      await awaitAll();
+      // Local only — see `localSlots` for why a remote run is never cancelled
+      // by a shutdown.
+      for (const worker of localSlots()) worker.agent.cancel();
+      await awaitAll(false);
+    },
+
+    agentInputFor,
+
+    adopt: ({ payload, agent, nodeId }): void => {
+      // Never claims and never starts a job row: both happened in the
+      // previous life. The slot counts against the node's target and
+      // hardware like any other, so the node is not handed a second job into
+      // the slot this one still occupies. `run` is called now, because a
+      // remote handle drops every frame (a commit-request included) until it
+      // has been.
+      const slot = occupy({
+        id: agent.id,
+        agent,
+        payload,
+        nodeId,
+        startedAtMs: jobRepo.getById(payload.jobId)?.startedAt ?? nowMs(),
+      });
+      trackRun(slot, payload);
     },
   };
 };

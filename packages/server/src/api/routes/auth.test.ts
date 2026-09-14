@@ -70,6 +70,10 @@ const fakeSupervisor = (): Supervisor => ({
   stop: async () => {
     await Promise.resolve();
   },
+  agentInputFor: () => {
+    throw new Error('this fake supervisor runs no agents');
+  },
+  adopt: () => {},
 });
 
 /** A scan coordinator that does nothing; these routes never touch it. */

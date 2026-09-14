@@ -119,6 +119,7 @@ const fakeSupervisor = (running: string[] = []): FakeSupervisor => {
         path: null,
         startedAtMs: NOW,
         pid: 1234,
+        nodeId: 'local',
       })),
       paused,
     }),
@@ -140,6 +141,10 @@ const fakeSupervisor = (running: string[] = []): FakeSupervisor => {
     stop: async () => {
       await Promise.resolve();
     },
+    agentInputFor: () => {
+      throw new Error('this fake supervisor runs no agents');
+    },
+    adopt: () => {},
   };
 };
 

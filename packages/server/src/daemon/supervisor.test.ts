@@ -13,12 +13,20 @@ import { migrate } from '../db/migrate.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
+import { createJobRepo } from '../db/job-repo.js';
 import { createSettingsRepo, type HardwareSettings } from '../db/settings-repo.js';
+import type { OnlineNode } from '../nodes/hub.js';
+import { applyJobFailure } from '../worker/apply-report.js';
 import { AgentFailure, type AgentHandle } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
 import { createEventBus, type TrawlarrEvent } from './events.js';
-import { createSupervisor, type CreateAgentFn, type Supervisor } from './supervisor.js';
+import {
+  createSupervisor,
+  type AgentFactoryInput,
+  type CreateAgentFn,
+  type Supervisor,
+} from './supervisor.js';
 
 /** 2024-01-01T00:30:00Z — inside a 00:00-01:00 window, wherever one is used. */
 const NOW = Date.UTC(2024, 0, 1, 0, 30);
@@ -83,11 +91,16 @@ const rowFor = (db: Db, fileId: string): MediaFileRow =>
  */
 interface FakeAgent {
   readonly id: string;
+  /** `local`, or the remote node this agent was created for. */
+  readonly nodeId: string;
   readonly payload: JobPayload;
   readonly cancelled: boolean;
   readonly killed: boolean;
+  /** How many times the supervisor called `settled()`, and whether the job row had ended each time. */
+  readonly settledCalls: { jobEnded: boolean }[];
   finish(report: JobReport): Promise<void>;
   die(reason: string): Promise<void>;
+  fail(error: AgentFailure): Promise<void>;
   step(over?: { seq?: number; pluginId?: string }): void;
   progress(percent: number): void;
 }
@@ -182,17 +195,24 @@ const harness = (input: HarnessInput) => {
   const all: FakeAgent[] = [];
   const live = new Set<FakeAgent>();
 
-  const createAgent: CreateAgentFn = (factoryInput) => {
+  const makeFake = (factoryInput: AgentFactoryInput, nodeId: string): FakeAgent & AgentHandle => {
     let payload: JobPayload | null = null;
     let cancelled = false;
     let killed = false;
     let settle: { resolve: (report: JobReport) => void; reject: (error: unknown) => void } | null =
       null;
 
+    const settledCalls: { jobEnded: boolean }[] = [];
     const agent: FakeAgent & AgentHandle = {
       id: factoryInput.id,
+      nodeId,
       pid: undefined,
       exited: Promise.resolve(0),
+      settledCalls,
+      settled: () => {
+        const job = payload === null ? null : createJobRepo(db).getById(payload.jobId);
+        settledCalls.push({ jobEnded: job?.endedAt != null });
+      },
       get payload() {
         if (payload === null) throw new Error(`${factoryInput.id} was never given a job.`);
         return payload;
@@ -227,6 +247,11 @@ const harness = (input: HarnessInput) => {
         settle?.reject(new AgentFailure(reason, { reported: false, cancelled }));
         await flush();
       },
+      fail: async (error: AgentFailure) => {
+        live.delete(agent);
+        settle?.reject(error);
+        await flush();
+      },
       step: (over) => {
         factoryInput.onStep({
           seq: over?.seq ?? 1,
@@ -247,17 +272,48 @@ const harness = (input: HarnessInput) => {
 
     all.push(agent);
     live.add(agent);
+    return agent;
+  };
+
+  const createAgent: CreateAgentFn = (factoryInput) => {
+    const agent = makeFake(factoryInput, 'local');
     input.onAgentCreated?.({ supervisor, index: all.length });
     return agent;
   };
 
-  const supervisor = createSupervisor({
-    db,
-    bus,
-    settings,
-    nowMs: () => now,
-    createAgent,
-  });
+  /** What `remoteNodes()` returns; a test edits it in place. */
+  const online: OnlineNode[] = [];
+
+  const addNode = (over: {
+    nodeId: string;
+    target: number;
+    reachable: string[];
+    hardware?: HardwareSettings;
+    paused?: boolean;
+  }): void => {
+    // `job.node_id` is a foreign key: a node must have a row before a job can name it.
+    db.prepare(`INSERT INTO node (id, name) VALUES (?, ?)`).run(over.nodeId, over.nodeId);
+    online.push({
+      nodeId: over.nodeId,
+      schedule: { timezone: 'UTC', baseCounts: { transcode: over.target, health: 0 }, windows: [] },
+      paused: over.paused ?? false,
+      hardware: over.hardware ?? { available: ['cpu'], caps: {} },
+      reachableLibraryIds: new Set(over.reachable),
+    });
+  };
+
+  const newSupervisor = (): Supervisor =>
+    createSupervisor({
+      db,
+      bus,
+      settings,
+      nowMs: () => now,
+      createAgent,
+      remoteNodes: () => online,
+      createRemoteAgent: (factoryInput) => makeFake(factoryInput, factoryInput.nodeId),
+    });
+
+  const supervisor = newSupervisor();
 
   const successReport = (agent: FakeAgent): JobReport => ({
     jobId: agent.payload.jobId,
@@ -284,6 +340,10 @@ const harness = (input: HarnessInput) => {
   return {
     db,
     supervisor,
+    newSupervisor,
+    makeFake,
+    online,
+    addNode,
     libraryId,
     addLibrary,
     events,
@@ -769,5 +829,220 @@ describe('the supervisor', () => {
     // before a real job could start.
     const jobs = db.prepare(`SELECT COUNT(*) AS n FROM job`).get() as { n: number };
     expect(jobs.n).toBe(2);
+  });
+});
+
+const jobNodeOf = (db: Db, jobId: string): string | null =>
+  (db.prepare(`SELECT node_id FROM job WHERE id = ?`).get(jobId) as { node_id: string | null })
+    .node_id;
+
+describe('the supervisor, across remote nodes', () => {
+  it('claims onto a remote node up to its own target while local claims its own', async () => {
+    // Asymmetric: local target 1, remote target 2, six files. Swapping the
+    // two targets anywhere changes the split.
+    const { supervisor, agents, addNode, libraryId, db } = harness({
+      queued: 6,
+      target: { transcode: 1, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 2, reachable: [libraryId] });
+
+    await supervisor.tick();
+
+    const running = agents.running();
+    expect(running.filter((agent) => agent.nodeId === 'local')).toHaveLength(1);
+    expect(running.filter((agent) => agent.nodeId === 'node-x')).toHaveLength(2);
+    expect(rowsInState(db, 'running')).toHaveLength(3);
+
+    const byJob = new Map(supervisor.status().workers.map((worker) => [worker.jobId, worker]));
+    for (const agent of running) {
+      expect(byJob.get(agent.payload.jobId)?.nodeId).toBe(agent.nodeId);
+      // `job.node_id` records where every job ran, local ones included.
+      expect(jobNodeOf(db, agent.payload.jobId)).toBe(agent.nodeId);
+    }
+  });
+
+  it('never claims onto a remote node from a library it cannot reach', async () => {
+    const { supervisor, agents, addNode, addLibrary, db } = harness({
+      queued: 3,
+      target: { transcode: 0, health: 0 },
+    });
+    const reachable = addLibrary({ queued: 1 });
+    addNode({ nodeId: 'node-x', target: 4, reachable: [reachable] });
+
+    await supervisor.tick();
+
+    expect(agents.running()).toHaveLength(1);
+    expect(agents.running()[0]!.payload.libraryId).toBe(reachable);
+    expect(rowsInState(db, 'queued')).toHaveLength(3);
+  });
+
+  it('never claims hardware work onto a remote node that declared only cpu', async () => {
+    // The LOCAL node has nvenc and a target of zero; the remote node has a
+    // target but no GPU. Using the local hardware for the remote view would
+    // claim here.
+    const { supervisor, agents, addNode, libraryId, db } = harness({
+      queued: 2,
+      target: { transcode: 0, health: 0 },
+      hardware: { available: ['cpu', 'nvenc'], caps: {} },
+      flowEncoder: 'hevc_nvenc',
+    });
+    addNode({ nodeId: 'node-x', target: 2, reachable: [libraryId] });
+
+    await supervisor.tick();
+
+    expect(agents.started()).toHaveLength(0);
+    expect(rowsInState(db, 'queued')).toHaveLength(2);
+  });
+
+  it('claims nothing onto a paused remote node, while local still claims', async () => {
+    const { supervisor, agents, addNode, libraryId } = harness({
+      queued: 4,
+      target: { transcode: 1, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 2, reachable: [libraryId], paused: true });
+
+    await supervisor.tick();
+
+    expect(agents.running().map((agent) => agent.nodeId)).toEqual(['local']);
+  });
+
+  it('stalls a remote run whose lease expired, spending an attempt', async () => {
+    const { supervisor, agents, addNode, libraryId, db } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    const agent = agents.running()[0]!;
+
+    // What the hub's release hands the handle: nothing authored this.
+    await agent.fail(new AgentFailure('Node node-x was offline too long.', { reported: false }));
+
+    const row = rowFor(db, agent.payload.fileId);
+    expect(row.state).toBe('held');
+    expect(row.attempt_count).toBe(1);
+  });
+
+  it('folds a superseded result into the closed job row without touching the file', async () => {
+    const { supervisor, agents, addNode, libraryId, db, events } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+    const { fileId, jobId } = agent.payload;
+
+    // The release already happened: the attempt was stalled and the row closed.
+    applyJobFailure({ db, payload: agent.payload, reason: 'released', nowMs: () => NOW });
+    const before = rowFor(db, fileId);
+
+    await agent.fail(
+      new AgentFailure('The commit was refused.', { reported: true, superseded: true }),
+    );
+
+    expect(rowFor(db, fileId)).toEqual(before);
+    expect(createJobRepo(db).getById(jobId)?.outcome).toBe('released\nThe commit was refused.');
+    expect(events.find((event) => event.type === 'job.finished')).toMatchObject({
+      jobId,
+      state: before.state,
+    });
+    expect(supervisor.status().workers).toHaveLength(0);
+  });
+
+  it('never strands a file whose commit was refused while its job still held the claim', async () => {
+    // Nothing released this row, so nothing else will ever end it: the
+    // refusal must still take the file out of `running`.
+    const { supervisor, agents, addNode, libraryId, db } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+
+    await agent.fail(new AgentFailure('refused', { reported: true, superseded: true }));
+
+    expect(rowFor(db, agent.payload.fileId).state).toBe('held');
+    expect(createJobRepo(db).getById(agent.payload.jobId)?.endedAt).not.toBeNull();
+  });
+
+  it('calls settled() exactly once, after the job row has ended', async () => {
+    const { supervisor, agents, addNode, libraryId, successReport } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+
+    await agent.finish(successReport(agent));
+
+    expect(agent.settledCalls).toEqual([{ jobEnded: true }]);
+  });
+
+  it('adopts a run started before a restart: it holds a slot, and its settlement is written', async () => {
+    const { supervisor, agents, addNode, libraryId, db, newSupervisor, makeFake, successReport } =
+      harness({ queued: 3, target: { transcode: 0, health: 0 } });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    const original = agents.running()[0]!;
+    const payload = original.payload;
+    await supervisor.drain({ includeRemote: false });
+
+    // "Restart": a second supervisor over the same database.
+    const restarted = newSupervisor();
+    const adopted = makeFake(restarted.agentInputFor(payload), 'node-x');
+    restarted.adopt({ payload, agent: adopted, nodeId: 'node-x' });
+    await restarted.tick();
+
+    // The adopted run fills node-x's only slot: nothing more is claimed for it.
+    expect(restarted.status().workers.map((worker) => [worker.jobId, worker.nodeId])).toEqual([
+      [payload.jobId, 'node-x'],
+    ]);
+    expect(rowsInState(db, 'running')).toHaveLength(1);
+
+    restarted.pause();
+    await adopted.finish(successReport(adopted));
+    expect(rowFor(db, payload.fileId).state).toBe('good');
+    expect(createJobRepo(db).getById(payload.jobId)?.endedAt).not.toBeNull();
+    expect(restarted.status().workers).toHaveLength(0);
+  });
+
+  it('drains for shutdown without waiting on a remote run', async () => {
+    const { supervisor, agents, addNode, libraryId } = harness({
+      queued: 2,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    expect(agents.running()).toHaveLength(1);
+
+    await supervisor.drain({ includeRemote: false });
+
+    expect(agents.running()).toHaveLength(1);
+  });
+
+  it('stops without cancelling a remote run, which must survive the restart', async () => {
+    // A remote cancel is DURABLE (`job.cancel_requested_at`), so cancelling on
+    // shutdown would cancel every remote job on every daemon restart.
+    const { supervisor, agents, addNode, libraryId, cancelledReport } = harness({
+      queued: 2,
+      target: { transcode: 1, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    const local = agents.running().find((agent) => agent.nodeId === 'local')!;
+    const remote = agents.running().find((agent) => agent.nodeId === 'node-x')!;
+
+    const stopping = supervisor.stop();
+    expect(local.cancelled).toBe(true);
+    expect(remote.cancelled).toBe(false);
+    expect(remote.killed).toBe(false);
+    await local.finish(cancelledReport(local));
+    await stopping;
   });
 });

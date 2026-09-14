@@ -58,6 +58,10 @@ const fakeSupervisor = (): Supervisor => ({
   stop: async () => {
     await Promise.resolve();
   },
+  agentInputFor: () => {
+    throw new Error('this fake supervisor runs no agents');
+  },
+  adopt: () => {},
 });
 
 const fakeScans = (): ScanCoordinator => ({
