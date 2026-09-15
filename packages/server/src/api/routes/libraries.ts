@@ -156,6 +156,10 @@ export const libraryRoutes: Route[] = [
       // is walked now rather than at the next interval, because "I added my
       // library and nothing happened" is indistinguishable from broken.
       ctx.scans.request(library.id, 'startup');
+      // Every online node probes the library list it was last sent; without a
+      // push it never learns this library exists, and its eligibility (and
+      // any claim made from it) stays based on the old list.
+      ctx.nodes.pushConfigAll();
 
       // A brand-new library with no flow cannot converge anything, and this
       // is where it says so — in `pausedReason`, immediately, rather than
@@ -208,6 +212,9 @@ export const libraryRoutes: Route[] = [
       if (rootsChanged || after.flowId !== library.flowId) {
         ctx.scans.request(library.id, 'manual');
       }
+      // Moved roots map to different node paths: a node must re-probe them
+      // before it is claimed for this library again.
+      ctx.nodes.pushConfigAll();
       return toLibraryResource(after);
     },
   },
@@ -221,6 +228,7 @@ export const libraryRoutes: Route[] = [
       // Its watch outlives the row otherwise, and every event it delivers
       // asks for a scan of a library id `scanLibrary` refuses by name.
       ctx.scans.syncWatchers();
+      ctx.nodes.pushConfigAll();
       return noContent();
     },
   },

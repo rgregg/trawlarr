@@ -19,6 +19,7 @@ import { migrate } from '../db/migrate.js';
 import { createNodeRepo, type NodeRepo } from '../db/node-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { createPluginRepo } from '../plugins/plugin-repo.js';
+import { AgentFailure } from '../worker/agent-handle.js';
 import { buildJobPayload, type JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION } from '../worker/protocol.js';
 import type { JobReport } from '../worker/run-payload.js';
@@ -391,20 +392,79 @@ describe('createNodeHub', () => {
   });
 
   it('records library probes and reports them through onlineNodes', async () => {
+    const libA = createLibraryRepo(db).create({ name: 'A', roots: ['/media/a'], nowMs: now });
+    const libB = createLibraryRepo(db).create({ name: 'B', roots: ['/media/b'], nowMs: now });
     const client = await connectNode();
     await client.hello();
     const before = nodesChanged;
     client.send({
       type: 'libraries',
       libraries: [
-        { libraryId: 'lib-a', reachable: true, detail: 'ok' },
-        { libraryId: 'lib-b', reachable: false, detail: 'missing' },
+        { libraryId: libA.id, reachable: true, detail: 'ok' },
+        { libraryId: libB.id, reachable: false, detail: 'missing' },
       ],
     });
     await waitFor(() => nodesChanged > before, 'onNodesChanged');
     const [online] = hub.onlineNodes();
     expect(online?.nodeId).toBe(creds.nodeId);
-    expect([...online!.reachableLibraryIds]).toEqual(['lib-a']);
+    expect([...online!.reachableLibraryIds]).toEqual([libA.id]);
+  });
+
+  it('treats a library probe taken before a config push as stale until a fresh one arrives', async () => {
+    // The node probed the library list it was last sent. After a library or
+    // map edit that probe says nothing about what a claim would now send it.
+    const library = createLibraryRepo(db).create({ name: 'A', roots: ['/media/a'], nowMs: now });
+    const client = await connectNode();
+    await client.hello();
+    const probe: NodeFrame = {
+      type: 'libraries',
+      libraries: [{ libraryId: library.id, reachable: true, detail: '' }],
+    };
+    let before = nodesChanged;
+    client.send(probe);
+    await waitFor(() => nodesChanged > before, 'first probe');
+    expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([library.id]);
+
+    hub.pushConfigAll();
+    expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([]);
+    await client.next('config');
+
+    before = nodesChanged;
+    client.send(probe);
+    await waitFor(() => nodesChanged > before, 'fresh probe');
+    expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([library.id]);
+  });
+
+  it("never reports a library reachable whose roots do not map under the node's current path map", async () => {
+    const library = createLibraryRepo(db).create({ name: 'TV', roots: ['/srv/tv'], nowMs: now });
+    const client = await connectNode();
+    await client.hello();
+    const before = nodesChanged;
+    // A node's probe is only as good as the roots it was sent; a claim is
+    // mapped through the map as it is NOW.
+    client.send({
+      type: 'libraries',
+      libraries: [{ libraryId: library.id, reachable: true, detail: '' }],
+    });
+    await waitFor(() => nodesChanged > before, 'probe');
+    expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([]);
+  });
+
+  it('settles a claim whose path a map edit unmapped as unmapped, spending nothing', async () => {
+    const client = await connectNode();
+    await client.hello();
+    const payload = claimJob();
+    // The edit lands between the claim and `prepare`.
+    nodes.update(creds.nodeId, { pathMap: [{ serverPath: '/elsewhere', nodePath: '/mnt/nas' }] });
+    const agent = hub.createAgent({
+      ...factoryInput({ steps: [], logs: [], heartbeats: [] }),
+      nodeId: creds.nodeId,
+    });
+    const error = await agent.run(payload).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect(error).toMatchObject({ unmapped: true, reported: true });
+    expect((error as Error).message).toContain(payload.path);
+    expect(client.frames.some((frame) => frame.type === 'job')).toBe(false);
   });
 
   it('sends a mapped job with bundles, and records a connected lease and the server-view payload', async () => {

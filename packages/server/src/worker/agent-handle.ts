@@ -97,6 +97,13 @@ export class AgentFailure extends Error {
    * lost claim from a failed attempt without reading the error text.
    */
   readonly superseded: boolean;
+  /**
+   * The job was never sent: a path in it does not map under the remote
+   * node's CURRENT path map, because a map or library edit raced the claim.
+   * Nothing about the file or the flow is in question, so the supervisor
+   * requeues it unpenalised rather than spending an attempt on the edit.
+   */
+  readonly unmapped: boolean;
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
 
@@ -106,6 +113,7 @@ export class AgentFailure extends Error {
       cancelled?: boolean;
       reported?: boolean;
       superseded?: boolean;
+      unmapped?: boolean;
       exitCode?: number | null;
       signal?: NodeJS.Signals | null;
     } = {},
@@ -115,6 +123,7 @@ export class AgentFailure extends Error {
     this.cancelled = options.cancelled ?? false;
     this.reported = options.reported ?? false;
     this.superseded = options.superseded ?? false;
+    this.unmapped = options.unmapped ?? false;
     this.exitCode = options.exitCode ?? null;
     this.signal = options.signal ?? null;
   }

@@ -6,7 +6,7 @@ import { AgentFailure, answerDocRequest, type AgentHandle } from '../worker/agen
 import type { JobPayload } from '../worker/job-payload.js';
 import type { AgentToDaemon, DaemonToAgent } from '../worker/protocol.js';
 import type { JobReport } from '../worker/run-payload.js';
-import { reportToServer } from './map-payload.js';
+import { reportToServer, UnmappedPathError } from './map-payload.js';
 import type { ServerFrame } from './node-frames.js';
 
 export interface RemoteJobChannel {
@@ -309,7 +309,7 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
         ok: false,
         error: new AgentFailure(
           `This job could not be sent to node ${input.nodeId}: ${messageOf(error)}`,
-          { reported: true, cancelled },
+          { reported: true, cancelled, unmapped: error instanceof UnmappedPathError },
         ),
       });
       return;

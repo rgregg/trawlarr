@@ -1078,6 +1078,31 @@ describe('the supervisor, across remote nodes', () => {
     expect(createJobRepo(db).getById(agent.payload.jobId)?.outcome).toContain('refused');
   });
 
+  it('requeues unpenalised when a map edit unmapped the claimed path before it was sent', async () => {
+    const { supervisor, agents, addNode, libraryId, db } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+
+    await agent.fail(
+      new AgentFailure(
+        `This job could not be sent to node node-x: Path "${agent.payload.path}" is outside the node's path map.`,
+        { reported: true, unmapped: true },
+      ),
+    );
+
+    const row = rowFor(db, agent.payload.fileId);
+    expect(row.state).toBe('queued');
+    expect(row.attempt_count).toBe(0);
+    const job = createJobRepo(db).getById(agent.payload.jobId);
+    expect(job?.endedAt).not.toBeNull();
+    expect(job?.outcome).toContain(agent.payload.path);
+  });
+
   it('calls settled() exactly once, after the job row has ended', async () => {
     const { supervisor, agents, addNode, libraryId, successReport } = harness({
       queued: 1,

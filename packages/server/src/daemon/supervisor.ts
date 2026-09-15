@@ -21,6 +21,7 @@ import {
   applyJobCancelled,
   applyJobFailure,
   applyJobReport,
+  applyJobUnmapped,
   applyThrownFailure,
   recordReplacement,
 } from '../worker/apply-report.js';
@@ -403,6 +404,11 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         // file's fault: requeue rather than count an attempt.
         state = applyJobCancelled({ db, payload, nowMs }).state;
         text = 'Cancelled by an operator; the file was requeued unpenalised.';
+      } else if (outcome.error instanceof AgentFailure && outcome.error.unmapped) {
+        // A map or library edit raced the claim, so the job was never sent:
+        // requeued without spending an attempt, with the path in the outcome.
+        text = messageOf(outcome.error);
+        state = applyJobUnmapped({ db, payload, reason: text, nowMs }).state;
       } else if (outcome.error instanceof AgentFailure && outcome.error.superseded) {
         // Checked AFTER cancelled: a commit refused because an operator
         // cancelled the job is still the operator's decision.

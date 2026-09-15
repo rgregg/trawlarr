@@ -35,7 +35,7 @@ import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION, type AgentToDaemon } from '../worker/protocol.js';
 import { DEFAULT_STALE_AFTER_MS } from '../worker/reap-stalled.js';
 import type { BundleStore } from './bundles.js';
-import { libraryRootsForNode, payloadToNode } from './map-payload.js';
+import { libraryRootsForNode, payloadToNode, UnmappedPathError } from './map-payload.js';
 import {
   MAX_FRAME_BYTES,
   parseNodeFrame,
@@ -96,6 +96,8 @@ export interface NodeHub {
   isOnline(nodeId: string): boolean;
   onlineNodes(): OnlineNode[];
   pushConfig(nodeId: string): void;
+  /** Push config to every online node: what a library create/edit/delete needs. */
+  pushConfigAll(): void;
   disconnect(nodeId: string, reason: string): void;
   createAgent(input: AgentFactoryInput & { nodeId: string }): RemoteAgentHandle;
   /**
@@ -139,6 +141,7 @@ export const createNoopNodeHub = (): NodeHub => ({
   isOnline: () => false,
   onlineNodes: () => [],
   pushConfig: () => {},
+  pushConfigAll: () => {},
   disconnect: () => {},
   createAgent: () => {
     throw new Error('No node hub is running, so no job can be sent to a remote node.');
@@ -156,6 +159,13 @@ interface Connection {
   welcomed: boolean;
   lastPongAt: number;
   helloTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * A `libraries` probe has arrived since the last config this socket was
+   * sent (welcome included). Until one does, the stored probe describes the
+   * library list and map the node HAD, and a claim made from it can fail to
+   * map — so no library counts as reachable on this node.
+   */
+  probeFresh: boolean;
 }
 
 type WelcomeJob = Extract<ServerFrame, { type: 'welcome' }>['jobs'][number];
@@ -457,7 +467,19 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       },
       prepare: async (payload) => {
         register(handle, payload);
-        return await prepareFor(options.nodeId, payload);
+        try {
+          return await prepareFor(options.nodeId, payload);
+        } catch (error) {
+          // The node's probe no longer matches what a claim would send it.
+          // Without this, a requeued file is claimed straight back onto the
+          // same node, fails to map again, and loops without spending an
+          // attempt; stale, the node takes no claim until it re-probes.
+          if (error instanceof UnmappedPathError) {
+            const conn = connections.get(options.nodeId);
+            if (conn !== undefined) conn.probeFresh = false;
+          }
+          throw error;
+        }
       },
       appendLog: (text) => {
         if (handle.jobId !== null) appendLogLines(handle.jobId, [text]);
@@ -599,6 +621,8 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
 
     const { jobs, reconnect, cancelWithoutHandle } = reconcile(conn.nodeId, hello.jobs, now);
     conn.welcomed = true;
+    // The welcome carries config; the node re-probes on receiving it.
+    conn.probeFresh = false;
     sendFrame(conn, { type: 'welcome', config: configFrame(node), jobs });
     // After the welcome, so a cancel queued while the node was away reaches
     // a node that already knows the job continues.
@@ -698,6 +722,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
         return;
       case 'libraries':
         nodes.recordLibraries(conn.nodeId, frame.libraries);
+        conn.probeFresh = true;
         input.onNodesChanged();
         bus.emit({ type: 'nodes.changed', nodeId: conn.nodeId, online: true });
         return;
@@ -765,6 +790,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       welcomed: false,
       lastPongAt: nowMs(),
       helloTimer: null,
+      probeFresh: false,
     };
     const previous = connections.get(nodeId);
     connections.set(nodeId, conn);
@@ -852,6 +878,15 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     });
   };
 
+  const pushConfigTo = (nodeId: string): void => {
+    const conn = welcomedConnection(nodeId);
+    const node = nodes.getById(nodeId);
+    if (conn !== null && node !== null) {
+      conn.probeFresh = false;
+      sendFrame(conn, configFrame(node));
+    }
+  };
+
   const pingAll = (): void => {
     const now = nowMs();
     for (const conn of connections.values()) {
@@ -880,27 +915,44 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
 
     onlineNodes: () => {
       const online: OnlineNode[] = [];
+      const libraries = new Map(libraryRepo.list().map((library) => [library.id, library]));
       for (const conn of connections.values()) {
         if (!conn.welcomed) continue;
         const node = nodes.getById(conn.nodeId);
         if (node === null || node.revokedAt !== null) continue;
+        // A probe only vouches for the roots the node was sent. Every root
+        // must also map under the map as it is NOW, or a claim made on the
+        // strength of that probe fails in `prepare` with UnmappedPathError.
+        const reachable = conn.probeFresh
+          ? node.libraries.filter((probe) => {
+              const library = libraries.get(probe.libraryId);
+              return (
+                probe.reachable &&
+                library !== undefined &&
+                libraryRootsForNode(library, node.pathMap).every((root) => root !== null)
+              );
+            })
+          : [];
         online.push({
           nodeId: node.id,
           schedule: node.schedule,
           paused: node.paused,
           hardware: { available: node.hardwareTypes, caps: node.hardwareCaps },
-          reachableLibraryIds: new Set(
-            node.libraries.filter((probe) => probe.reachable).map((probe) => probe.libraryId),
-          ),
+          reachableLibraryIds: new Set(reachable.map((probe) => probe.libraryId)),
         });
       }
       return online;
     },
 
     pushConfig: (nodeId) => {
-      const conn = welcomedConnection(nodeId);
-      const node = nodes.getById(nodeId);
-      if (conn !== null && node !== null) sendFrame(conn, configFrame(node));
+      pushConfigTo(nodeId);
+      input.onNodesChanged();
+    },
+
+    pushConfigAll: () => {
+      for (const conn of connections.values()) {
+        if (conn.welcomed) pushConfigTo(conn.nodeId);
+      }
       input.onNodesChanged();
     },
 

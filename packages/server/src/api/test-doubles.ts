@@ -79,6 +79,8 @@ export interface FakeNodeHub extends NodeHub {
   /** Ids `isOnline` reports true for; empty means every node is offline. */
   online: Set<string>;
   pushConfigCalls: string[];
+  /** How many times `pushConfigAll` was called. */
+  pushConfigAllCalls: number;
   disconnectCalls: { nodeId: string; reason: string }[];
 }
 
@@ -91,17 +93,22 @@ export const fakeNodeHub = (): FakeNodeHub => {
   const online = new Set<string>();
   const pushConfigCalls: string[] = [];
   const disconnectCalls: { nodeId: string; reason: string }[] = [];
-  return {
+  const hub: FakeNodeHub = {
     ...createNoopNodeHub(),
     online,
     pushConfigCalls,
+    pushConfigAllCalls: 0,
     disconnectCalls,
     isOnline: (nodeId) => online.has(nodeId),
     pushConfig: (nodeId) => {
       pushConfigCalls.push(nodeId);
     },
+    pushConfigAll: () => {
+      hub.pushConfigAllCalls += 1;
+    },
     disconnect: (nodeId, reason) => {
       disconnectCalls.push({ nodeId, reason });
     },
   };
+  return hub;
 };

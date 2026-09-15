@@ -2736,6 +2736,24 @@ describe('node management', () => {
     ).toMatchObject({ name: node.node.name, paused: false, tags: '' });
   });
 
+  it('pushes config to every online node when a library is created, edited or deleted', async () => {
+    // A node probes the library list it was last sent; without a push it
+    // keeps reporting the old list, and claims made from it fail to map.
+    const created = await api('POST', '/libraries', { name: 'pushed', roots: ['/media/pushed'] });
+    expect(created.status).toBe(201);
+    expect(nodeHub.pushConfigAllCalls).toBe(1);
+
+    const edited = await api('PATCH', `/libraries/${String(created.body.id)}`, {
+      roots: ['/media/pushed-2'],
+    });
+    expect(edited.status).toBe(200);
+    expect(nodeHub.pushConfigAllCalls).toBe(2);
+
+    const deleted = await api('DELETE', `/libraries/${String(created.body.id)}`);
+    expect(deleted.status).toBe(204);
+    expect(nodeHub.pushConfigAllCalls).toBe(3);
+  });
+
   it('updates a node and pushes the new config to it', async () => {
     const node = await createNode();
 

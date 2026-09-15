@@ -417,3 +417,28 @@ export const applyJobCancelled = (input: {
 
   return { state: requireRow(input.db, input.payload.fileId).state };
 };
+
+/**
+ * Fold a remote job that was never sent because its path no longer maps
+ * under the node's current path map into an unpenalised requeue.
+ *
+ * A map or library edit that lands between a claim and the job leaving is
+ * an operator's change, not evidence about the file: spending an attempt on
+ * it would let three edits push a healthy file to `failed`. The job row
+ * closes as `failed` with the reason, since nothing ran.
+ */
+export const applyJobUnmapped = (input: {
+  db: Db;
+  payload: JobPayload;
+  reason: string;
+  nowMs: () => number;
+}): AppliedOutcome => {
+  createMediaFileRepo(input.db).requeue(input.payload.fileId);
+  createJobRepo(input.db).finish({
+    jobId: input.payload.jobId,
+    state: 'failed',
+    outcome: `Not sent, requeued unpenalised: ${input.reason}`,
+    nowMs: input.nowMs(),
+  });
+  return { state: requireRow(input.db, input.payload.fileId).state };
+};
