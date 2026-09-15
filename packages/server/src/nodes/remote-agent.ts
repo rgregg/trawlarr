@@ -264,6 +264,12 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
           });
           return;
         }
+        if (report.superseded === true && cancelled && !report.cancelled) {
+          // The same rule a `failed` frame follows below: a commit refused
+          // because THIS handle was cancelled is the operator's decision,
+          // even when the refusal reached the node before the cancel did.
+          report = { ...report, cancelled: true };
+        }
         const serverPath = report.replaced?.path ?? null;
         withServerStat(report, statPath).then(
           (restated) => {

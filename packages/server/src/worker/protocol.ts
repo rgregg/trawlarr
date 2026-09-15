@@ -146,6 +146,9 @@ export const parseAgentMessage = (raw: unknown): AgentToDaemon | null => {
       if (!isRecord(report)) return null;
       if (report['held'] !== undefined && typeof report['held'] !== 'boolean') return null;
       if (report['reviewReason'] != null && typeof report['reviewReason'] !== 'string') return null;
+      if (report['superseded'] !== undefined && typeof report['superseded'] !== 'boolean') {
+        return null;
+      }
       return { type: 'done', report: report as unknown as JobReport };
     }
     case 'failed': {

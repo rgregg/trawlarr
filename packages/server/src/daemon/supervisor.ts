@@ -22,6 +22,7 @@ import {
   applyJobFailure,
   applyJobReport,
   applyThrownFailure,
+  recordReplacement,
 } from '../worker/apply-report.js';
 import { AgentFailure, createAgentHandle, type AgentHandle } from '../worker/agent-handle.js';
 import { buildJobPayload, type JobPayload } from '../worker/job-payload.js';
@@ -344,15 +345,22 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
    *  - the job row is still open but the file is no longer claimed by it: the
    *    row is closed as failed, and the file (someone else's now) is left alone.
    */
-  const settleSuperseded = (payload: JobPayload, text: string): FileState => {
+  const settleSuperseded = (payload: JobPayload, text: string, report?: JobReport): FileState => {
     const job = jobRepo.getById(payload.jobId);
     const file = mediaFileRepo.getById(payload.fileId);
     if (job !== null && job.endedAt !== null) {
+      // Even a report carrying a replacement: the row was released and a
+      // newer claim may own the file now. That job re-probes it; writing an
+      // identity from here could overwrite what the newer job recorded.
       jobRepo.appendOutcome({ jobId: payload.jobId, text });
       return file?.state ?? 'failed';
     }
     const latest = jobRepo.listForFile(payload.fileId)[0];
     if (file !== null && file.state === 'running' && latest?.id === payload.jobId) {
+      // Still ours: a replacement that landed before the refusal is recorded
+      // before the stall, or the retry would start from the old identity and
+      // probe of a file that is no longer on disk.
+      if (report?.replaced != null) recordReplacement({ db, row: file, report, nowMs });
       return applyJobFailure({ db, payload, reason: text, nowMs }).state;
     }
     jobRepo.finish({ jobId: payload.jobId, state: 'failed', outcome: text, nowMs: nowMs() });
@@ -378,8 +386,14 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
     let text: string;
     try {
       if (outcome.ok && outcome.report.cancelled) {
-        state = applyJobCancelled({ db, payload, nowMs }).state;
+        state = applyJobCancelled({ db, payload, report: outcome.report, nowMs }).state;
         text = 'Cancelled by an operator; the file was requeued unpenalised.';
+      } else if (outcome.ok && outcome.report.superseded === true) {
+        // A refused commit AFTER a Replace landed (`runPayload` reports rather
+        // than throws then): the same fold as a `failed` frame marked
+        // superseded, carrying the replacement to record.
+        text = outcome.report.outcome;
+        state = settleSuperseded(payload, text, outcome.report);
       } else if (outcome.ok) {
         state = applyJobReport({ db, payload, report: outcome.report, nowMs }).state;
         text = outcome.report.outcome;

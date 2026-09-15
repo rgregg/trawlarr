@@ -846,6 +846,57 @@ exports.plugin = (args) => {
       expect(stepsSeen.some((step) => step.pluginId === 'trawlarr:writeToLog')).toBe(false);
     }, 180_000);
 
+    it('reports a landed replacement when a later commit is refused, instead of losing it in the abort', async () => {
+      // Replace installs, then a community plugin's commit is refused (an
+      // operator cancel, or a lease that ran out). Rethrowing the abort here
+      // threw away `replaced`: the row was requeued with its OLD identity
+      // though the file on disk had already changed.
+      const payload = await realTranscodePayload();
+      const before = await readFile(payload.path);
+      const community = passThroughPluginPath();
+      const flow = payload.flow.definition;
+      const withCommunity: JobPayload = {
+        ...payload,
+        pluginPaths: { 'tdarr:afterReplace': community },
+        flow: {
+          ...payload.flow,
+          definition: {
+            nodes: [
+              ...flow.nodes,
+              {
+                id: 'after',
+                pluginId: 'tdarr:afterReplace',
+                pluginVersion: '1.0.0',
+                inputs: {},
+              },
+            ],
+            edges: [...flow.edges, { fromNodeId: 'replace', outputNumber: 1, toNodeId: 'after' }],
+          },
+        },
+      };
+      const gate: CommitGate = async (request) => {
+        if (request.kind === 'plugin') throw new SupersededError('cancelled by an operator');
+      };
+
+      const report = await runPayload({
+        payload: withCommunity,
+        ports: { ...quietPorts(), commitGate: gate },
+      });
+
+      expect(report.failed).toBe(true);
+      expect(report.success).toBe(false);
+      expect(report.superseded).toBe(true);
+      expect(report.error).toContain('cancelled by an operator');
+      expect(report.outcome).toContain('cancelled by an operator');
+      expect(report.replaced).not.toBeNull();
+      expect(report.replaced!.probe).not.toBeNull();
+      expect(report.postFacts).not.toBeNull();
+      expect(report.steps.map((step) => step.pluginId)).toContain('trawlarr:replaceOriginal');
+      const after = await readFile(report.replaced!.path);
+      expect(after.equals(before)).toBe(false);
+      expect(listStagingDirs(payload)).toEqual([]);
+    }, 180_000);
+
     it('with no commitGate port, behaves exactly as before', async () => {
       const payload = await realTranscodePayload();
       const report = await runPayload({ payload, ports: quietPorts() });

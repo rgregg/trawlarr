@@ -74,6 +74,31 @@ const flowFor = (encoder: string): FlowDefinition => ({
   ],
 });
 
+const HEVC_PROBE: ProbeData = {
+  streams: [
+    { index: 0, codec_type: 'video', codec_name: 'hevc', width: 1920, height: 1080 },
+    { index: 1, codec_type: 'audio', codec_name: 'aac' },
+  ],
+  format: { duration: '60.0', size: '2048', bit_rate: '8192' },
+};
+
+const HEVC_FACTS: FactSet = extractFacts({ probe: HEVC_PROBE, container: 'mkv', sizeBytes: 2048 });
+
+/** What a Replace that really swapped a new file in reports. */
+const replacedFile = (path: string): NonNullable<JobReport['replaced']> => ({
+  path,
+  container: 'mkv',
+  sizeBytes: 2048,
+  mtimeMs: NOW,
+  ctimeMs: NOW,
+  nlink: 1,
+  deviceId: 9,
+  inode: 4242,
+  hash: { sizeBytes: 2048, headHex: 'newhead', tailHex: 'newtail' },
+  probe: HEVC_PROBE,
+  probeError: null,
+});
+
 const rowsInState = (db: Db, state: FileState): MediaFileRow[] =>
   db.prepare(`SELECT * FROM media_file WHERE state = ?`).all(state) as MediaFileRow[];
 
@@ -622,6 +647,35 @@ describe('the supervisor', () => {
     expect(row.hold_until_ms).toBeNull();
   });
 
+  it('records the new identity when a cancelled report says a replacement already landed', async () => {
+    // Replace installed, then the operator's cancel refused a later plugin's
+    // commit. The cancel still requeues unpenalised, but the file on disk is
+    // not the one the row describes any more.
+    const { supervisor, agents, db, cancelledReport } = harness({
+      queued: 1,
+      target: { transcode: 1, health: 0 },
+    });
+
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+    const fileId = agent.payload.fileId;
+    await agent.finish({
+      ...cancelledReport(agent),
+      failed: true,
+      superseded: true,
+      replaced: replacedFile(agent.payload.path),
+      postFacts: HEVC_FACTS,
+    });
+
+    const row = rowFor(db, fileId);
+    expect(row.state).toBe('queued');
+    expect(row.attempt_count).toBe(0);
+    expect(row.inode_key).toBe('9:4242');
+    expect(row.size_bytes).toBe(2048);
+    expect(createJobRepo(db).getById(agent.payload.jobId)?.state).toBe('cancelled');
+  });
+
   it('leaves a cancelled file as claimable as one that was never claimed', async () => {
     // The documented consequence of `applyJobCancelled` (see its own comment:
     // "eligible again the moment a worker is free"). A cancel is a stop, not
@@ -967,6 +1021,61 @@ describe('the supervisor, across remote nodes', () => {
 
     expect(rowFor(db, agent.payload.fileId).state).toBe('held');
     expect(createJobRepo(db).getById(agent.payload.jobId)?.endedAt).not.toBeNull();
+  });
+
+  it('records a landed replacement from a superseded report before stalling the still-held row', async () => {
+    const { supervisor, agents, addNode, libraryId, db, successReport } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+
+    await agent.finish({
+      ...successReport(agent),
+      success: false,
+      failed: true,
+      superseded: true,
+      outcome: 'Flow aborted after a replacement: refused',
+      replaced: replacedFile(agent.payload.path),
+      postFacts: HEVC_FACTS,
+    });
+
+    const row = rowFor(db, agent.payload.fileId);
+    expect(row.state).toBe('held');
+    expect(row.attempt_count).toBe(1);
+    expect(row.inode_key).toBe('9:4242');
+    expect(createJobRepo(db).getById(agent.payload.jobId)?.endedAt).not.toBeNull();
+  });
+
+  it('only appends a superseded report to a job row that already ended, even with a replacement', async () => {
+    // The release closed the row and a newer claim may own the file: that
+    // job re-probes; this late report must not write the file's identity.
+    const { supervisor, agents, addNode, libraryId, db, successReport } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+    applyJobFailure({ db, payload: agent.payload, reason: 'released', nowMs: () => NOW });
+    const before = rowFor(db, agent.payload.fileId);
+
+    await agent.finish({
+      ...successReport(agent),
+      success: false,
+      failed: true,
+      superseded: true,
+      outcome: 'Flow aborted after a replacement: refused',
+      replaced: replacedFile(agent.payload.path),
+      postFacts: HEVC_FACTS,
+    });
+
+    expect(rowFor(db, agent.payload.fileId)).toEqual(before);
+    expect(createJobRepo(db).getById(agent.payload.jobId)?.outcome).toContain('refused');
   });
 
   it('calls settled() exactly once, after the job row has ended', async () => {

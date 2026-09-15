@@ -300,6 +300,23 @@ describe('createRemoteAgentHandle', () => {
     expect((await run).replaced?.path).toBe('/media/movies/a.mkv');
   });
 
+  it('marks a superseded report cancelled when this handle was cancelled, as a failed frame would be', async () => {
+    // The node's commit can be refused for the cancel before the cancel frame
+    // itself reaches it: its report then says superseded, not cancelled, and
+    // folding that as a superseded stall would spend an attempt on the
+    // operator's decision.
+    const { handle, state } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    state.online = false;
+    handle.cancel();
+    handle.receive({
+      type: 'done',
+      report: { ...reportFixture('/mnt/nas/movies/a.mkv'), failed: true, superseded: true },
+    });
+    expect((await run).cancelled).toBe(true);
+  });
+
   it('a failed frame rejects as reported, carrying superseded', async () => {
     const { handle } = harness();
     const run = handle.run(payloadFixture());

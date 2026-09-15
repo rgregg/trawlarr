@@ -178,6 +178,13 @@ export interface JobReport {
   preFacts: FactSet;
   postFacts: FactSet | null;
   cancelled: boolean;
+  /**
+   * The run was stopped by a `SupersededError` (a refused commit) AFTER a
+   * Replace had already run, so it reports rather than throws — see the
+   * abort handling in `runPayload`. The daemon folds it as it folds a
+   * `failed` frame marked `superseded`, having first recorded `replaced`.
+   */
+  superseded?: boolean;
 }
 
 /** The engine's own substitute for the Replace Original File node's plugin id. */
@@ -672,13 +679,25 @@ export const runPayload = async (input: {
       };
 
       // A `FlowAbort` (a refused or unanswerable commit) comes out of
-      // `runFlow` as a rejection, not a result, and deliberately leaves this
-      // function the same way: there is no honest `JobReport` for a run that
-      // could not commit, and the agent reports it as `failed` — marked
-      // `superseded` when it is a `SupersededError`. It is caught only to put
-      // the reason in this job's own log, and re-thrown through the `finally`
-      // blocks below, which still remove the scratch directory holding the
-      // encode that will now never be installed.
+      // `runFlow` as a rejection, not a result. With no Replace invocation
+      // yet in this run it leaves this function the same way: there is no
+      // honest `JobReport` for a run that could not commit, and the agent
+      // reports it as `failed` — marked `superseded` when it is a
+      // `SupersededError`. The `finally` blocks below still remove the
+      // scratch directory holding the encode that will now never be
+      // installed.
+      //
+      // ONCE A REPLACE HAS RUN, THE ABORT IS NOT RETHROWN. Replace installs
+      // and a later community plugin's commit is refused (an operator's
+      // cancel, a lease that ran out): the library file on disk has already
+      // changed, and a thrown abort carries no `replaced`, so the row was
+      // requeued or stalled under its OLD identity and path. That is the
+      // "job outcome vs. file changed" conflation AGENTS.md warns about. So
+      // the run is reported — failed, carrying the abort — with `replaced`
+      // computed exactly as for a finished flow, and the daemon records the
+      // identity before it folds the abort.
+      const stepsSoFar: StepRecord[] = [];
+      let aborted: FlowAbort | null = null;
       const result = await runFlow({
         flow: payload.flow.definition,
         initialPath: payload.path,
@@ -691,6 +710,7 @@ export const runPayload = async (input: {
           // lets a reader of the raw log tell one node's output from the
           // next's without cross-referencing `job_step` rows.
           log?.append(`--- step ${String(step.seq)}: ${step.pluginId} ---`);
+          stepsSoFar.push(step);
           ports.onStep(step);
           // Once per completed step: the natural unit of progress here, since
           // every long-running node (Execute, Verify, Replace) is itself one
@@ -703,49 +723,13 @@ export const runPayload = async (input: {
       }).catch((error: unknown) => {
         if (error instanceof FlowAbort) {
           onLog(`The run stopped before a library write: ${error.message}`);
+          if (replaceOutputs.length > 0) {
+            aborted = error;
+            return null;
+          }
         }
         throw error;
       });
-
-      // THE RULE: a terminal output the flow author did not route, on a node
-      // that is reporting failure, is not success.
-      //
-      // Both halves are read from things that already exist and generalise:
-      //
-      //  - "terminal and unrouted" is `stopReason === 'end-of-flow'`, which
-      //    `runFlow` returns from exactly one place — the branch where no edge
-      //    leaves the output the node just took. The flow definition knows
-      //    which outputs have no outgoing edge; this is that fact, already
-      //    computed. Only the LAST step can be the unrouted one, so that is
-      //    the step judged. A flow that DOES route its failure output
-      //    somewhere (quarantine, alert, retry with different settings) and
-      //    finishes on its own terms downstream is unaffected.
-      //
-      //  - "reporting failure" is the node's OWN `details()` declaration for
-      //    the output it took (`PluginOutputDescriptor.outcome`), captured on
-      //    the step by `runFlow`. Not a plugin-id allow-list: that shape
-      //    listed Verify Output and Replace Original File and silently
-      //    omitted Execute, so ffmpeg exiting non-zero — a missing hardware
-      //    encoder, a corrupt source, ENOSPC in staging — ended the flow with
-      //    `success = true` and stored the PRE-transcode signature as `good`,
-      //    which `isKnownGood` then matched forever: a whole library
-      //    reporting "100% converged" with nothing transcoded and no error
-      //    anywhere. An id list has to be extended for every future
-      //    first-party node and can never cover a community plugin at all;
-      //    a declaration travels with the node that owns the meaning.
-      //
-      // A node that declares nothing (the Tdarr-compatible shape) is neutral,
-      // which is deliberate and conservative in the safe direction: guessing
-      // "failure" from an undeclared output — say, by pattern-matching the
-      // tooltip — would misread a filter node's "no, this file is not hevc"
-      // as a failure and hold files that had genuinely converged.
-      const lastStep = result.steps.at(-1);
-      const endedOnUnroutedFailure =
-        result.stopReason === 'end-of-flow' &&
-        lastStep !== undefined &&
-        lastStep.outputOutcome === 'failure';
-
-      const success = !result.failed && !endedOnUnroutedFailure;
 
       // What the LIBRARY FILE is now, decided from the Replace node's OWN
       // returned path — never from the step's output number, and never from
@@ -823,6 +807,69 @@ export const runPayload = async (input: {
           replaced.probeError = messageOf(error);
         }
       }
+
+      if (result === null) {
+        const abort = aborted as FlowAbort | null;
+        const message = abort?.message ?? 'The run was aborted.';
+        return {
+          jobId: payload.jobId,
+          fileId: payload.fileId,
+          steps: stepsSoFar,
+          // `runFlow` has no stop reason for an abort; the outcome names it.
+          stopReason: 'plugin-error',
+          failed: true,
+          error: message,
+          success: false,
+          held: false,
+          reviewReason: null,
+          outcome: `Flow aborted after a replacement: ${message}`,
+          replaced,
+          preFacts,
+          postFacts,
+          cancelled: ports.signal?.aborted === true,
+          superseded: abort instanceof SupersededError,
+        };
+      }
+
+      // THE RULE: a terminal output the flow author did not route, on a node
+      // that is reporting failure, is not success.
+      //
+      // Both halves are read from things that already exist and generalise:
+      //
+      //  - "terminal and unrouted" is `stopReason === 'end-of-flow'`, which
+      //    `runFlow` returns from exactly one place — the branch where no edge
+      //    leaves the output the node just took. The flow definition knows
+      //    which outputs have no outgoing edge; this is that fact, already
+      //    computed. Only the LAST step can be the unrouted one, so that is
+      //    the step judged. A flow that DOES route its failure output
+      //    somewhere (quarantine, alert, retry with different settings) and
+      //    finishes on its own terms downstream is unaffected.
+      //
+      //  - "reporting failure" is the node's OWN `details()` declaration for
+      //    the output it took (`PluginOutputDescriptor.outcome`), captured on
+      //    the step by `runFlow`. Not a plugin-id allow-list: that shape
+      //    listed Verify Output and Replace Original File and silently
+      //    omitted Execute, so ffmpeg exiting non-zero — a missing hardware
+      //    encoder, a corrupt source, ENOSPC in staging — ended the flow with
+      //    `success = true` and stored the PRE-transcode signature as `good`,
+      //    which `isKnownGood` then matched forever: a whole library
+      //    reporting "100% converged" with nothing transcoded and no error
+      //    anywhere. An id list has to be extended for every future
+      //    first-party node and can never cover a community plugin at all;
+      //    a declaration travels with the node that owns the meaning.
+      //
+      // A node that declares nothing (the Tdarr-compatible shape) is neutral,
+      // which is deliberate and conservative in the safe direction: guessing
+      // "failure" from an undeclared output — say, by pattern-matching the
+      // tooltip — would misread a filter node's "no, this file is not hevc"
+      // as a failure and hold files that had genuinely converged.
+      const lastStep = result.steps.at(-1);
+      const endedOnUnroutedFailure =
+        result.stopReason === 'end-of-flow' &&
+        lastStep !== undefined &&
+        lastStep.outputOutcome === 'failure';
+
+      const success = !result.failed && !endedOnUnroutedFailure;
 
       const held = result.stopReason === 'held-for-review';
       const outcome = held

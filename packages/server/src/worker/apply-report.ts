@@ -72,38 +72,26 @@ const requireRow = (db: Db, fileId: string): MediaFileRow => {
 };
 
 /**
- * Persist what a run reported: the replacement it made (if any), the ledger
- * transition it implies, and the job row's own outcome.
+ * Record what a run's Replace left on disk against the row, when — and only
+ * when — the library file's identity actually changed.
  *
- * This is the half of the old `runJob` that writes. It takes a `JobReport`,
- * which is plain data — so the run that produced it may have happened in
- * another process — and is the ONLY place the file's next state is decided.
+ * Shared by every fold that can carry a report: a finished run
+ * (`applyJobReport`), an operator's cancel, and a superseded abort, all of
+ * which may arrive after a replacement already landed. A cancel that
+ * requeued the row under its OLD identity left the next scan to open a
+ * second row for the same path.
  *
- * Throws when the replacement cannot be recorded (an identity collision, an
- * unreadable replacement). `runJob` folds that into a stall, exactly as it
- * did when this code was inline.
+ * Throws when the replacement cannot be recorded (unprobeable, identity
+ * collision); callers fold that into a stall.
  */
-export const applyJobReport = (input: {
+export const recordReplacement = (input: {
   db: Db;
-  payload: JobPayload;
+  row: MediaFileRow;
   report: JobReport;
   nowMs: () => number;
-}): AppliedOutcome => {
-  const { db, payload, report } = input;
+}): { claimedModified: boolean; postFacts: FactSet | null } => {
+  const { db, row, report } = input;
   const mediaFileRepo = createMediaFileRepo(db);
-  const jobRepo = createJobRepo(db);
-  const row = requireRow(db, payload.fileId);
-  if (report.held === true) {
-    // Remember the human decision before probing/identity reconciliation can
-    // throw. A failed reconciliation (or a crash) must not turn it into retry
-    // backoff, and the replacement's new path must remain blocked as well.
-    mediaFileRepo.rememberReviewIntent({
-      fileId: row.id,
-      reason: report.reviewReason?.trim() || 'Review requested by the flow.',
-      path: report.replaced?.path ?? row.path,
-    });
-  }
-
   // Whether the LIBRARY FILE actually changed — decided from identity
   // (inode, content hash), never from the replace step's output number and
   // never from whether the job as a whole succeeded. The report carries the
@@ -203,6 +191,49 @@ export const applyJobReport = (input: {
       throw error;
     }
   }
+
+  return { claimedModified, postFacts };
+};
+
+/**
+ * Persist what a run reported: the replacement it made (if any), the ledger
+ * transition it implies, and the job row's own outcome.
+ *
+ * This is the half of the old `runJob` that writes. It takes a `JobReport`,
+ * which is plain data — so the run that produced it may have happened in
+ * another process — and is the ONLY place the file's next state is decided.
+ *
+ * Throws when the replacement cannot be recorded (an identity collision, an
+ * unreadable replacement). `runJob` folds that into a stall, exactly as it
+ * did when this code was inline.
+ */
+export const applyJobReport = (input: {
+  db: Db;
+  payload: JobPayload;
+  report: JobReport;
+  nowMs: () => number;
+}): AppliedOutcome => {
+  const { db, payload, report } = input;
+  const mediaFileRepo = createMediaFileRepo(db);
+  const jobRepo = createJobRepo(db);
+  const row = requireRow(db, payload.fileId);
+  if (report.held === true) {
+    // Remember the human decision before probing/identity reconciliation can
+    // throw. A failed reconciliation (or a crash) must not turn it into retry
+    // backoff, and the replacement's new path must remain blocked as well.
+    mediaFileRepo.rememberReviewIntent({
+      fileId: row.id,
+      reason: report.reviewReason?.trim() || 'Review requested by the flow.',
+      path: report.replaced?.path ?? row.path,
+    });
+  }
+
+  const { claimedModified, postFacts } = recordReplacement({
+    db,
+    row,
+    report,
+    nowMs: input.nowMs,
+  });
 
   const currentSignature = computeSignature({
     flowDefinitionHash: payload.flow.definitionHash,
@@ -354,9 +385,24 @@ export const applyThrownFailure = (input: {
 export const applyJobCancelled = (input: {
   db: Db;
   payload: JobPayload;
+  /**
+   * The cancelled run's own report, when it produced one. A cancel that
+   * refused a commit AFTER Replace installed still changed the library file,
+   * and requeueing under the old identity would let the next scan open a
+   * second row for it — so the replacement is recorded first.
+   */
+  report?: JobReport;
   nowMs: () => number;
 }): AppliedOutcome => {
   const mediaFileRepo = createMediaFileRepo(input.db);
+  if (input.report?.replaced != null) {
+    recordReplacement({
+      db: input.db,
+      row: requireRow(input.db, input.payload.fileId),
+      report: input.report,
+      nowMs: input.nowMs,
+    });
+  }
   // Throws for a file that no longer exists, exactly as `requireRow` would:
   // a cancel for a row that has been deleted is a bug worth surfacing, not
   // something to swallow.
