@@ -4,7 +4,7 @@ import { WebSocket, type RawData } from 'ws';
 import type { HardwareType } from '@trawlarr/core';
 import type { DocumentPort, StepRecord } from '@trawlarr/engine';
 import { osFileLock } from '../daemon/os-file-lock.js';
-import { MAX_LOG_EXCERPT_CHARS, truncateLogExcerpt } from '../db/job-repo.js';
+import { MAX_LOG_EXCERPT_CHARS, truncateLogExcerpt } from '../job-log/log-excerpt.js';
 import { DAEMON_VERSION } from '../daemon/version.js';
 import {
   parseServerFrame,

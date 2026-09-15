@@ -12,7 +12,7 @@ import {
   type NodeFrame,
   type ServerFrame,
 } from '../nodes/node-frames.js';
-import { MAX_LOG_EXCERPT_CHARS } from '../db/job-repo.js';
+import { MAX_LOG_EXCERPT_CHARS } from '../job-log/log-excerpt.js';
 import { AgentFailure, type AgentHandle, type AgentHandleDeps } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION } from '../worker/protocol.js';
