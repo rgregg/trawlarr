@@ -95,21 +95,31 @@ describe('validatePathMapRows', () => {
 });
 
 describe('joinCommand', () => {
-  it('produces the docker and cli commands verbatim', () => {
+  it('pins the docker command to the published sha tag, with a library volume placeholder', () => {
     expect(
       joinCommand({
         serverUrl: 'http://trawlarr.example.com:8787',
         token: 'tok_abc123',
-        version: '1.2.0',
+        commit: '0341860aa1b2c3d4e5f60718293a4b5c6d7e8f90',
       }),
     ).toEqual({
       docker:
         'docker run -d --name trawlarr-node -e TRAWLARR_MODE=node ' +
         '-e TRAWLARR_SERVER=http://trawlarr.example.com:8787 ' +
-        '-e TRAWLARR_NODE_TOKEN=tok_abc123 -v trawlarr-node:/config ' +
-        'ghcr.io/rgregg/trawlarr:1.2.0',
+        '-e TRAWLARR_NODE_TOKEN=tok_abc123 ' +
+        '-v <library-path>:<path-this-node-uses> -v trawlarr-node:/config ' +
+        'ghcr.io/rgregg/trawlarr:sha-0341860',
       cli: 'trawlarr node --server http://trawlarr.example.com:8787 --token tok_abc123',
     });
+  });
+
+  it('falls back to :main when the server reports no commit, never an unpublished version tag', () => {
+    // `version` is 0.0.0 on every main build, and no :0.0.0 is ever pushed.
+    expect(
+      joinCommand({ serverUrl: 'http://s', token: 't', commit: null }).docker.endsWith(
+        'ghcr.io/rgregg/trawlarr:main',
+      ),
+    ).toBe(true);
   });
 });
 

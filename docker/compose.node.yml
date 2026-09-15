@@ -12,6 +12,10 @@ services:
     # killed by process group with a ~5s grace period, so 15s is enough for
     # that shutdown to finish and still fast to recycle the container.
     stop_grace_period: 15s
+    # The image's HEALTHCHECK polls the daemon's HTTP port. A node runs no
+    # HTTP server, so left enabled it would report unhealthy for ever.
+    healthcheck:
+      disable: true
     environment:
       - PUID=1000
       - PGID=1000
@@ -41,6 +45,9 @@ services:
     container_name: trawlarr-node-nvidia
     restart: unless-stopped
     stop_grace_period: 15s
+    # No HTTP server on a node: see trawlarr-node above.
+    healthcheck:
+      disable: true
     runtime: nvidia
     environment:
       - PUID=1000

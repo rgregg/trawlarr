@@ -16,13 +16,13 @@ import {
 } from './nodes-model.js';
 
 /**
- * `GET /system/version`'s `version` field — the tag the join dialog's
- * `docker run` command pins to. Declared narrowly here rather than pulling
- * in `VersionResource` from `Config.tsx`, the same way every other section
- * on this screen only imports the one field it reads.
+ * `GET /system/version`'s `commit` field — what the join dialog's
+ * `docker run` command pins its image tag to. Declared narrowly here rather
+ * than pulling in `VersionResource` from `Config.tsx`, the same way every
+ * other section on this screen only imports the one field it reads.
  */
 interface VersionInfo {
-  version: string;
+  commit: string | null;
 }
 
 const copyToClipboard = (text: string): Promise<void> | null => {
@@ -63,13 +63,13 @@ const JoinDialog = (props: {
   name: string;
   serverUrl: string;
   token: string;
-  version: string;
+  commit: string | null;
   onDone: () => void;
 }): JSX.Element => {
   const commands = joinCommand({
     serverUrl: props.serverUrl,
     token: props.token,
-    version: props.version,
+    commit: props.commit,
   });
   return (
     <div role="alert" className="config-section node-join-dialog">
@@ -477,7 +477,7 @@ export const Nodes = (props: {
   const stale = props.live.staleness.nodes;
   const [nodes, setNodes] = useState<NodeResource[] | null>(null);
   const [libraryNames, setLibraryNames] = useState<Record<string, string>>({});
-  const [version, setVersion] = useState<string | null>(null);
+  const [commit, setCommit] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [view, setView] = useState<View>({ kind: 'list' });
@@ -544,7 +544,7 @@ export const Nodes = (props: {
       try {
         const info = await client.get<VersionInfo>('/system/version');
         if (cancelled) return;
-        setVersion(info.version);
+        setCommit(info.commit);
       } catch {
         // Same as above: the join dialog just has nothing to pin if this
         // fails, which is caught before the dialog opens (see `createNode`).
@@ -594,7 +594,7 @@ export const Nodes = (props: {
           name={view.name}
           serverUrl={(globalThis as { location?: { origin?: string } }).location?.origin ?? ''}
           token={view.token}
-          version={version ?? 'latest'}
+          commit={commit}
           onDone={() => {
             setView({ kind: 'list' });
           }}

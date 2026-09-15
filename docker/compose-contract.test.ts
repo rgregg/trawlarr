@@ -78,6 +78,16 @@ describe('the node variant', () => {
     expect(body).not.toMatch(/^\s*ports:/m);
   });
 
+  it("disables the image's HTTP healthcheck in every node service, which has no HTTP server to answer it", () => {
+    // The image's HEALTHCHECK polls the daemon's port. A node never listens,
+    // so left enabled every node container reports unhealthy for ever.
+    const services = body.split(/^ {2}(?=trawlarr-node)/m).slice(1);
+    expect(services).toHaveLength(2);
+    for (const service of services) {
+      expect(service).toMatch(/^\s+healthcheck:\s*\n\s+disable:\s+true\b/m);
+    }
+  });
+
   it('selects node mode', () => {
     expect(body).toMatch(/TRAWLARR_MODE=node/);
   });
