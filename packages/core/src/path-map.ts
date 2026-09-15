@@ -36,7 +36,7 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
   if (!Array.isArray(map)) throw new PathMapError('A path map must be a list.');
   const seenServer = new Set<string>();
   const seenNode = new Set<string>();
-  return map.map((entry: unknown, index) => {
+  const entries = map.map((entry: unknown, index) => {
     const record = (entry ?? {}) as Record<string, unknown>;
     const serverPath = checkAbsolute(
       `Entry ${String(index + 1)}: server path`,
@@ -58,6 +58,27 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
     seenNode.add(nodePath);
     return { serverPath, nodePath };
   });
+  // Nesting has to be the same on both sides. With `/media/movies -> /mnt`
+  // and `/media/tv -> /mnt/tv`, the server file `/media/movies/tv/x` maps to
+  // `/mnt/tv/x`, and the longest-prefix lookup maps THAT back to
+  // `/media/tv/x`: a report (and its replacement) would be recorded against
+  // a different file than the one the node was sent.
+  for (const a of entries) {
+    for (const b of entries) {
+      if (a === b) continue;
+      const nodeNested = within(b.nodePath, a.nodePath);
+      const serverNested = within(b.serverPath, a.serverPath);
+      if (nodeNested !== serverNested) {
+        const describe = (entry: PathMapping): string =>
+          `"${entry.serverPath}" -> "${entry.nodePath}"`;
+        throw new PathMapError(
+          `Entries ${describe(b)} and ${describe(a)} nest differently on the server and the node, ` +
+            `so a path under one could map back to the other. Nest them the same way on both sides.`,
+        );
+      }
+    }
+  }
+  return entries;
 };
 
 const within = (root: string, path: string): boolean =>

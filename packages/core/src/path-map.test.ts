@@ -65,4 +65,33 @@ describe('validatePathMap', () => {
       ]),
     ).toThrow(/\/mnt\/nas/);
   });
+
+  it('rejects a node path nested inside another when the server paths are not nested the same way, naming both', () => {
+    // /media/movies/tv/x -> /mnt/tv/x -> back to /media/tv/x: a report would
+    // land on a different file than the one the node was sent.
+    const map = [
+      { serverPath: '/media/movies', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+    ];
+    expect(() => validatePathMap(map)).toThrow(PathMapError);
+    expect(() => validatePathMap(map)).toThrow(/\/media\/movies[\s\S]*\/media\/tv/);
+  });
+
+  it('rejects a server path nested inside another when the node paths are not nested', () => {
+    expect(() =>
+      validatePathMap([
+        { serverPath: '/media', nodePath: '/mnt/a' },
+        { serverPath: '/media/tv', nodePath: '/srv/tv' },
+      ]),
+    ).toThrow(PathMapError);
+  });
+
+  it('accepts nesting that is the same on both sides', () => {
+    expect(
+      validatePathMap([
+        { serverPath: '/media', nodePath: '/mnt' },
+        { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+      ]),
+    ).toHaveLength(2);
+  });
 });

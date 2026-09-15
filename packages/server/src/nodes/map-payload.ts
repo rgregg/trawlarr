@@ -13,8 +13,8 @@ import type { LibraryRecord } from '../db/library-repo.js';
 export class UnmappedPathError extends Error {
   readonly path: string;
 
-  constructor(path: string) {
-    super(`Path "${path}" is outside the node's path map.`);
+  constructor(path: string, message?: string) {
+    super(message ?? `Path "${path}" is outside the node's path map.`);
     this.path = path;
   }
 }
@@ -41,9 +41,29 @@ const toServerOrThrow = (map: readonly PathMapping[], path: string): string => {
  * `configVars`/`pluginPaths`/`ffmpegPath`/`ffprobePath` are untouched here —
  * see the task brief for why each is the node host's job, not this one's.
  */
-export const payloadToNode = (payload: JobPayload, map: readonly PathMapping[]): JobPayload => ({
+export const payloadToNode = (payload: JobPayload, map: readonly PathMapping[]): JobPayload => {
+  const nodePath = toNodeOrThrow(map, payload.path);
+  // The report comes back through `reportToServer`'s longest-prefix lookup,
+  // not this one. A map whose entries overlap can send `/media/shows/x` to
+  // `/mnt/shows/x` and bring that back as `/media/tv/x` — recording the
+  // result against a different file. Refused before the job is sent.
+  if (mapPath(map, nodePath, 'toServer') !== payload.path) {
+    throw new UnmappedPathError(
+      payload.path,
+      `Path "${payload.path}" maps to "${nodePath}" on the node, which does not map back to the ` +
+        `same server path. Fix the node's path map so its entries do not overlap.`,
+    );
+  }
+  return mapPayload(payload, map, nodePath);
+};
+
+const mapPayload = (
+  payload: JobPayload,
+  map: readonly PathMapping[],
+  nodePath: string,
+): JobPayload => ({
   ...payload,
-  path: toNodeOrThrow(map, payload.path),
+  path: nodePath,
   library: {
     ...payload.library,
     roots: payload.library.roots.map((root) => toNodeOrThrow(map, root)),

@@ -141,6 +141,21 @@ describe('payloadToNode', () => {
     ).toThrow(UnmappedPathError);
   });
 
+  it('throws UnmappedPathError when the file would not map back to the same server path', () => {
+    // Nested the same way on both sides, so validatePathMap accepts it, but
+    // /media/shows/x -> /mnt/shows/x -> back through /mnt/shows -> /media/tv/x.
+    const map = [
+      { serverPath: '/media', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/shows' },
+    ];
+    const payload = fixturePayload({
+      path: '/media/shows/x.mkv',
+      library: { roots: ['/media'], stagingDir: null, trashDir: null },
+    });
+    expect(() => payloadToNode(payload, map)).toThrow(UnmappedPathError);
+    expect(() => payloadToNode(payload, map)).toThrow(/\/media\/shows\/x\.mkv/);
+  });
+
   it('throws when a library root is outside the map', () => {
     expect(() =>
       payloadToNode(fixturePayload({ library: { roots: ['/other/movies'] } }), MAP),
