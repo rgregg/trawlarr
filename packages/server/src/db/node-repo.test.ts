@@ -117,6 +117,37 @@ describe('createNodeRepo', () => {
     ).toEqual([{ serverPath: '/media', nodePath: '/mnt' }]);
   });
 
+  it('reads a stored map that no longer validates as-is, with the reason, and keeps it across other edits', async () => {
+    const { node } = await repo.create({ name: 'n', nowMs: 0 });
+    const legacy = [
+      { serverPath: '/media', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/shows' },
+    ];
+    expect(() => repo.update(node.id, { pathMap: legacy })).toThrow(/"tv"[\s\S]*"shows"/);
+    db.prepare('UPDATE node SET path_map_json = ? WHERE id = ?').run(
+      JSON.stringify(legacy),
+      node.id,
+    );
+
+    const stored = repo.getById(node.id)!;
+    expect(stored.pathMap).toEqual(legacy);
+    expect(stored.pathMapError).toMatch(/"tv"[\s\S]*"shows"/);
+    expect(repo.list().find((record) => record.id === node.id)?.pathMapError).toBe(
+      stored.pathMapError,
+    );
+    // Renaming the node must not be blocked by, or silently erase, the map.
+    expect(repo.update(node.id, { name: 'renamed' }).pathMap).toEqual(legacy);
+    // Fixing the map clears the reason.
+    expect(
+      repo.update(node.id, {
+        pathMap: [
+          { serverPath: '/media', nodePath: '/mnt' },
+          { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+        ],
+      }).pathMapError,
+    ).toBeNull();
+  });
+
   it('remove refuses a node with a running job', async () => {
     const { node } = await repo.create({ name: 'n', nowMs: 0 });
 

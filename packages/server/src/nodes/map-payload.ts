@@ -47,6 +47,11 @@ export const payloadToNode = (payload: JobPayload, map: readonly PathMapping[]):
   // not this one. A map whose entries overlap can send `/media/shows/x` to
   // `/mnt/shows/x` and bring that back as `/media/tv/x` — recording the
   // result against a different file. Refused before the job is sent.
+  //
+  // Defence in depth: `validatePathMap` now refuses any map where this can
+  // happen, so for a validated map this should be unreachable. It stays for
+  // a map stored before that rule existed (and the hub refuses to offer such
+  // a node work at all — see `NodeRecord.pathMapError`).
   if (mapPath(map, nodePath, 'toServer') !== payload.path) {
     throw new UnmappedPathError(
       payload.path,
@@ -81,13 +86,29 @@ const mapPayload = (
  * Only `replaced.path` carries a persisted path a node could have produced;
  * step records carry no paths of their own (`StepRecord.logExcerpt` is free
  * text, written as-is).
+ *
+ * `replaced.path` is where a plugin chose to put its output, not a path the
+ * server sent, so the round-trip guard in `payloadToNode` never saw it. It
+ * gets its own: under a map with inconsistent nesting, `/mnt/tv/x` maps back
+ * to `/media/tv/x`, whose node path is `/mnt/shows/x` — and the row would
+ * record the identity of a file the node never touched. A validated map
+ * cannot do this; a map stored before `validatePathMap` refused it can, and
+ * the throw settles the job as a failed attempt (`remote-agent`'s `done`).
  */
 export const reportToServer = (report: JobReport, map: readonly PathMapping[]): JobReport => {
   if (report.replaced === null) return report;
-  return {
-    ...report,
-    replaced: { ...report.replaced, path: toServerOrThrow(map, report.replaced.path) },
-  };
+  const nodePath = report.replaced.path;
+  const serverPath = toServerOrThrow(map, nodePath);
+  const again = mapPath(map, serverPath, 'toNode');
+  if (again !== nodePath) {
+    throw new UnmappedPathError(
+      nodePath,
+      `The replacement at "${nodePath}" on the node maps to "${serverPath}" on the server, which ` +
+        `maps back to "${String(again)}" rather than the same node path. Fix the node's path map ` +
+        `so its nested entries sit at the same place on both sides.`,
+    );
+  }
+  return { ...report, replaced: { ...report.replaced, path: serverPath } };
 };
 
 /**

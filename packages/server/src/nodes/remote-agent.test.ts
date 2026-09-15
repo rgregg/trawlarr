@@ -186,6 +186,26 @@ describe('createRemoteAgentHandle', () => {
     expect(report.replaced?.path).toBe('/media/movies/a.mkv');
   });
 
+  it('settles as an ordinary failure, not unmapped, when a replaced path does not round-trip under the stored map', async () => {
+    const legacy: PathMapping[] = [
+      { serverPath: '/media', nodePath: '/mnt/nas' },
+      { serverPath: '/media/movies/extras', nodePath: '/mnt/nas/bonus' },
+    ];
+    const { handle, statted } = harness({
+      prepare: (payload) =>
+        Promise.resolve({ payload: payloadToNode(payload, legacy), pathMap: legacy }),
+    });
+    const run = handle.run(payloadFixture());
+    await flush();
+    // Back to /media/movies/extras/a.mkv, which the node sees as /mnt/nas/bonus/a.mkv.
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/extras/a.mkv') });
+    const error = await run.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect(error).toMatchObject({ reported: true, unmapped: false });
+    expect((error as Error).message).toContain('/mnt/nas/movies/extras/a.mkv');
+    expect(statted).toEqual([]);
+  });
+
   it("replaces the node's device/inode/stat with the server's own stat of the mapped path, keeping hash and probe", async () => {
     // Device numbers are per-host: an NFS client's anonymous st_dev never
     // equals the server's, so a report carrying the node's identity would

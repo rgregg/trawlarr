@@ -309,6 +309,9 @@ const NodeDetail = (props: {
           </button>
         </div>
         {rowsProblem !== null && <p className="problems">{rowsProblem}</p>}
+        {rowsProblem === null && node.pathMapError !== null && (
+          <p className="problems">{node.pathMapError}</p>
+        )}
       </div>
 
       <div className="node-detail-section">

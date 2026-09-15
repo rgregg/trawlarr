@@ -450,6 +450,44 @@ describe('createNodeHub', () => {
     expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([]);
   });
 
+  it('offers no work to a node whose stored path map predates the nesting rule, and refuses to send it a claim', async () => {
+    const library = createLibraryRepo(db).create({ name: 'A', roots: ['/media/a'], nowMs: now });
+    const client = await connectNode();
+    await client.hello();
+    // Written straight to the row, as a map saved before validatePathMap
+    // refused inconsistent nesting would be. Every root still maps.
+    const legacy = [
+      { serverPath: '/media', nodePath: '/mnt/nas' },
+      { serverPath: '/media/tv', nodePath: '/mnt/nas/shows' },
+    ];
+    db.prepare('UPDATE node SET path_map_json = ? WHERE id = ?').run(
+      JSON.stringify(legacy),
+      creds.nodeId,
+    );
+    const before = nodesChanged;
+    client.send({
+      type: 'libraries',
+      libraries: [{ libraryId: library.id, reachable: true, detail: '' }],
+    });
+    await waitFor(() => nodesChanged > before, 'probe');
+    expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([]);
+    // Still readable, as stored, so an operator can see and fix it.
+    const stored = nodes.getById(creds.nodeId)!;
+    expect(stored.pathMap).toEqual(legacy);
+    expect(stored.pathMapError).toContain('/media/tv');
+
+    // A claim that raced the check is refused before anything is sent.
+    const payload = claimJob();
+    const agent = hub.createAgent({
+      ...factoryInput({ steps: [], logs: [], heartbeats: [] }),
+      nodeId: creds.nodeId,
+    });
+    const error = await agent.run(payload).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ unmapped: true, reported: true });
+    expect((error as Error).message).toContain('/media/tv');
+    expect(client.frames.some((frame) => frame.type === 'job')).toBe(false);
+  });
+
   it('settles a claim whose path a map edit unmapped as unmapped, spending nothing', async () => {
     const client = await connectNode();
     await client.hello();

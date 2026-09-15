@@ -32,6 +32,8 @@ export interface NodeResource {
   hardwareTypes: string[];
   hardwareCaps: Record<string, number>;
   pathMap: { serverPath: string; nodePath: string }[];
+  /** Why the stored map is invalid; a node with one is offered no work. */
+  pathMapError: string | null;
   paused: boolean;
   schedule: { baseCounts: { transcode: number; health: number } } & Record<string, unknown>;
   libraries: { libraryId: string; reachable: boolean; detail: string }[];

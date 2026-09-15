@@ -239,6 +239,10 @@ On `hello` the node lists every journaled job, and the server answers each:
 - `node.path_map_json`: an ordered list of `{serverPath, nodePath}`, longest
   prefix wins. UI copy: *the server sees `/media/movies`* → *this node sees
   ___*.
+- An entry nested inside another must nest on both sides, at the same relative
+  suffix (`/media -> /mnt` with `/media/tv -> /mnt/tv`, never `/mnt/shows`), so
+  mapping a path out and back always returns the same path. A stored map that
+  fails this makes the node ineligible for claims until it is fixed.
 - The server rewrites a payload before sending it:
   - `path`;
   - `library` roots;

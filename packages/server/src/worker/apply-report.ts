@@ -1,4 +1,5 @@
 import {
+  applyReleaseUnpenalised,
   applyRunOutcome,
   applyStall,
   buildIdentityCandidate,
@@ -420,12 +421,16 @@ export const applyJobCancelled = (input: {
 
 /**
  * Fold a remote job that was never sent because its path no longer maps
- * under the node's current path map into an unpenalised requeue.
+ * under the node's current path map back into the queue, unpenalised.
  *
  * A map or library edit that lands between a claim and the job leaving is
  * an operator's change, not evidence about the file: spending an attempt on
- * it would let three edits push a healthy file to `failed`. The job row
- * closes as `failed` with the reason, since nothing ran.
+ * it would let three edits push a healthy file to `failed`. Nor is it a
+ * requeue: `mediaFileRepo.requeue` clears the attempt count and backoff, so a
+ * genuinely failing file that kept losing that race was handed a fresh retry
+ * budget every time and never reached `failed`. `applyReleaseUnpenalised`
+ * undoes only what the claim changed. The job row closes as `failed` with
+ * the reason, since nothing ran.
  */
 export const applyJobUnmapped = (input: {
   db: Db;
@@ -433,12 +438,20 @@ export const applyJobUnmapped = (input: {
   reason: string;
   nowMs: () => number;
 }): AppliedOutcome => {
-  createMediaFileRepo(input.db).requeue(input.payload.fileId);
-  createJobRepo(input.db).finish({
-    jobId: input.payload.jobId,
-    state: 'failed',
-    outcome: `Not sent, requeued unpenalised: ${input.reason}`,
-    nowMs: input.nowMs(),
-  });
+  const mediaFileRepo = createMediaFileRepo(input.db);
+  input.db.transaction(() => {
+    const ledger = mediaFileRepo.getLedger(input.payload.fileId);
+    if (ledger === null) throw new Error(`Claimed file ${input.payload.fileId} does not exist.`);
+    mediaFileRepo.setLedger({
+      fileId: input.payload.fileId,
+      record: applyReleaseUnpenalised(ledger),
+    });
+    createJobRepo(input.db).finish({
+      jobId: input.payload.jobId,
+      state: 'failed',
+      outcome: `Not sent, requeued unpenalised: ${input.reason}`,
+      nowMs: input.nowMs(),
+    });
+  })();
   return { state: requireRow(input.db, input.payload.fileId).state };
 };

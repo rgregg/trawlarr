@@ -52,6 +52,7 @@ const toNodeResource = (record: NodeRecord) => ({
   name: record.name,
   accessMode: record.accessMode,
   pathMap: record.pathMap,
+  pathMapError: record.pathMapError,
   hardwareTypes: record.hardwareTypes,
   hardwareCaps: record.hardwareCaps,
   tags: record.tags,

@@ -183,6 +183,27 @@ describe('reportToServer', () => {
       reportToServer(fixtureReport({ replaced: { path: '/other/a.mp4' } }), MAP),
     ).toThrow(UnmappedPathError);
   });
+
+  it('throws UnmappedPathError when the replaced path does not round-trip, rather than recording another file', () => {
+    // A stored map from before validatePathMap refused inconsistent nesting.
+    // `/mnt/tv/a.mp4` maps back to `/media/tv/a.mp4`, whose node path is
+    // `/mnt/shows/a.mp4`: the row would take on a different file's identity.
+    const legacy: PathMapping[] = [
+      { serverPath: '/media', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/shows' },
+    ];
+    expect(() =>
+      reportToServer(fixtureReport({ replaced: { path: '/mnt/tv/a.mp4' } }), legacy),
+    ).toThrow(UnmappedPathError);
+    expect(() =>
+      reportToServer(fixtureReport({ replaced: { path: '/mnt/tv/a.mp4' } }), legacy),
+    ).toThrow(/\/mnt\/tv\/a\.mp4[\s\S]*\/media\/tv\/a\.mp4/);
+    // A path that does round-trip under the same map is still mapped.
+    expect(
+      reportToServer(fixtureReport({ replaced: { path: '/mnt/shows/a.mp4' } }), legacy).replaced
+        ?.path,
+    ).toBe('/media/tv/a.mp4');
+  });
 });
 
 describe('libraryRootsForNode', () => {

@@ -429,6 +429,15 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
   ): Promise<{ payload: JobPayload; pathMap: PathMapping[] }> => {
     const node = nodes.getById(nodeId);
     if (node === null) throw new Error(`Node "${nodeId}" is not registered on this server.`);
+    // `onlineNodes` already offers such a node nothing; this catches a claim
+    // that raced the map going bad. Unmapped, so it spends no attempt and
+    // marks the probe stale rather than looping the file back onto this node.
+    if (node.pathMapError !== null) {
+      throw new UnmappedPathError(
+        payload.path,
+        `Node ${node.name}'s path map is invalid, so no job is sent to it: ${node.pathMapError}`,
+      );
+    }
     const ids = [...new Set(payload.flow.definition.nodes.map((flowNode) => flowNode.pluginId))];
     const pluginBundles: JobPayload['pluginBundles'] = {};
     for (const [id, { root, relPath }] of Object.entries(pluginRepo.resolveBundleRoots(ids))) {
@@ -937,16 +946,22 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
         // A probe only vouches for the roots the node was sent. Every root
         // must also map under the map as it is NOW, or a claim made on the
         // strength of that probe fails in `prepare` with UnmappedPathError.
-        const reachable = conn.probeFresh
-          ? node.libraries.filter((probe) => {
-              const library = libraries.get(probe.libraryId);
-              return (
-                probe.reachable &&
-                library !== undefined &&
-                libraryRootsForNode(library, node.pathMap).every((root) => root !== null)
-              );
-            })
-          : [];
+        //
+        // A stored map that fails today's validation (saved before a rule
+        // existed) vouches for nothing: its round trip can record a report
+        // against a different file. The node stays listed, with no libraries,
+        // until an operator saves a valid map.
+        const reachable =
+          conn.probeFresh && node.pathMapError === null
+            ? node.libraries.filter((probe) => {
+                const library = libraries.get(probe.libraryId);
+                return (
+                  probe.reachable &&
+                  library !== undefined &&
+                  libraryRootsForNode(library, node.pathMap).every((root) => root !== null)
+                );
+              })
+            : [];
         online.push({
           nodeId: node.id,
           schedule: node.schedule,

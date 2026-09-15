@@ -15,7 +15,12 @@ import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { buildJobPayload, type JobPayload } from './job-payload.js';
 import type { JobReport } from './run-payload.js';
-import { applyJobFailure, applyJobReport, applyThrownFailure } from './apply-report.js';
+import {
+  applyJobFailure,
+  applyJobReport,
+  applyJobUnmapped,
+  applyThrownFailure,
+} from './apply-report.js';
 import { withServerStat } from '../nodes/remote-agent.js';
 
 const NOW = 1_700_000_000_000;
@@ -387,6 +392,53 @@ describe('applyJobReport', () => {
     const row = createMediaFileRepo(db).getById(payload.fileId)!;
     expect(row.content_key).toBe(OLD_IDENTITY.contentKey);
     expect(row.video_codec).toBe('h264');
+  });
+});
+
+describe('applyJobUnmapped', () => {
+  it('puts a claimed file back without resetting its attempts or backoff, and closes the job', () => {
+    const { payload } = seeded();
+    const mediaFileRepo = createMediaFileRepo(db);
+    mediaFileRepo.setLedger({
+      fileId: payload.fileId,
+      record: {
+        state: 'held',
+        signature: 'sig-old',
+        attemptCount: 2,
+        consecutiveNoopCount: 0,
+        holdUntilMs: NOW - 1,
+      },
+    });
+    const claimed = mediaFileRepo.claimNext({ workerClass: 'transcode', nowMs: NOW });
+    expect(claimed?.fileId).toBe(payload.fileId);
+    expect(mediaFileRepo.getById(payload.fileId)?.state).toBe('running');
+
+    const applied = applyJobUnmapped({
+      db,
+      payload,
+      reason: `Path "${payload.path}" is outside the node's path map.`,
+      nowMs: () => NOW,
+    });
+
+    expect(applied.state).toBe('queued');
+    const row = mediaFileRepo.getById(payload.fileId)!;
+    expect(row).toMatchObject({
+      state: 'queued',
+      signature: 'sig-old',
+      attempt_count: 2,
+      consecutive_noop_count: 0,
+      hold_until_ms: NOW - 1,
+      review_reason: null,
+    });
+    // Still claimable, and one more failure would still be its last.
+    expect(mediaFileRepo.claimNext({ workerClass: 'transcode', nowMs: NOW })?.fileId).toBe(
+      payload.fileId,
+    );
+    const job = createJobRepo(db).getById(payload.jobId)!;
+    expect(job.state).toBe('failed');
+    expect(job.endedAt).not.toBeNull();
+    expect(job.outcome).toContain('Not sent, requeued unpenalised:');
+    expect(job.outcome).toContain(payload.path);
   });
 });
 

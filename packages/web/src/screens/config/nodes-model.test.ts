@@ -22,6 +22,7 @@ const NODE: NodeResource = {
   hardwareTypes: [],
   hardwareCaps: {},
   pathMap: [],
+  pathMapError: null,
   paused: false,
   schedule: { baseCounts: { transcode: 1, health: 1 } },
   libraries: [],

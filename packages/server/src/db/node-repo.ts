@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   DEFAULT_SCHEDULE,
+  PathMapError,
   validateSchedule,
   validatePathMap,
   type HardwareType,
@@ -17,7 +18,14 @@ export interface NodeRecord {
   id: string;
   name: string;
   accessMode: 'direct' | 'transfer';
+  /** As stored — even when it no longer validates; see `pathMapError`. */
   pathMap: PathMapping[];
+  /**
+   * Why the stored map fails `validatePathMap` today, or null when it passes.
+   * Non-null means the node must be offered no work (`hub.onlineNodes`) and
+   * sent no job (`hub` prepare) until an operator saves a valid map.
+   */
+  pathMapError: string | null;
   hardwareTypes: HardwareType[];
   hardwareCaps: Partial<Record<HardwareType, number>>;
   tags: string;
@@ -160,11 +168,45 @@ const scheduleFromRow = (workerConfigJson: string | null): ScheduleConfig => {
   return parsed;
 };
 
+/**
+ * The stored path map, re-validated on every read.
+ *
+ * Validation rules tighten (nested entries must now sit at the same suffix on
+ * both sides), and a map saved before a rule existed stays in the row. Three
+ * ways to treat one, and why this is the one taken:
+ * - throwing here would break `GET /nodes` and every hub read for that node,
+ *   leaving the operator no way to see the map they need to fix;
+ * - silently using it lets a claim run under a map whose round trip can land
+ *   a report on a different file (the defect the rule exists to prevent);
+ * - so it is returned as stored, with the reason, and the hub treats a node
+ *   carrying a reason as having no reachable libraries.
+ * A map corrupt beyond parsing is reported the same way, with an empty map.
+ */
+const pathMapFromRow = (json: string): { pathMap: PathMapping[]; pathMapError: string | null } => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (error) {
+    return {
+      pathMap: [],
+      pathMapError: `The stored path map is unreadable (${error instanceof Error ? error.message : String(error)}). Save the node's paths again.`,
+    };
+  }
+  const pathMap = Array.isArray(parsed) ? (parsed as PathMapping[]) : [];
+  try {
+    validatePathMap(parsed);
+    return { pathMap, pathMapError: null };
+  } catch (error) {
+    if (!(error instanceof PathMapError)) throw error;
+    return { pathMap, pathMapError: error.message };
+  }
+};
+
 const toRecord = (row: NodeRowRaw): NodeRecord => ({
   id: row.id,
   name: row.name,
   accessMode: row.access_mode as 'direct' | 'transfer',
-  pathMap: JSON.parse(row.path_map_json) as PathMapping[],
+  ...pathMapFromRow(row.path_map_json),
   hardwareTypes: JSON.parse(row.hardware_types_json) as HardwareType[],
   hardwareCaps: JSON.parse(row.hardware_caps_json) as Partial<Record<HardwareType, number>>,
   tags: row.tags,
@@ -368,10 +410,13 @@ export const createNodeRepo = (db: Db): NodeRepo => {
       const name = patch.name === undefined ? current.name : patch.name.trim();
       if (patch.name !== undefined) checkNameAvailable(name, id);
 
-      const pathMap =
+      // Untouched when not being edited — byte for byte, not re-parsed: a
+      // stored map that no longer validates (or parses) must not block a
+      // rename or pause, and must not be silently rewritten either.
+      const pathMapJson =
         patch.pathMap === undefined
-          ? (JSON.parse(current.path_map_json) as PathMapping[])
-          : validatePathMap(patch.pathMap);
+          ? current.path_map_json
+          : JSON.stringify(validatePathMap(patch.pathMap));
 
       let scheduleJson = current.worker_config_json;
       if (patch.schedule !== undefined) {
@@ -382,7 +427,7 @@ export const createNodeRepo = (db: Db): NodeRepo => {
       const paused = patch.paused === undefined ? current.paused === 1 : patch.paused;
       const tags = patch.tags === undefined ? current.tags : patch.tags;
 
-      updateNode.run(name, JSON.stringify(pathMap), scheduleJson, paused ? 1 : 0, tags, id);
+      updateNode.run(name, pathMapJson, scheduleJson, paused ? 1 : 0, tags, id);
       return toRecord(requireRow(id));
     },
 

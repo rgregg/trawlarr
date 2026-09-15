@@ -126,7 +126,13 @@ before the cancel does.
 A library or path-map edit between a claim and `prepare` makes the payload
 unmappable (`UnmappedPathError`). That is an operator's change, not evidence
 about the file, so it settles as `AgentFailure.unmapped` and
-`applyJobUnmapped` requeues unpenalised with the path in the outcome. To keep
+`applyJobUnmapped` puts the row back unpenalised with the path in the outcome.
+It is not a requeue: `applyRequeue` clears `attemptCount` and the backoff, so a
+genuinely failing file that kept losing this race got a fresh retry budget
+each time and never reached `failed`. The fold uses core's
+`applyReleaseUnpenalised`, which undoes only what the claim changed (`running`
+back to `queued`) and keeps attempts, backoff, no-op count and signature; a row
+something else moved off `running` meanwhile is left alone. To keep
 that from looping (requeue, re-claim onto the same node, fail again), the hub
 marks the node's library probe stale on an unmapped `prepare`, and
 `onlineNodes` counts no library reachable on a node until a `libraries` frame
@@ -134,6 +140,32 @@ arrives after its latest config push, and never one whose roots do not map
 under the node's CURRENT map. A probe already in flight when a config was
 pushed can still mark the node fresh; the unpenalised fold bounds the cost of
 that race to one requeue per probe.
+
+## Path maps: nested entries sit at the same suffix on both sides
+
+`validatePathMap` requires, for every pair of entries where one nests inside
+the other on either side, that it nests on both sides AND at the same relative
+suffix (`rel(serverA, serverB) === rel(nodeA, nodeB)`). The old rule only
+checked the first half, and accepted `/media -> /mnt` with
+`/media/tv -> /mnt/shows`: `/media/shows/x` goes out as `/mnt/shows/x` and
+comes back as `/media/tv/x`, another file. With both halves, longest-prefix
+mapping is a bijection over mapped paths, so every round trip holds.
+
+The run-time round-trip guards stay as defence in depth: `payloadToNode` for
+`payload.path`, and now `reportToServer` for `replaced.path` (where a plugin put
+its output, which the server never sent). A mismatch there throws
+`UnmappedPathError`, which the remote handle's `done` settles as an ordinary
+failed attempt (not `unmapped`: the flow ran, and a replacement may have landed).
+
+A map stored before the rule is not rewritten or rejected on read. `NodeRepo`
+re-validates on every read and returns the map as stored plus `pathMapError`;
+throwing would break `GET /nodes` and leave the operator unable to see what to
+fix, and using it silently would allow exactly the wrong-identity record the
+rule prevents. A node with a `pathMapError` has no reachable libraries in
+`onlineNodes`, `prepare` refuses it as unmapped (for a claim that raced), and
+`GET /nodes` and the Nodes tab show the reason. An edit that does not touch the
+map (rename, pause) leaves the stored JSON byte for byte; saving a valid map
+clears it.
 
 ## A claim the daemon died preparing is stalled at start (minor 3)
 

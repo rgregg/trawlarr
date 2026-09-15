@@ -2721,6 +2721,29 @@ describe('node management', () => {
     expect(response.body.error.message.length).toBeGreaterThan(0);
   });
 
+  it('refuses nested entries at different suffixes with 400 naming both, and still lists a stored one with its reason', async () => {
+    const node = await createNode();
+    const legacy = [
+      { serverPath: '/media', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/shows' },
+    ];
+
+    const response = await api('PUT', `/nodes/${node.node.id}`, { pathMap: legacy });
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain('"/media/tv" -> "/mnt/shows"');
+
+    // A map saved before the rule existed.
+    db.prepare('UPDATE node SET path_map_json = ? WHERE id = ?').run(
+      JSON.stringify(legacy),
+      node.node.id,
+    );
+    const listed = (await api('GET', '/nodes')).body.find(
+      (n: ResponseBody) => n.id === node.node.id,
+    );
+    expect(listed.pathMap).toEqual(legacy);
+    expect(listed.pathMapError).toContain('"/media/tv" -> "/mnt/shows"');
+  });
+
   it('rejects a PUT whose name, paused, or tags is the wrong type, before touching the row', async () => {
     const node = await createNode();
 
