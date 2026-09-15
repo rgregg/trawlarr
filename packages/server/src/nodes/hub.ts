@@ -129,6 +129,8 @@ export interface CreateNodeHubInput {
    * (an unwritable job log, a rejected upgrade). Defaults to stderr.
    */
   onError?: (context: string, error: unknown) => void;
+  /** Seam for tests: how a replaced path is stat'd on this server (`RemoteAgentInput.statPath`). */
+  statPath?: RemoteAgentInput['statPath'];
 }
 
 /** A hub with no nodes: what an API context built without the daemon's real hub gets. */
@@ -460,6 +462,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       appendLog: (text) => {
         if (handle.jobId !== null) appendLogLines(handle.jobId, [text]);
       },
+      ...(input.statPath === undefined ? {} : { statPath: input.statPath }),
     };
     const handle = createRemoteAgentHandle(remoteInput);
     return handle;

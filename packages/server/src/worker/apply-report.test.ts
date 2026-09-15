@@ -16,6 +16,7 @@ import { createJobRepo } from '../db/job-repo.js';
 import { buildJobPayload, type JobPayload } from './job-payload.js';
 import type { JobReport } from './run-payload.js';
 import { applyJobFailure, applyJobReport, applyThrownFailure } from './apply-report.js';
+import { withServerStat } from '../nodes/remote-agent.js';
 
 const NOW = 1_700_000_000_000;
 
@@ -325,6 +326,48 @@ describe('applyJobReport', () => {
     expect(row.signature).toBe(
       computeSignature({ flowDefinitionHash: payload.flow.definitionHash, facts: PRE_FACTS }),
     );
+  });
+
+  it("does not mark the file modified when a remote node's non-swapping Replace reports its own device number", async () => {
+    // A node reaches the library over NFS, whose client hands out an
+    // anonymous st_dev. Its Replace refused to swap (hardlink/size guard) and
+    // reported the untouched original — with the NODE's dev:ino. The server's
+    // own stat of that path is what the row's identity was built from.
+    const { payload } = seeded();
+    const nodeReport: JobReport = {
+      ...baseReport(payload),
+      replaced: {
+        path: '/lib/movie.mkv',
+        container: 'mkv',
+        sizeBytes: 4096,
+        mtimeMs: NOW - 1000,
+        ctimeMs: NOW - 1000,
+        nlink: 1,
+        deviceId: 9_999,
+        inode: 77,
+        hash: OLD_HASH,
+        probe: PRE_PROBE,
+        probeError: null,
+      },
+      postFacts: PRE_FACTS,
+    };
+
+    const report = await withServerStat(nodeReport, () =>
+      Promise.resolve({
+        dev: 66,
+        ino: 1234,
+        nlink: 1,
+        mtimeMs: NOW - 1000,
+        ctimeMs: NOW - 1000,
+        size: 4096,
+      }),
+    );
+    const applied = applyJobReport({ db, payload, report, nowMs: () => NOW });
+
+    const row = createMediaFileRepo(db).getById(payload.fileId)!;
+    expect(applied.state).toBe('good');
+    expect(row.inode_key).toBe(OLD_IDENTITY.inodeKey);
+    expect(createMediaFileRepo(db).getLedger(payload.fileId)?.consecutiveNoopCount).toBe(0);
   });
 
   it('refuses to record a changed file it cannot describe, rather than storing a split row', () => {

@@ -41,7 +41,20 @@ const reportFixture = (path: string): JobReport =>
     error: null,
     success: true,
     outcome: 'ok',
-    replaced: { path, container: 'mkv', sizeBytes: 1 },
+    replaced: {
+      path,
+      container: 'mkv',
+      sizeBytes: 1,
+      mtimeMs: 1,
+      ctimeMs: 1,
+      nlink: 1,
+      // The NODE's own stat: its NFS client's anonymous device number.
+      deviceId: 9_999,
+      inode: 4_242,
+      hash: { sizeBytes: 1, headHex: 'nodehead', tailHex: 'nodetail' },
+      probe: null,
+      probeError: null,
+    },
     preFacts: {},
     postFacts: null,
     cancelled: false,
@@ -58,8 +71,19 @@ const noDocuments: DocumentPort = {
   removeOne: () => {},
 };
 
+/** What the SERVER sees when it stats a replaced path through its own mount. */
+const SERVER_STAT = {
+  dev: 66,
+  ino: 1_234,
+  nlink: 1,
+  mtimeMs: 111,
+  ctimeMs: 222,
+  size: 4_096,
+};
+
 const harness = (over: Partial<RemoteAgentInput> = {}) => {
   const sent: ServerFrame[] = [];
+  const statted: string[] = [];
   const setRemoteCalls: Parameters<RemoteAgentInput['jobs']['setRemote']>[0][] = [];
   const cancelRequests: { jobId: string; nowMs: number }[] = [];
   const heartbeats: number[] = [];
@@ -104,9 +128,13 @@ const harness = (over: Partial<RemoteAgentInput> = {}) => {
         pathMap: MAP,
       }),
     appendLog: () => {},
+    statPath: (path) => {
+      statted.push(path);
+      return Promise.resolve(SERVER_STAT);
+    },
     ...over,
   });
-  return { handle, sent, setRemoteCalls, state, cancelRequests, heartbeats };
+  return { handle, sent, setRemoteCalls, state, cancelRequests, heartbeats, statted };
 };
 
 describe('createRemoteAgentHandle', () => {
@@ -156,6 +184,42 @@ describe('createRemoteAgentHandle', () => {
     handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
     const report = await run;
     expect(report.replaced?.path).toBe('/media/movies/a.mkv');
+  });
+
+  it("replaces the node's device/inode/stat with the server's own stat of the mapped path, keeping hash and probe", async () => {
+    // Device numbers are per-host: an NFS client's anonymous st_dev never
+    // equals the server's, so a report carrying the node's identity would
+    // read as "the file changed" even for a Replace that swapped nothing.
+    const { handle, statted } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    const report = await run;
+    expect(statted).toEqual(['/media/movies/a.mkv']);
+    expect(report.replaced).toMatchObject({
+      path: '/media/movies/a.mkv',
+      deviceId: 66,
+      inode: 1_234,
+      nlink: 1,
+      mtimeMs: 111,
+      ctimeMs: 222,
+      sizeBytes: 4_096,
+      hash: { sizeBytes: 1, headHex: 'nodehead', tailHex: 'nodetail' },
+      probe: null,
+    });
+  });
+
+  it('rejects as a reported failure naming the path when the server cannot stat the replaced file', async () => {
+    const { handle } = harness({
+      statPath: () => Promise.reject(new Error('ENOENT: no such file or directory')),
+    });
+    const run = handle.run(payloadFixture());
+    await flush();
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    const error = await run.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect(error).toMatchObject({ reported: true });
+    expect((error as Error).message).toContain('/media/movies/a.mkv');
   });
 
   it('sends commit-result granted:false when the decision refuses', async () => {

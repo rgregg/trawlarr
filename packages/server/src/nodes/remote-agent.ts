@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { leaseOnClaim, type PathMapping } from '@trawlarr/core';
 import type { AgentFactoryInput } from '../daemon/supervisor.js';
 import type { JobRepo } from '../db/job-repo.js';
@@ -47,7 +48,57 @@ export interface RemoteAgentInput extends AgentFactoryInput {
   prepare: (payload: JobPayload) => Promise<{ payload: JobPayload; pathMap: PathMapping[] }>;
   /** Append one line to the server-side job log file. */
   appendLog: (text: string) => void;
+  /** Seam for tests: how the server stats a replaced path. Defaults to `fs.promises.stat`. */
+  statPath?: (path: string) => Promise<ServerStat>;
 }
+
+/** The fields of a server-side `stat` a replaced file's identity is rebuilt from. */
+export interface ServerStat {
+  dev: number;
+  ino: number;
+  nlink: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  size: number;
+}
+
+/**
+ * The report with `replaced`'s filesystem identity taken from the SERVER's
+ * own stat of the (already server-mapped) path.
+ *
+ * WHY THE NODE'S STAT CANNOT BE USED. The identity key is `dev:ino`, and a
+ * device number is per host: an NFS client gets an anonymous `st_dev` that
+ * never equals the server's. A Replace that swapped nothing (hardlink or
+ * size guard, "already the file this flow produced") reports the untouched
+ * original, and with the node's device number that original's key no longer
+ * matches the row — `applyJobReport` reads "the file changed", records the
+ * same facts, the no-op limit trips, and the file goes terminal
+ * `not_converging`. A real replacement would store the node's key too, and
+ * poison every later local run's comparison. The partial `hash` and `probe`
+ * are content-derived, so the node's are kept.
+ *
+ * Rejects when the server cannot stat the path: recording a foreign identity
+ * is worse than a failed attempt.
+ */
+export const withServerStat = async (
+  report: JobReport,
+  statPath: (path: string) => Promise<ServerStat>,
+): Promise<JobReport> => {
+  if (report.replaced === null) return report;
+  const stats = await statPath(report.replaced.path);
+  return {
+    ...report,
+    replaced: {
+      ...report.replaced,
+      deviceId: stats.dev,
+      inode: stats.ino,
+      nlink: stats.nlink,
+      mtimeMs: stats.mtimeMs,
+      ctimeMs: stats.ctimeMs,
+      sizeBytes: stats.size,
+    },
+  };
+};
 
 export interface RemoteAgentHandle extends AgentHandle {
   readonly nodeId: string;
@@ -81,6 +132,7 @@ type Outcome = { ok: true; report: JobReport } | { ok: false; error: AgentFailur
  * the node is offline and flushed by `reconnected`.
  */
 export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHandle => {
+  const statPath = input.statPath ?? ((path: string) => stat(path));
   let jobId: string | null = null;
   let pathMap: readonly PathMapping[] = input.pathMap ?? [];
   let started = false;
@@ -212,7 +264,22 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
           });
           return;
         }
-        finish({ ok: true, report });
+        const serverPath = report.replaced?.path ?? null;
+        withServerStat(report, statPath).then(
+          (restated) => {
+            finish({ ok: true, report: restated });
+          },
+          (error: unknown) => {
+            finish({
+              ok: false,
+              error: new AgentFailure(
+                `Node ${input.nodeId} reported a replacement at "${String(serverPath)}", but the ` +
+                  `server cannot stat that path to record its identity: ${messageOf(error)}`,
+                { reported: true, cancelled },
+              ),
+            });
+          },
+        );
         return;
       }
       case 'failed':

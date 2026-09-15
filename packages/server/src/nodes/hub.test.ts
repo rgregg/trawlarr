@@ -97,6 +97,9 @@ const makeHub = (over: { pingIntervalMs?: number; offlineAfterMs?: number } = {}
     onError: (context, error) => {
       hubErrors.push(`${context}: ${error instanceof Error ? error.message : String(error)}`);
     },
+    // A replaced path in these reports is never a real file on this host.
+    statPath: () =>
+      Promise.resolve({ dev: 1, ino: 1, nlink: 1, mtimeMs: now, ctimeMs: now, size: 1 }),
     ...over,
   });
 };
