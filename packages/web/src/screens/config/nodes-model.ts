@@ -6,6 +6,8 @@
  * no DOM.
  */
 
+import type { LiveState } from '../../api/events.js';
+
 /**
  * `GET /nodes`'s response, field for field as `packages/server/src/api/routes/nodes.ts`
  * reports it (`toNodeResource` plus the per-row `local`/`online`/`running`
@@ -73,6 +75,21 @@ export const nodeStatus = (node: NodeResource): NodeStatusLabel => {
   if (!node.enrolled) return 'Waiting to join';
   return node.online ? 'Online' : 'Offline';
 };
+
+/**
+ * What the Nodes tab re-fetches `GET /nodes` on. `nodes.changed` alone is
+ * not enough: each card's running count is joined from the job table, and
+ * a job starting or finishing — on this daemon or any node — emits only
+ * `job.started`/`job.finished`. Keyed on `nodes` staleness only, a card sat
+ * at "0 running" for a whole remote transcode and then at "1 running" after
+ * it ended, until the page was reloaded.
+ */
+export const nodesRefreshKey = (live: Pick<LiveState, 'staleness' | 'jobs'>): string =>
+  [
+    String(live.staleness.nodes),
+    String(live.staleness.jobs),
+    Object.keys(live.jobs).sort().join(','),
+  ].join('|');
 
 /**
  * The build a remote node last reported, as its card prints it — or `null`

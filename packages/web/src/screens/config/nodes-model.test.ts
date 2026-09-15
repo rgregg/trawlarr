@@ -1,9 +1,11 @@
 import { validatePathMap } from '@trawlarr/core';
 import { describe, expect, it } from 'vitest';
+import { initialLiveState, reduceLive } from '../../api/events.js';
 import {
   joinCommand,
   nodeBuildLabel,
   nodeStatus,
+  nodesRefreshKey,
   pathMapRows,
   unreachableSummary,
   validatePathMapRows,
@@ -53,6 +55,55 @@ describe('nodeStatus', () => {
 
   it('is "Revoked" even for a node that never enrolled', () => {
     expect(nodeStatus({ ...NODE, enrolled: false, revokedAt: 1_000 })).toBe('Revoked');
+  });
+});
+
+describe('nodesRefreshKey', () => {
+  const started = reduceLive(initialLiveState, {
+    type: 'job.started',
+    jobId: 'job-1',
+    fileId: 'file-1',
+    libraryId: 'lib-1',
+    path: '/media/x.mkv',
+    workerId: 'node-1:0',
+    pid: null,
+  });
+
+  // The running count on each card comes from the job table, so a job
+  // starting or finishing must re-fetch nodes even though neither emits
+  // `nodes.changed`.
+  it('changes when a job starts', () => {
+    expect(nodesRefreshKey(started)).not.toBe(nodesRefreshKey(initialLiveState));
+  });
+
+  it('changes when a job finishes', () => {
+    const finished = reduceLive(started, {
+      type: 'job.finished',
+      jobId: 'job-1',
+      fileId: 'file-1',
+      state: 'good',
+      outcome: 'done',
+    });
+    expect(nodesRefreshKey(finished)).not.toBe(nodesRefreshKey(started));
+  });
+
+  it('changes on nodes.changed', () => {
+    const changed = reduceLive(initialLiveState, {
+      type: 'nodes.changed',
+      nodeId: 'node-1',
+      online: true,
+    });
+    expect(nodesRefreshKey(changed)).not.toBe(nodesRefreshKey(initialLiveState));
+  });
+
+  it('does not change on progress, so a transcode does not re-fetch every tick', () => {
+    const progressed = reduceLive(started, {
+      type: 'job.progress',
+      jobId: 'job-1',
+      percent: 40,
+      stage: 'ffmpeg',
+    });
+    expect(nodesRefreshKey(progressed)).toBe(nodesRefreshKey(started));
   });
 });
 

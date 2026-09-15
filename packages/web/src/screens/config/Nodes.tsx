@@ -9,6 +9,7 @@ import {
   joinCommand,
   nodeBuildLabel,
   nodeStatus,
+  nodesRefreshKey,
   pathMapRows,
   unreachableSummary,
   validatePathMapRows,
@@ -480,7 +481,7 @@ export const Nodes = (props: {
   navigate: (to: string) => void;
 }): JSX.Element => {
   const { client } = props;
-  const stale = props.live.staleness.nodes;
+  const stale = nodesRefreshKey(props.live);
   const [nodes, setNodes] = useState<NodeResource[] | null>(null);
   const [libraryNames, setLibraryNames] = useState<Record<string, string>>({});
   const [commit, setCommit] = useState<string | null>(null);
