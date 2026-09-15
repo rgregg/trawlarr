@@ -3,10 +3,11 @@ import type { ApiClient } from '../../api/client.js';
 import type { LiveState } from '../../api/events.js';
 import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
-import { formatTimestamp } from '../../shell/time.js';
+import { formatWhen } from '../../shell/time.js';
 import { describeFailure } from './library-form-model.js';
 import {
   joinCommand,
+  lastSeenLabel,
   nodeBuildLabel,
   nodeStatus,
   nodesRefreshKey,
@@ -381,7 +382,7 @@ const NodeDetail = (props: {
             </>
           )
         ) : (
-          <span className="detail">Revoked {formatTimestamp(node.revokedAt)}</span>
+          <span className="detail">Revoked {formatWhen(node.revokedAt, Date.now())}</span>
         )}
         {canDelete && (
           <button type="button" disabled={busy} onClick={() => void remove()}>
@@ -448,8 +449,7 @@ const NodeRow = (props: {
       </div>
       <p className="detail">
         {String(node.running.length)} running. Last seen{' '}
-        {node.lastSeenAt === null ? 'never' : formatTimestamp(node.lastSeenAt)}.
-        {build === null ? null : ` ${build}`}
+        {lastSeenLabel(node.lastSeenAt, Date.now())}.{build === null ? null : ` ${build}`}
       </p>
       {unreachable.length > 0 && <p className="problems">Unreachable: {unreachable.join('; ')}</p>}
       <div className="row-actions">

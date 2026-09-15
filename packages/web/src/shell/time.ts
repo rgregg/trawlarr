@@ -47,3 +47,18 @@ export const toIsoInstant = (ms: number): string | null => {
 
 /** The instant in full, or an em dash. For a screen with room for one. */
 export const formatTimestamp = (ms: number): string => toIsoInstant(ms) ?? '—';
+
+/**
+ * An instant as a person reads it: "Today, HH:MM UTC" on the same UTC day as
+ * `nowMs`, where a bare date reads as more stale than it is, else the date.
+ *
+ * An unreadable `nowMs` costs the "Today" shortcut and nothing else — the
+ * date is still the truth, so it is rendered rather than withheld.
+ */
+export const formatWhen = (ms: number, nowMs: number): string => {
+  const when = toIsoInstant(ms);
+  if (when === null) return '—';
+  const day = when.slice(0, 10);
+  const now = toIsoInstant(nowMs);
+  return now !== null && day === now.slice(0, 10) ? `Today, ${when.slice(11, 16)} UTC` : day;
+};

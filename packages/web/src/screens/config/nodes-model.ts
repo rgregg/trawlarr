@@ -7,6 +7,7 @@
  */
 
 import type { LiveState } from '../../api/events.js';
+import { formatWhen } from '../../shell/time.js';
 
 /**
  * `GET /nodes`'s response, field for field as `packages/server/src/api/routes/nodes.ts`
@@ -99,6 +100,14 @@ export const nodesRefreshKey = (live: Pick<LiveState, 'staleness' | 'jobs'>): st
  */
 export const nodeBuildLabel = (node: Pick<NodeResource, 'buildVersion'>): string | null =>
   node.buildVersion === null || node.buildVersion === '' ? null : `Build ${node.buildVersion}.`;
+
+/**
+ * When a node last talked to this daemon, as its card prints it. It was the
+ * raw ISO string (`2026-09-15T05:19:40.308Z`), unlike every other "when" a
+ * person reads on this UI.
+ */
+export const lastSeenLabel = (lastSeenAt: number | null, nowMs: number): string =>
+  lastSeenAt === null ? 'never' : formatWhen(lastSeenAt, nowMs);
 
 /**
  * Path-map rows with a stable React key, derived rather than stored: the

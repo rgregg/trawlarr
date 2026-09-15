@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { initialLiveState, reduceLive } from '../../api/events.js';
 import {
   joinCommand,
+  lastSeenLabel,
   nodeBuildLabel,
   nodeStatus,
   nodesRefreshKey,
@@ -344,5 +345,23 @@ describe('pathMapRows', () => {
 
   it('is empty for an empty map', () => {
     expect(pathMapRows([])).toEqual([]);
+  });
+});
+
+describe('lastSeenLabel', () => {
+  const nowMs = Date.parse('2026-09-15T08:00:00.000Z');
+
+  it('reads a time today the way the flow version list does, never as a raw ISO string', () => {
+    const label = lastSeenLabel(Date.parse('2026-09-15T05:19:40.308Z'), nowMs);
+    expect(label).toBe('Today, 05:19 UTC');
+    expect(label).not.toMatch(/T\d\d:|Z$/);
+  });
+
+  it('reads an earlier day as its date', () => {
+    expect(lastSeenLabel(Date.parse('2026-09-12T05:19:40.308Z'), nowMs)).toBe('2026-09-12');
+  });
+
+  it('reads a node never seen as "never"', () => {
+    expect(lastSeenLabel(null, nowMs)).toBe('never');
   });
 });
