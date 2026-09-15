@@ -1,4 +1,5 @@
 import type { LiveState } from '../../api/events.js';
+import { localActiveCount } from '../config/config-model.js';
 
 /**
  * What is happening, and — far more often on a healthy install — why nothing
@@ -527,3 +528,20 @@ export const nextDebounceDelayMs = (input: {
   delayMs: number;
   maxWaitMs: number;
 }): number => Math.max(0, Math.min(input.delayMs, input.maxWaitMs - input.waitedMs));
+
+/**
+ * The Runtime panel's "N running — target …" line. `target` is only this
+ * daemon's schedule, so N counts only this daemon's workers: `active` counts
+ * every node's, and a remote transcode read as "1 running — target transcode
+ * 0". Remote jobs still show in the running list above.
+ */
+export const workerTargetLine = (status: {
+  paused: boolean;
+  target: Record<string, number>;
+  workers: Array<{ nodeId: string }>;
+}): string =>
+  `${String(localActiveCount(status.workers))} running` +
+  `${status.paused ? ', pool paused' : ''} — target ` +
+  Object.entries(status.target)
+    .map(([workerClass, count]) => `${workerClass} ${String(count)}`)
+    .join(', ');
