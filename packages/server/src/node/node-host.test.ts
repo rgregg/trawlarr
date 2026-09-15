@@ -6,13 +6,25 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createBundleStore } from '../nodes/bundles.js';
-import type { NodeConfigFrame, NodeFrame, ServerFrame } from '../nodes/node-frames.js';
+import {
+  MAX_FRAME_BYTES,
+  type NodeConfigFrame,
+  type NodeFrame,
+  type ServerFrame,
+} from '../nodes/node-frames.js';
+import { MAX_LOG_EXCERPT_CHARS } from '../db/job-repo.js';
 import { AgentFailure, type AgentHandle, type AgentHandleDeps } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION } from '../worker/protocol.js';
 import type { JobReport } from '../worker/run-payload.js';
 import { createJournal } from './journal.js';
-import { startNodeHost, type NodeHost, type NodeHostInput } from './node-host.js';
+import {
+  bundleCacheMaxBytesFrom,
+  DEFAULT_BUNDLE_CACHE_MAX_BYTES,
+  startNodeHost,
+  type NodeHost,
+  type NodeHostInput,
+} from './node-host.js';
 
 // ---------------------------------------------------------------------------
 // A fake server: the enroll and bundle endpoints over plain `http`, and the
@@ -433,6 +445,75 @@ describe('startNodeHost', () => {
     const done = await conn.next('agent', (f) => f.message.type === 'done');
     expect(done.jobId).toBe('job-1');
     expect(factory.agents).toHaveLength(1);
+  });
+
+  it('caps step log excerpts in step and done frames, so a chatty plugin cannot exceed the frame limit', async () => {
+    // The hub's socket refuses a frame over MAX_FRAME_BYTES with 1009; the
+    // node reconnects and re-sends the same held report, for ever.
+    const { server, factory, start } = await setup();
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+
+    conn.send({ type: 'job', jobId: 'job-big', payload: payloadFor('job-big', server.bundle) });
+    await waitFor(() => factory.agents[0]?.payload != null);
+    const agent = factory.agents[0]!;
+    const huge = 'x'.repeat(MAX_FRAME_BYTES + 1024);
+    const step = {
+      seq: 1,
+      nodeId: 'n',
+      pluginId: 'p',
+      pluginName: 'P',
+      outputNumber: 1,
+      outputOutcome: null,
+      durationMs: 1,
+      logExcerpt: huge,
+      error: null,
+    };
+
+    agent.deps.onStep(step);
+    const stepFrame = await conn.next('agent', (f) => f.message.type === 'step');
+    const sentStep = (stepFrame.message as { step: { logExcerpt: string } }).step;
+    expect(sentStep.logExcerpt.length).toBeLessThan(MAX_LOG_EXCERPT_CHARS + 200);
+
+    agent.resolve({ ...reportFor('job-big'), steps: [step, { ...step, seq: 2 }] });
+    const done = await conn.next('agent', (f) => f.message.type === 'done');
+    expect(Buffer.byteLength(JSON.stringify(done), 'utf8')).toBeLessThan(MAX_FRAME_BYTES);
+    const report = (done.message as { report: JobReport }).report;
+    for (const sent of report.steps) {
+      expect(sent.logExcerpt.length).toBeLessThan(MAX_LOG_EXCERPT_CHARS + 200);
+      expect(sent.logExcerpt.startsWith('xxx')).toBe(true);
+    }
+  });
+
+  it('prunes the bundle cache to the configured cap once a job settles', async () => {
+    const pruned: number[] = [];
+    const { server, factory, start } = await setup({
+      bundleCacheMaxBytes: 12_345,
+      onBundleCachePrune: (maxBytes) => {
+        pruned.push(maxBytes);
+      },
+    });
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+
+    conn.send({ type: 'job', jobId: 'job-p', payload: payloadFor('job-p', server.bundle) });
+    await waitFor(() => factory.agents[0]?.payload != null);
+    expect(pruned).toEqual([]);
+    factory.agents[0]!.resolve(reportFor('job-p'));
+    await conn.next('agent', (f) => f.message.type === 'done');
+    await waitFor(() => pruned.length > 0);
+    expect(pruned).toEqual([12_345]);
+  });
+
+  it('reads the bundle cache cap from TRAWLARR_NODE_BUNDLE_CACHE_BYTES, defaulting to 2 GiB', () => {
+    expect(DEFAULT_BUNDLE_CACHE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
+    expect(bundleCacheMaxBytesFrom({})).toBe(DEFAULT_BUNDLE_CACHE_MAX_BYTES);
+    expect(bundleCacheMaxBytesFrom({ TRAWLARR_NODE_BUNDLE_CACHE_BYTES: '5000' })).toBe(5000);
+    expect(bundleCacheMaxBytesFrom({ TRAWLARR_NODE_BUNDLE_CACHE_BYTES: 'lots' })).toBe(
+      DEFAULT_BUNDLE_CACHE_MAX_BYTES,
+    );
   });
 
   it('holds a failed report naming the plugin and bundle when the bundle cannot be fetched', async () => {

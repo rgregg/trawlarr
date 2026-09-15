@@ -280,6 +280,28 @@ describe('createRemoteAgentHandle', () => {
     await expect(handle.exited).resolves.toBeNull();
   });
 
+  it('carries cancelled on an abandon after a cancel made while offline, so the release spends no attempt', async () => {
+    // Cancelled while the node was away, then grace ran out: that is still
+    // the operator's decision, not a stall of the file.
+    const { handle, state } = harness();
+    const run = handle.run(payloadFixture());
+    await flush();
+    state.online = false;
+    handle.cancel();
+    handle.abandon(new AgentFailure('grace window ran out', { reported: false }));
+    await expect(run).rejects.toMatchObject({
+      message: 'grace window ran out',
+      cancelled: true,
+      reported: false,
+    });
+  });
+
+  it('carries cancelled on an abandon of an adopted job whose row was cancelled', async () => {
+    const { handle } = harness({ fresh: false, pathMap: MAP, cancelRequested: true });
+    handle.abandon(new AgentFailure('already released', { reported: false }));
+    await expect(handle.run(payloadFixture())).rejects.toMatchObject({ cancelled: true });
+  });
+
   it('settled() sends ack-report', async () => {
     const { handle, sent } = harness();
     const run = handle.run(payloadFixture());

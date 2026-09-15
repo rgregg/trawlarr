@@ -253,6 +253,31 @@ describe('createJobRepo', () => {
       repo.finish({ jobId, state: 'succeeded', outcome: 'end-of-flow', nowMs: NOW + 10 });
       expect(repo.listLeased()).toEqual([]);
     });
+
+    it('finish clears the stored payload and path map, which nothing reads once a job ends', () => {
+      // A whole server-view payload per remote job, kept for ever, is the job
+      // table growing by the flow definition on every run.
+      const jobId = repo.start({ fileId, flowId, flowHash, nowMs: NOW, nodeId: 'local' });
+      repo.setRemote({
+        jobId,
+        nodeId: 'local',
+        lease: leaseOnClaim(),
+        payloadJson: '{"big":true}',
+        pathMapJson: '[{"serverPath":"/media","nodePath":"/mnt"}]',
+      });
+      repo.finish({ jobId, state: 'failed', outcome: 'released', nowMs: NOW + 10 });
+      const row = db
+        .prepare(`SELECT payload_json, path_map_json, lease_state FROM job WHERE id = ?`)
+        .get(jobId) as {
+        payload_json: string | null;
+        path_map_json: string | null;
+        lease_state: string | null;
+      };
+      expect(row.payload_json).toBeNull();
+      expect(row.path_map_json).toBeNull();
+      // The lease is kept: the hub tells a late result from a duplicate by it.
+      expect(row.lease_state).toBe('connected');
+    });
   });
 
   describe('appendOutcome', () => {

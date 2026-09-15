@@ -2,8 +2,9 @@ import { mkdir, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { WebSocket, type RawData } from 'ws';
 import type { HardwareType } from '@trawlarr/core';
-import type { DocumentPort } from '@trawlarr/engine';
+import type { DocumentPort, StepRecord } from '@trawlarr/engine';
 import { osFileLock } from '../daemon/os-file-lock.js';
+import { MAX_LOG_EXCERPT_CHARS, truncateLogExcerpt } from '../db/job-repo.js';
 import { DAEMON_VERSION } from '../daemon/version.js';
 import {
   parseServerFrame,
@@ -61,6 +62,13 @@ export interface NodeHostInput {
   createAgent?: typeof createAgentHandle;
   WebSocketImpl?: typeof WebSocket;
   fetchFn?: typeof fetch;
+  /**
+   * The bundle cache's size cap, pruned to after every job settles. Defaults
+   * to `TRAWLARR_NODE_BUNDLE_CACHE_BYTES`, else {@link DEFAULT_BUNDLE_CACHE_MAX_BYTES}.
+   */
+  bundleCacheMaxBytes?: number;
+  /** Seam for tests: told the cap each time the bundle cache is pruned. */
+  onBundleCachePrune?: (maxBytes: number) => void;
   /** Default [1_000, 2_000, 5_000, 10_000, 30_000]; the last value repeats. */
   reconnectDelaysMs?: readonly number[];
   /** Default 300_000. */
@@ -102,6 +110,38 @@ export class NodeAlreadyRunningError extends Error {
 }
 
 const DEFAULT_RECONNECT_DELAYS_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+/**
+ * How much plugin-bundle source a node keeps. Every plugin version a flow
+ * ever ran lands in the cache, and nothing else ever removes one.
+ */
+export const DEFAULT_BUNDLE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+
+export const bundleCacheMaxBytesFrom = (env: NodeJS.ProcessEnv): number => {
+  const raw = env.TRAWLARR_NODE_BUNDLE_CACHE_BYTES;
+  return raw !== undefined && /^\d+$/.test(raw.trim())
+    ? Number(raw.trim())
+    : DEFAULT_BUNDLE_CACHE_MAX_BYTES;
+};
+
+/**
+ * A step with its log excerpt capped as the server's `job_step` row caps it.
+ *
+ * Done on the NODE, before a frame is sent or journaled: a plugin that echoes
+ * ffmpeg's output can put megabytes into one step, a `done` frame carries
+ * every step, and a frame over `MAX_FRAME_BYTES` is refused by the hub with
+ * 1009 — after which the node reconnects and re-sends the same held report,
+ * for ever. The server would truncate the excerpt on storage anyway.
+ */
+const capStep = (step: StepRecord): StepRecord =>
+  step.logExcerpt.length <= MAX_LOG_EXCERPT_CHARS
+    ? step
+    : { ...step, logExcerpt: truncateLogExcerpt(step.logExcerpt) };
+
+const capFinal = (final: AgentToDaemon): AgentToDaemon =>
+  final.type === 'done'
+    ? { ...final, report: { ...final.report, steps: final.report.steps.map(capStep) } }
+    : final;
 const DEFAULT_LIBRARY_PROBE_INTERVAL_MS = 300_000;
 
 /**
@@ -415,7 +455,8 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
    * and a job whose report never arrives is stalled as vanished even when it
    * replaced the file.
    */
-  const holdAndSend = (jobId: string, final: AgentToDaemon): void => {
+  const holdAndSend = (jobId: string, uncapped: AgentToDaemon): void => {
+    const final = capFinal(uncapped);
     running.delete(jobId);
     // The agent is gone: nothing is left to deliver an answer to.
     abandonPending(jobId, 'the run has ended');
@@ -482,6 +523,21 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
     },
   });
 
+  const bundleCacheMaxBytes = input.bundleCacheMaxBytes ?? bundleCacheMaxBytesFrom(process.env);
+
+  /**
+   * Keep the bundle cache under its cap. Only while no job is running: prune
+   * removes whole bundle directories by least-recent use, and a running
+   * agent `require`s plugin files lazily from the one it was given.
+   */
+  const pruneBundles = (): void => {
+    if (stopping || running.size > 0) return;
+    input.onBundleCachePrune?.(bundleCacheMaxBytes);
+    bundleCache.prune(bundleCacheMaxBytes).catch((error: unknown) => {
+      log(`[node] Could not prune the bundle cache: ${messageOf(error)}`);
+    });
+  };
+
   const runJob = async (jobId: string, payload: JobPayload): Promise<void> => {
     const pluginPaths: Record<string, string> = { ...payload.pluginPaths };
     for (const [pluginId, { bundle, relPath }] of Object.entries(payload.pluginBundles ?? {})) {
@@ -528,7 +584,7 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
         documents: remoteDocuments(jobId),
         commits: remoteCommits(jobId),
         onStep: (step) => {
-          sendAgent(jobId, { type: 'step', step });
+          sendAgent(jobId, { type: 'step', step: capStep(step) });
         },
         onHeartbeat: (at) => {
           sendAgent(jobId, { type: 'heartbeat', nowMs: at });
@@ -585,6 +641,7 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
       })
       .finally(() => {
         runs.delete(jobId);
+        pruneBundles();
       });
     runs.set(jobId, run);
   };

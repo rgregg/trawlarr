@@ -11,6 +11,7 @@ import {
   MIN_STALE_AFTER_MS,
   StaleThresholdTooShortError,
   reapStalled,
+  stallUnsentRemoteJobs,
 } from './reap-stalled.js';
 
 /**
@@ -390,5 +391,53 @@ describe('reapStalled', () => {
     expect(repo.getById(fileId)?.state).toBe('running');
     expect(MIN_STALE_AFTER_MS).toBe(HOUR_MS);
     expect(DEFAULT_STALE_AFTER_MS).toBe(24 * HOUR_MS);
+  });
+});
+
+describe('stallUnsentRemoteJobs', () => {
+  it('stalls an open remote job the daemon never sent, and leaves sent and local jobs alone', () => {
+    // A daemon that died while `prepare` was still awaiting left a row that
+    // names a node but has no lease: no node ever had it, nothing will ever
+    // report it, and the reaper would wait out its 24 h floor.
+    const unsentFile = runningFile({ claimedAtMs: NOW - 60_000 });
+    const unsent = runningJob({
+      fileId: unsentFile,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: null,
+      nodeId: 'node-x',
+    });
+
+    const sentFile = runningFile({ claimedAtMs: NOW - 60_000 });
+    const sent = runningJob({
+      fileId: sentFile,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: null,
+      nodeId: 'node-x',
+    });
+    createJobRepo(db).setRemote({
+      jobId: sent,
+      nodeId: 'node-x',
+      lease: { state: 'connected', expiresAtMs: null },
+      payloadJson: '{}',
+      pathMapJson: '[]',
+    });
+
+    const localFile = runningFile({ claimedAtMs: NOW - 60_000 });
+    const local = runningJob({
+      fileId: localFile,
+      startedAtMs: NOW - 60_000,
+      heartbeatAtMs: null,
+      nodeId: 'local',
+    });
+
+    expect(stallUnsentRemoteJobs({ db, nowMs: NOW })).toBe(1);
+
+    expect(repo.getById(unsentFile)?.state).toBe('held');
+    expect(repo.getById(unsentFile)?.attempt_count).toBe(1);
+    expect(jobRow(unsent).state).toBe('failed');
+    expect(jobRow(unsent).outcome).toContain('never sent');
+    expect(jobRow(sent).ended_at).toBeNull();
+    expect(jobRow(local).ended_at).toBeNull();
+    expect(repo.getById(localFile)?.state).toBe('running');
   });
 });

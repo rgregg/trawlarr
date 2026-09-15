@@ -305,3 +305,78 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
 
   return summary;
 };
+
+/**
+ * Daemon start: stall every open job that names a REMOTE node but has no
+ * lease — a claim this daemon died while still preparing, before the lease
+ * was written and the job sent. Returns how many were stalled.
+ *
+ * No node ever had such a job, so nothing will ever report it, and the hub
+ * adopts only leased rows. Left alone its file sits `running` until the
+ * reaper's 24 h floor. It is a failed attempt like any other a daemon crash
+ * interrupts (backoff, counted), not a cancel.
+ *
+ * Must run after the daemon lock (a refused second daemon must not touch a
+ * running daemon's claims, which are exactly this shape while `prepare`
+ * awaits) and before adoption and the first tick.
+ */
+export const stallUnsentRemoteJobs = (input: { db: Db; nowMs: number }): number => {
+  const { db } = input;
+  const rows = db
+    .prepare(
+      `SELECT id, file_id FROM job
+       WHERE ended_at IS NULL AND lease_state IS NULL AND node_id IS NOT NULL AND node_id != ?`,
+    )
+    .all(LOCAL_NODE_ID) as { id: string; file_id: string }[];
+
+  for (const row of rows) {
+    stallOpenJob({
+      db,
+      jobId: row.id,
+      fileId: row.file_id,
+      outcome:
+        `The daemon stopped while preparing this job, so it was never sent to its node; ` +
+        `the attempt was stalled when the daemon started again.`,
+      nowMs: input.nowMs,
+    });
+  }
+  return rows.length;
+};
+
+/**
+ * Close one open job as a failed attempt, in one transaction: the file is
+ * backed off (an attempt spent) only while this job still holds its claim —
+ * a file some other job has since taken is that job's — and the row ends
+ * `failed` with `outcome`.
+ */
+export const stallOpenJob = (input: {
+  db: Db;
+  jobId: string;
+  fileId: string;
+  outcome: string;
+  nowMs: number;
+}): void => {
+  const { db } = input;
+  const mediaFileRepo = createMediaFileRepo(db);
+  const jobRepo = createJobRepo(db);
+  db.transaction(() => {
+    const file = mediaFileRepo.getById(input.fileId);
+    const latest = jobRepo.listForFile(input.fileId)[0];
+    if (file !== null && file.state === 'running' && latest?.id === input.jobId) {
+      mediaFileRepo.setLedger({
+        fileId: file.id,
+        record: applyStall({
+          record: mediaFileRepo.getLedger(file.id) ?? newLedgerRecord(),
+          nowMs: input.nowMs,
+        }),
+        lastRunId: input.jobId,
+      });
+    }
+    jobRepo.finish({
+      jobId: input.jobId,
+      state: 'failed',
+      outcome: input.outcome,
+      nowMs: input.nowMs,
+    });
+  })();
+};

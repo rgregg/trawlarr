@@ -16,7 +16,7 @@ import { sweepJobLogs } from '../job-log/job-log-store.js';
 import { createBundleStore } from '../nodes/bundles.js';
 import { createNodeHub, type NodeHub } from '../nodes/hub.js';
 import { createNodeHttpHandler } from '../nodes/node-http.js';
-import { reapStalled } from '../worker/reap-stalled.js';
+import { reapStalled, stallUnsentRemoteJobs } from '../worker/reap-stalled.js';
 import { buildCommitFrom } from './build-info.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
@@ -452,6 +452,11 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
    *    rows to the hub (`reapStalled`), so nothing requeues a file a node may
    *    still be encoding before that node has had its grace to reconnect.
    */
+  // A claim this daemon died while still preparing names a node but holds no
+  // lease, so adoption never sees it and nothing would end it for a day.
+  // After the lock for the same reason adoption is: a refused second daemon
+  // must not stall the running daemon's claims mid-prepare.
+  stallUnsentRemoteJobs({ db, nowMs: nowMs() });
   for (const job of hub.adoptLeasedJobs((payload) => supervisor.agentInputFor(payload))) {
     supervisor.adopt(job);
   }

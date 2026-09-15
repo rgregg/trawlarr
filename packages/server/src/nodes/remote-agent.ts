@@ -407,8 +407,20 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
 
     receive,
 
-    abandon: (failure: AgentFailure): void => {
+    abandon: (given: AgentFailure): void => {
       if (settledOnce) return;
+      // A job cancelled while its node was offline, whose grace then ran
+      // out, is still the operator's cancel: without the flag the supervisor
+      // stalls it as a vanished worker and spends an attempt.
+      const failure =
+        cancelled && !given.cancelled
+          ? new AgentFailure(given.message, {
+              reported: given.reported,
+              superseded: given.superseded,
+              unmapped: given.unmapped,
+              cancelled: true,
+            })
+          : given;
       if (jobId !== null) send({ type: 'abandon', jobId, reason: failure.message });
       if (!started) {
         earlyFailure ??= failure;

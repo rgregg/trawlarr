@@ -2818,6 +2818,16 @@ describe('node management', () => {
     expect(deleted.status).toBe(400);
   });
 
+  it('refuses PUT on the local node, whose schedule and hardware live in daemon settings', async () => {
+    // Accepted, it stored a name/map/schedule nothing ever reads, and the
+    // operator saw a 200 for a change that did nothing.
+    const response = await api('PUT', '/nodes/local', { paused: true, name: 'renamed' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('local-node');
+    expect(nodeHub.pushConfigCalls).toEqual([]);
+  });
+
   it('409s a second enroll-token request for an already-enrolled node', async () => {
     const node = await createNode();
     await db.prepare(`UPDATE node SET secret_hash = 'x' WHERE id = ?`).run(node.node.id);

@@ -288,7 +288,7 @@ const logExcerptWithError = (logExcerpt: string, error: string | null | undefine
  */
 export const MAX_LOG_EXCERPT_CHARS = 8_000;
 
-const truncateLogExcerpt = (text: string): string => {
+export const truncateLogExcerpt = (text: string): string => {
   if (text.length <= MAX_LOG_EXCERPT_CHARS) return text;
   const kept = text.slice(0, MAX_LOG_EXCERPT_CHARS);
   const omitted = text.length - MAX_LOG_EXCERPT_CHARS;
@@ -312,7 +312,14 @@ export const createJobRepo = (db: Db): JobRepo => {
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  const finishJob = db.prepare(`UPDATE job SET state = ?, outcome = ?, ended_at = ? WHERE id = ?`);
+  // The remote payload and path map are only read to adopt an OPEN leased job
+  // after a restart (`listLeased`); once a job ends nothing reads them — a late
+  // result only appends to `outcome`. Kept, every remote run would leave a
+  // whole server-view payload in the job table for ever.
+  const finishJob = db.prepare(
+    `UPDATE job SET state = ?, outcome = ?, ended_at = ?, payload_json = NULL, path_map_json = NULL
+     WHERE id = ?`,
+  );
 
   const heartbeatJob = db.prepare(`UPDATE job SET heartbeat_at = ? WHERE id = ?`);
 

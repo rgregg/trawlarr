@@ -670,6 +670,27 @@ describe('createNodeHub', () => {
     expect(leaseOf(payload.jobId)).toEqual({ state: 'grace', expiresAtMs: now + GRACE_MS });
   });
 
+  it('stalls a leased job whose stored payload is corrupt and adopts the rest, rather than failing startup', async () => {
+    const { payload: good } = await startRemoteJob();
+    const { payload: bad } = await startRemoteJob();
+    db.prepare(`UPDATE job SET payload_json = '{not json' WHERE id = ?`).run(bad.jobId);
+
+    const restarted = makeHub();
+    extraHubs.push(restarted);
+    const adopted = restarted.adoptLeasedJobs(() =>
+      factoryInput({ steps: [], logs: [], heartbeats: [] }),
+    );
+
+    expect(adopted.map((job) => job.payload.jobId)).toEqual([good.jobId]);
+    const badRow = jobs.getById(bad.jobId)!;
+    expect(badRow.endedAt).not.toBeNull();
+    expect(badRow.state).toBe('failed');
+    expect(badRow.outcome).toContain('corrupt');
+    expect(leaseOf(bad.jobId).state).toBe('expired');
+    expect(files.getById(bad.fileId)?.state).toBe('held');
+    expect(files.getById(bad.fileId)?.attempt_count).toBe(1);
+  });
+
   it('appends a late result for a job already released, without touching the ledger, and acks it', async () => {
     const { client, payload, outcome } = await startRemoteJob();
     client.ws.close();
@@ -702,6 +723,29 @@ describe('createNodeHub', () => {
     expect(jobs.getById(payload.jobId)?.outcome).toBe(
       'released\nA late result arrived from node garage after this job was released: Transcoded to hevc',
     );
+  });
+
+  it('refuses a commit-request that reaches the socket after a revoke closed it', async () => {
+    // The close handshake takes a round trip, and the socket still delivers
+    // frames until it completes: a commit granted in that window moves the
+    // lease to `committing`, which grace never expires.
+    const { client, payload } = await startRemoteJob();
+    hub.disconnect(creds.nodeId, 'revoked');
+    client.send({
+      type: 'agent',
+      jobId: payload.jobId,
+      message: { type: 'commit-request', id: 11, kind: 'replace', pluginId: 'x' },
+    });
+    await waitFor(() => client.closed !== null, 'close');
+
+    expect(leaseOf(payload.jobId).state).toBe('grace');
+    expect(
+      client.frames.some(
+        (frame) =>
+          frame.type === 'agent' && frame.message.type === 'commit-result' && frame.message.granted,
+      ),
+    ).toBe(false);
+    expect(hub.isOnline(creds.nodeId)).toBe(false);
   });
 
   it('applies a held report for a still-claimed job through the handle', async () => {

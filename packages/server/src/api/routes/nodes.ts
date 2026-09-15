@@ -76,7 +76,7 @@ const requireNotLocal = (id: string): void => {
       400,
       'local-node',
       `"${LOCAL_NODE_ID}" is this daemon itself, not a remote node; it cannot be enrolled, ` +
-        `revoked, or deleted.`,
+        `edited, revoked, or deleted. Its workers are set in the daemon's own settings.`,
     );
   }
 };
@@ -202,6 +202,9 @@ export const nodeRoutes: Route[] = [
     path: '/nodes/:id',
     handler: ({ params, body, ctx }) => {
       const id = params.id!;
+      // The local node's schedule and hardware are the daemon's own settings;
+      // an update here would store values nothing reads and answer 200.
+      requireNotLocal(id);
       const repo = createNodeRepo(ctx.db);
       requireNode(repo, id);
       const patch = asPatchBody(body);

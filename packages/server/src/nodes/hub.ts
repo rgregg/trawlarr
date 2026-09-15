@@ -33,7 +33,7 @@ import { createPluginRepo } from '../plugins/plugin-repo.js';
 import { AgentFailure } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION, type AgentToDaemon } from '../worker/protocol.js';
-import { DEFAULT_STALE_AFTER_MS } from '../worker/reap-stalled.js';
+import { DEFAULT_STALE_AFTER_MS, stallOpenJob } from '../worker/reap-stalled.js';
 import type { BundleStore } from './bundles.js';
 import { libraryRootsForNode, payloadToNode, UnmappedPathError } from './map-payload.js';
 import {
@@ -754,6 +754,20 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     }
     conn.welcomed = false;
     if (closing || connections.get(conn.nodeId) !== conn) return;
+    detach(conn);
+  };
+
+  /**
+   * Stop a connection speaking for its node, and move its leases to grace.
+   *
+   * Once this returns the socket is no longer current, so `handleMessage`
+   * drops every frame it still delivers — which matters for `disconnect`: a
+   * close handshake takes a round trip, and a commit-request that arrived in
+   * that window would otherwise be granted, moving the lease to `committing`,
+   * which grace never expires.
+   */
+  const detach = (conn: Connection): void => {
+    conn.welcomed = false;
     connections.delete(conn.nodeId);
 
     const now = nowMs();
@@ -957,7 +971,11 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     },
 
     disconnect: (nodeId, reason) => {
-      connections.get(nodeId)?.ws.close(NODE_CLOSE_DISCONNECTED, closeReason(reason));
+      const conn = connections.get(nodeId);
+      if (conn === undefined) return;
+      // Detached BEFORE the close is sent, not when it completes: see `detach`.
+      if (!closing) detach(conn);
+      conn.ws.close(NODE_CLOSE_DISCONNECTED, closeReason(reason));
     },
 
     createAgent: (factory) => {
@@ -968,11 +986,35 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     adoptLeasedJobs: (inputFor) => {
       const now = nowMs();
       const graceMs = settings.getNodes().leaseGraceMs;
-      return jobRepo.listLeased().map((leased) => {
+      const adopted: AdoptedJob[] = [];
+      for (const leased of jobRepo.listLeased()) {
+        let payload: JobPayload;
+        let pathMap: PathMapping[];
+        try {
+          payload = JSON.parse(leased.payloadJson) as JobPayload;
+          pathMap = JSON.parse(leased.pathMapJson) as PathMapping[];
+        } catch (error) {
+          // One unreadable row must not abort daemon startup (and with it
+          // every other adoption): nothing can settle a job without its
+          // payload, so it is released and stalled here, and the rest go on.
+          jobRepo.setLease({
+            jobId: leased.jobId,
+            lease: { state: 'expired', expiresAtMs: leased.lease.expiresAtMs },
+          });
+          stallOpenJob({
+            db,
+            jobId: leased.jobId,
+            fileId: leased.fileId,
+            outcome:
+              `The stored payload for this remote job is corrupt, so it could not be adopted after ` +
+              `a restart (${error instanceof Error ? error.message : String(error)}); the file was ` +
+              `released and the attempt stalled.`,
+            nowMs: now,
+          });
+          continue;
+        }
         const next = leaseOnDaemonStart(leased.lease, now, graceMs);
         setLeaseIfChanged(leased.jobId, leased.lease, next);
-        const payload = JSON.parse(leased.payloadJson) as JobPayload;
-        const pathMap = JSON.parse(leased.pathMapJson) as PathMapping[];
         const handle = buildHandle(inputFor(payload, leased.nodeId), {
           nodeId: leased.nodeId,
           fresh: false,
@@ -990,8 +1032,9 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
             ),
           );
         }
-        return { payload, agent: handle, nodeId: leased.nodeId };
-      });
+        adopted.push({ payload, agent: handle, nodeId: leased.nodeId });
+      }
+      return adopted;
     },
 
     sweepLeases: () => {
