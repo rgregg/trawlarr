@@ -2,7 +2,8 @@
 
 .libraries .row-actions,
 .library-setup .row-actions,
-.flow-picker .row-actions {
+.flow-picker .row-actions,
+.nodes-tab .row-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
@@ -346,7 +347,9 @@
 /* Wider than the Watch screen's 17rem: these cards hold a full path, a flow
    name and four buttons, and at 17rem the buttons wrapped onto three rows. */
 .libraries .library-cards {
-  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+  /* min(): a bare 24rem column is wider than a phone's content box, which
+     pushed every card past the page's right gutter. */
+  grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr));
 }
 
 .library-card {

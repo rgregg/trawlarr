@@ -7,8 +7,9 @@ import { formatWhen } from '../../shell/time.js';
 import { describeFailure } from './library-form-model.js';
 import {
   joinCommand,
-  lastSeenLabel,
-  nodeBuildLabel,
+  nodeCardLine,
+  nodeSettingsEditable,
+  pausedShown,
   nodeStatus,
   nodesRefreshKey,
   pathMapRows,
@@ -132,6 +133,13 @@ const NodeDetail = (props: {
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
+  const [pausedDraft, setPausedDraft] = useState<boolean | null>(null);
+  const paused = pausedShown({ draft: pausedDraft, saved: node.paused });
+  // Drop the draft once the reloaded row agrees with it.
+  useEffect(() => {
+    if (paused.draft !== pausedDraft) setPausedDraft(paused.draft);
+  }, [paused.draft, pausedDraft]);
+  const editable = nodeSettingsEditable(node);
 
   const run = async (call: () => Promise<void>): Promise<void> => {
     setBusy(true);
@@ -168,9 +176,15 @@ const NodeDetail = (props: {
     });
   };
 
-  const togglePaused = async (paused: boolean): Promise<void> => {
+  const togglePaused = async (next: boolean): Promise<void> => {
+    setPausedDraft(next);
     await run(async () => {
-      await client.put<NodeMutationResponse>(`/nodes/${node.id}`, { paused });
+      try {
+        await client.put<NodeMutationResponse>(`/nodes/${node.id}`, { paused: next });
+      } catch (error) {
+        setPausedDraft(null);
+        throw error;
+      }
     });
   };
 
@@ -217,22 +231,25 @@ const NodeDetail = (props: {
           <input
             id={`node-${node.id}-workers`}
             inputMode="numeric"
+            readOnly={!editable}
             value={workerInput}
             onChange={(event) => {
               setWorkerInput(event.target.value);
             }}
           />
-          <button type="button" disabled={busy} onClick={() => void saveWorkerCount()}>
-            Save
-          </button>
+          {editable && (
+            <button type="button" disabled={busy} onClick={() => void saveWorkerCount()}>
+              Save
+            </button>
+          )}
         </div>
       </div>
 
       <label className="switch">
         <input
           type="checkbox"
-          checked={node.paused}
-          disabled={busy}
+          checked={paused.checked}
+          disabled={busy || !editable}
           onChange={(event) => void togglePaused(event.target.checked)}
         />
         Paused
@@ -253,6 +270,7 @@ const NodeDetail = (props: {
               <tr key={row.key}>
                 <td>
                   <input
+                    readOnly={!editable}
                     value={row.serverPath}
                     onChange={(event) => {
                       setRows((current) =>
@@ -267,6 +285,7 @@ const NodeDetail = (props: {
                 </td>
                 <td>
                   <input
+                    readOnly={!editable}
                     value={row.nodePath}
                     onChange={(event) => {
                       setRows((current) =>
@@ -280,37 +299,41 @@ const NodeDetail = (props: {
                   />
                 </td>
                 <td>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRows((current) =>
-                        current.filter((candidate) => candidate.key !== row.key),
-                      );
-                    }}
-                  >
-                    Remove
-                  </button>
+                  {editable && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRows((current) =>
+                          current.filter((candidate) => candidate.key !== row.key),
+                        );
+                      }}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-        <div className="row-actions">
-          <button
-            type="button"
-            onClick={() => {
-              setRows((current) => [
-                ...current,
-                { key: newRowKey(), serverPath: '', nodePath: '' },
-              ]);
-            }}
-          >
-            Add row
-          </button>
-          <button type="button" disabled={busy} onClick={() => void savePaths()}>
-            Save paths
-          </button>
-        </div>
+        {editable && (
+          <div className="row-actions">
+            <button
+              type="button"
+              onClick={() => {
+                setRows((current) => [
+                  ...current,
+                  { key: newRowKey(), serverPath: '', nodePath: '' },
+                ]);
+              }}
+            >
+              Add row
+            </button>
+            <button type="button" disabled={busy} onClick={() => void savePaths()}>
+              Save paths
+            </button>
+          </div>
+        )}
         {rowsProblem !== null && <p className="problems">{rowsProblem}</p>}
         {rowsProblem === null && node.pathMapError !== null && (
           <p className="problems">{node.pathMapError}</p>
@@ -413,7 +436,6 @@ const NodeRow = (props: {
   const { node } = props;
   const status = nodeStatus(node);
   const unreachable = unreachableSummary(node, props.libraryNames);
-  const build = nodeBuildLabel(node);
 
   if (node.local) {
     return (
@@ -447,10 +469,7 @@ const NodeRow = (props: {
         <h3>{node.name}</h3>
         <p className="badge">{status}</p>
       </div>
-      <p className="detail">
-        {String(node.running.length)} running. Last seen{' '}
-        {lastSeenLabel(node.lastSeenAt, Date.now())}.{build === null ? null : ` ${build}`}
-      </p>
+      <p className="detail">{nodeCardLine(node, Date.now())}</p>
       {unreachable.length > 0 && <p className="problems">Unreachable: {unreachable.join('; ')}</p>}
       <div className="row-actions">
         <button type="button" onClick={props.onToggle}>

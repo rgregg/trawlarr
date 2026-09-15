@@ -5,6 +5,9 @@ import {
   joinCommand,
   lastSeenLabel,
   nodeBuildLabel,
+  nodeCardLine,
+  nodeSettingsEditable,
+  pausedShown,
   nodeStatus,
   nodesRefreshKey,
   pathMapRows,
@@ -363,5 +366,39 @@ describe('lastSeenLabel', () => {
 
   it('reads a node never seen as "never"', () => {
     expect(lastSeenLabel(null, nowMs)).toBe('never');
+  });
+});
+
+describe('nodeCardLine', () => {
+  const nowMs = Date.parse('2026-09-15T08:00:00.000Z');
+  const seen = { ...NODE, enrolled: true, lastSeenAt: Date.parse('2026-09-15T05:19:40.308Z') };
+
+  it('prints running, last seen and build', () => {
+    expect(nodeCardLine({ ...seen, running: ['j1'], buildVersion: '0.4.1' }, nowMs)).toBe(
+      '1 running. Last seen Today, 05:19 UTC. Build 0.4.1.',
+    );
+  });
+
+  it('says "Paused" for a paused node, which the card never showed', () => {
+    expect(nodeCardLine({ ...seen, paused: true }, nowMs)).toBe(
+      '0 running. Paused. Last seen Today, 05:19 UTC.',
+    );
+  });
+});
+
+describe('nodeSettingsEditable', () => {
+  it('locks a revoked node, whose settings no longer reach anything', () => {
+    expect(nodeSettingsEditable({ revokedAt: 1 })).toBe(false);
+    expect(nodeSettingsEditable({ revokedAt: null })).toBe(true);
+  });
+});
+
+describe('pausedShown', () => {
+  it('shows the value being saved until the reloaded row agrees, so the box never flips back', () => {
+    // Clicked on: the row still says off until the reload lands.
+    expect(pausedShown({ draft: true, saved: false })).toEqual({ checked: true, draft: true });
+    // The reload landed: the draft is spent.
+    expect(pausedShown({ draft: true, saved: true })).toEqual({ checked: true, draft: null });
+    expect(pausedShown({ draft: null, saved: false })).toEqual({ checked: false, draft: null });
   });
 });

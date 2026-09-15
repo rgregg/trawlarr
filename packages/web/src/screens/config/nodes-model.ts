@@ -110,6 +110,45 @@ export const lastSeenLabel = (lastSeenAt: number | null, nowMs: number): string 
   lastSeenAt === null ? 'never' : formatWhen(lastSeenAt, nowMs);
 
 /**
+ * A remote node's one-line summary under its name. "Paused" is in it because
+ * a paused node otherwise looked exactly like an idle one.
+ */
+export const nodeCardLine = (
+  node: Pick<NodeResource, 'running' | 'paused' | 'lastSeenAt' | 'buildVersion'>,
+  nowMs: number,
+): string => {
+  const build = nodeBuildLabel(node);
+  return [
+    `${String(node.running.length)} running.`,
+    ...(node.paused ? ['Paused.'] : []),
+    `Last seen ${lastSeenLabel(node.lastSeenAt, nowMs)}.`,
+    ...(build === null ? [] : [build]),
+  ].join(' ');
+};
+
+/**
+ * A revoked node cannot authenticate, so its workers, pause and paths reach
+ * nothing; editable, they suggested a revoke could be tuned rather than undone
+ * by deleting and re-adding the node.
+ */
+export const nodeSettingsEditable = (node: Pick<NodeResource, 'revokedAt'>): boolean =>
+  node.revokedAt === null;
+
+/**
+ * What the Paused checkbox shows. It is controlled by the row, which only
+ * changes when `GET /nodes` reloads after the save — so a click flipped it,
+ * React put it straight back, and the reload flipped it again. `draft` is the
+ * value being saved; it is shown until the row agrees, then dropped.
+ */
+export const pausedShown = (input: {
+  draft: boolean | null;
+  saved: boolean;
+}): { checked: boolean; draft: boolean | null } =>
+  input.draft === null || input.draft === input.saved
+    ? { checked: input.saved, draft: null }
+    : { checked: input.draft, draft: input.draft };
+
+/**
  * Path-map rows with a stable React key, derived rather than stored: the
  * server has no id for a mapping entry, and index alone breaks identity
  * across a reorder mid-edit (React would then reuse a row's DOM node for a
