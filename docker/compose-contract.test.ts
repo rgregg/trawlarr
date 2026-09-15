@@ -10,16 +10,29 @@ const RUNTIME_VARS = new Set([
   'TZ',
   'NVIDIA_VISIBLE_DEVICES',
   'NVIDIA_DRIVER_CAPABILITIES',
+  // Read by the entrypoint (TRAWLARR_MODE) and by `trawlarr node` directly
+  // (TRAWLARR_SERVER, TRAWLARR_NODE_TOKEN) — a node has no daemon and so
+  // none of these are ENV_BINDINGS.
+  'TRAWLARR_MODE',
+  'TRAWLARR_SERVER',
+  'TRAWLARR_NODE_TOKEN',
 ]);
 
 const composeFiles = readdirSync('docker')
   .filter((name) => name.startsWith('compose') && name.endsWith('.yml'))
   .map((name) => join('docker', name));
 
+// Files that run the DAEMON (a server): a fixed hostname, a 5-minute drain
+// and the published API port all exist because of the daemon's own
+// behaviour, and a node has none of them (see the node-specific describe
+// block below).
+const serverComposeFiles = composeFiles.filter((file) => !file.includes('compose.node'));
+
 describe('compose files', () => {
   it('are all discovered (a renamed file must not make this suite vacuous)', () => {
     expect(composeFiles).toContain('docker/compose.yml');
     expect(composeFiles).toContain('docker/compose.nvidia.yml');
+    expect(composeFiles).toContain('docker/compose.node.yml');
   });
 
   it.each(composeFiles)('%s sets only variables trawlarr reads', (file) => {
@@ -36,16 +49,50 @@ describe('compose files', () => {
   // hostname, every image update changes it and an interrupted file waits a
   // day in "running"; without the grace period, Docker kills the daemon 10s
   // into a drain that is built to wait 5 minutes.
-  it.each(composeFiles)('%s keeps the hostname fixed and lets the daemon drain', (file) => {
+  it.each(serverComposeFiles)('%s keeps the hostname fixed and lets the daemon drain', (file) => {
     const body = readFileSync(file, 'utf8');
     expect(body).toMatch(/^\s+hostname:\s+\S+/m);
     expect(body).toMatch(/^\s+stop_grace_period:\s+5m\b/m);
   });
 
   it('publish the daemon port the image binds', () => {
-    for (const file of composeFiles) {
+    for (const file of serverComposeFiles) {
       expect(readFileSync(file, 'utf8')).toContain('8265');
     }
+  });
+});
+
+describe('the node variant', () => {
+  const body = readFileSync('docker/compose.node.yml', 'utf8');
+
+  it('runs the same image as the server compose file', () => {
+    // Selected by environment, not by a second image: a GPU host runs
+    // exactly the build its server does.
+    const imageOf = (file: string): string =>
+      /^\s+image:\s+(\S+)$/m.exec(readFileSync(file, 'utf8'))![1]!;
+
+    expect(imageOf('docker/compose.node.yml')).toBe(imageOf('docker/compose.yml'));
+  });
+
+  it('publishes no ports: a node connects out, it never accepts inbound connections', () => {
+    expect(body).not.toMatch(/^\s*ports:/m);
+  });
+
+  it('selects node mode', () => {
+    expect(body).toMatch(/TRAWLARR_MODE=node/);
+  });
+
+  it('gives the daemon time to drain agents on shutdown', () => {
+    expect(body).toMatch(/^\s+stop_grace_period:\s+15s\b/m);
+  });
+
+  it('offers an NVIDIA profile variant with the encoder capabilities copied over', () => {
+    expect(body).toMatch(/trawlarr-node-nvidia/);
+    expect(body).toMatch(/runtime:\s+nvidia/);
+    expect(body).toMatch(/NVIDIA_VISIBLE_DEVICES=all/);
+    expect(body).toMatch(/NVIDIA_DRIVER_CAPABILITIES=[^\n]*video/);
+    expect(body).toMatch(/TRAWLARR_HARDWARE=[^\n]*nvenc/);
+    expect(body).toMatch(/TRAWLARR_HARDWARE_CAPS=nvenc=\d+/);
   });
 });
 
