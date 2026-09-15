@@ -7,6 +7,7 @@ import { formatTimestamp } from '../../shell/time.js';
 import { describeFailure } from './library-form-model.js';
 import {
   joinCommand,
+  nodeBuildLabel,
   nodeStatus,
   pathMapRows,
   unreachableSummary,
@@ -410,6 +411,7 @@ const NodeRow = (props: {
   const { node } = props;
   const status = nodeStatus(node);
   const unreachable = unreachableSummary(node, props.libraryNames);
+  const build = nodeBuildLabel(node);
 
   if (node.local) {
     return (
@@ -446,6 +448,7 @@ const NodeRow = (props: {
       <p className="detail">
         {String(node.running.length)} running. Last seen{' '}
         {node.lastSeenAt === null ? 'never' : formatTimestamp(node.lastSeenAt)}.
+        {build === null ? null : ` ${build}`}
       </p>
       {unreachable.length > 0 && <p className="problems">Unreachable: {unreachable.join('; ')}</p>}
       <div className="row-actions">

@@ -2,6 +2,7 @@ import { validatePathMap } from '@trawlarr/core';
 import { describe, expect, it } from 'vitest';
 import {
   joinCommand,
+  nodeBuildLabel,
   nodeStatus,
   pathMapRows,
   unreachableSummary,
@@ -52,6 +53,16 @@ describe('nodeStatus', () => {
 
   it('is "Revoked" even for a node that never enrolled', () => {
     expect(nodeStatus({ ...NODE, enrolled: false, revokedAt: 1_000 })).toBe('Revoked');
+  });
+});
+
+describe('nodeBuildLabel', () => {
+  it('prints the build a node reported', () => {
+    expect(nodeBuildLabel({ buildVersion: '0.4.1' })).toBe('Build 0.4.1.');
+  });
+
+  it('prints nothing for a node that has never connected', () => {
+    expect(nodeBuildLabel({ buildVersion: null })).toBeNull();
   });
 });
 

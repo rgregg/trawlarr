@@ -75,6 +75,15 @@ export const nodeStatus = (node: NodeResource): NodeStatusLabel => {
 };
 
 /**
+ * The build a remote node last reported, as its card prints it — or `null`
+ * before it has ever connected. The API sent `buildVersion` all along; the
+ * card never showed it, so a node running a different build from the server
+ * was indistinguishable from one running the same.
+ */
+export const nodeBuildLabel = (node: Pick<NodeResource, 'buildVersion'>): string | null =>
+  node.buildVersion === null || node.buildVersion === '' ? null : `Build ${node.buildVersion}.`;
+
+/**
  * Path-map rows with a stable React key, derived rather than stored: the
  * server has no id for a mapping entry, and index alone breaks identity
  * across a reorder mid-edit (React would then reuse a row's DOM node for a
