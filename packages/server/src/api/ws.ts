@@ -120,10 +120,49 @@ export const capLogText = (text: string): string => {
 const serialise = (event: TrawlarrEvent): string =>
   JSON.stringify(event.type === 'job.log' ? { ...event, text: capLogText(event.text) } : event);
 
-const denyUpgrade = (socket: Duplex, status: number, code: string, message: string): void => {
+/**
+ * Upgrade paths some listener on a server has claimed as its own.
+ *
+ * One `http.Server` carries more than one WebSocket endpoint (this event
+ * stream, and the node socket in `nodes/hub.ts`), and Node hands EVERY
+ * upgrade to EVERY `upgrade` listener. A listener that 404ed each path but
+ * its own would refuse the other endpoint's clients before that endpoint
+ * ever saw them — so a listener registers its path here, and every listener
+ * leaves a registered path alone. An upgrade no listener claims is still
+ * refused (by whichever listener runs first; the rest see a destroyed
+ * socket), because an unanswered upgrade is a socket held open for ever.
+ */
+const claimedUpgradePaths = new WeakMap<Server, Set<string>>();
+
+export const claimUpgradePath = (server: Server, path: string): void => {
+  const paths = claimedUpgradePaths.get(server) ?? new Set<string>();
+  paths.add(path);
+  claimedUpgradePaths.set(server, paths);
+};
+
+export const releaseUpgradePath = (server: Server, path: string): void => {
+  claimedUpgradePaths.get(server)?.delete(path);
+};
+
+/** True when another listener owns `path`, or the upgrade has already been answered. */
+export const upgradeHandledElsewhere = (server: Server, path: string, socket: Duplex): boolean =>
+  socket.destroyed || (claimedUpgradePaths.get(server)?.has(path) ?? false);
+
+const STATUS_TEXT: Record<number, string> = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  404: 'Not Found',
+};
+
+export const denyUpgrade = (
+  socket: Duplex,
+  status: number,
+  code: string,
+  message: string,
+): void => {
   const body = JSON.stringify({ error: { code, message } });
   socket.write(
-    `HTTP/1.1 ${String(status)} ${status === 401 ? 'Unauthorized' : 'Not Found'}\r\n` +
+    `HTTP/1.1 ${String(status)} ${STATUS_TEXT[status] ?? 'Error'}\r\n` +
       `content-type: application/json; charset=utf-8\r\n` +
       `content-length: ${String(Buffer.byteLength(body))}\r\n` +
       `connection: close\r\n\r\n${body}`,
@@ -221,8 +260,21 @@ export const attachWebSocket = (input: AttachWebSocketInput): WsChannel => {
   };
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const url = new URL(req.url ?? '/', 'http://localhost');
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      // `new URL` throws synchronously on a request target like `http://[`,
+      // and this listener runs before any authentication: uncaught, one
+      // malformed request from anyone who can reach the port takes the whole
+      // daemon down. A destroyed socket means another listener answered it.
+      if (!socket.destroyed) {
+        denyUpgrade(socket, 400, 'bad-request', 'The upgrade request URL could not be parsed.');
+      }
+      return;
+    }
     if (url.pathname !== path) {
+      if (upgradeHandledElsewhere(input.server, url.pathname, socket)) return;
       denyUpgrade(
         socket,
         404,
@@ -294,6 +346,7 @@ export const attachWebSocket = (input: AttachWebSocketInput): WsChannel => {
     })();
   };
 
+  claimUpgradePath(input.server, path);
   input.server.on('upgrade', onUpgrade);
 
   return {
@@ -301,6 +354,7 @@ export const attachWebSocket = (input: AttachWebSocketInput): WsChannel => {
     clientCount: () => clients.size,
     close: async () => {
       input.server.removeListener('upgrade', onUpgrade);
+      releaseUpgradePath(input.server, path);
       for (const socket of [...clients.keys()]) {
         drop(socket);
         // 1001 "going away": the daemon is shutting down, and the client

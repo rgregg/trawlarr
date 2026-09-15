@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   flowLabel,
   formatWindow,
+  localActiveCount,
   oidcSummary,
   parseWindow,
   parseWorkerCount,
@@ -104,6 +105,25 @@ describe('parseWorkerCount', () => {
       ok: false,
       message: 'Enter a whole number of workers.',
     });
+  });
+});
+
+describe('localActiveCount', () => {
+  // Task 9's known mismatch: `GET /workers`'s `active` counts every worker
+  // across every node, while `target` is only ever the local schedule's ask.
+  // The Workers tab must compare like with like.
+  it('counts only workers whose nodeId is "local"', () => {
+    expect(localActiveCount([{ nodeId: 'local' }, { nodeId: 'local' }, { nodeId: 'node-1' }])).toBe(
+      2,
+    );
+  });
+
+  it('is zero when every worker belongs to a remote node', () => {
+    expect(localActiveCount([{ nodeId: 'node-1' }, { nodeId: 'node-2' }])).toBe(0);
+  });
+
+  it('is zero for an empty list', () => {
+    expect(localActiveCount([])).toBe(0);
   });
 });
 

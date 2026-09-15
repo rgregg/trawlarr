@@ -10,6 +10,7 @@ import {
   toRunningRows,
   nextDebounceDelayMs,
   toWorkerSlots,
+  workerTargetLine,
   type LibraryResource,
   type LibraryStats,
 } from './watch-model.js';
@@ -612,5 +613,27 @@ describe('nextDebounceDelayMs', () => {
     // 400 for ever and the screen's counters never refresh.
     expect(nextDebounceDelayMs({ waitedMs: 2000, delayMs: 400, maxWaitMs: 2000 })).toBe(0);
     expect(nextDebounceDelayMs({ waitedMs: 9999, delayMs: 400, maxWaitMs: 2000 })).toBe(0);
+  });
+});
+
+describe('workerTargetLine', () => {
+  it("counts only this daemon's workers against its own target, not a remote node's job", () => {
+    expect(
+      workerTargetLine({
+        paused: false,
+        target: { transcode: 0, health: 0 },
+        workers: [{ nodeId: 'node-1' }],
+      }),
+    ).toBe('0 running — target transcode 0, health 0');
+  });
+
+  it('counts local workers and says when the pool is paused', () => {
+    expect(
+      workerTargetLine({
+        paused: true,
+        target: { transcode: 2 },
+        workers: [{ nodeId: 'local' }, { nodeId: 'node-1' }, { nodeId: 'local' }],
+      }),
+    ).toBe('2 running, pool paused — target transcode 2');
   });
 });

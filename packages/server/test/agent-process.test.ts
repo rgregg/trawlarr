@@ -21,6 +21,7 @@ import {
   AgentFailure,
   createAgentHandle,
   forkAgent,
+  type CommitPort,
 } from '../src/worker/agent-handle.js';
 import { fakeTimers } from './fake-child.js';
 import { probeFile } from '../src/probe/ffprobe.js';
@@ -235,6 +236,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   logPath: null,
   // Only first-party plugins here: nothing installed to resolve.
   pluginPaths: {},
+  pluginBundles: {},
 });
 
 /** The daemon side of the document store: a plain map, in THIS process. */
@@ -255,10 +257,11 @@ const recordingDocuments = () => {
   return { port, docs };
 };
 
-const handleFor = (documents: DocumentPort) =>
+const handleFor = (documents: DocumentPort, commits?: CommitPort) =>
   createAgentHandle({
     id: 'w1',
     documents,
+    ...(commits === undefined ? {} : { commits }),
     onStep: () => {},
     onHeartbeat: () => {},
     onProgress: () => {},
@@ -381,6 +384,36 @@ describe('the forked worker agent', () => {
 
     await expect(handle.exited).resolves.toBe(0);
     expect(isAlive(handle.pid ?? 0)).toBe(false);
+  }, 30_000);
+
+  it('asks the daemon before a plugin it cannot vouch for, and never runs it when refused', async () => {
+    // The commit round trip across a real process boundary. The run above
+    // already crossed it granted (a path-named plugin asks, and the default
+    // port grants); this is the refusal, which must stop the node BEFORE its
+    // code runs and come back as a superseded failure, not as a report.
+    const { port, docs } = recordingDocuments();
+    const asked: { kind: string; pluginId: string }[] = [];
+    const identity = identityPluginPath();
+    const handle = handleFor(port, async (request) => {
+      asked.push(request);
+      return { granted: false, reason: 'lease released' };
+    });
+
+    const failure = await handle.run(payloadFor(flowThrough([identity]))).then(
+      () => {
+        throw new Error('expected the run to reject');
+      },
+      (error: unknown) => error as AgentFailure,
+    );
+
+    expect(asked).toEqual([{ kind: 'plugin', pluginId: identity }]);
+    expect(failure).toBeInstanceOf(AgentFailure);
+    expect(failure.superseded).toBe(true);
+    expect(failure.reported).toBe(true);
+    expect(failure.message).toContain('lease released');
+    // The plugin's only effect is this document: absent, so it never ran.
+    expect(docs.size).toBe(0);
+    await expect(handle.exited).resolves.toBe(1);
   }, 30_000);
 });
 

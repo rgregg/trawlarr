@@ -1630,3 +1630,52 @@ describe('account set-password', () => {
     expect(stderr()).toContain('single sign-on');
   });
 });
+
+describe('cli: node', () => {
+  it('exits 2 naming --server and --token when the node is not enrolled and has no token', async () => {
+    vi.stubEnv('TRAWLARR_SERVER', undefined);
+    vi.stubEnv('TRAWLARR_NODE_TOKEN', undefined);
+    try {
+      const dataDir = newDataDir();
+      expect(await main(['node', '--data-dir', dataDir])).toBe(2);
+      expect(stderr()).toContain('--server');
+      expect(stderr()).toContain('--token');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('takes its data directory from TRAWLARR_NODE_DATA_DIR, never the daemon variable', async () => {
+    const nodeDir = newDataDir();
+    const daemonDir = newDataDir();
+    vi.stubEnv('TRAWLARR_SERVER', undefined);
+    vi.stubEnv('TRAWLARR_NODE_TOKEN', undefined);
+    vi.stubEnv('TRAWLARR_NODE_DATA_DIR', nodeDir);
+    vi.stubEnv('TRAWLARR_DATA_DIR', daemonDir);
+    try {
+      expect(await main(['node'])).toBe(2);
+      expect(existsSync(join(nodeDir, 'node.lock'))).toBe(true);
+      expect(existsSync(join(daemonDir, 'node.lock'))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects an unknown hardware type before starting anything', async () => {
+    const dataDir = newDataDir();
+    const code = await main([
+      'node',
+      '--data-dir',
+      dataDir,
+      '--server',
+      'http://127.0.0.1:9',
+      '--token',
+      't',
+      '--hardware',
+      'gpu',
+    ]);
+    expect(code).toBe(2);
+    expect(stderr()).toContain('"gpu"');
+    expect(existsSync(join(dataDir, 'node.lock'))).toBe(false);
+  });
+});

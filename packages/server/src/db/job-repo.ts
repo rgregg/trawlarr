@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { WorkerClass } from '@trawlarr/core';
+import type { Lease, LeaseState, WorkerClass } from '@trawlarr/core';
 import type { Db } from './connection.js';
+import { MAX_LOG_EXCERPT_CHARS, truncateLogExcerpt } from '../job-log/log-excerpt.js';
 
 export interface JobRow {
   id: string;
@@ -23,6 +24,35 @@ export interface JobRow {
    */
   workerPid: number | null;
   workerHost: string | null;
+  /**
+   * NULL on every local job: a local worker's liveness is a pid in this
+   * host's process table, which a remote one does not have. See
+   * `012_remote_nodes.sql`.
+   */
+  leaseState: LeaseState | null;
+  leaseExpiresAt: number | null;
+  /**
+   * When an operator asked to cancel this job, or null. Durable so a remote
+   * job's cancel survives a daemon restart (`013_job_cancel_requested.sql`).
+   */
+  cancelRequestedAt: number | null;
+}
+
+/**
+ * A job with an active remote lease, as `listLeased` returns it: the lease
+ * itself, and the two things needed to fold a late-arriving report back in
+ * faithfully after a daemon restart -- the payload built on the SERVER
+ * (server paths) and the path map it was sent through, since neither
+ * survives in memory across a restart and the node's map may have changed
+ * since.
+ */
+export interface JobLeaseRow {
+  jobId: string;
+  fileId: string;
+  nodeId: string;
+  lease: Lease;
+  payloadJson: string;
+  pathMapJson: string;
 }
 
 export interface JobStepRow {
@@ -150,6 +180,33 @@ export interface JobRepo {
   /** Filtered, paginated job history, newest first. */
   query(input: QueryJobsInput): JobPage;
   getSteps(jobId: string): JobStepRow[];
+  /**
+   * Hands a job to a remote node: records who has it, its initial lease, and
+   * the server-built payload and path map it was sent through (see
+   * `JobLeaseRow`).
+   */
+  setRemote(input: {
+    jobId: string;
+    nodeId: string;
+    lease: Lease;
+    payloadJson: string;
+    pathMapJson: string;
+  }): void;
+  /** Updates the lease alone -- the common case once a job is already remote. */
+  setLease(input: { jobId: string; lease: Lease }): void;
+  /** Every open job with an active lease, for the supervisor to reconcile on startup. */
+  listLeased(): JobLeaseRow[];
+  /**
+   * Folds one more line into a job's outcome rather than replacing it --
+   * used when a remote report arrives piecemeal (progress, then a final
+   * result) and each arrival should be visible, not just the last one.
+   */
+  appendOutcome(input: { jobId: string; text: string }): void;
+  /**
+   * Records an operator's cancel on an open job. The first request wins, and
+   * an ended job is left alone: there is nothing left to cancel.
+   */
+  requestCancel(input: { jobId: string; nowMs: number }): void;
 }
 
 interface JobRowRaw {
@@ -167,6 +224,11 @@ interface JobRowRaw {
   ended_at: number | null;
   worker_pid: number | null;
   worker_host: string | null;
+  lease_state: string | null;
+  lease_expires_at: number | null;
+  cancel_requested_at: number | null;
+  payload_json: string | null;
+  path_map_json: string | null;
 }
 
 interface JobStepRowRaw {
@@ -195,6 +257,9 @@ const toJobRow = (row: JobRowRaw): JobRow => ({
   endedAt: row.ended_at,
   workerPid: row.worker_pid,
   workerHost: row.worker_host,
+  leaseState: row.lease_state as LeaseState | null,
+  leaseExpiresAt: row.lease_expires_at,
+  cancelRequestedAt: row.cancel_requested_at,
 });
 
 const toJobStepRow = (row: JobStepRowRaw): JobStepRow => ({
@@ -214,22 +279,9 @@ const logExcerptWithError = (logExcerpt: string, error: string | null | undefine
   return logExcerpt === '' ? `ERROR: ${error}` : `${logExcerpt}\nERROR: ${error}`;
 };
 
-/**
- * An "excerpt" that grows without bound is not one: a chatty community
- * plugin (or one that echoes ffmpeg's own progress lines through `jobLog`)
- * can write megabytes into a single step. Kept generous — several full
- * pages of log text — because the trace exists to answer "why did this file
- * get this decision", and a truncation aggressive enough to cut off the
- * actual error message defeats that.
- */
-export const MAX_LOG_EXCERPT_CHARS = 8_000;
-
-const truncateLogExcerpt = (text: string): string => {
-  if (text.length <= MAX_LOG_EXCERPT_CHARS) return text;
-  const kept = text.slice(0, MAX_LOG_EXCERPT_CHARS);
-  const omitted = text.length - MAX_LOG_EXCERPT_CHARS;
-  return `${kept}\n… [truncated, ${omitted} more characters]`;
-};
+// Lives outside `db/` because the remote node host caps excerpts too, and a
+// node never loads anything under `db/` (see agent-handle.test.ts).
+export { MAX_LOG_EXCERPT_CHARS };
 
 /**
  * Records what happened to a file as it was driven through a flow: one `job`
@@ -248,7 +300,14 @@ export const createJobRepo = (db: Db): JobRepo => {
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  const finishJob = db.prepare(`UPDATE job SET state = ?, outcome = ?, ended_at = ? WHERE id = ?`);
+  // The remote payload and path map are only read to adopt an OPEN leased job
+  // after a restart (`listLeased`); once a job ends nothing reads them — a late
+  // result only appends to `outcome`. Kept, every remote run would leave a
+  // whole server-view payload in the job table for ever.
+  const finishJob = db.prepare(
+    `UPDATE job SET state = ?, outcome = ?, ended_at = ?, payload_json = NULL, path_map_json = NULL
+     WHERE id = ?`,
+  );
 
   const heartbeatJob = db.prepare(`UPDATE job SET heartbeat_at = ? WHERE id = ?`);
 
@@ -263,6 +322,33 @@ export const createJobRepo = (db: Db): JobRepo => {
   const selectForFile = db.prepare(`SELECT * FROM job WHERE file_id = ? ORDER BY started_at DESC`);
 
   const selectSteps = db.prepare(`SELECT * FROM job_step WHERE job_id = ? ORDER BY seq ASC`);
+
+  const setRemoteJob = db.prepare(
+    `UPDATE job SET node_id = ?, lease_state = ?, lease_expires_at = ?, payload_json = ?, path_map_json = ?
+     WHERE id = ?`,
+  );
+
+  const setLeaseJob = db.prepare(
+    `UPDATE job SET lease_state = ?, lease_expires_at = ? WHERE id = ?`,
+  );
+
+  // `ended_at IS NULL AND lease_state IS NOT NULL` matches `job_leased_idx`
+  // (see `012_remote_nodes.sql`) so this stays an index scan as the job
+  // table grows.
+  const selectLeased = db.prepare(
+    `SELECT id, file_id, node_id, lease_state, lease_expires_at, payload_json, path_map_json
+     FROM job WHERE ended_at IS NULL AND lease_state IS NOT NULL`,
+  );
+
+  const requestCancelJob = db.prepare(
+    `UPDATE job SET cancel_requested_at = ?
+     WHERE id = ? AND ended_at IS NULL AND cancel_requested_at IS NULL`,
+  );
+
+  const appendOutcomeJob = db.prepare(
+    `UPDATE job SET outcome = CASE WHEN outcome IS NULL THEN ? ELSE outcome || char(10) || ? END
+     WHERE id = ?`,
+  );
 
   return {
     start(input) {
@@ -339,6 +425,51 @@ export const createJobRepo = (db: Db): JobRepo => {
 
     getSteps(jobId) {
       return (selectSteps.all(jobId) as JobStepRowRaw[]).map(toJobStepRow);
+    },
+
+    setRemote(input) {
+      setRemoteJob.run(
+        input.nodeId,
+        input.lease.state,
+        input.lease.expiresAtMs,
+        input.payloadJson,
+        input.pathMapJson,
+        input.jobId,
+      );
+    },
+
+    setLease(input) {
+      setLeaseJob.run(input.lease.state, input.lease.expiresAtMs, input.jobId);
+    },
+
+    listLeased() {
+      const rows = selectLeased.all() as {
+        id: string;
+        file_id: string;
+        node_id: string | null;
+        lease_state: string;
+        lease_expires_at: number | null;
+        payload_json: string | null;
+        path_map_json: string | null;
+      }[];
+      return rows.map((row) => ({
+        jobId: row.id,
+        fileId: row.file_id,
+        // node_id is set alongside lease_state by setRemote and never
+        // cleared while a lease is active, so it is never null here.
+        nodeId: row.node_id as string,
+        lease: { state: row.lease_state as LeaseState, expiresAtMs: row.lease_expires_at },
+        payloadJson: row.payload_json as string,
+        pathMapJson: row.path_map_json as string,
+      }));
+    },
+
+    requestCancel(input) {
+      requestCancelJob.run(input.nowMs, input.jobId);
+    },
+
+    appendOutcome(input) {
+      appendOutcomeJob.run(input.text, input.text, input.jobId);
     },
   };
 };

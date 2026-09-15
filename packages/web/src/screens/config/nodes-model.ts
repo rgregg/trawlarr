@@ -1,0 +1,282 @@
+/**
+ * The Nodes tab's data shape and pure logic, parsed once and in one place —
+ * `Config.tsx`'s split for the Configure screen's other tabs (see
+ * `config-model.ts`'s own comment): `Nodes.tsx` is a thin renderer over this,
+ * so every branch worth asserting lives here where a test can reach it with
+ * no DOM.
+ */
+
+import type { LiveState } from '../../api/events.js';
+import { formatWhen } from '../../shell/time.js';
+
+/**
+ * `GET /nodes`'s response, field for field as `packages/server/src/api/routes/nodes.ts`
+ * reports it (`toNodeResource` plus the per-row `local`/`online`/`running`
+ * it joins on). Two fields the task brief's sketch got wrong, corrected
+ * against the route that actually ships:
+ *
+ * - `running` is `string[]` (job ids), not objects with `path`/`percent` —
+ *   the route joins on `job.node_id` alone and invents nothing else. Only
+ *   the running COUNT is shown for that reason; a path or a percentage here
+ *   would be display code fabricating data the API never sent.
+ * - `schedule` is unconditionally present (not optional) — every node row
+ *   carries a schedule (`DEFAULT_SCHEDULE` when never set).
+ */
+export interface NodeResource {
+  id: string;
+  name: string;
+  local: boolean;
+  online: boolean;
+  revokedAt: number | null;
+  enrolled: boolean;
+  enrollExpiresAt: number | null;
+  lastSeenAt: number | null;
+  buildVersion: string | null;
+  hardwareTypes: string[];
+  hardwareCaps: Record<string, number>;
+  pathMap: { serverPath: string; nodePath: string }[];
+  /** Why the stored map is invalid; a node with one is offered no work. */
+  pathMapError: string | null;
+  paused: boolean;
+  schedule: { baseCounts: { transcode: number; health: number } } & Record<string, unknown>;
+  libraries: { libraryId: string; reachable: boolean; detail: string }[];
+  running: string[];
+}
+
+/**
+ * `POST /nodes`, `PUT /nodes/:id` and `POST /nodes/:id/revoke` all answer
+ * with the bare `toNodeResource(record)` shape — `NodeResource` MINUS
+ * `local`/`online`/`running`, which only the `GET /nodes` LIST handler
+ * joins on (`packages/server/src/api/routes/nodes.ts`, the per-row spread
+ * after `toNodeResource(record)` in its `.map`). A mutation response is
+ * therefore never a valid list row: reaching for `.running.length` (or
+ * `.local`/`.online`) on one throws, which is exactly what crashed Add
+ * node / Save workers / Toggle paused / Save paths / Revoke before this
+ * type existed to keep the two shapes apart. `Nodes.tsx` types every
+ * mutation's response as `NodeMutationResponse` and reloads `GET /nodes`
+ * for anything that touches a row.
+ */
+export type NodeMutationResponse = Omit<NodeResource, 'local' | 'online' | 'running'>;
+
+export type NodeStatusLabel = 'Online' | 'Offline' | 'Revoked' | 'Waiting to join';
+
+/**
+ * A revoked node is reported as revoked regardless of anything else it
+ * reports: a revoke does not stop a node's process, only its ability to
+ * authenticate, so a revoked node can still show up "online" on the wire
+ * and showing that as "Online" would suggest it is still doing work for
+ * this daemon when it categorically is not.
+ *
+ * "Waiting to join" comes next: an unenrolled node has never proven it
+ * holds a secret, so "Online"/"Offline" — both claims about a node this
+ * daemon has actually talked to as itself — do not apply yet.
+ */
+export const nodeStatus = (node: NodeResource): NodeStatusLabel => {
+  if (node.revokedAt !== null) return 'Revoked';
+  if (!node.enrolled) return 'Waiting to join';
+  return node.online ? 'Online' : 'Offline';
+};
+
+/**
+ * What the Nodes tab re-fetches `GET /nodes` on. `nodes.changed` alone is
+ * not enough: each card's running count is joined from the job table, and
+ * a job starting or finishing — on this daemon or any node — emits only
+ * `job.started`/`job.finished`. Keyed on `nodes` staleness only, a card sat
+ * at "0 running" for a whole remote transcode and then at "1 running" after
+ * it ended, until the page was reloaded.
+ */
+export const nodesRefreshKey = (live: Pick<LiveState, 'staleness' | 'jobs'>): string =>
+  [
+    String(live.staleness.nodes),
+    String(live.staleness.jobs),
+    Object.keys(live.jobs).sort().join(','),
+  ].join('|');
+
+/**
+ * The build a remote node last reported, as its card prints it — or `null`
+ * before it has ever connected. The API sent `buildVersion` all along; the
+ * card never showed it, so a node running a different build from the server
+ * was indistinguishable from one running the same.
+ */
+export const nodeBuildLabel = (node: Pick<NodeResource, 'buildVersion'>): string | null =>
+  node.buildVersion === null || node.buildVersion === '' ? null : `Build ${node.buildVersion}.`;
+
+/**
+ * When a node last talked to this daemon, as its card prints it. It was the
+ * raw ISO string (`2026-09-15T05:19:40.308Z`), unlike every other "when" a
+ * person reads on this UI.
+ */
+export const lastSeenLabel = (lastSeenAt: number | null, nowMs: number): string =>
+  lastSeenAt === null ? 'never' : formatWhen(lastSeenAt, nowMs);
+
+/**
+ * A remote node's one-line summary under its name. "Paused" is in it because
+ * a paused node otherwise looked exactly like an idle one.
+ */
+export const nodeCardLine = (
+  node: Pick<NodeResource, 'running' | 'paused' | 'lastSeenAt' | 'buildVersion'>,
+  nowMs: number,
+): string => {
+  const build = nodeBuildLabel(node);
+  return [
+    `${String(node.running.length)} running.`,
+    ...(node.paused ? ['Paused.'] : []),
+    `Last seen ${lastSeenLabel(node.lastSeenAt, nowMs)}.`,
+    ...(build === null ? [] : [build]),
+  ].join(' ');
+};
+
+/**
+ * A revoked node cannot authenticate, so its workers, pause and paths reach
+ * nothing; editable, they suggested a revoke could be tuned rather than undone
+ * by deleting and re-adding the node.
+ */
+export const nodeSettingsEditable = (node: Pick<NodeResource, 'revokedAt'>): boolean =>
+  node.revokedAt === null;
+
+/**
+ * What the Paused checkbox shows. It is controlled by the row, which only
+ * changes when `GET /nodes` reloads after the save — so a click flipped it,
+ * React put it straight back, and the reload flipped it again. `draft` is the
+ * value being saved; it is shown until the row agrees, then dropped.
+ */
+export const pausedShown = (input: {
+  draft: boolean | null;
+  saved: boolean;
+}): { checked: boolean; draft: boolean | null } =>
+  input.draft === null || input.draft === input.saved
+    ? { checked: input.saved, draft: null }
+    : { checked: input.draft, draft: input.draft };
+
+/**
+ * Path-map rows with a stable React key, derived rather than stored: the
+ * server has no id for a mapping entry, and index alone breaks identity
+ * across a reorder mid-edit (React would then reuse a row's DOM node for a
+ * different pair, which briefly shows the wrong node path while a field is
+ * still focused). `serverPath`/`nodePath` are validated unique server-side
+ * (see `validatePathMapRows` below, mirroring `@trawlarr/core`'s
+ * `validatePathMap`), so the pair is a safe key on its own.
+ */
+export const pathMapRows = (
+  map: NodeResource['pathMap'],
+): { serverPath: string; nodePath: string; key: string }[] =>
+  map.map((entry) => ({ ...entry, key: `${entry.serverPath}\u0000${entry.nodePath}` }));
+
+const isAbsoluteNoDotDot = (path: string): boolean => {
+  if (!path.startsWith('/')) return false;
+  return !path.split('/').some((segment) => segment === '.' || segment === '..');
+};
+
+const trimTrailing = (path: string): string =>
+  path.length > 1 && path.endsWith('/') ? trimTrailing(path.slice(0, -1)) : path;
+
+const within = (root: string, path: string): boolean =>
+  root === '/' || path === root || path.startsWith(`${root}/`);
+
+const relativeTo = (root: string, path: string): string =>
+  path === root ? '' : root === '/' ? path.slice(1) : path.slice(root.length + 1);
+
+/**
+ * Mirrors ALL of `@trawlarr/core`'s `validatePathMap` rules — absolute
+ * paths, no `.`/`..` segments, trailing slashes ignored, no server path and
+ * no node path listed twice, and nested rows nesting at the same place on
+ * both sides — so a bad row is caught inline, beside the table, before the
+ * round trip to `PUT /nodes/:id`. The server's `validatePathMap` is still
+ * the source of truth; this is a UI-side echo with terse copy.
+ *
+ * Every rule has to be echoed, not just the easy ones: a rule missing here
+ * sent the save to the server, whose refusal rendered below Libraries,
+ * Hardware and Revoke as a paragraph, worded "is mapped more than once" —
+ * copy this screen must never show.
+ */
+export const validatePathMapRows = (
+  rows: { serverPath: string; nodePath: string }[],
+): string | null => {
+  const seenServer = new Set<string>();
+  const seenNode = new Set<string>();
+  const entries: { serverPath: string; nodePath: string }[] = [];
+  for (const row of rows) {
+    if (!isAbsoluteNoDotDot(row.serverPath)) {
+      if (!row.serverPath.startsWith('/')) {
+        return `Server path "${row.serverPath}" must be an absolute path.`;
+      }
+      return `Server path "${row.serverPath}" must not contain "." or ".." segments.`;
+    }
+    if (!isAbsoluteNoDotDot(row.nodePath)) {
+      if (!row.nodePath.startsWith('/')) {
+        return `This node's path "${row.nodePath}" must be an absolute path.`;
+      }
+      return `This node's path "${row.nodePath}" must not contain "." or ".." segments.`;
+    }
+    const serverPath = trimTrailing(row.serverPath);
+    const nodePath = trimTrailing(row.nodePath);
+    if (seenServer.has(serverPath)) {
+      return `Server path "${row.serverPath}" is listed more than once.`;
+    }
+    if (seenNode.has(nodePath)) {
+      return `This node's path "${row.nodePath}" is listed more than once.`;
+    }
+    seenServer.add(serverPath);
+    seenNode.add(nodePath);
+    entries.push({ serverPath, nodePath });
+  }
+  for (const a of entries) {
+    for (const b of entries) {
+      if (a === b) continue;
+      const serverNested = within(a.serverPath, b.serverPath);
+      if (within(a.nodePath, b.nodePath) !== serverNested) {
+        return `"${b.serverPath}" and "${a.serverPath}" must nest the same way on both sides.`;
+      }
+      if (
+        serverNested &&
+        relativeTo(a.serverPath, b.serverPath) !== relativeTo(a.nodePath, b.nodePath)
+      ) {
+        return `"${b.serverPath}" must sit at the same place under "${a.serverPath}" on both sides.`;
+      }
+    }
+  }
+  return null;
+};
+
+/**
+ * The two commands the "add a node" dialog shows once, over the token it
+ * just issued.
+ *
+ * The image tag is `:sha-<short commit>` — what CI publishes for every build
+ * (`docker/metadata-action`'s 7-character short sha) — and `:main` when the
+ * server reports no commit. Never `:<version>`: a main build's version is
+ * `0.0.0`, which is never pushed, so that command failed as pasted. The
+ * library volume is a visible placeholder because only the operator knows
+ * where this machine mounts the library; without any `-v` for it the node
+ * probes every library as unreachable.
+ */
+export const joinCommand = (input: {
+  serverUrl: string;
+  token: string;
+  commit: string | null;
+}): { docker: string; cli: string } => {
+  const tag =
+    input.commit === null || input.commit === '' ? 'main' : `sha-${input.commit.slice(0, 7)}`;
+  return {
+    docker:
+      `docker run -d --name trawlarr-node -e TRAWLARR_MODE=node ` +
+      `-e TRAWLARR_SERVER=${input.serverUrl} -e TRAWLARR_NODE_TOKEN=${input.token} ` +
+      `-v <library-path>:<path-this-node-uses> -v trawlarr-node:/config ` +
+      `ghcr.io/rgregg/trawlarr:${tag}`,
+    cli: `trawlarr node --server ${input.serverUrl} --token ${input.token}`,
+  };
+};
+
+/**
+ * Which of a node's libraries it cannot reach, and why — the line the
+ * detail panel prints beside each one. `unreachable`/`unmapped` never
+ * appear in the copy itself (see the task's ruling): the sentence is
+ * "<library>: <detail>", and `detail` is the node's own probe reason.
+ */
+export const unreachableSummary = (
+  node: NodeResource,
+  libraryNames: Record<string, string>,
+): string[] =>
+  node.libraries
+    .filter((probe) => !probe.reachable)
+    .map((probe) => `${libraryNames[probe.libraryId] ?? probe.libraryId}: ${probe.detail}`);

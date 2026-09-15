@@ -12,7 +12,7 @@
 
 import type { FlowDiff } from '@trawlarr/core';
 
-import { toIsoInstant } from '../../shell/time.js';
+import { formatWhen } from '../../shell/time.js';
 
 /** `GET /flows/:id/versions`'s per-item shape — see `flows.ts`'s handler. */
 export interface ApiVersionSummary {
@@ -44,21 +44,11 @@ const SHORT_HASH_LENGTH = 8;
 const describeNote = (note: string): string => (note === '' ? 'Published' : note);
 
 /**
- * When a version was published, as a date — and "Today" for one published
- * on the same UTC day as `nowMs`, since that is the row an operator is most
- * likely to be checking right after a publish and the one where a bare date
- * reads as more stale than it is.
+ * When a version was published: "Today, HH:MM UTC" for today — the row an
+ * operator is most likely checking right after a publish — else the date.
+ * Shared with the Nodes tab, so it lives in `shell/time.ts`.
  */
-export const formatWhen = (createdAtMs: number, nowMs: number): string => {
-  const created = toIsoInstant(createdAtMs);
-  if (created === null) return '—';
-  const day = created.slice(0, 10);
-  // An unreadable `nowMs` costs the "Today" shortcut and nothing else — the
-  // date is still the truth about when this version was published, so it is
-  // rendered rather than withheld.
-  const now = toIsoInstant(nowMs);
-  return now !== null && day === now.slice(0, 10) ? `Today, ${created.slice(11, 16)} UTC` : day;
-};
+export { formatWhen };
 
 export const toVersionRows = (items: ApiVersionSummary[], nowMs: number): VersionRow[] =>
   items.map((item) => ({

@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSyn
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
 import { extractFacts, type FactSet, type FlowDefinition } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
@@ -15,7 +16,12 @@ import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { AgentFailure, type AgentHandle } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
-import { startDaemon, type Daemon } from './daemon.js';
+import {
+  LEASE_SWEEP_INTERVAL_MS,
+  leaseSweepIntervalMs,
+  startDaemon,
+  type Daemon,
+} from './daemon.js';
 import {
   DAEMON_LOCK_FILENAME,
   DaemonAlreadyRunningError,
@@ -266,6 +272,26 @@ afterEach(async () => {
 
 const health = async (port: number): Promise<Response> =>
   await fetch(`http://127.0.0.1:${String(port)}/api/v1/system/health`);
+
+describe('leaseSweepIntervalMs', () => {
+  it('honours the test override only in a test process', () => {
+    // A stray variable in a production container must not change when
+    // remote claims are released.
+    expect(leaseSweepIntervalMs({ TRAWLARR_TEST_LEASE_SWEEP_MS: '500' })).toBe(
+      LEASE_SWEEP_INTERVAL_MS,
+    );
+    expect(
+      leaseSweepIntervalMs({ NODE_ENV: 'production', TRAWLARR_TEST_LEASE_SWEEP_MS: '500' }),
+    ).toBe(LEASE_SWEEP_INTERVAL_MS);
+    expect(leaseSweepIntervalMs({ NODE_ENV: 'test' })).toBe(LEASE_SWEEP_INTERVAL_MS);
+    expect(leaseSweepIntervalMs({ NODE_ENV: 'test', TRAWLARR_TEST_LEASE_SWEEP_MS: '0' })).toBe(
+      LEASE_SWEEP_INTERVAL_MS,
+    );
+    expect(leaseSweepIntervalMs({ NODE_ENV: 'test', TRAWLARR_TEST_LEASE_SWEEP_MS: '500' })).toBe(
+      500,
+    );
+  });
+});
 
 describe('startDaemon', () => {
   it('starts, serves the API on the recorded port, and stops cleanly', async () => {
@@ -518,6 +544,134 @@ describe('startDaemon', () => {
     const daemon = await start({ dataDir });
     await Promise.all([daemon.stop(), daemon.stop()]);
     await expect(daemon.stopped).resolves.toBeUndefined();
+  });
+});
+
+describe('remote nodes across a daemon restart', () => {
+  const HOUR_MS = 60 * 60 * 1000;
+
+  /**
+   * What a daemon killed mid-encode leaves behind for a remote job: the file
+   * claimed, the job leased to `node-x` as `connected`, and its heartbeat a
+   * day old — a long single step, exactly what the reaper's floor must not
+   * judge on a remote node's behalf.
+   */
+  const seedLeasedJob = (dataDir: string): { fileId: string; jobId: string } => {
+    const { fileId, libraryId, root } = seedLibrary(dataDir);
+    const db = openDataDb(dataDir);
+    db.prepare(`INSERT INTO node (id, name) VALUES ('node-x', 'garage')`).run();
+    createMediaFileRepo(db).setState({ fileId, state: 'running' });
+    const jobRepo = createJobRepo(db);
+    const jobId = jobRepo.start({
+      fileId,
+      flowId: 'flow',
+      flowHash: 'hash',
+      nowMs: NOW - 25 * HOUR_MS,
+      nodeId: 'node-x',
+    });
+    jobRepo.heartbeat({ jobId, nowMs: NOW - 25 * HOUR_MS });
+    const payload = {
+      jobId,
+      fileId,
+      libraryId,
+      path: join(root, 'file.mkv'),
+      workerClass: 'transcode',
+      hardwareType: 'cpu',
+      logPath: null,
+    } as unknown as JobPayload;
+    jobRepo.setRemote({
+      jobId,
+      nodeId: 'node-x',
+      lease: { state: 'connected', expiresAtMs: null },
+      payloadJson: JSON.stringify(payload),
+      pathMapJson: '[]',
+    });
+    db.close();
+    return { fileId, jobId };
+  };
+
+  it('adopts a leased job at startup: grace from now, a slot on its node, and no reaping', async () => {
+    const dataDir = newDataDir();
+    const { fileId, jobId } = seedLeasedJob(dataDir);
+    const startedAt = NOW + 60_000;
+
+    const daemon = await start({
+      dataDir,
+      createAgent: fakeAgents().createAgent,
+      nowMs: () => startedAt,
+    });
+
+    const db = openDataDb(dataDir);
+    const graceMs = createSettingsRepo({ db }).getNodes().leaseGraceMs;
+    const job = createJobRepo(db).getById(jobId)!;
+    const file = createMediaFileRepo(db).getById(fileId)!;
+    db.close();
+    expect({ state: job.leaseState, expiresAt: job.leaseExpiresAt }).toEqual({
+      state: 'grace',
+      expiresAt: startedAt + graceMs,
+    });
+    // The startup reaper left it alone: the hub's lease sweep owns it.
+    expect(job.endedAt).toBeNull();
+    expect(file.state).toBe('running');
+
+    const record = (await readDaemonRecord({ dataDir }))!;
+    const response = await fetch(`http://127.0.0.1:${String(daemon.port)}/api/v1/workers`, {
+      headers: { 'x-api-key': record.apiKey },
+    });
+    const body = (await response.json()) as { workers: { jobId: string; nodeId: string }[] };
+    expect(body.workers.map((worker) => [worker.jobId, worker.nodeId])).toEqual([
+      [jobId, 'node-x'],
+    ]);
+  });
+
+  it('leaves a remote job running and uncancelled when it shuts down', async () => {
+    // A remote cancel is durable: cancelling on shutdown would cancel every
+    // remote job on every restart. The node keeps encoding; the next start adopts it.
+    const dataDir = newDataDir();
+    const { fileId, jobId } = seedLeasedJob(dataDir);
+
+    const daemon = await start({
+      dataDir,
+      createAgent: fakeAgents().createAgent,
+      drainDeadlineMs: 0,
+    });
+    await daemon.stop();
+
+    const db = openDataDb(dataDir);
+    const job = createJobRepo(db).getById(jobId)!;
+    expect(job.cancelRequestedAt).toBeNull();
+    expect(job.endedAt).toBeNull();
+    expect(createMediaFileRepo(db).getById(fileId)?.state).toBe('running');
+    db.close();
+  });
+
+  it('accepts node sockets and node HTTP on its own port', async () => {
+    const dataDir = newDataDir();
+    const daemon = await start({ dataDir });
+    const base = `127.0.0.1:${String(daemon.port)}`;
+
+    // The node handler answers a bundle request itself, with a node 401 —
+    // not the operator API's.
+    const bundle = await fetch(`http://${base}/api/v1/nodes/bundles/abc`);
+    expect(bundle.status).toBe(401);
+    expect(((await bundle.json()) as { error: { message: string } }).error.message).toMatch(
+      /not authorised as a node/,
+    );
+
+    // And the node socket endpoint exists: an unauthenticated upgrade is
+    // refused as unauthorised, not as an unknown path.
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(`ws://${base}/api/v1/nodes/connect`);
+      ws.on('unexpected-response', (_req, res) => {
+        resolve(res.statusCode ?? 0);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        reject(new Error('an unauthenticated node socket was accepted'));
+      });
+      ws.on('error', () => {});
+    });
+    expect(status).toBe(401);
   });
 });
 

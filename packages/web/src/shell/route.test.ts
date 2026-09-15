@@ -139,3 +139,13 @@ describe('the account tab', () => {
     expect(formatRoute({ name: 'config', tab: 'account' })).toBe('/config?tab=account');
   });
 });
+
+describe('the nodes tab', () => {
+  it('parses ?tab=nodes', () => {
+    expect(parseRoute('/config', 'tab=nodes')).toEqual({ name: 'config', tab: 'nodes' });
+  });
+
+  it('round-trips through formatRoute', () => {
+    expect(formatRoute({ name: 'config', tab: 'nodes' })).toBe('/config?tab=nodes');
+  });
+});

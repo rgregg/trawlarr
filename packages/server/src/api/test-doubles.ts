@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Writable } from 'node:stream';
+import { createNoopNodeHub, type NodeHub } from '../nodes/hub.js';
 
 /**
  * Minimal `IncomingMessage`/`ServerResponse` doubles for handlers that are
@@ -72,4 +73,42 @@ export const responseOf = (): ResponseDouble => {
   });
 
   return bag as unknown as ResponseDouble;
+};
+
+export interface FakeNodeHub extends NodeHub {
+  /** Ids `isOnline` reports true for; empty means every node is offline. */
+  online: Set<string>;
+  pushConfigCalls: string[];
+  /** How many times `pushConfigAll` was called. */
+  pushConfigAllCalls: number;
+  disconnectCalls: { nodeId: string; reason: string }[];
+}
+
+/**
+ * A `NodeHub` a test can both drive (mark a node online) and inspect (did
+ * `PUT`/`revoke` really call through). Never used for anything but
+ * assertions — the daemon always passes the real hub (`createNodeHub`).
+ */
+export const fakeNodeHub = (): FakeNodeHub => {
+  const online = new Set<string>();
+  const pushConfigCalls: string[] = [];
+  const disconnectCalls: { nodeId: string; reason: string }[] = [];
+  const hub: FakeNodeHub = {
+    ...createNoopNodeHub(),
+    online,
+    pushConfigCalls,
+    pushConfigAllCalls: 0,
+    disconnectCalls,
+    isOnline: (nodeId) => online.has(nodeId),
+    pushConfig: (nodeId) => {
+      pushConfigCalls.push(nodeId);
+    },
+    pushConfigAll: () => {
+      hub.pushConfigAllCalls += 1;
+    },
+    disconnect: (nodeId, reason) => {
+      disconnectCalls.push({ nodeId, reason });
+    },
+  };
+  return hub;
 };

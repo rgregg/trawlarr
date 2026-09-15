@@ -4,6 +4,7 @@ import {
   BACKOFF_MINUTES,
   MAX_ATTEMPTS,
   NOOP_LIMIT,
+  applyReleaseUnpenalised,
   applyRequeue,
   applyRunOutcome,
   applyStall,
@@ -282,5 +283,36 @@ describe('isEligible', () => {
     expect(isEligible(record({ state: 'failed' }), NOW)).toBe(false);
     expect(isEligible(record({ state: 'not_converging' }), NOW)).toBe(false);
     expect(isEligible(record({ state: 'good', signature: SIG }), NOW)).toBe(false);
+  });
+});
+
+describe('applyReleaseUnpenalised', () => {
+  it('returns a claimed file to the queue keeping its attempts, backoff, no-op count and signature', () => {
+    const claimed = record({
+      state: 'running',
+      signature: 'sig-old',
+      attemptCount: 2,
+      consecutiveNoopCount: 0,
+      holdUntilMs: NOW - 1,
+    });
+    const released = applyReleaseUnpenalised(claimed);
+    expect(released).toEqual({ ...claimed, state: 'queued' });
+    expect(isEligible(released, NOW)).toBe(true);
+  });
+
+  it('is not a requeue: one more failed attempt still reaches the terminal state', () => {
+    const released = applyReleaseUnpenalised(
+      record({ state: 'running', attemptCount: MAX_ATTEMPTS - 1, holdUntilMs: NOW - 1 }),
+    );
+    expect(applyStall({ record: { ...released, state: 'running' }, nowMs: NOW }).state).toBe(
+      'failed',
+    );
+  });
+
+  it('leaves a row nothing is running untouched, so a state an operator wrote meanwhile stands', () => {
+    const held = record({ state: 'held', attemptCount: 1, holdUntilMs: NOW + 60_000 });
+    expect(applyReleaseUnpenalised(held)).toEqual(held);
+    const failed = record({ state: 'failed', attemptCount: MAX_ATTEMPTS });
+    expect(applyReleaseUnpenalised(failed)).toEqual(failed);
   });
 });

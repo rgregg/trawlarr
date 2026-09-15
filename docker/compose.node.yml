@@ -1,0 +1,70 @@
+# A NODE runs jobs for a server elsewhere. It runs the SAME image as
+# docker/compose.yml — TRAWLARR_MODE=node selects the node command instead
+# of a different image, so a GPU host runs exactly the build its server
+# does. A node has no database and no web UI, so there is no `ports:` here:
+# it connects out to the server and never accepts inbound connections.
+services:
+  trawlarr-node:
+    image: ghcr.io/rgregg/trawlarr:latest
+    container_name: trawlarr-node
+    restart: unless-stopped
+    # Shorter than the server's 5-minute drain: a node's own agents are
+    # killed by process group with a ~5s grace period, so 15s is enough for
+    # that shutdown to finish and still fast to recycle the container.
+    stop_grace_period: 15s
+    # The image's HEALTHCHECK polls the daemon's HTTP port. A node runs no
+    # HTTP server, so left enabled it would report unhealthy for ever.
+    healthcheck:
+      disable: true
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - TRAWLARR_MODE=node
+      - TRAWLARR_SERVER=https://trawlarr.example.com
+      # Only needed the first time: after enrollment the node's own secret
+      # lives in <data-dir>/node.json and this can be removed.
+      - TRAWLARR_NODE_TOKEN=change-me-to-the-enrollment-token
+      # - TRAWLARR_HARDWARE=cpu
+      # - TRAWLARR_HARDWARE_CAPS=nvenc=2
+    volumes:
+      - ./config:/config
+      # This node's own path for a library, which need not match the
+      # server's. The Nodes page's path map for this node must name
+      # /media/movies (the RIGHT side below) as what this node sees.
+      - /mnt/nas/movies:/media/movies
+
+  # `docker compose --profile nvidia -f docker/compose.node.yml up -d`
+  # brings up the NVENC variant instead. Settings copied from
+  # docker/compose.nvidia.yml: Debian's ffmpeg already carries
+  # h264_nvenc/hevc_nvenc, and the NVIDIA container runtime injects the
+  # driver at run time.
+  trawlarr-node-nvidia:
+    profiles: ['nvidia']
+    image: ghcr.io/rgregg/trawlarr:latest
+    container_name: trawlarr-node-nvidia
+    restart: unless-stopped
+    stop_grace_period: 15s
+    # No HTTP server on a node: see trawlarr-node above.
+    healthcheck:
+      disable: true
+    runtime: nvidia
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - TRAWLARR_MODE=node
+      - TRAWLARR_SERVER=https://trawlarr.example.com
+      - TRAWLARR_NODE_TOKEN=change-me-to-the-enrollment-token
+      - NVIDIA_VISIBLE_DEVICES=all
+      # `video` is the capability that injects libnvidia-encode. The default
+      # (compute,utility) does NOT, and hevc_nvenc then fails at run time
+      # with an error that names nothing useful.
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - TRAWLARR_HARDWARE=cpu,nvenc
+      # Consumer NVIDIA cards cap concurrent NVENC sessions and FAIL jobs past
+      # the cap rather than queueing them. Set this to your card's limit.
+      - TRAWLARR_HARDWARE_CAPS=nvenc=2
+    volumes:
+      - ./config:/config
+      - /mnt/nas/movies:/media/movies

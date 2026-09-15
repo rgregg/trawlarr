@@ -50,6 +50,14 @@ export interface PluginRepo {
   replaceSourcePlugins(sourceId: string, plugins: DiscoveredPlugin[]): void;
   /** Only ids this host actually has. Unknown ids are absent, never guessed. */
   resolveAbsPaths(ids: readonly string[]): Record<string, string>;
+  /**
+   * For each installed id: the source tree root and the plugin's relPath
+   * inside it, so a bundle can be built for the WHOLE tree a plugin was
+   * discovered under (community plugins `require()` out of it) rather than
+   * just the plugin's own directory. A path-named plugin (no source) and an
+   * id this host does not have are both absent, never guessed.
+   */
+  resolveBundleRoots(ids: readonly string[]): Record<string, { root: string; relPath: string }>;
 }
 
 export class PluginRepoError extends Error {
@@ -238,6 +246,24 @@ export const createPluginRepo = (db: Db): PluginRepo => {
       for (const id of wanted) {
         const row = selectPlugin.get(id) as PluginDbRow | undefined;
         if (row !== undefined) resolved[row.id] = row.abs_path;
+      }
+      return resolved;
+    },
+
+    resolveBundleRoots(ids) {
+      const wanted = [...new Set(ids.filter((id) => parsePluginId(id) !== null))];
+      const resolved: Record<string, { root: string; relPath: string }> = {};
+      for (const id of wanted) {
+        const row = selectPlugin.get(id) as PluginDbRow | undefined;
+        if (row === undefined || row.source_id === null) continue;
+        if (!row.abs_path.endsWith(row.rel_path)) {
+          throw new PluginRepoError(
+            `Plugin "${row.id}" has abs_path "${row.abs_path}" that does not end with its ` +
+              `rel_path "${row.rel_path}"; cannot compute its source tree root.`,
+          );
+        }
+        const root = row.abs_path.slice(0, row.abs_path.length - row.rel_path.length);
+        resolved[row.id] = { root, relPath: row.rel_path };
       }
       return resolved;
     },

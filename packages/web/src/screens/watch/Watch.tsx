@@ -15,6 +15,7 @@ import {
   toIdleInputs,
   toLibraryCard,
   toWorkerSlots,
+  workerTargetLine,
   type Job24h,
   type JobListRow,
   type LibraryResource,
@@ -73,6 +74,8 @@ interface WorkerStatus {
   target: Record<string, number>;
   baseCounts: Record<string, number>;
   active: number;
+  /** Every node's workers; `nodeId` is `'local'` for this daemon's. */
+  workers: Array<{ nodeId: string }>;
 }
 
 /** `GET /system/health`, the one anonymous route. */
@@ -767,13 +770,7 @@ export const Watch = (props: {
           // of this screen sat on a card, which made the bottom of the
           // screen read as leftovers rather than as a section.
           <div className="runtime-panel">
-            <p className="worker-target">
-              {String(workerStatus.active)} running
-              {workerStatus.paused ? ', pool paused' : ''} — target{' '}
-              {Object.entries(workerStatus.target)
-                .map(([workerClass, count]) => `${workerClass} ${String(count)}`)
-                .join(', ')}
-            </p>
+            <p className="worker-target">{workerTargetLine(workerStatus)}</p>
             {health !== null && (
               <p className="detail">
                 Trawlarr {health.version} (schema {String(health.schemaVersion)}) — {health.status}

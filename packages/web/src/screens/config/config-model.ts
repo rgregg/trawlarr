@@ -74,6 +74,21 @@ export const parseWindow = (
   return { ok: true, minutes: hours * 60 + minutes };
 };
 
+/**
+ * How many workers, of the ones `GET /workers` lists, belong to THIS daemon.
+ *
+ * `GET /workers`'s own `active` field is `status.workers.length` — every
+ * worker across every node, local and remote alike (Task 9's known
+ * mismatch: `workers.changed`'s `active` counts remote workers too, while
+ * `target` is only ever the LOCAL schedule's ask). Showing that raw count
+ * beside `target` reads as "this daemon asked for N and is running M", which
+ * is false the moment a remote node is running anything — M then includes
+ * work `target` never asked for. Filtering to `nodeId === 'local'` is what
+ * makes the two numbers answer the same question again.
+ */
+export const localActiveCount = (workers: Array<{ nodeId: string }>): number =>
+  workers.filter((worker) => worker.nodeId === 'local').length;
+
 export const formatWindow = (minutes: number): string => {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;

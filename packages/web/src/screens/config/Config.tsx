@@ -8,6 +8,7 @@ import { formatTimestamp } from '../../shell/time.js';
 import { formatBytes } from '../files/files-model.js';
 import {
   formatWindow,
+  localActiveCount,
   parseWindow,
   parseWorkerCount,
   oidcSummary,
@@ -20,6 +21,7 @@ import {
   type PurgeSweep,
   type WorkerClass,
 } from './config-model.js';
+import { Nodes } from './Nodes.js';
 import { buildLabel } from './build-label.js';
 import { Libraries } from './Libraries.js';
 import { Flows } from '../flows/Flows.js';
@@ -30,6 +32,7 @@ const TABS: Array<{ tab: ConfigTab; label: string }> = [
   { tab: 'libraries', label: 'Libraries' },
   { tab: 'flows', label: 'Flows' },
   { tab: 'plugins', label: 'Plugins' },
+  { tab: 'nodes', label: 'Nodes' },
   { tab: 'system', label: 'System' },
   { tab: 'account', label: 'Account' },
 ];
@@ -47,7 +50,13 @@ interface WorkersResource {
   target: Record<WorkerClass, number>;
   /** The configured, permanent count. This is the number this tab edits. */
   baseCounts: Record<WorkerClass, number>;
+  /**
+   * Every worker across every node, local and remote alike — NOT what this
+   * section compares against `target`, which is a local-only ask. See
+   * `localActiveCount`'s own comment for why the two must not be conflated.
+   */
   active: number;
+  workers: Array<{ nodeId: string }>;
 }
 
 /**
@@ -167,7 +176,7 @@ const WorkersTab = (props: { client: ApiClient; live: LiveState }): JSX.Element 
       <p className="detail">
         Running right now (what the schedule is asking for): transcode{' '}
         {String(data.target.transcode)}, health check {String(data.target.health)},{' '}
-        {String(data.active)} active.
+        {String(localActiveCount(data.workers))} active on this node.
       </p>
 
       <div className="worker-count-fields">
@@ -1361,6 +1370,9 @@ export const Config = (props: {
     )}
     {props.tab === 'plugins' && <PluginsTab client={props.client} />}
     {props.tab === 'flows' && <Flows client={props.client} navigate={props.navigate} />}
+    {props.tab === 'nodes' && (
+      <Nodes client={props.client} live={props.live} navigate={props.navigate} />
+    )}
     {props.tab === 'system' && <SystemTab client={props.client} />}
     {props.tab === 'account' && <AccountTab client={props.client} account={props.account} />}
   </section>

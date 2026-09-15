@@ -107,4 +107,53 @@ describe.runIf(POSIX)('docker/entrypoint.sh', () => {
       }),
     ).rejects.toMatchObject({ code: 78 });
   });
+
+  it('leaves server mode (the default) unchanged', async () => {
+    const { bin, data, log } = setup();
+
+    await run('bash', ['docker/entrypoint.sh', 'trawlarr', 'daemon'], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, TRAWLARR_DATA_DIR: data },
+    });
+
+    expect(readFileSync(log, 'utf8').trim().split('\n').at(-1)).toBe(
+      'gosu trawlarr:trawlarr trawlarr daemon',
+    );
+  });
+
+  it('runs the node command when TRAWLARR_MODE=node and the image CMD is unchanged', async () => {
+    const { bin, data, log } = setup();
+
+    // The image's CMD is ["trawlarr", "daemon"]: a node deployment selects
+    // node mode by environment, not by overriding the container's command,
+    // so a GPU host runs exactly the build its server does.
+    await run('bash', ['docker/entrypoint.sh', 'trawlarr', 'daemon'], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, TRAWLARR_DATA_DIR: data, TRAWLARR_MODE: 'node' },
+    });
+
+    expect(readFileSync(log, 'utf8').trim().split('\n').at(-1)).toBe(
+      'gosu trawlarr:trawlarr node /app/dist/cli.js node',
+    );
+  });
+
+  it('runs the node command when TRAWLARR_MODE=node and no command is given at all', async () => {
+    const { bin, data, log } = setup();
+
+    await run('bash', ['docker/entrypoint.sh'], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, TRAWLARR_DATA_DIR: data, TRAWLARR_MODE: 'node' },
+    });
+
+    expect(readFileSync(log, 'utf8').trim().split('\n').at(-1)).toBe(
+      'gosu trawlarr:trawlarr node /app/dist/cli.js node',
+    );
+  });
+
+  it('rejects an unknown TRAWLARR_MODE before touching the command', async () => {
+    const { bin, data } = setup();
+
+    await expect(
+      run('bash', ['docker/entrypoint.sh', 'trawlarr', 'daemon'], {
+        env: { PATH: `${bin}:/usr/bin:/bin`, TRAWLARR_DATA_DIR: data, TRAWLARR_MODE: 'bogus' },
+      }),
+    ).rejects.toMatchObject({ code: 78 });
+  });
 });

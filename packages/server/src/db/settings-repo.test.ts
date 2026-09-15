@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { openDatabase } from './connection.js';
 import { migrate } from './migrate.js';
-import { createSettingsRepo, SettingValidationError } from './settings-repo.js';
+import {
+  createSettingsRepo,
+  MIN_LEASE_GRACE_MS,
+  minLeaseGraceMs,
+  SettingValidationError,
+} from './settings-repo.js';
 
 const freshDb = () => {
   const db = openDatabase({ file: ':memory:' });
@@ -119,5 +124,24 @@ describe('settings repo', () => {
         oidcRedirectUri: 'https://trawlarr.example.com/api/v1/auth/oidc/callback',
       }),
     ).not.toThrow();
+  });
+
+  it('nodes settings default to a one-hour lease grace and validate the floor', () => {
+    const repo = createSettingsRepo({ db: freshDb() });
+    expect(repo.getNodes()).toEqual({ leaseGraceMs: 3_600_000 });
+    expect(() => repo.setNodes({ leaseGraceMs: 299_999 })).toThrow(SettingValidationError);
+    repo.setNodes({ leaseGraceMs: 300_000 });
+    expect(repo.getNodes()).toEqual({ leaseGraceMs: 300_000 });
+  });
+
+  it('lowers the lease grace floor only for a test process that explicitly asks', () => {
+    // The end-to-end seam must never reach production: the variable alone,
+    // or NODE_ENV=test alone, keeps the five-minute floor.
+    expect(minLeaseGraceMs({ TRAWLARR_TEST_ALLOW_SHORT_GRACE: '1' })).toBe(MIN_LEASE_GRACE_MS);
+    expect(minLeaseGraceMs({ NODE_ENV: 'production', TRAWLARR_TEST_ALLOW_SHORT_GRACE: '1' })).toBe(
+      MIN_LEASE_GRACE_MS,
+    );
+    expect(minLeaseGraceMs({ NODE_ENV: 'test' })).toBe(MIN_LEASE_GRACE_MS);
+    expect(minLeaseGraceMs({ NODE_ENV: 'test', TRAWLARR_TEST_ALLOW_SHORT_GRACE: '1' })).toBe(1);
   });
 });

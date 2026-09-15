@@ -37,4 +37,22 @@ fi
 mkdir -p "${DATA_DIR}/logs/jobs"
 chown -R "${PUID}:${PGID}" "${DATA_DIR}"
 
+MODE="${TRAWLARR_MODE:-server}"
+if [ "${MODE}" != "server" ] && [ "${MODE}" != "node" ]; then
+  echo "trawlarr: TRAWLARR_MODE=\"${TRAWLARR_MODE}\" must be \"server\" or \"node\"." >&2
+  exit 78
+fi
+
+# A NODE runs jobs for a server elsewhere: no database, no web UI, no port.
+# Selected by environment rather than a different image, so a GPU host runs
+# exactly the build its server does. Only the image's own default command
+# (`trawlarr daemon`, or none at all) is rewritten — an operator who already
+# passed an explicit command gets exactly what they asked for.
+if [ "${MODE}" = "node" ] && { [ "$#" -eq 0 ] || [ "${1:-}" = "trawlarr" ]; }; then
+  # A node needs no TRAWLARR_NODE_DATA_DIR set on top of TRAWLARR_DATA_DIR:
+  # both name the one directory the entrypoint just prepared and chowned.
+  export TRAWLARR_NODE_DATA_DIR="${TRAWLARR_NODE_DATA_DIR:-${DATA_DIR}}"
+  set -- node /app/dist/cli.js node
+fi
+
 exec gosu trawlarr:trawlarr "$@"
