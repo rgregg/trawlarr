@@ -1,3 +1,4 @@
+import { validatePathMap } from '@trawlarr/core';
 import { describe, expect, it } from 'vitest';
 import {
   joinCommand,
@@ -92,6 +93,96 @@ describe('validatePathMapRows', () => {
         { serverPath: '/media', nodePath: '/mnt/b' },
       ]),
     ).toBe('Server path "/media" is listed more than once.');
+  });
+
+  it('treats a trailing slash as the same path, as the server does', () => {
+    expect(
+      validatePathMapRows([
+        { serverPath: '/media', nodePath: '/mnt/a' },
+        { serverPath: '/media/', nodePath: '/mnt/b' },
+      ]),
+    ).toBe('Server path "/media/" is listed more than once.');
+  });
+
+  it('flags a node path listed more than once', () => {
+    expect(
+      validatePathMapRows([
+        { serverPath: '/a', nodePath: '/x' },
+        { serverPath: '/b', nodePath: '/x' },
+      ]),
+    ).toBe('This node\'s path "/x" is listed more than once.');
+  });
+
+  it('flags rows that nest on one side only', () => {
+    expect(
+      validatePathMapRows([
+        { serverPath: '/media/movies', nodePath: '/mnt' },
+        { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+      ]),
+    ).toContain('nest the same way');
+  });
+
+  it('flags a nested row that sits at a different suffix on each side', () => {
+    expect(
+      validatePathMapRows([
+        { serverPath: '/a', nodePath: '/x' },
+        { serverPath: '/a/tv', nodePath: '/x/shows' },
+      ]),
+    ).toBe('"/a/tv" must sit at the same place under "/a" on both sides.');
+  });
+
+  it('accepts nested rows that nest identically on both sides', () => {
+    expect(
+      validatePathMapRows([
+        { serverPath: '/a', nodePath: '/x' },
+        { serverPath: '/a/tv', nodePath: '/x/tv' },
+      ]),
+    ).toBeNull();
+  });
+
+  // The UI echo must refuse everything the server refuses: a rule it misses
+  // round-trips to a 400 rendered far from the table in the server's wording.
+  it('refuses exactly what core validatePathMap refuses, never in "mapped" wording', () => {
+    const cases: { serverPath: string; nodePath: string }[][] = [
+      [{ serverPath: 'lib', nodePath: '/x' }],
+      [{ serverPath: '/a/./b', nodePath: '/x' }],
+      [
+        { serverPath: '/a', nodePath: '/x' },
+        { serverPath: '/a/', nodePath: '/y' },
+      ],
+      [
+        { serverPath: '/a', nodePath: '/x/' },
+        { serverPath: '/b', nodePath: '/x' },
+      ],
+      [
+        { serverPath: '/a', nodePath: '/x' },
+        { serverPath: '/a/tv', nodePath: '/x/shows' },
+      ],
+      [
+        { serverPath: '/media/movies', nodePath: '/mnt' },
+        { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+      ],
+      [
+        { serverPath: '/', nodePath: '/x' },
+        { serverPath: '/a', nodePath: '/y' },
+      ],
+      [
+        { serverPath: '/a', nodePath: '/x' },
+        { serverPath: '/a/tv', nodePath: '/x/tv' },
+        { serverPath: '/b', nodePath: '/y' },
+      ],
+    ];
+    for (const rows of cases) {
+      let coreRefuses = false;
+      try {
+        validatePathMap(rows);
+      } catch {
+        coreRefuses = true;
+      }
+      const problem = validatePathMapRows(rows);
+      expect(problem !== null, JSON.stringify(rows)).toBe(coreRefuses);
+      expect(problem ?? '').not.toMatch(/mapped/i);
+    }
   });
 });
 

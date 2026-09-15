@@ -93,18 +93,34 @@ const isAbsoluteNoDotDot = (path: string): boolean => {
   return !path.split('/').some((segment) => segment === '.' || segment === '..');
 };
 
+const trimTrailing = (path: string): string =>
+  path.length > 1 && path.endsWith('/') ? trimTrailing(path.slice(0, -1)) : path;
+
+const within = (root: string, path: string): boolean =>
+  root === '/' || path === root || path.startsWith(`${root}/`);
+
+const relativeTo = (root: string, path: string): string =>
+  path === root ? '' : root === '/' ? path.slice(1) : path.slice(root.length + 1);
+
 /**
- * Mirrors `@trawlarr/core`'s `validatePathMap` rules — absolute paths, no
- * `.`/`..` segments, no server path listed twice — so a bad row is caught
- * on screen before the round trip to `PUT /nodes/:id` that would otherwise
- * be the first place it is rejected. The server's own `validatePathMap` is
- * still the source of truth; this is a UI-side echo of the same rules, not
- * a second implementation core depends on.
+ * Mirrors ALL of `@trawlarr/core`'s `validatePathMap` rules — absolute
+ * paths, no `.`/`..` segments, trailing slashes ignored, no server path and
+ * no node path listed twice, and nested rows nesting at the same place on
+ * both sides — so a bad row is caught inline, beside the table, before the
+ * round trip to `PUT /nodes/:id`. The server's `validatePathMap` is still
+ * the source of truth; this is a UI-side echo with terse copy.
+ *
+ * Every rule has to be echoed, not just the easy ones: a rule missing here
+ * sent the save to the server, whose refusal rendered below Libraries,
+ * Hardware and Revoke as a paragraph, worded "is mapped more than once" —
+ * copy this screen must never show.
  */
 export const validatePathMapRows = (
   rows: { serverPath: string; nodePath: string }[],
 ): string | null => {
   const seenServer = new Set<string>();
+  const seenNode = new Set<string>();
+  const entries: { serverPath: string; nodePath: string }[] = [];
   for (const row of rows) {
     if (!isAbsoluteNoDotDot(row.serverPath)) {
       if (!row.serverPath.startsWith('/')) {
@@ -118,10 +134,32 @@ export const validatePathMapRows = (
       }
       return `This node's path "${row.nodePath}" must not contain "." or ".." segments.`;
     }
-    if (seenServer.has(row.serverPath)) {
+    const serverPath = trimTrailing(row.serverPath);
+    const nodePath = trimTrailing(row.nodePath);
+    if (seenServer.has(serverPath)) {
       return `Server path "${row.serverPath}" is listed more than once.`;
     }
-    seenServer.add(row.serverPath);
+    if (seenNode.has(nodePath)) {
+      return `This node's path "${row.nodePath}" is listed more than once.`;
+    }
+    seenServer.add(serverPath);
+    seenNode.add(nodePath);
+    entries.push({ serverPath, nodePath });
+  }
+  for (const a of entries) {
+    for (const b of entries) {
+      if (a === b) continue;
+      const serverNested = within(a.serverPath, b.serverPath);
+      if (within(a.nodePath, b.nodePath) !== serverNested) {
+        return `"${b.serverPath}" and "${a.serverPath}" must nest the same way on both sides.`;
+      }
+      if (
+        serverNested &&
+        relativeTo(a.serverPath, b.serverPath) !== relativeTo(a.nodePath, b.nodePath)
+      ) {
+        return `"${b.serverPath}" must sit at the same place under "${a.serverPath}" on both sides.`;
+      }
+    }
   }
   return null;
 };
