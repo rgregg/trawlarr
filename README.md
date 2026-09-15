@@ -101,9 +101,16 @@ file.
 
 **If a node disconnects mid-job**, the job keeps running — the node is still
 doing the work, only the connection dropped. The file's lease is released
-after a grace window (`nodes.leaseGraceMs`, one hour by default); once that
-passes, that node can no longer install its result even if it reconnects and
-finishes, so the file gets picked up fresh instead.
+after a one-hour grace window; once that passes, that node can no longer
+install its result even if it reconnects and finishes, so the file gets
+picked up fresh instead.
+
+**Node environment.** `TRAWLARR_SERVER` and `TRAWLARR_NODE_TOKEN` (first run
+only) point a node at its server; `TRAWLARR_NODE_DATA_DIR` is where it keeps
+its secret, job journal and plugin cache; `TRAWLARR_HARDWARE` and
+`TRAWLARR_HARDWARE_CAPS` declare its hardware as on a server; and
+`TRAWLARR_NODE_BUNDLE_CACHE_BYTES` caps the plugin cache (2 GiB by default,
+least recently used pruned first).
 
 **Revoke** a node from the same screen to cut off its enrollment immediately.
 

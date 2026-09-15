@@ -91,6 +91,60 @@ single newest-mtime check, because a file that is not the tree's newest can stil
 to an older-but-different mtime, or a deletion of a non-newest file) and a coarser key would serve a
 stale manifest silently. `nodes/bundles.test.ts` pins both invalidation cases.
 
+## A remote replacement's identity is the server's own stat (C-1)
+
+A node's `ReplacedFile.deviceId`/`inode` come from ITS `stat`, and a device
+number is per host: an NFS client gets an anonymous `st_dev` that never equals
+the server's. Keyed on `dev:ino`, a Replace that swapped nothing reported the
+untouched original under a key that no longer matched its row, read as "the
+file changed", tripped the no-op limit and went terminal `not_converging`; a
+real replacement stored the node's key and poisoned later local comparisons.
+So the remote handle, after mapping the report back, re-stats `replaced.path`
+on the server and substitutes `deviceId`, `inode`, `nlink`, `mtimeMs`,
+`ctimeMs` and `sizeBytes`, keeping the node's content-derived partial `hash`
+and `probe`. A path the server cannot stat settles the run as a reported
+failure naming it — a stalled attempt is better than a foreign identity.
+
+## A refused commit after a landed Replace is reported, not thrown (I-2)
+
+`FlowAbort` used to leave `runPayload` as a rejection in every case. After
+Replace had installed, a later refused commit (operator cancel, lease expired)
+threw away `replaced`, and the row was requeued or stalled under its OLD
+identity although the disk had changed. Now, once any Replace invocation
+recorded an output, the abort returns a `JobReport` (`failed`, not `success`,
+`superseded` when it was a `SupersededError`, `replaced` computed as for a
+finished flow). The daemon records the identity through `recordReplacement`
+(shared with `applyJobReport`) in the cancelled fold and in the superseded fold
+while the row still holds the file; a superseded report on a row that already
+ended still only appends its outcome, because a newer claim may own the file
+and will re-probe it. A remote handle that was cancelled marks such a report
+`cancelled`, as it marks a `failed` frame, since the refusal can reach the node
+before the cancel does.
+
+## A claim a map edit raced is requeued without spending an attempt (I-4c)
+
+A library or path-map edit between a claim and `prepare` makes the payload
+unmappable (`UnmappedPathError`). That is an operator's change, not evidence
+about the file, so it settles as `AgentFailure.unmapped` and
+`applyJobUnmapped` requeues unpenalised with the path in the outcome. To keep
+that from looping (requeue, re-claim onto the same node, fail again), the hub
+marks the node's library probe stale on an unmapped `prepare`, and
+`onlineNodes` counts no library reachable on a node until a `libraries` frame
+arrives after its latest config push, and never one whose roots do not map
+under the node's CURRENT map. A probe already in flight when a config was
+pushed can still mark the node fresh; the unpenalised fold bounds the cost of
+that race to one requeue per probe.
+
+## A claim the daemon died preparing is stalled at start (minor 3)
+
+`prepare` is async (bundle manifests), and the lease is written only after it.
+A daemon that dies inside it leaves an open job naming a remote node with no
+lease: adoption never sees it, no node has it, and the reaper would wait its
+24 h floor. `stallUnsentRemoteJobs` runs at startup after the lock and before
+adoption and stalls each as an ordinary failed attempt (it is a crash, not a
+cancel). After the lock for the same reason adoption is: a second daemon
+refused the lock must not stall the running daemon's mid-prepare claims.
+
 ## Test-only seams, honoured only under `NODE_ENV=test`
 
 - `TRAWLARR_PROTOCOL_VERSION_OVERRIDE` — lets a test node claim a different protocol version than the
@@ -114,6 +168,9 @@ matter how they are invoked.
   (`remote-node-end-to-end.test.ts`, "applies a report held across a node restart exactly once")
   exercises the restart-and-redeliver path but with a job that does not itself replace a file; the
   double-apply guard for a replacement specifically is unit-level only.
+- **A granted `plugin` commit holds `committing` for the whole plugin run.** Grace never
+  expires a committing lease, so a long community plugin that writes near its end and loses
+  its connection is reclaimed only by the 24 h floor.
 - **Node flapping during payload prepare spends an attempt per in-flight claim.** A node that
   disconnects and reconnects rapidly while the daemon is still building a job's payload (before any
   frame is sent) is not distinguished from a node that took the job and immediately lost it — each

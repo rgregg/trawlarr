@@ -110,8 +110,12 @@ type NodeFrame =
   | { type: 'agent'; jobId: string; message: AgentToDaemon }
   | { type: 'hello'; ... }
   | { type: 'libraries'; ... }
-  | { type: 'job-state'; jobId: string; state: 'running' | 'held-report' | 'lost' }
+  | { type: 'job-state'; jobId: string; state: 'running' | 'held-report' | 'lost' } // unused: see below
   | { type: 'log-backfill'; jobId: string; fromLine: number; lines: string[] };
+
+// `job-state` is accepted by the server (a `lost` releases the job) but no
+// node sends it: a node reports every job's state in `hello`'s journal, and a
+// run's end as the `done`/`failed` it holds until `ack-report`.
 
 type ServerFrame =
   | { type: 'agent'; jobId: string; message: DaemonToAgent }
@@ -268,7 +272,9 @@ from elsewhere in their source.
   complete, then rewrites `pluginPaths` to the cached copies before forking
   the agent.
 - A hash mismatch is a failed download, never a run.
-- The cache is pruned by LRU at a size cap.
+- The cache is pruned by LRU at a size cap (`TRAWLARR_NODE_BUNDLE_CACHE_BYTES`,
+  2 GiB by default) whenever a job settles and no other job is running — a
+  running agent loads plugin files lazily from its bundle.
 - A plugin named by bare path (no source) cannot be shipped; on a remote node
   it fails to load with the error naming it, as a missing plugin does
   locally.
@@ -311,12 +317,14 @@ is disconnected they wait; they fail if the job's lease expires.
 - **Add node** (Nodes page) → name → the server creates a `node` row and a
   one-time enrollment token, valid 24 h, stored hashed. The dialog shows the
   token once, together with both:
-  - `docker run … -e TRAWLARR_MODE=node -e TRAWLARR_SERVER=… -e TRAWLARR_NODE_TOKEN=… ghcr.io/rgregg/trawlarr:<version>`
+  - `docker run … -e TRAWLARR_MODE=node -e TRAWLARR_SERVER=… -e TRAWLARR_NODE_TOKEN=… ghcr.io/rgregg/trawlarr:sha-<short commit>` (`:main` when the server reports no commit), with a `-v <library-path>:<path-this-node-uses>` placeholder
   - `trawlarr node --server … --token …`
 - **Exchange**: `POST /api/v1/nodes/enroll {token}` → `{nodeId, secret}`. The
   token is consumed; the server stores `argon2(secret)`. The node writes the
   secret to `<data>/node.json` (mode 0600) and ignores the token afterwards.
-- **Revoke** deletes the secret hash and closes the socket. The node's jobs
+- **Revoke** sets `revoked_at` (authentication refuses a revoked node on every
+  call, cached secret or not) and closes the socket; the socket stops speaking
+  for the node before its close handshake completes. The node's jobs
   enter `grace` and expire normally. The node cannot reconnect, and the Nodes
   page shows it as revoked until it is deleted.
 - **Migration** adds to `node`: `secret_hash`, `enroll_token_hash`,
@@ -412,3 +420,10 @@ Designed now so phase 1 does not block it; not built in phase 1.
 - Scheduling beyond per-node counts, hardware and reachability (e.g.
   data locality scoring).
 - Extracting `@trawlarr/node-agent` as its own package.
+
+### Known limits
+
+- A granted `plugin`-kind commit moves the lease to `committing`, and it stays
+  there for the whole plugin run: grace never expires a committing lease (the
+  node may be mid-write), so a long community plugin that writes near its end
+  and loses its connection is reclaimed only by the 24 h floor, not by grace.
