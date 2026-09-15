@@ -148,6 +148,12 @@ export const releaseUpgradePath = (server: Server, path: string): void => {
 export const upgradeHandledElsewhere = (server: Server, path: string, socket: Duplex): boolean =>
   socket.destroyed || (claimedUpgradePaths.get(server)?.has(path) ?? false);
 
+const STATUS_TEXT: Record<number, string> = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  404: 'Not Found',
+};
+
 export const denyUpgrade = (
   socket: Duplex,
   status: number,
@@ -156,7 +162,7 @@ export const denyUpgrade = (
 ): void => {
   const body = JSON.stringify({ error: { code, message } });
   socket.write(
-    `HTTP/1.1 ${String(status)} ${status === 401 ? 'Unauthorized' : 'Not Found'}\r\n` +
+    `HTTP/1.1 ${String(status)} ${STATUS_TEXT[status] ?? 'Error'}\r\n` +
       `content-type: application/json; charset=utf-8\r\n` +
       `content-length: ${String(Buffer.byteLength(body))}\r\n` +
       `connection: close\r\n\r\n${body}`,
@@ -254,7 +260,19 @@ export const attachWebSocket = (input: AttachWebSocketInput): WsChannel => {
   };
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const url = new URL(req.url ?? '/', 'http://localhost');
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      // `new URL` throws synchronously on a request target like `http://[`,
+      // and this listener runs before any authentication: uncaught, one
+      // malformed request from anyone who can reach the port takes the whole
+      // daemon down. A destroyed socket means another listener answered it.
+      if (!socket.destroyed) {
+        denyUpgrade(socket, 400, 'bad-request', 'The upgrade request URL could not be parsed.');
+      }
+      return;
+    }
     if (url.pathname !== path) {
       if (upgradeHandledElsewhere(input.server, url.pathname, socket)) return;
       denyUpgrade(

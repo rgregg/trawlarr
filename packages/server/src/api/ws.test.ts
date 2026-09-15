@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import type { AddressInfo } from 'node:net';
+import { createConnection, type AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import type { FlowDefinition } from '@trawlarr/core';
@@ -324,6 +324,31 @@ describe('over a real socket', () => {
       }),
     ).rejects.toMatchObject({ message: expect.stringContaining('401') });
     expect(channel.clientCount()).toBe(0);
+  });
+
+  it('answers a malformed upgrade URL with 400 and keeps serving, rather than crashing the daemon', async () => {
+    // Pre-auth and synchronous inside the 'upgrade' listener: a URL that
+    // `new URL` rejects used to throw uncaught, taking the whole daemon down
+    // for anyone who could reach the port.
+    const response = await new Promise<string>((resolve, reject) => {
+      const raw = createConnection({ host: '127.0.0.1', port }, () => {
+        raw.write(
+          'GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\n' +
+            'Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n' +
+            'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+        );
+      });
+      let text = '';
+      raw.on('data', (chunk) => {
+        text += chunk.toString('utf8');
+      });
+      raw.on('close', () => resolve(text));
+      raw.on('error', reject);
+    });
+    expect(response).toMatch(/^HTTP\/1\.1 400/);
+
+    const { status } = await api('GET', '/system/version');
+    expect(status).toBe(200);
   });
 
   it('refuses an upgrade on any other path', async () => {
