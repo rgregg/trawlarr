@@ -134,6 +134,25 @@ export const applyRequeue = (record: LedgerRecord): LedgerRecord => ({
   reviewReason: null,
 });
 
+/**
+ * Undo a claim that never became an attempt — the job was never sent, so
+ * nothing about the file was learned.
+ *
+ * The claim changed exactly one thing, `state` (`queued`/`held` -> `running`),
+ * so only that is put back. Unlike `applyRequeue`, the attempt count, backoff
+ * and no-op count survive: resetting them here meant a file that kept racing
+ * a path-map edit got a fresh retry budget each time and never reached
+ * `failed`, however genuinely broken it was. The claim did not record which
+ * of `queued`/`held` it took the row from; both are claimable under the same
+ * hold rule (`isEligible`), and `queued` with counters kept is the same shape
+ * a scan's re-queue writes.
+ *
+ * A row that is not `running` is returned unchanged: whatever moved it (an
+ * operator's hold, a requeue) happened after the claim and must stand.
+ */
+export const applyReleaseUnpenalised = (record: LedgerRecord): LedgerRecord =>
+  record.state === 'running' ? { ...record, state: 'queued' } : record;
+
 export const isEligible = (record: LedgerRecord, nowMs: number): boolean => {
   if (record.reviewReason != null) return false;
   if (record.state === 'queued') return record.holdUntilMs === null || nowMs > record.holdUntilMs;

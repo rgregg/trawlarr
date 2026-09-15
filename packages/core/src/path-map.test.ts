@@ -86,6 +86,82 @@ describe('validatePathMap', () => {
     ).toThrow(PathMapError);
   });
 
+  it('rejects nested entries whose suffix differs between the sides, naming both entries and both suffixes', () => {
+    // /media/shows/x -> /mnt/shows/x -> back to /media/tv/x: another file's
+    // identity would be recorded on the row.
+    const map = [
+      { serverPath: '/media', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/shows' },
+    ];
+    expect(() => validatePathMap(map)).toThrow(PathMapError);
+    expect(() => validatePathMap(map)).toThrow(/"\/media" -> "\/mnt"/);
+    expect(() => validatePathMap(map)).toThrow(/"\/media\/tv" -> "\/mnt\/shows"/);
+    expect(() => validatePathMap(map)).toThrow(/"tv"[\s\S]*"shows"/);
+    // Order in the list does not matter.
+    expect(() => validatePathMap([...map].reverse())).toThrow(PathMapError);
+  });
+
+  it('rejects a mismatched suffix at a deeper level of nesting', () => {
+    expect(() =>
+      validatePathMap([
+        { serverPath: '/media', nodePath: '/mnt' },
+        { serverPath: '/media/tv/kids', nodePath: '/mnt/kids/tv' },
+      ]),
+    ).toThrow(/"tv\/kids"[\s\S]*"kids\/tv"/);
+    expect(() =>
+      validatePathMap([
+        { serverPath: '/media', nodePath: '/mnt' },
+        { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+        { serverPath: '/media/tv/kids', nodePath: '/mnt/tv/children' },
+      ]),
+    ).toThrow(PathMapError);
+  });
+
+  it('accepts consistent nesting several levels deep, and every mapped path round-trips', () => {
+    const map = validatePathMap([
+      { serverPath: '/media', nodePath: '/mnt' },
+      { serverPath: '/media/tv', nodePath: '/mnt/tv' },
+      { serverPath: '/media/tv/kids/cartoons', nodePath: '/mnt/tv/kids/cartoons' },
+    ]);
+    for (const path of [
+      '/media/a',
+      '/media/tv/b',
+      '/media/tv/kids/c',
+      '/media/tv/kids/cartoons/d',
+    ]) {
+      const onNode = mapPath(map, path, 'toNode');
+      expect(onNode).not.toBeNull();
+      expect(mapPath(map, onNode!, 'toServer')).toBe(path);
+    }
+  });
+
+  it('applies the same rule to a root "/" entry on either side', () => {
+    expect(
+      validatePathMap([
+        { serverPath: '/', nodePath: '/mnt' },
+        { serverPath: '/media', nodePath: '/mnt/media' },
+      ]),
+    ).toHaveLength(2);
+    expect(
+      validatePathMap([
+        { serverPath: '/data', nodePath: '/' },
+        { serverPath: '/data/media', nodePath: '/media' },
+      ]),
+    ).toHaveLength(2);
+    expect(() =>
+      validatePathMap([
+        { serverPath: '/', nodePath: '/mnt' },
+        { serverPath: '/media', nodePath: '/mnt/library' },
+      ]),
+    ).toThrow(/"media"[\s\S]*"library"/);
+    expect(() =>
+      validatePathMap([
+        { serverPath: '/data', nodePath: '/' },
+        { serverPath: '/data/media', nodePath: '/library' },
+      ]),
+    ).toThrow(PathMapError);
+  });
+
   it('accepts nesting that is the same on both sides', () => {
     expect(
       validatePathMap([

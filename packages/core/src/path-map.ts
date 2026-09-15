@@ -58,22 +58,41 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
     seenNode.add(nodePath);
     return { serverPath, nodePath };
   });
-  // Nesting has to be the same on both sides. With `/media/movies -> /mnt`
-  // and `/media/tv -> /mnt/tv`, the server file `/media/movies/tv/x` maps to
-  // `/mnt/tv/x`, and the longest-prefix lookup maps THAT back to
-  // `/media/tv/x`: a report (and its replacement) would be recorded against
-  // a different file than the one the node was sent.
+  // Longest-prefix mapping is only a bijection over mapped paths when nested
+  // entries agree on BOTH sides. Two rules, checked for every ordered pair:
+  //
+  // 1. Nesting on one side implies nesting on the other. With
+  //    `/media/movies -> /mnt` and `/media/tv -> /mnt/tv`, the server file
+  //    `/media/movies/tv/x` maps to `/mnt/tv/x`, and the longest-prefix lookup
+  //    maps THAT back to `/media/tv/x`.
+  // 2. The nested entry sits at the same relative suffix on both sides. With
+  //    `/media -> /mnt` and `/media/tv -> /mnt/shows`, `/media/shows/x` maps to
+  //    `/mnt/shows/x`, which maps back to `/media/tv/x`.
+  //
+  // Either way a report (and a replacement's identity) would be recorded
+  // against a different file than the one the node was sent. The round-trip
+  // guards in `map-payload.ts` refuse the job at run time; this refuses the
+  // map when it is saved, so it never gets that far.
+  const describe = (entry: PathMapping): string => `"${entry.serverPath}" -> "${entry.nodePath}"`;
   for (const a of entries) {
     for (const b of entries) {
       if (a === b) continue;
-      const nodeNested = within(b.nodePath, a.nodePath);
-      const serverNested = within(b.serverPath, a.serverPath);
+      const nodeNested = within(a.nodePath, b.nodePath);
+      const serverNested = within(a.serverPath, b.serverPath);
       if (nodeNested !== serverNested) {
-        const describe = (entry: PathMapping): string =>
-          `"${entry.serverPath}" -> "${entry.nodePath}"`;
         throw new PathMapError(
-          `Entries ${describe(b)} and ${describe(a)} nest differently on the server and the node, ` +
+          `Entries ${describe(a)} and ${describe(b)} nest differently on the server and the node, ` +
             `so a path under one could map back to the other. Nest them the same way on both sides.`,
+        );
+      }
+      if (!serverNested) continue;
+      const serverSuffix = relativeTo(a.serverPath, b.serverPath);
+      const nodeSuffix = relativeTo(a.nodePath, b.nodePath);
+      if (serverSuffix !== nodeSuffix) {
+        throw new PathMapError(
+          `Entry ${describe(b)} is nested inside ${describe(a)}, but at "${serverSuffix}" on the ` +
+            `server and "${nodeSuffix}" on the node, so a path under one could map back to the ` +
+            `other. Nest it at the same place on both sides, or remove one of the entries.`,
         );
       }
     }
@@ -83,6 +102,10 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
 
 const within = (root: string, path: string): boolean =>
   root === '/' || path === root || path.startsWith(`${root}/`);
+
+/** `path` below `root`, without a leading slash; `path` must be `within(root, path)`. */
+const relativeTo = (root: string, path: string): string =>
+  path === root ? '' : root === '/' ? path.slice(1) : path.slice(root.length + 1);
 
 export const mapPath = (
   map: readonly PathMapping[],
