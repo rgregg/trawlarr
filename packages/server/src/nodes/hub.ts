@@ -57,6 +57,8 @@ export const NODE_SOCKET_PATH = '/api/v1/nodes/connect';
 const PROTOCOL_REFUSAL_RETRY_MS = 300_000;
 const DEFAULT_PING_INTERVAL_MS = 15_000;
 const DEFAULT_OFFLINE_AFTER_MS = 45_000;
+/** How often a connected node's `last_seen_at` is rewritten from its pongs. */
+const TOUCH_EVERY_MS = 60_000;
 const DEFAULT_HELLO_TIMEOUT_MS = 10_000;
 
 /** Close codes a node host acts on. */
@@ -158,6 +160,12 @@ interface Connection {
   /** Handshake complete: jobs and config may be sent. */
   welcomed: boolean;
   lastPongAt: number;
+  /**
+   * When this socket last wrote the node's `last_seen_at`. Pongs arrive every
+   * ping interval (15 s); writing each one would be a DB write per node per
+   * 15 s for a field the UI shows to the minute.
+   */
+  lastTouchedAt: number;
   helloTimer: ReturnType<typeof setTimeout> | null;
   /**
    * A `libraries` probe has arrived since the last config this socket was
@@ -622,6 +630,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       ffprobePath: hello.ffprobePath,
       nowMs: now,
     });
+    conn.lastTouchedAt = now;
     const node = nodes.getById(conn.nodeId);
     if (node === null) {
       conn.ws.close(NODE_CLOSE_DISCONNECTED, 'node removed');
@@ -812,6 +821,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       helloSeen: false,
       welcomed: false,
       lastPongAt: nowMs(),
+      lastTouchedAt: nowMs(),
       helloTimer: null,
       probeFresh: false,
     };
@@ -830,9 +840,19 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     }, helloTimeoutMs);
     conn.helloTimer.unref?.();
 
-    ws.on('pong', () => {
-      conn.lastPongAt = nowMs();
-    });
+    ws.on(
+      'pong',
+      guarded(conn, () => {
+        conn.lastPongAt = nowMs();
+        // Hello and close were the only writes, so a node connected for a
+        // week showed "last seen" a week ago while it was working.
+        if (!conn.welcomed || connections.get(nodeId) !== conn) return;
+        if (conn.lastPongAt - conn.lastTouchedAt < TOUCH_EVERY_MS) return;
+        conn.lastTouchedAt = conn.lastPongAt;
+        nodes.touch(nodeId, conn.lastPongAt);
+        bus.emit({ type: 'nodes.changed', nodeId, online: true });
+      }),
+    );
     ws.on(
       'message',
       guarded(conn, (data: RawData) => {

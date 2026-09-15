@@ -694,6 +694,29 @@ describe('createNodeHub', () => {
     await waitFor(() => !hub.isOnline(creds.nodeId), 'offline');
   });
 
+  it('advances last seen on pongs while connected, at most once a minute', async () => {
+    await hub.close();
+    hub = makeHub({ pingIntervalMs: 5, offlineAfterMs: 10 * 60_000 });
+    hub.attach(server);
+    const client = await connectNode();
+    await client.hello();
+    const lastSeen = () => nodes.getById(creds.nodeId)!.lastSeenAt;
+    expect(lastSeen()).toBe(NOW);
+
+    let pongs = 0;
+    client.ws.on('ping', () => (pongs += 1));
+    now = NOW + 30_000;
+    const before = pongs;
+    await waitFor(() => pongs >= before + 3, 'pings inside the throttle window');
+    expect(lastSeen()).toBe(NOW);
+
+    now = NOW + 61_000;
+    await waitFor(() => lastSeen() === NOW + 61_000, 'last seen to advance');
+    expect(
+      events.filter((event) => event.type === 'nodes.changed' && event.online).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
   it('adopts every leased job after a restart, with grace counted from the new start', async () => {
     const { payload } = await startRemoteJob();
     // "Restart": a second hub over the same database, a long time later.
