@@ -745,9 +745,13 @@ describe('startNodeHost', () => {
     const seen = server.refusedUpgrades.length;
     await waitFor(() => server.refusedUpgrades.length >= seen + 3);
     expect(lines.filter((line) => line.includes('503'))).toHaveLength(1);
-    expect(lines.filter((line) => line.includes("refused this node's credentials"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("refused this node's credentials"))).toHaveLength(
+      1,
+    );
     // The bare ws error ("Unexpected server response: 401") said nothing an operator could act on.
-    expect(lines.filter((line) => /Unexpected server response|closed before/.test(line))).toEqual([]);
+    expect(lines.filter((line) => /Unexpected server response|closed before/.test(line))).toEqual(
+      [],
+    );
   });
 
   it('backfills log lines the server does not have on a continue', async () => {
