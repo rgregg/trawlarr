@@ -44,7 +44,7 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
     );
     const nodePath = checkAbsolute(`Entry ${String(index + 1)}: node path`, record['nodePath']);
     if (seenServer.has(serverPath)) {
-      throw new PathMapError(`Server path "${serverPath}" is mapped more than once.`);
+      throw new PathMapError(`Server path "${serverPath}" is listed more than once.`);
     }
     // `reportToServer` maps a node path back via `mapPath(..., 'toServer')`,
     // which picks the longest matching `nodePath` prefix — that lookup must
@@ -52,7 +52,7 @@ export const validatePathMap = (map: unknown): PathMapping[] => {
     // claiming the same node path) is rejected here rather than silently
     // resolved by "whichever entry came first".
     if (seenNode.has(nodePath)) {
-      throw new PathMapError(`Node path "${nodePath}" is mapped more than once.`);
+      throw new PathMapError(`Node path "${nodePath}" is listed more than once.`);
     }
     seenServer.add(serverPath);
     seenNode.add(nodePath);

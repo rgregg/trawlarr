@@ -57,6 +57,27 @@ describe('validatePathMap', () => {
     ).toThrow(PathMapError);
   });
 
+  it('words duplicates without "mapped", since the api echoes the message into the Nodes tab', () => {
+    const messageOf = (map: unknown): string => {
+      try {
+        validatePathMap(map);
+      } catch (error) {
+        return (error as Error).message;
+      }
+      return '';
+    };
+    const server = messageOf([
+      { serverPath: '/media', nodePath: '/x' },
+      { serverPath: '/media', nodePath: '/y' },
+    ]);
+    const node = messageOf([
+      { serverPath: '/media', nodePath: '/x' },
+      { serverPath: '/other', nodePath: '/x' },
+    ]);
+    expect(server).toBe('Server path "/media" is listed more than once.');
+    expect(node).toBe('Node path "/x" is listed more than once.');
+  });
+
   it('rejects a duplicate node path, naming the path, so toServer lookups do not depend on array order', () => {
     expect(() =>
       validatePathMap([

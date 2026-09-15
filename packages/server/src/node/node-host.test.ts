@@ -706,7 +706,9 @@ describe('startNodeHost', () => {
     const byId = new Map(frame.libraries.map((probe) => [probe.libraryId, probe]));
     expect(byId.get('ok')).toMatchObject({ reachable: true });
     expect(byId.get('unmapped')).toMatchObject({ reachable: false });
-    expect(byId.get('unmapped')!.detail).toContain('not mapped');
+    // Printed verbatim on the node's card.
+    expect(byId.get('unmapped')!.detail).toBe('no path on this node');
+    expect(byId.get('unmapped')!.detail).not.toMatch(/mapped/i);
     expect(byId.get('missing')).toMatchObject({ reachable: false });
     expect(byId.get('missing')!.detail).toContain('ENOENT');
   });

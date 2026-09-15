@@ -666,7 +666,8 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
     if (library.nodeRoots.length === 0) problems.push('no roots');
     for (const root of library.nodeRoots) {
       if (root === null) {
-        problems.push('not mapped');
+        // The card prints this verbatim; "not mapped" was path-map jargon.
+        problems.push('no path on this node');
         continue;
       }
       try {
