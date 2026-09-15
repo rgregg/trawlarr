@@ -510,7 +510,9 @@
   padding: 0;
   display: grid;
   gap: var(--space-3);
-  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
+  /* min(): a bare 24rem column is wider than a phone's content box, so every
+     card ran past the page's right gutter. */
+  grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr));
 }
 
 .node-card {
