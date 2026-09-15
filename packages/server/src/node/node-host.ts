@@ -91,6 +91,10 @@ export const NODE_LOCK_FILENAME = 'node.lock';
 export const ENROLLMENT_REFUSED_MESSAGE =
   "The enrollment token was refused: it is wrong, expired, or already used. Create a new one on the server's Nodes page.";
 
+export const CREDENTIALS_REFUSED_MESSAGE =
+  "[node] The server refused this node's credentials: it may have been revoked or deleted. " +
+  'Re-enroll with a new token.';
+
 /**
  * A node that cannot run as configured, and retrying will not change that: no
  * enrollment to use, or a token the server refused. The CLI exits 2 for it.
@@ -321,6 +325,24 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
     return delay;
   };
 
+  /**
+   * The last refusal status logged, so a node retrying against a server that
+   * keeps refusing it says so once rather than every backoff. Cleared by a
+   * welcome, so a later refusal is news again.
+   */
+  let loggedRefusal: number | null = null;
+  const reportRefusal = (status: number): void => {
+    if (status === loggedRefusal) return;
+    loggedRefusal = status;
+    // A revoked or deleted node used to log only ws's "Unexpected server
+    // response: 401" on every retry, which never said what to do about it.
+    log(
+      status === 401
+        ? CREDENTIALS_REFUSED_MESSAGE
+        : `[node] The server at ${baseUrl()} answered HTTP ${String(status)} to this node; retrying.`,
+    );
+  };
+
   const baseUrl = (): string => (input.serverUrl ?? state!.serverUrl).replace(/\/+$/, '');
 
   const nodeHeaders = (): Record<string, string> => ({
@@ -505,6 +527,7 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
         `${baseUrl()}${API_PREFIX}/bundles/${encodeURIComponent(hash)}`,
         { headers: nodeHeaders() },
       );
+      if (response.status === 401) reportRefusal(401);
       if (!response.ok) {
         throw new Error(`the server answered ${String(response.status)} for its manifest`);
       }
@@ -516,6 +539,7 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
         `${baseUrl()}${API_PREFIX}/bundles/${encodeURIComponent(hash)}/files/${encoded}`,
         { headers: nodeHeaders() },
       );
+      if (response.status === 401) reportRefusal(401);
       if (!response.ok) {
         throw new Error(`the server answered ${String(response.status)} for "${relPath}"`);
       }
@@ -711,6 +735,7 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
   const handleWelcome = (frame: Extract<ServerFrame, { type: 'welcome' }>): void => {
     welcomed = true;
     backoffIndex = 0;
+    loggedRefusal = null;
     for (const job of frame.jobs) {
       if (!known.has(job.jobId)) continue;
       switch (job.action) {
@@ -856,7 +881,15 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
       return;
     }
     socket = ws;
+    let refusedUpgrade = false;
 
+    ws.on('unexpected-response', (_request, response) => {
+      refusedUpgrade = true;
+      if (socket === ws && !stopping) reportRefusal(response.statusCode ?? 0);
+      // Handling this event makes aborting the handshake ours; `terminate`
+      // does it and still emits the 'close' that schedules the retry.
+      ws.terminate();
+    });
     ws.on('open', () => {
       if (socket !== ws) return;
       armSilence(ws);
@@ -892,7 +925,10 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
       }
     });
     ws.on('error', (error: Error) => {
-      if (socket === ws && !stopping) log(`[node] Connection error: ${error.message}`);
+      // A refused upgrade was already reported; its abort error adds nothing.
+      if (socket === ws && !stopping && !refusedUpgrade) {
+        log(`[node] Connection error: ${error.message}`);
+      }
     });
     ws.on('close', (code: number) => {
       if (socket !== ws) return;

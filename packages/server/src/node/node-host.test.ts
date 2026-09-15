@@ -50,6 +50,10 @@ interface FakeServer {
   connectionTimes: number[];
   enrollTokens: string[];
   bundleRequests: string[];
+  /** Upgrades refused because of `refuseWith`, in order. */
+  refusedUpgrades: number[];
+  /** When set, every connect upgrade is answered with this status: a revoke, a proxy error. */
+  refuseWith: number | null;
   nextConnection(): Promise<FakeConnection>;
   bundle: { hash: string; relPath: string };
   close(): Promise<void>;
@@ -81,6 +85,7 @@ const startFakeServer = async (): Promise<FakeServer> => {
   const enrollTokens: string[] = [];
   const bundleRequests: string[] = [];
   const waiters: ((conn: FakeConnection) => void)[] = [];
+  const fake = { refusedUpgrades: [], refuseWith: null } as unknown as FakeServer;
 
   const authorised = (req: IncomingMessage): boolean =>
     req.headers['x-trawlarr-node'] === NODE_ID && req.headers.authorization === `Bearer ${SECRET}`;
@@ -147,6 +152,12 @@ const startFakeServer = async (): Promise<FakeServer> => {
       socket.destroy();
       return;
     }
+    if (fake.refuseWith !== null) {
+      fake.refusedUpgrades.push(fake.refuseWith);
+      socket.write(`HTTP/1.1 ${String(fake.refuseWith)} Refused\r\nConnection: close\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
     if (!authorised(req)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();
@@ -198,7 +209,7 @@ const startFakeServer = async (): Promise<FakeServer> => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
 
-  return {
+  Object.assign(fake, {
     url: `http://127.0.0.1:${String(port)}`,
     connections,
     connectionTimes,
@@ -212,7 +223,8 @@ const startFakeServer = async (): Promise<FakeServer> => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
-  };
+  });
+  return fake;
 };
 
 // ---------------------------------------------------------------------------
@@ -711,6 +723,31 @@ describe('startNodeHost', () => {
     expect(byId.get('unmapped')!.detail).not.toMatch(/mapped/i);
     expect(byId.get('missing')).toMatchObject({ reachable: false });
     expect(byId.get('missing')!.detail).toContain('ENOENT');
+  });
+
+  it('says once that the server refused its credentials, and again only when the refusal changes', async () => {
+    const lines: string[] = [];
+    const { server, start } = await setup({ log: (line) => lines.push(line) });
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+
+    server.refuseWith = 401;
+    conn.ws.terminate();
+    await waitFor(() => server.refusedUpgrades.length >= 4);
+    const refused = lines.filter((line) => line.includes("refused this node's credentials"));
+    expect(refused).toEqual([
+      "[node] The server refused this node's credentials: it may have been revoked or deleted. " +
+        'Re-enroll with a new token.',
+    ]);
+
+    server.refuseWith = 503;
+    const seen = server.refusedUpgrades.length;
+    await waitFor(() => server.refusedUpgrades.length >= seen + 3);
+    expect(lines.filter((line) => line.includes('503'))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("refused this node's credentials"))).toHaveLength(1);
+    // The bare ws error ("Unexpected server response: 401") said nothing an operator could act on.
+    expect(lines.filter((line) => /Unexpected server response|closed before/.test(line))).toEqual([]);
   });
 
   it('backfills log lines the server does not have on a continue', async () => {
