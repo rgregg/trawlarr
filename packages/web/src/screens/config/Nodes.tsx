@@ -11,6 +11,7 @@ import {
   pathMapRows,
   unreachableSummary,
   validatePathMapRows,
+  type NodeMutationResponse,
   type NodeResource,
 } from './nodes-model.js';
 
@@ -104,8 +105,20 @@ const NodeDetail = (props: {
   client: ApiClient;
   node: NodeResource;
   libraryNames: Record<string, string>;
-  onChanged: (node: NodeResource) => void;
-  onDeleted: () => void;
+  /**
+   * Fired after every successful mutation. The ONLY way this screen learns
+   * a mutation succeeded is by re-fetching `GET /nodes` — never by reading
+   * the mutation's own response as a row. `POST /nodes`, `PUT /nodes/:id`
+   * and `POST /nodes/:id/revoke` all return the bare `toNodeResource(...)`
+   * shape (`NodeMutationResponse` below): no `local`/`online`/`running`,
+   * because only the LIST handler joins those on
+   * (`packages/server/src/api/routes/nodes.ts`). Passing that response
+   * straight into row state is exactly what made `node.running.length`
+   * throw on every one of Save workers / Toggle paused / Save paths /
+   * Revoke — this callback is the fix: it asks the parent to reload the
+   * real list instead.
+   */
+  onMutated: () => void;
 }): JSX.Element => {
   const { client, node } = props;
   const [workerInput, setWorkerInput] = useState(String(node.schedule.baseCounts.transcode));
@@ -122,6 +135,7 @@ const NodeDetail = (props: {
     setFailure(null);
     try {
       await call();
+      props.onMutated();
     } catch (error) {
       setFailure(describeFailure(error));
     } finally {
@@ -140,20 +154,20 @@ const NodeDetail = (props: {
       return;
     }
     await run(async () => {
-      const updated = await client.put<NodeResource>(`/nodes/${node.id}`, {
+      // Typed as the MUTATION response, never `NodeResource`: it has no
+      // `running`/`online`/`local`, so nothing here can mistake it for a row.
+      await client.put<NodeMutationResponse>(`/nodes/${node.id}`, {
         schedule: {
           ...node.schedule,
           baseCounts: { ...node.schedule.baseCounts, transcode: Number(trimmed) },
         },
       });
-      props.onChanged(updated);
     });
   };
 
   const togglePaused = async (paused: boolean): Promise<void> => {
     await run(async () => {
-      const updated = await client.put<NodeResource>(`/nodes/${node.id}`, { paused });
-      props.onChanged(updated);
+      await client.put<NodeMutationResponse>(`/nodes/${node.id}`, { paused });
     });
   };
 
@@ -166,24 +180,27 @@ const NodeDetail = (props: {
     }
     setRowsProblem(null);
     await run(async () => {
-      const updated = await client.put<NodeResource>(`/nodes/${node.id}`, { pathMap: plain });
-      props.onChanged(updated);
+      const updated = await client.put<NodeMutationResponse>(`/nodes/${node.id}`, {
+        pathMap: plain,
+      });
+      // Reading `pathMap` off the mutation response is fine — it is a real
+      // field on that shape, just not the `local`/`online`/`running` trio
+      // that made it unsafe to treat as a row. Read here, never passed to
+      // `onMutated` or any row-shaped state.
       setRows(pathMapRows(updated.pathMap).map((row) => ({ ...row })));
     });
   };
 
   const revoke = async (): Promise<void> => {
     await run(async () => {
-      const updated = await client.post<NodeResource>(`/nodes/${node.id}/revoke`, {});
+      await client.post<NodeMutationResponse>(`/nodes/${node.id}/revoke`, {});
       setConfirmingRevoke(false);
-      props.onChanged(updated);
     });
   };
 
   const remove = async (): Promise<void> => {
     await run(async () => {
       await client.del(`/nodes/${node.id}`);
-      props.onDeleted();
     });
   };
 
@@ -385,8 +402,7 @@ const NodeRow = (props: {
   navigate: (to: string) => void;
   expanded: boolean;
   onToggle: () => void;
-  onChanged: (node: NodeResource) => void;
-  onDeleted: () => void;
+  onMutated: () => void;
 }): JSX.Element => {
   const { node } = props;
   const status = nodeStatus(node);
@@ -439,8 +455,7 @@ const NodeRow = (props: {
           client={props.client}
           node={node}
           libraryNames={props.libraryNames}
-          onChanged={props.onChanged}
-          onDeleted={props.onDeleted}
+          onMutated={props.onMutated}
         />
       )}
     </li>
@@ -470,6 +485,24 @@ export const Nodes = (props: {
   const [addName, setAddName] = useState('');
   const [addFailure, setAddFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
   const [adding, setAdding] = useState(false);
+
+  // The ONLY place `nodes` state is written from the network. Every mutation
+  // (Add node, Save workers, Toggle paused, Save paths, Revoke, Delete) ends
+  // by calling this again rather than by merging its own response into
+  // state — see `NodeDetail`'s `onMutated` doc comment for why a mutation's
+  // response is never a safe substitute for a real list row.
+  const reload = async (): Promise<void> => {
+    try {
+      const next = await client.get<NodeResource[]>('/nodes');
+      setProblem(null);
+      setNodes(next);
+      setExpandedId((current) =>
+        current !== null && next.some((node) => node.id === current) ? current : null,
+      );
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -522,12 +555,6 @@ export const Nodes = (props: {
     };
   }, [client]);
 
-  const replace = (node: NodeResource): void => {
-    setNodes((current) =>
-      (current ?? []).map((candidate) => (candidate.id === node.id ? node : candidate)),
-    );
-  };
-
   const createNode = async (): Promise<void> => {
     const name = addName.trim();
     if (name === '') {
@@ -541,14 +568,18 @@ export const Nodes = (props: {
     setAdding(true);
     setAddFailure(null);
     try {
+      // `POST /nodes`'s `node` field is a MUTATION response (`NodeMutationResponse`
+      // — no `local`/`online`/`running`), so only its `name` and the token/expiry
+      // are kept for the dialog. The list itself is refreshed by `reload()`,
+      // which is what actually adds a row for the new node.
       const answer = await client.post<{
-        node: NodeResource;
+        node: NodeMutationResponse;
         enrollToken: string;
         enrollExpiresAt: number;
       }>('/nodes', { name });
-      setNodes((current) => [...(current ?? []), answer.node]);
       setAddName('');
       setView({ kind: 'join', name: answer.node.name, token: answer.enrollToken });
+      await reload();
     } catch (error) {
       setAddFailure(describeFailure(error));
     } finally {
@@ -664,13 +695,7 @@ export const Nodes = (props: {
             onToggle={() => {
               setExpandedId((current) => (current === node.id ? null : node.id));
             }}
-            onChanged={replace}
-            onDeleted={() => {
-              setNodes((current) =>
-                (current ?? []).filter((candidate) => candidate.id !== node.id),
-              );
-              setExpandedId(null);
-            }}
+            onMutated={() => void reload()}
           />
         ))}
       </ul>

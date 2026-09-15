@@ -5,6 +5,7 @@ import {
   pathMapRows,
   unreachableSummary,
   validatePathMapRows,
+  type NodeMutationResponse,
   type NodeResource,
 } from './nodes-model.js';
 
@@ -83,13 +84,13 @@ describe('validatePathMapRows', () => {
     );
   });
 
-  it('flags a server path mapped more than once', () => {
+  it('flags a server path listed more than once', () => {
     expect(
       validatePathMapRows([
         { serverPath: '/media', nodePath: '/mnt/a' },
         { serverPath: '/media', nodePath: '/mnt/b' },
       ]),
-    ).toContain('more than once');
+    ).toBe('Server path "/media" is listed more than once.');
   });
 });
 
@@ -140,6 +141,27 @@ describe('unreachableSummary', () => {
       libraries: [{ libraryId: 'lib-1', reachable: true, detail: 'ok' }],
     };
     expect(unreachableSummary(node, {})).toEqual([]);
+  });
+});
+
+describe('NodeMutationResponse', () => {
+  /**
+   * The compile-time half of the fix for the crash on Add node / Save
+   * workers / Toggle paused / Save paths / Revoke: `POST /nodes`,
+   * `PUT /nodes/:id` and `POST /nodes/:id/revoke` all answer with this
+   * shape — `NodeResource` minus `local`/`online`/`running` — because only
+   * `GET /nodes`'s LIST handler joins those three on. A mutation response
+   * therefore has no `running` to call `.length` on, and this type is what
+   * makes putting one where a list row belongs a build failure rather than
+   * a runtime `TypeError` an operator hits by clicking "Save".
+   */
+  it('cannot stand in for a GET /nodes list row — it has no local/online/running', () => {
+    const rows: NodeResource[] = [NODE];
+    const mutationResponse: NodeMutationResponse = NODE;
+    // @ts-expect-error a mutation response has no `local`/`online`/`running`
+    // and must never be pushed into list-row state — see `Nodes.tsx`'s
+    // `onMutated` callback, which reloads `GET /nodes` instead.
+    rows.push(mutationResponse);
   });
 });
 
