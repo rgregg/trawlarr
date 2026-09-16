@@ -374,8 +374,15 @@ legend {
 
 .problems {
   margin: var(--space-2) 0 0;
-  padding-left: 1.2rem;
   color: var(--bad);
+}
+
+/* Only the LIST form is indented, and only to leave room for its own markers.
+   Applied to `.problems` flat, that indent also hit the single-sentence `<p>`
+   form — a node card's "Unreachable: …" line sat 1.2rem in from the card's
+   other body text, reading as a nested detail of the line above it. */
+ul.problems {
+  padding-left: 1.2rem;
 }
 
 /* The daemon's refusals are multi-sentence and are shown whole, wrapped
