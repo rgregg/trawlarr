@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { initialLiveState, reduceLive } from '../../api/events.js';
 import {
   joinCommand,
+  normalizeServerUrl,
+  serverUrlProblem,
   lastSeenLabel,
   nodeBuildLabel,
   nodeCardLine,
@@ -278,6 +280,38 @@ describe('joinCommand', () => {
         'ghcr.io/rgregg/trawlarr:main',
       ),
     ).toBe(true);
+  });
+});
+
+describe('serverUrlProblem', () => {
+  it('accepts http and https URLs, with or without a port or path', () => {
+    for (const value of [
+      'http://192.168.1.10:8787',
+      'https://trawlarr.example.com',
+      'https://example.com/trawlarr/',
+      '  http://host:8787  ',
+    ]) {
+      expect(serverUrlProblem(value)).toBeNull();
+    }
+  });
+
+  it('refuses an empty field, a non-URL, and a non-http scheme', () => {
+    expect(serverUrlProblem('')).not.toBeNull();
+    expect(serverUrlProblem('   ')).not.toBeNull();
+    expect(serverUrlProblem('192.168.1.10:8787')).not.toBeNull();
+    expect(serverUrlProblem('not a url')).not.toBeNull();
+    // A scheme the node's HTTP client cannot use is a URL all the same, so
+    // parsing alone would have let `file:` and `ftp:` through.
+    expect(serverUrlProblem('ftp://host')).not.toBeNull();
+    expect(serverUrlProblem('file:///etc/hosts')).not.toBeNull();
+  });
+});
+
+describe('normalizeServerUrl', () => {
+  it('trims and drops trailing slashes, which is what an address bar copies', () => {
+    expect(normalizeServerUrl('  http://host:8787/  ')).toBe('http://host:8787');
+    expect(normalizeServerUrl('https://example.com///')).toBe('https://example.com');
+    expect(normalizeServerUrl('http://host:8787')).toBe('http://host:8787');
   });
 });
 

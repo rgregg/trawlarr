@@ -7,6 +7,8 @@ import { formatWhen } from '../../shell/time.js';
 import { describeFailure } from './library-form-model.js';
 import {
   joinCommand,
+  normalizeServerUrl,
+  serverUrlProblem,
   nodeCardLine,
   nodeSettingsEditable,
   pausedShown,
@@ -65,24 +67,52 @@ const CopyableCommand = (props: { command: string }): JSX.Element => {
  */
 const JoinDialog = (props: {
   name: string;
-  serverUrl: string;
+  /**
+   * What the Server URL field starts at — the page's own origin. It is a
+   * guess, not an answer: behind a reverse proxy, or when this browser
+   * reaches the daemon on an address the new machine cannot, the origin is
+   * the wrong host. So it is prefilled and editable, and both commands are
+   * rebuilt from whatever is in the field.
+   */
+  defaultServerUrl: string;
   token: string;
   commit: string | null;
   onDone: () => void;
 }): JSX.Element => {
-  const commands = joinCommand({
-    serverUrl: props.serverUrl,
-    token: props.token,
-    commit: props.commit,
-  });
+  const [serverUrl, setServerUrl] = useState(props.defaultServerUrl);
+  const urlProblem = serverUrlProblem(serverUrl);
+  const commands =
+    urlProblem !== null
+      ? null
+      : joinCommand({
+          serverUrl: normalizeServerUrl(serverUrl),
+          token: props.token,
+          commit: props.commit,
+        });
   return (
     <div role="alert" className="config-section node-join-dialog">
       <h3>Add {props.name} on the new machine</h3>
       <p className="help">Expires in 24 h. Run one of these there.</p>
-      <p className="detail">Docker</p>
-      <CopyableCommand command={commands.docker} />
-      <p className="detail">CLI</p>
-      <CopyableCommand command={commands.cli} />
+      <label htmlFor="node-join-server">Server URL</label>
+      <input
+        id="node-join-server"
+        value={serverUrl}
+        onChange={(event) => {
+          setServerUrl(event.target.value);
+        }}
+      />
+      {/* No command is offered while the URL is unusable: a copyable command
+          built from a broken URL is pasted before it is read. */}
+      {commands === null ? (
+        <p className="problems">{urlProblem}</p>
+      ) : (
+        <>
+          <p className="detail">Docker</p>
+          <CopyableCommand command={commands.docker} />
+          <p className="detail">CLI</p>
+          <CopyableCommand command={commands.cli} />
+        </>
+      )}
       <div className="row-actions">
         <button type="button" className="btn-primary" onClick={props.onDone}>
           Done
@@ -620,7 +650,9 @@ export const Nodes = (props: {
       <section className="nodes-tab">
         <JoinDialog
           name={view.name}
-          serverUrl={(globalThis as { location?: { origin?: string } }).location?.origin ?? ''}
+          defaultServerUrl={
+            (globalThis as { location?: { origin?: string } }).location?.origin ?? ''
+          }
           token={view.token}
           commit={commit}
           onDone={() => {

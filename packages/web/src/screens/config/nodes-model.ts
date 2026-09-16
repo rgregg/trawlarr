@@ -239,6 +239,43 @@ export const validatePathMapRows = (
 };
 
 /**
+ * Why the Server URL typed into the join dialog cannot be put in a command,
+ * or `null` when it can. The dialog prefills the page's own origin, but that
+ * is only a guess: behind a reverse proxy, or when the browser reaches this
+ * daemon on a LAN address the node cannot resolve, the origin is the wrong
+ * host and the pasted command joins nothing. Hence editable, hence checked.
+ *
+ * Deliberately light — this validates the SHAPE, not reachability. Only the
+ * node can say whether it can actually connect.
+ */
+export const serverUrlProblem = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (trimmed === '') return 'Enter the URL this node should connect to.';
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return 'Not a URL.';
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'Must start with http:// or https://.';
+  }
+  return null;
+};
+
+/**
+ * The typed URL as the commands should carry it: trimmed, with trailing
+ * slashes dropped. `http://host:8787/` pasted into `--server` makes every
+ * request path double-slashed, and it is what a browser's address bar copies.
+ */
+export const normalizeServerUrl = (value: string): string => {
+  const trimmed = value.trim();
+  let end = trimmed.length;
+  while (end > 0 && trimmed[end - 1] === '/') end -= 1;
+  return trimmed.slice(0, end);
+};
+
+/**
  * The two commands the "add a node" dialog shows once, over the token it
  * just issued.
  *
