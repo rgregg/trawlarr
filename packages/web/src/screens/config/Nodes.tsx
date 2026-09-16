@@ -460,7 +460,9 @@ const NodeRow = (props: {
       : status === 'Revoked'
         ? 'status-attention'
         : status === 'Waiting to join'
-          ? 'status-paused'
+          ? // Not `status-paused`: that pill's ❙❙ marker says a person stopped
+            // this node, and nothing has ever run on one that has not joined.
+            'status-pending'
           : 'status-idle';
 
   return (
