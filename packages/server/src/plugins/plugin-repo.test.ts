@@ -228,4 +228,24 @@ describe('installed plugins', () => {
     const repo = seed();
     expect(() => repo.replaceSourcePlugins('ghost', [])).toThrow(/ghost/);
   });
+
+  describe('resolveBundleRoots', () => {
+    it('strips rel_path off abs_path to get the tree root, only for installed plugins', () => {
+      const repo = seed();
+      expect(repo.resolveBundleRoots(['tdarr:ffmpegCommandSetContainer'])).toEqual({
+        'tdarr:ffmpegCommandSetContainer': {
+          root: '/srv/plugins/',
+          relPath:
+            'FlowPlugins/CommunityFlowPlugins/ffmpegCommand/ffmpegCommandSetContainer/1.0.0/index.js',
+        },
+      });
+    });
+
+    it('skips path-named plugins and ids this host does not have', () => {
+      const repo = seed();
+      expect(
+        repo.resolveBundleRoots(['/abs/path/to/plugin.js', 'tdarr:nope', 'trawlarr:execute']),
+      ).toEqual({});
+    });
+  });
 });

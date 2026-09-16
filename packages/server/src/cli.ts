@@ -4,7 +4,13 @@ import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { FlowValidationError, type FileState, type FlowDefinition } from '@trawlarr/core';
+import {
+  FlowValidationError,
+  HARDWARE_TYPES,
+  type FileState,
+  type FlowDefinition,
+  type HardwareType,
+} from '@trawlarr/core';
 import { createPluginLoader } from '@trawlarr/engine';
 import { FIRST_PARTY_PLUGINS } from '@trawlarr/plugins-core';
 import type { PluginDetails } from '@trawlarr/plugin-api';
@@ -27,6 +33,13 @@ import { runQueue } from './worker/loop.js';
 import { DEFAULT_STALE_AFTER_MS, reapStalled, type ReapSummary } from './worker/reap-stalled.js';
 import { startDaemon } from './daemon/daemon.js';
 import { DaemonAlreadyRunningError, readDaemonRecord } from './daemon/lockfile.js';
+import {
+  listEncodersWith,
+  preflightHardware,
+  runEncodeProbe,
+} from './daemon/hardware-preflight.js';
+import { NodeAlreadyRunningError, NodeSetupError, startNodeHost } from './node/node-host.js';
+import { readNodeState } from './node/node-state.js';
 import type { DaemonRecord } from './daemon/lockfile.js';
 import { ApiRequestError, createCliClient, type CliClient } from './cli-client.js';
 import { createPluginRepo, PluginRepoError, type PluginRepo } from './plugins/plugin-repo.js';
@@ -35,7 +48,19 @@ import { syncSource } from './plugins/sync-source.js';
 import { PLUGIN_TRUST_CONSEQUENCE } from './plugins/trust.js';
 
 /** Raised by a command handler to report a clean, diagnosable failure — never a raw stack trace. */
-class CliError extends Error {}
+class CliError extends Error {
+  /**
+   * 1 for a failure; 2 for a command that cannot run as configured — the
+   * distinction a supervisor (systemd, a container restart policy) needs to
+   * tell "try again" from "a node whose token will never be accepted".
+   */
+  readonly exitCode: number;
+
+  constructor(message: string, exitCode = 1) {
+    super(message);
+    this.exitCode = exitCode;
+  }
+}
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -1593,6 +1618,171 @@ const cmdDaemon = async (args: string[]): Promise<number> => {
 };
 
 // ---------------------------------------------------------------------------
+// node
+// ---------------------------------------------------------------------------
+
+const parseHardwareOption = (raw: string): HardwareType[] => {
+  const types = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  for (const entry of types) {
+    if (!(HARDWARE_TYPES as readonly string[]).includes(entry)) {
+      throw new CliError(
+        `node: --hardware lists "${entry}", which is not a hardware type. Valid: ` +
+          `${HARDWARE_TYPES.join(', ')}.`,
+        2,
+      );
+    }
+  }
+  return types.length === 0 ? ['cpu'] : (types as HardwareType[]);
+};
+
+const parseCapOptions = (entries: string[]): Partial<Record<HardwareType, number>> => {
+  const caps: Partial<Record<HardwareType, number>> = {};
+  for (const entry of entries.flatMap((raw) => raw.split(','))) {
+    const trimmed = entry.trim();
+    if (trimmed === '') continue;
+    const [key, value] = trimmed.split('=');
+    const count = Number(value);
+    if (
+      key === undefined ||
+      value === undefined ||
+      !(HARDWARE_TYPES as readonly string[]).includes(key) ||
+      !Number.isInteger(count) ||
+      count < 0
+    ) {
+      throw new CliError(
+        `node: --cap entries look like "nvenc=2" (a hardware type and a whole number), got ` +
+          `${JSON.stringify(trimmed)}.`,
+        2,
+      );
+    }
+    caps[key as HardwareType] = count;
+  }
+  return caps;
+};
+
+/**
+ * `trawlarr node` — run this machine as a remote worker for a trawlarr server.
+ *
+ * Foreground, like `trawlarr daemon`, for the same reason. A node needs no
+ * database, no web UI and no listening port: it enrolls once with a token,
+ * keeps one outbound connection to the server, and runs the jobs it is sent.
+ */
+const cmdNode = async (args: string[]): Promise<number> => {
+  const { values } = parseArgs({
+    args,
+    options: {
+      server: { type: 'string' },
+      token: { type: 'string' },
+      // Not the daemon's directory, nor its variable: a node's
+      // `logs/jobs/<id>.log` beside a daemon's on the same machine (or in a
+      // container that inherited TRAWLARR_DATA_DIR) would be two writers on
+      // one job log.
+      'data-dir': {
+        type: 'string',
+        default: process.env.TRAWLARR_NODE_DATA_DIR ?? './trawlarr-node-data',
+      },
+      ffmpeg: { type: 'string' },
+      ffprobe: { type: 'string' },
+      hardware: { type: 'string' },
+      cap: { type: 'string', multiple: true },
+    },
+  });
+
+  const dataDir = values['data-dir']!;
+  const serverUrl = values.server ?? process.env.TRAWLARR_SERVER;
+  const enrollToken = values.token ?? process.env.TRAWLARR_NODE_TOKEN;
+  const ffmpegPath = values.ffmpeg ?? process.env.TRAWLARR_FFMPEG ?? 'ffmpeg';
+  const ffprobePath = values.ffprobe ?? process.env.TRAWLARR_FFPROBE ?? 'ffprobe';
+  const available = parseHardwareOption(values.hardware ?? process.env.TRAWLARR_HARDWARE ?? 'cpu');
+  const envCaps = process.env.TRAWLARR_HARDWARE_CAPS;
+  const caps = parseCapOptions(values.cap ?? (envCaps === undefined ? [] : [envCaps]));
+  if (serverUrl !== undefined) {
+    let protocol: string | null;
+    try {
+      protocol = new URL(serverUrl).protocol;
+    } catch {
+      protocol = null;
+    }
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      throw new CliError(
+        `node: --server must be the server's http:// or https:// address, got ` +
+          `${JSON.stringify(serverUrl)}.`,
+        2,
+      );
+    }
+  }
+
+  let host;
+  try {
+    host = await startNodeHost({
+      dataDir,
+      serverUrl,
+      enrollToken,
+      ffmpegPath,
+      ffprobePath,
+      hardware: { available, caps },
+    });
+  } catch (error) {
+    if (error instanceof NodeSetupError) throw new CliError(error.message, 2);
+    if (error instanceof NodeAlreadyRunningError) throw new CliError(error.message);
+    throw error;
+  }
+  const running = host;
+
+  let stopRequested: Promise<void> | null = null;
+  let settleStopped: () => void = () => {};
+  const stopped = new Promise<void>((settle) => {
+    settleStopped = settle;
+  });
+  const stop = (): void => {
+    stopRequested ??= running.stop().then(settleStopped);
+  };
+  process.once('SIGTERM', stop);
+  process.once('SIGINT', stop);
+  const forgetSignals = (): void => {
+    process.removeListener('SIGTERM', stop);
+    process.removeListener('SIGINT', stop);
+  };
+
+  // The same check the daemon makes of its own declaration: a finding changes
+  // nothing, it names a mistake once at start instead of once per failed job.
+  const findings = await preflightHardware({
+    available,
+    listEncoders: async () => await listEncodersWith(ffmpegPath),
+    tryEncode: async (hardwareType) => (await runEncodeProbe(ffmpegPath, hardwareType)).ok,
+  });
+  for (const finding of findings) {
+    console.warn(
+      `[node] --hardware declares "${finding.hardwareType}", but ffmpeg at "${ffmpegPath}" ` +
+        `could not encode a frame with "${finding.expectedEncoder}" on this machine. Jobs ` +
+        `routed to that hardware here will fail.`,
+    );
+  }
+
+  try {
+    try {
+      await Promise.race([running.started, stopped]);
+    } catch (error) {
+      await running.stop();
+      if (error instanceof NodeSetupError) throw new CliError(error.message, 2);
+      throw error;
+    }
+    if (stopRequested === null) {
+      const shownServer = serverUrl ?? (await readNodeState(dataDir))?.serverUrl ?? 'the server';
+      console.log(`Connected to ${shownServer} as ${running.status().nodeId ?? 'this node'}.`);
+    }
+    await stopped;
+  } finally {
+    forgetSignals();
+  }
+  console.log('trawlarr node stopped.');
+  return 0;
+};
+
+// ---------------------------------------------------------------------------
 // plugin
 // ---------------------------------------------------------------------------
 
@@ -2222,6 +2412,7 @@ const cmdPluginSource = async (argv: string[]): Promise<number> => {
 
 const USAGE = `Usage:
   trawlarr daemon [--port <n>] [--bind <addr>]
+  trawlarr node [--server <url>] [--token <token>] [--data-dir <dir>] [--ffmpeg <path>] [--ffprobe <path>] [--hardware cpu,nvenc] [--cap nvenc=2...]
   trawlarr library add --name <name> --root <path> [--root <path>...] [--extensions mkv,mp4] [--allow-hardlinked] [--staging-dir <dir>] [--trash-dir <dir>]
   trawlarr flow add --name <name> --file <flow.json>
   trawlarr flow add --name <name> --template <id> [--set key=value...]
@@ -2252,7 +2443,8 @@ Flow templates: transcode-hevc, conform-library
 
 Installing a plugin runs its author's code as the user trawlarr runs as.
 
-All commands accept --data-dir <path> (default ./trawlarr-data).
+All commands accept --data-dir <path> (default ./trawlarr-data; for "node",
+./trawlarr-node-data or TRAWLARR_NODE_DATA_DIR).
 While a daemon owns that directory, every command talks to it over its API
 instead of opening the database — the daemon is the only writer.`;
 
@@ -2398,6 +2590,7 @@ const dispatch = async (argv: string[]): Promise<number> => {
     throw new CliError(`Unknown command: "trash ${sub ?? ''}".\n\n${USAGE}`);
   }
   if (cmd === 'daemon') return cmdDaemon(rest);
+  if (cmd === 'node') return cmdNode(rest);
   if (cmd === 'scan') return cmdScan(rest);
   if (cmd === 'run') return cmdRun(rest);
   if (cmd === 'status') return cmdStatus(rest);
@@ -2430,7 +2623,7 @@ export const main = async (argv: string[]): Promise<number> => {
     // worker — unknown library, overlapping roots, a bad flow file, ...)
     // still has a real `.message` worth showing on its own.
     console.error(`Error: ${messageOf(err)}`);
-    return 1;
+    return err instanceof CliError ? err.exitCode : 1;
   }
 };
 

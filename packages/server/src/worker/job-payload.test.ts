@@ -121,6 +121,9 @@ describe('buildJobPayload', () => {
     expect(payload.container).toBe('mkv');
     expect(payload.sizeBytes).toBe(4096);
     expect(payload.ffprobePath).toBe('ffprobe');
+    // buildJobPayload is synchronous; hashing plugin trees into bundles is
+    // async and is the hub's job (Task 8) before it ships a job to a node.
+    expect(payload.pluginBundles).toEqual({});
     // The whole point: it must survive the IPC boundary.
     expect(JSON.parse(JSON.stringify(payload))).toEqual(payload);
   });

@@ -8,6 +8,7 @@ import type { Supervisor } from '../daemon/supervisor.js';
 import type { FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
+import type { NodeHub } from '../nodes/hub.js';
 
 /**
  * Everything a route handler is allowed to reach.
@@ -62,6 +63,14 @@ export interface ApiContext {
    * on what is installed on the machine running it.
    */
   checkBinary?: (path: string) => Promise<boolean>;
+  /**
+   * Remote-node connection state and control — is a node online, tell it to
+   * re-pull config, force it off. `createApiContext` defaults this to a
+   * no-op (see `nodes/hub.ts`); the daemon passes the real hub. A node's
+   * ROW (name, path map, enrollment) lives in `NodeRepo`, constructed per
+   * request the same way every other repo here is.
+   */
+  nodes: NodeHub;
 }
 
 export interface RouteInput {
@@ -266,6 +275,24 @@ export const requireString = (body: unknown, field: string): string => {
       400,
       'invalid-body',
       `"${field}" is required and must be a non-empty string, got ${JSON.stringify(value)}.`,
+    );
+  }
+  return value;
+};
+
+/**
+ * An optional string field — unlike `requireString`, an empty string is
+ * valid (e.g. clearing a node's free-text `tags`), only the TYPE is
+ * enforced.
+ */
+export const optionalString = (body: unknown, field: string): string | undefined => {
+  const value = (body as Record<string, unknown> | null | undefined)?.[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new ApiError(
+      400,
+      'invalid-body',
+      `"${field}" must be a string, got ${JSON.stringify(value)}.`,
     );
   }
   return value;

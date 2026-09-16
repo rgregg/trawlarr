@@ -5,9 +5,11 @@
  * `HH:MM`; getting that wrong silently sets a window nobody asked for, which
  * has already happened once by hand — see `parseWindow`/`formatWindow`.
  *
- * `Config.tsx` is deliberately untested (there is no DOM testing library in
- * this repo), so every branch worth asserting lives here instead, where
- * `config-model.test.ts` can reach it with no DOM at all.
+ * Every branch worth asserting lives here rather than in `Config.tsx`, where
+ * `config-model.test.ts` can reach it with no DOM at all. `Config.tsx` itself
+ * is not untested any more — `Config.test.tsx` renders the Workers tab — but
+ * that suite stays deliberately narrow: a component test is for what only a
+ * rendered DOM can show.
  */
 
 /**
@@ -73,6 +75,21 @@ export const parseWindow = (
   if (hours > 23 || minutes > 59) return { ok: false, message: 'That is not a time of day.' };
   return { ok: true, minutes: hours * 60 + minutes };
 };
+
+/**
+ * How many workers, of the ones `GET /workers` lists, belong to THIS daemon.
+ *
+ * `GET /workers`'s own `active` field is `status.workers.length` — every
+ * worker across every node, local and remote alike (Task 9's known
+ * mismatch: `workers.changed`'s `active` counts remote workers too, while
+ * `target` is only ever the LOCAL schedule's ask). Showing that raw count
+ * beside `target` reads as "this daemon asked for N and is running M", which
+ * is false the moment a remote node is running anything — M then includes
+ * work `target` never asked for. Filtering to `nodeId === 'local'` is what
+ * makes the two numbers answer the same question again.
+ */
+export const localActiveCount = (workers: Array<{ nodeId: string }>): number =>
+  workers.filter((worker) => worker.nodeId === 'local').length;
 
 export const formatWindow = (minutes: number): string => {
   const hours = Math.floor(minutes / 60);

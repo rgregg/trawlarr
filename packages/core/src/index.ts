@@ -15,3 +15,5 @@ export * from './ffmpeg-noop.js';
 export * from './hardware-decode.js';
 export * from './worker-class.js';
 export * from './schedule.js';
+export * from './path-map.js';
+export * from './lease.js';

@@ -8,6 +8,7 @@ import { formatTimestamp } from '../../shell/time.js';
 import { formatBytes } from '../files/files-model.js';
 import {
   formatWindow,
+  localActiveCount,
   parseWindow,
   parseWorkerCount,
   oidcSummary,
@@ -20,6 +21,7 @@ import {
   type PurgeSweep,
   type WorkerClass,
 } from './config-model.js';
+import { Nodes } from './Nodes.js';
 import { buildLabel } from './build-label.js';
 import { Libraries } from './Libraries.js';
 import { Flows } from '../flows/Flows.js';
@@ -30,6 +32,7 @@ const TABS: Array<{ tab: ConfigTab; label: string }> = [
   { tab: 'libraries', label: 'Libraries' },
   { tab: 'flows', label: 'Flows' },
   { tab: 'plugins', label: 'Plugins' },
+  { tab: 'nodes', label: 'Nodes' },
   { tab: 'system', label: 'System' },
   { tab: 'account', label: 'Account' },
 ];
@@ -47,7 +50,13 @@ interface WorkersResource {
   target: Record<WorkerClass, number>;
   /** The configured, permanent count. This is the number this tab edits. */
   baseCounts: Record<WorkerClass, number>;
+  /**
+   * Every worker across every node, local and remote alike — NOT what this
+   * section compares against `target`, which is a local-only ask. See
+   * `localActiveCount`'s own comment for why the two must not be conflated.
+   */
   active: number;
+  workers: Array<{ nodeId: string }>;
 }
 
 /**
@@ -167,7 +176,7 @@ const WorkersTab = (props: { client: ApiClient; live: LiveState }): JSX.Element 
       <p className="detail">
         Running right now (what the schedule is asking for): transcode{' '}
         {String(data.target.transcode)}, health check {String(data.target.health)},{' '}
-        {String(data.active)} active.
+        {String(localActiveCount(data.workers))} active on this node.
       </p>
 
       <div className="worker-count-fields">
@@ -198,12 +207,10 @@ const WorkersTab = (props: { client: ApiClient; live: LiveState }): JSX.Element 
         ))}
       </div>
 
-      {/* Verbatim, per the brief: a measured result on this exact hardware,
-          not a general recommendation. */}
-      <p className="help worker-count-warning">
-        Raising transcode workers from 1 to 3 measurably reduced throughput on this hardware (6
-        vCPU, one GPU).
-      </p>
+      {/* No note here about what a worker count does to throughput: the one
+          that used to sit here stated a measured result ("1 to 3 reduced
+          throughput on 6 vCPU, one GPU") that this screen measures nothing to
+          back, on hardware it never inspects. */}
 
       {failure !== null && (
         <div role="alert" className="failure">
@@ -1329,9 +1336,11 @@ const SystemTab = (props: { client: ApiClient }): JSX.Element => (
 /**
  * The Configure screen: tabs behind one `?tab=` route.
  *
- * Deliberately untested, the same split every other screen in this package
- * uses: `config-model.ts` holds the parsing and the arithmetic a test can
- * reach without a DOM, and this file is a thin renderer over it.
+ * The same split every other screen in this package uses: `config-model.ts`
+ * holds the parsing and the arithmetic a test can reach without a DOM, and
+ * this file is a thin renderer over it. `Config.test.tsx` covers the Workers
+ * tab through this component, because the two counts that tab prints answer
+ * different questions and only a rendered DOM shows which one it shows.
  */
 export const Config = (props: {
   client: ApiClient;
@@ -1361,6 +1370,9 @@ export const Config = (props: {
     )}
     {props.tab === 'plugins' && <PluginsTab client={props.client} />}
     {props.tab === 'flows' && <Flows client={props.client} navigate={props.navigate} />}
+    {props.tab === 'nodes' && (
+      <Nodes client={props.client} live={props.live} navigate={props.navigate} />
+    )}
     {props.tab === 'system' && <SystemTab client={props.client} />}
     {props.tab === 'account' && <AccountTab client={props.client} account={props.account} />}
   </section>

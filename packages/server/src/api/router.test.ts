@@ -11,6 +11,7 @@ import type { SettingsRepo } from '../db/settings-repo.js';
 import { ApiError, created, noContent, type ApiContext, type Route } from './router.js';
 import { createApiHandler } from './server.js';
 import type { AccountRepo } from '../db/account-repo.js';
+import { createNoopNodeHub } from '../nodes/hub.js';
 
 const API_KEY = 'a-test-api-key-0123456789';
 
@@ -35,6 +36,7 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   schemaVersion: 4,
   envApplications: [],
   hardwareFindings: [],
+  nodes: createNoopNodeHub(),
   ...over,
 });
 

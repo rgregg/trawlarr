@@ -7,7 +7,7 @@ import type {
   RunVariables,
 } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
-import { DEFAULT_MAX_STEPS, runFlow } from './run-flow.js';
+import { DEFAULT_MAX_STEPS, FlowAbort, runFlow } from './run-flow.js';
 
 const details = (over: Partial<PluginDetails> = {}): PluginDetails => ({
   name: 'Node',
@@ -473,6 +473,62 @@ describe('runFlow — errors', () => {
     });
     expect(result.steps).toHaveLength(2);
     expect(result.failed).toBe(true);
+  });
+
+  it('lets a FlowAbort escape the run instead of routing it to an onFlowError node', async () => {
+    // The host's commit gate throws a FlowAbort subclass when this worker no
+    // longer owns the file. Routing it would run the flow's error handler —
+    // arbitrary plugin code — against a file another worker now holds.
+    class Released extends FlowAbort {}
+    const handler = vi.fn(routeTo(1).plugin);
+    const seen: string[] = [];
+    await expect(
+      runFlow({
+        flow: flow([node('a'), node('handler')], []),
+        initialPath: '/in.mkv',
+        startNodeId: 'a',
+        loadPlugin: loaderFor({
+          a: {
+            module: {
+              details,
+              plugin: () => {
+                throw new Released('claim released');
+              },
+            },
+          },
+          handler: {
+            module: { details, plugin: handler },
+            details: details({ pType: 'onFlowError' }),
+          },
+        }),
+        buildArgs,
+        onStep: (step) => seen.push(step.nodeId),
+      }),
+    ).rejects.toBeInstanceOf(Released);
+    expect(handler).not.toHaveBeenCalled();
+    expect(seen).not.toContain('handler');
+  });
+
+  it('lets a FlowAbort thrown by a loader escape too, even when load errors are routed', async () => {
+    const handler = vi.fn(routeTo(1).plugin);
+    await expect(
+      runFlow({
+        flow: flow([node('a'), node('handler')], []),
+        initialPath: '/in.mkv',
+        startNodeId: 'a',
+        loadPlugin: (candidate) => {
+          if (candidate.id === 'a') throw new FlowAbort('abort at load');
+          return loaderFor({
+            handler: {
+              module: { details, plugin: handler },
+              details: details({ pType: 'onFlowError' }),
+            },
+          })(candidate);
+        },
+        buildArgs,
+      }),
+    ).rejects.toBeInstanceOf(FlowAbort);
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('fails the run when a plugin returns nothing usable', async () => {

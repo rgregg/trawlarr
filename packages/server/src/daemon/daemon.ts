@@ -7,12 +7,16 @@ import { attachWebSocket, type WsChannel } from '../api/ws.js';
 import { openDatabase, type Db } from '../db/connection.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
+import { createNodeRepo } from '../db/node-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { applyEnvSettings, type EnvApplication } from '../config/env-settings.js';
 import { sweepLibraryTrash } from '../library/trash-sweep.js';
 import { sweepLibraryStaging } from '../library/staging-sweep.js';
 import { sweepJobLogs } from '../job-log/job-log-store.js';
-import { reapStalled } from '../worker/reap-stalled.js';
+import { createBundleStore } from '../nodes/bundles.js';
+import { createNodeHub, type NodeHub } from '../nodes/hub.js';
+import { createNodeHttpHandler } from '../nodes/node-http.js';
+import { reapStalled, stallUnsentRemoteJobs } from '../worker/reap-stalled.js';
 import { buildCommitFrom } from './build-info.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
@@ -20,23 +24,40 @@ import { acquireDaemonLock, type DaemonLock } from './lockfile.js';
 import { listEncodersWith, preflightHardware, runEncodeProbe } from './hardware-preflight.js';
 import { createScanCoordinator, type ScanCoordinator } from './scan-coordinator.js';
 import { createSupervisor, type CreateAgentFn, type Supervisor } from './supervisor.js';
+import { DAEMON_VERSION } from './version.js';
 import type { WatchPort } from './watcher.js';
 
-/**
- * The version this build reports through `GET /system/version`, kept equal to
- * `packages/server/package.json` (asserted by `build-info.test.ts`; a release
- * tag must match that file before the image workflow publishes). A literal rather than a runtime read of
- * `package.json`: the built `dist/` is what a real install runs, and
- * resolving a sibling file from it is a path that breaks differently in a
- * bundle, a global install and a test.
- */
-export const DAEMON_VERSION = '0.0.0';
+export { DAEMON_VERSION };
 
 /** How often the supervisor reconciles the pool with the schedule and the queue. */
 export const SUPERVISOR_TICK_MS = 30_000;
 
 /** How often stalled `running` rows are reclaimed (`reapStalled`'s own threshold is a day). */
 export const REAP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * How often remote leases are checked for a grace window that has run out.
+ *
+ * Grace is an hour by default, so a minute is ample precision; a release
+ * that waits for this sweep is also caught at the node's own reconnect.
+ */
+export const LEASE_SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * The lease sweep's interval for this process.
+ *
+ * TEST-ONLY SEAM. The remote-node end-to-end suite has to prove that a file
+ * released at grace expiry is never installed over by the node that lost it,
+ * against a REAL daemon process; waiting out a minute-long sweep (on top of
+ * the grace window) per case would make that suite take many minutes. Gated
+ * on `NODE_ENV === 'test'` so a stray `TRAWLARR_TEST_LEASE_SWEEP_MS` in a
+ * production container can never change when claims are released.
+ */
+export const leaseSweepIntervalMs = (env: NodeJS.ProcessEnv = process.env): number => {
+  if (env.NODE_ENV !== 'test') return LEASE_SWEEP_INTERVAL_MS;
+  const raw = env.TRAWLARR_TEST_LEASE_SWEEP_MS;
+  return raw !== undefined && /^[1-9]\d*$/.test(raw) ? Number(raw) : LEASE_SWEEP_INTERVAL_MS;
+};
 
 /** How often each library's trash is swept against its own flow-declared retention. */
 export const TRASH_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -252,6 +273,9 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   const wantedPort = input.port ?? daemonSettings.port;
 
   const bus = createEventBus();
+  // The two refer to each other only through closures, called long after
+  // both exist: the supervisor asks the hub which nodes are online at each
+  // tick, and the hub asks for a tick when a node comes online.
   const supervisor: Supervisor = createSupervisor({
     db,
     bus,
@@ -259,6 +283,27 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     dataDir,
     nowMs,
     createAgent: input.createAgent,
+    remoteNodes: () => hub.onlineNodes(),
+    createRemoteAgent: (factoryInput) => hub.createAgent(factoryInput),
+  });
+  const nodeRepo = createNodeRepo(db);
+  const bundles = createBundleStore();
+  const hub: NodeHub = createNodeHub({
+    db,
+    nodes: nodeRepo,
+    bundles,
+    settings,
+    bus,
+    nowMs,
+    buildVersion: DAEMON_VERSION,
+    onNodesChanged: () => {
+      void supervisor.tick().catch((error: unknown) => {
+        onError(error, { phase: 'supervisor tick' });
+      });
+    },
+    onError: (context, error) => {
+      onError(error, { phase: `nodes:${context}` });
+    },
   });
   const scans: ScanCoordinator = createScanCoordinator({
     db,
@@ -321,6 +366,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     commit: buildCommitFrom(process.env),
     envApplications,
     hardwareFindings,
+    nodes: hub,
   });
 
   // Before any work is attempted, and before the API can be asked: a library
@@ -332,12 +378,14 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     onError: (error, context) => {
       onError(error, { phase: `api:${context.method} ${context.path}` });
     },
+    nodeHttp: createNodeHttpHandler({ nodes: nodeRepo, bundles, nowMs }),
   });
   let ws: WsChannel | null = null;
   let lock: DaemonLock | null = null;
 
   const unwind = async (): Promise<void> => {
     if (lock !== null) await lock.release();
+    await hub.close();
     if (ws !== null) await ws.close();
     await new Promise<void>((resolveClose) => {
       server.closeAllConnections();
@@ -350,6 +398,9 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
   let port: number;
   try {
+    // The node socket's upgrade path is claimed only AFTER the lock (see
+    // below). Until then an upgrade to it is answered 404 by the event
+    // stream's listener, and the node simply retries.
     ws = attachWebSocket({ server, bus, settings, accounts: ctx.accounts });
     port = await listen(server, wantedPort, bind);
     // Only now is the recorded port a fact rather than a hope.
@@ -381,6 +432,35 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     await unwind();
     throw error;
   }
+
+  /**
+   * ADOPT EVERY LEASED REMOTE JOB, and only now. The order is the guarantee:
+   *
+   *  - AFTER the lock. Adoption moves every lease to grace (from now) and
+   *    settles leases already released. A second daemon refused by the lock
+   *    must never have done that to the running daemon's database: a
+   *    connected node's lease pushed to grace expires an hour later while the
+   *    node is still encoding, and the file is handed to a second worker.
+   *  - BEFORE `hub.attach`, so no node can say hello before its job has a
+   *    handle. A hello reconciled without one continues the job with nothing
+   *    to route its frames to — and adoption arriving after it would then put
+   *    a live node's lease back into grace.
+   *  - `supervisor.adopt` calls `run` straight away: a remote handle drops
+   *    every frame, a commit-request included, until it has been.
+   *  - BEFORE the first lease sweep, the startup reaper and the first tick:
+   *    the adopted runs hold their nodes' slots, and the reaper leaves leased
+   *    rows to the hub (`reapStalled`), so nothing requeues a file a node may
+   *    still be encoding before that node has had its grace to reconnect.
+   */
+  // A claim this daemon died while still preparing names a node but holds no
+  // lease, so adoption never sees it and nothing would end it for a day.
+  // After the lock for the same reason adoption is: a refused second daemon
+  // must not stall the running daemon's claims mid-prepare.
+  stallUnsentRemoteJobs({ db, nowMs: nowMs() });
+  for (const job of hub.adoptLeasedJobs((payload) => supervisor.agentInputFor(payload))) {
+    supervisor.adopt(job);
+  }
+  hub.attach(server);
 
   const timers = new Set<unknown>();
   let stopping = false;
@@ -457,6 +537,10 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
   every(SUPERVISOR_TICK_MS, 'supervisor tick', async () => {
     await supervisor.tick();
+  });
+
+  every(leaseSweepIntervalMs(), 'lease sweep', () => {
+    hub.sweepLeases();
   });
 
   every(REAP_INTERVAL_MS, 'stall reaper', () => {
@@ -604,8 +688,13 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
           resolveDeadline('deadline');
         }, input.drainDeadlineMs ?? DEFAULT_DRAIN_DEADLINE_MS);
       });
+      // LOCAL runs only, in both the drain and the cancel. A remote job
+      // survives a daemon restart by design: its node keeps encoding, and the
+      // next start adopts the job with its lease in grace. Waiting on one
+      // would hold shutdown for the rest of an encode, and cancelling one
+      // would be durable — every restart would cancel every remote job.
       const outcome = await Promise.race([
-        supervisor.drain().then((): 'drained' => 'drained'),
+        supervisor.drain({ includeRemote: false }).then((): 'drained' => 'drained'),
         deadline,
       ]);
       if (deadlineHandle !== null) clearTimer(deadlineHandle);
@@ -614,6 +703,11 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
         // therefore reaches an ffmpeg the worker spawned for itself.
         await supervisor.stop();
       }
+
+      // Node sockets close with the rest of the daemon; their leases are
+      // not touched on the way out (the hub is closing, so a socket close
+      // moves nothing), and the next start puts them in grace.
+      await hub.close();
 
       if (ws !== null) await ws.close();
       await new Promise<void>((resolveClose) => {

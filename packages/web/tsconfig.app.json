@@ -11,5 +11,12 @@
     "declaration": false,
     "declarationMap": false
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
+  // The component tests need `types` this config deliberately leaves empty
+  // (vitest's, and @testing-library/jest-dom's matcher augmentation), so they
+  // are type-checked by `tsconfig.test.json` instead — which `pnpm typecheck`
+  // runs. They are excluded here rather than left out of `include` so that a
+  // test file can never be pulled into `vite build`'s type-check by a wider
+  // glob later.
+  "exclude": ["src/**/*.test.tsx", "src/test/**/*.ts"]
 }

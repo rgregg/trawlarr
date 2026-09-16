@@ -71,6 +71,53 @@ The pnpm workspace holds six packages:
 inside the library, and why a library hardlinked into a torrent client looks
 like it is doing nothing.
 
+### Remote nodes
+
+A node runs jobs for a server elsewhere — a GPU machine, say, next to a
+server with none. It runs the same image, or the same `trawlarr node`
+binary, and connects out to the server; the server never connects to it. A
+node needs its own direct access to the library files it works on — there is
+no file transfer yet, so a node must be able to open the same paths a job
+touches.
+
+Add one from **Config → Nodes → Add node** in the UI. You get an enrollment
+token (shown once), a `docker run` command and a `trawlarr node` command
+built from it. Or bring one up from `docker/compose.node.yml`:
+
+```bash
+docker compose -f docker/compose.node.yml up -d
+# or, for an NVENC node:
+docker compose -f docker/compose.node.yml --profile nvidia up -d
+```
+
+**The path map.** A node's own filesystem paths need not match the server's,
+so each node has a path map: for every library it works on, the path the
+server uses and the path this node uses for the same files. For example, if
+the server sees a library at `/library/movies` and this node's compose file
+bind-mounts it at `/media/movies`, the map's "This node's path" column reads
+`/media/movies` for that library's `/library/movies`. Get the map wrong and
+the node fails every job for that library rather than touching the wrong
+file.
+
+**If a node disconnects mid-job**, the job keeps running — the node is still
+doing the work, only the connection dropped. The file's lease is released
+after a one-hour grace window; once that passes, that node can no longer
+install its result even if it reconnects and finishes, so the file gets
+picked up fresh instead.
+
+**Node environment.** `TRAWLARR_SERVER` and `TRAWLARR_NODE_TOKEN` (first run
+only) point a node at its server; `TRAWLARR_NODE_DATA_DIR` is where it keeps
+its secret, job journal and plugin cache; `TRAWLARR_HARDWARE` and
+`TRAWLARR_HARDWARE_CAPS` declare its hardware as on a server; and
+`TRAWLARR_NODE_BUNDLE_CACHE_BYTES` caps the plugin cache (2 GiB by default,
+least recently used pruned first).
+
+**Revoke** a node from the same screen to cut off its enrollment immediately.
+
+Plugins run on a node exactly as they do on the server: unsandboxed, in the
+node's own process, as its service user. A node is not a safer place to run
+plugin code than the server is.
+
 ### Try it
 
 `@trawlarr/server` builds the `trawlarr` CLI: point it at a real folder of

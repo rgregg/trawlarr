@@ -267,6 +267,21 @@ legend {
   letter-spacing: -0.1em;
 }
 
+/* Something that has not started yet rather than something stopped: same
+   `--warn` vocabulary as paused (both want a person), but deliberately NO
+   marker glyph. A node waiting to join wore the paused bars, which read as
+   "somebody paused this" when nothing has ever run here; nothing in the set
+   above means "has not joined yet", and a wrong glyph is worse than none. */
+.status-pending .badge {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.status-pending {
+  border-left-color: var(--warn);
+}
+
 .status-converged {
   border-left-color: var(--good);
 }
@@ -374,8 +389,15 @@ legend {
 
 .problems {
   margin: var(--space-2) 0 0;
-  padding-left: 1.2rem;
   color: var(--bad);
+}
+
+/* Only the LIST form is indented, and only to leave room for its own markers.
+   Applied to `.problems` flat, that indent also hit the single-sentence `<p>`
+   form — a node card's "Unreachable: …" line sat 1.2rem in from the card's
+   other body text, reading as a nested detail of the line above it. */
+ul.problems {
+  padding-left: 1.2rem;
 }
 
 /* The daemon's refusals are multi-sentence and are shown whole, wrapped

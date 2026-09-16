@@ -26,7 +26,8 @@ export type DaemonToAgent =
   | { type: 'job'; payload: JobPayload }
   | { type: 'cancel' }
   | { type: 'doc-result'; id: number; ok: true; value: unknown }
-  | { type: 'doc-result'; id: number; ok: false; error: string };
+  | { type: 'doc-result'; id: number; ok: false; error: string }
+  | { type: 'commit-result'; id: number; granted: boolean; reason: string | null };
 
 /**
  * Messages one agent sends up to the daemon.
@@ -61,21 +62,28 @@ export type AgentToDaemon =
       data?: Record<string, unknown>;
       nowMs?: number;
     }
+  | { type: 'commit-request'; id: number; kind: 'replace' | 'plugin'; pluginId: string }
   | { type: 'done'; report: JobReport }
-  | { type: 'failed'; error: string };
+  | { type: 'failed'; error: string; superseded?: boolean };
 
 /**
  * Bumped whenever a message shape changes incompatibly.
  *
  * A forked child is built from the same tree as its daemon, so a mismatch
- * cannot happen locally — but a v1.2 remote node is a SEPARATE INSTALL that
- * can be older or newer than the daemon it connects to, and a silent
- * protocol skew there presents as jobs that never report. The version is
- * therefore checked at startup rather than assumed: `agent-handle.ts` puts
- * it in the child's environment and `agent.ts` refuses to run under a
- * different one.
+ * cannot happen locally — but a remote node is a SEPARATE INSTALL that can
+ * be older or newer than the daemon it connects to, and a silent protocol
+ * skew there presents as jobs that never report. The version is therefore
+ * checked at startup rather than assumed: `agent-handle.ts` puts it in the
+ * child's environment and `agent.ts` refuses to run under a different one.
+ *
+ * v2 is load-bearing, not cosmetic: remote nodes exist now, over the node
+ * socket in `../nodes/node-frames.ts`, which envelopes these same messages
+ * inside `agent`/`job` frames. A node running v1 would have no `commit-*`
+ * handshake and no `failed.superseded`, so a version mismatch there must
+ * refuse the connection rather than let a node silently skip the commit
+ * gate.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Environment variable carrying `PROTOCOL_VERSION` to a forked agent. */
 export const PROTOCOL_VERSION_ENV = 'TRAWLARR_PROTOCOL_VERSION';
@@ -138,10 +146,27 @@ export const parseAgentMessage = (raw: unknown): AgentToDaemon | null => {
       if (!isRecord(report)) return null;
       if (report['held'] !== undefined && typeof report['held'] !== 'boolean') return null;
       if (report['reviewReason'] != null && typeof report['reviewReason'] !== 'string') return null;
+      if (report['superseded'] !== undefined && typeof report['superseded'] !== 'boolean') {
+        return null;
+      }
       return { type: 'done', report: report as unknown as JobReport };
     }
-    case 'failed':
-      return typeof raw['error'] === 'string' ? { type: 'failed', error: raw['error'] } : null;
+    case 'failed': {
+      if (typeof raw['error'] !== 'string') return null;
+      if (raw['superseded'] !== undefined && typeof raw['superseded'] !== 'boolean') return null;
+      return {
+        type: 'failed',
+        error: raw['error'],
+        ...(raw['superseded'] !== undefined ? { superseded: raw['superseded'] as boolean } : {}),
+      };
+    }
+    case 'commit-request': {
+      const kind = raw['kind'];
+      if (kind !== 'replace' && kind !== 'plugin') return null;
+      return typeof raw['id'] === 'number' && typeof raw['pluginId'] === 'string'
+        ? { type: 'commit-request', id: raw['id'], kind, pluginId: raw['pluginId'] }
+        : null;
+    }
     default:
       return null;
   }
@@ -165,6 +190,16 @@ export const parseDaemonMessage = (raw: unknown): DaemonToAgent | null => {
         return { type: 'doc-result', id: raw['id'], ok: false, error: raw['error'] };
       }
       return null;
+    }
+    case 'commit-result': {
+      if (typeof raw['id'] !== 'number' || typeof raw['granted'] !== 'boolean') return null;
+      if (raw['reason'] !== null && typeof raw['reason'] !== 'string') return null;
+      return {
+        type: 'commit-result',
+        id: raw['id'],
+        granted: raw['granted'],
+        reason: raw['reason'] as string | null,
+      };
     }
     default:
       return null;

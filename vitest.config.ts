@@ -1,20 +1,12 @@
 import { defineConfig } from 'vitest/config';
-import { fileURLToPath } from 'node:url';
-
-const pkg = (name: string) => fileURLToPath(new URL(`./packages/${name}/src`, import.meta.url));
+import { workspaceAlias } from './vitest.alias.js';
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      '@trawlarr/plugin-api': pkg('plugin-api'),
-      '@trawlarr/core': pkg('core'),
-      '@trawlarr/plugins-core': pkg('plugins-core'),
-      '@trawlarr/engine': pkg('engine'),
-      '@trawlarr/server': pkg('server'),
-      '@trawlarr/web': pkg('web'),
-    },
-  },
+  resolve: { alias: workspaceAlias },
   test: {
+    // The `node` half of `vitest.workspace.ts`. Everything in this repo runs
+    // here; only `packages/web/src/**/*.test.tsx` runs in a DOM.
+    name: 'node',
     include: [
       'packages/*/src/**/*.test.ts',
       'packages/*/test/**/*.test.ts',

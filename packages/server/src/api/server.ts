@@ -12,6 +12,8 @@ import { SCHEMA_VERSION } from '../db/migrate.js';
 import type { SettingsRepo } from '../db/settings-repo.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
+import { createNoopNodeHub, type NodeHub } from '../nodes/hub.js';
+import type { NodeHttpHandler } from '../nodes/node-http.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
 import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from './session.js';
 import { createAccountRepo, type AccountRepo } from '../db/account-repo.js';
@@ -109,6 +111,16 @@ export interface CreateApiHandlerOptions {
    * is how a test asks for a daemon that serves the API and nothing else.
    */
   webRoot?: string | null;
+  /**
+   * The node-facing surface (enrollment, authenticated bundle downloads),
+   * awaited BEFORE the ordinary router and its operator auth: those
+   * endpoints authenticate with a node's own secret, never the daemon's API
+   * key or a session cookie, and `nodeHttp` resolves `false` and writes
+   * nothing for every path that isn't one of its own. Defaults to a handler
+   * that resolves `false` unconditionally, so a context built without one
+   * (chiefly tests of the rest of this file) behaves exactly as before.
+   */
+  nodeHttp?: NodeHttpHandler;
 }
 
 /**
@@ -195,16 +207,39 @@ export const createApiHandler = (
     return input.ctx.accounts.getById(accountId) !== null;
   };
 
-  return (req, res) => {
-    if (serveStatic(req, res)) return;
-    void (async () => {
-      const method = req.method ?? 'GET';
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      const pathname = url.pathname;
-      const cookies = parseCookies(req.headers.cookie);
-      const secure = isSecureRequest(req);
+  const nodeHttp = options?.nodeHttp ?? (async () => false);
 
+  return (req, res) => {
+    // `method`/`pathname` are also what the catch block logs with, so they
+    // get placeholder values BEFORE the try — a malformed `req.url` (a raw
+    // socket can send one the HTTP parser lets through, e.g. `GET
+    // http://[ HTTP/1.1`) throws out of `new URL` below, and that throw must
+    // still have something to log, not a ReferenceError of its own.
+    let method = req.method ?? 'GET';
+    let pathname = req.url ?? '/';
+
+    void (async () => {
       try {
+        // `new URL` and everything that reads it are INSIDE this try along
+        // with `nodeHttp`/`serveStatic`/the router: a request whose URL the
+        // HTTP parser accepted but the WHATWG URL parser rejects must land
+        // in the same catch as every other failure, or it becomes an
+        // unhandled rejection that takes the whole daemon down with it.
+        method = req.method ?? 'GET';
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        pathname = url.pathname;
+        const cookies = parseCookies(req.headers.cookie);
+        const secure = isSecureRequest(req);
+
+        // Awaited FIRST: a node authenticates with its own secret, not the
+        // operator API key or session the router enforces below, so it must
+        // get first refusal on every request — but a rejection from it (a
+        // client aborting mid-body, a read stream erroring after headers
+        // were already written) must land in the same catch as everything
+        // else, for the same reason as above.
+        if (await nodeHttp(req, res)) return;
+        if (serveStatic(req, res)) return;
+
         const matched = router.match(method, pathname);
 
         if (matched.kind === 'not-found') {
@@ -304,12 +339,46 @@ export const createApiHandler = (
           );
           return;
         }
+        if (
+          error instanceof TypeError &&
+          (error as NodeJS.ErrnoException).code === 'ERR_INVALID_URL'
+        ) {
+          // The HTTP parser accepts request lines the WHATWG URL parser
+          // then rejects (e.g. a raw `GET http://[ HTTP/1.1` from a socket
+          // that never goes near `fetch`/a browser) — a malformed URL, not
+          // an internal failure, so it gets its own diagnosable 400 rather
+          // than falling into the generic 500 below.
+          send(res, 400, errorBody('bad-url', `Could not parse "${req.url ?? ''}" as a URL path.`));
+          return;
+        }
         // Everything else is flattened. The detail goes to the log, never
         // to the client — see INTERNAL_ERROR_MESSAGE.
         onError(error, { method, path: pathname });
-        send(res, 500, errorBody('internal-error', INTERNAL_ERROR_MESSAGE));
+        if (res.headersSent) {
+          // `nodeHttp`'s bundle-file stream can fail (the file vanished
+          // between the manifest walk and the read) after it has already
+          // written a 200 and started piping bytes — `send` would then
+          // throw trying to call `writeHead` a second time. The only
+          // honest thing left to do is end the connection: whatever
+          // partial body the client already has is not a response it can
+          // trust, so more bytes at this point would only make that worse.
+          res.destroy();
+        } else {
+          send(res, 500, errorBody('internal-error', INTERNAL_ERROR_MESSAGE));
+        }
       }
-    })();
+    })().catch((error: unknown) => {
+      // The try/catch above is meant to be exhaustive, but this is the
+      // backstop for anything that still escapes it (a throw from `onError`
+      // itself, a `send`/`res.destroy()` call throwing because the socket
+      // is already gone). An unhandled rejection here EXITS THE PROCESS on
+      // Node 22 — taking every running transcode down with it — so the only
+      // acceptable response to "something I didn't expect happened" is to
+      // log it and end this one connection, never to let the promise reject
+      // unobserved.
+      onError(error, { method, path: pathname });
+      res.destroy();
+    });
   };
 };
 
@@ -340,6 +409,8 @@ export interface CreateApiContextInput {
   dryRuns?: FlowDryRunCoordinator;
   /** Seam for tests; production always gets the real repo built here. */
   accounts?: AccountRepo;
+  /** The daemon passes its real hub; a context built without one gets the no-op hub. */
+  nodes?: NodeHub;
 }
 
 /**
@@ -382,6 +453,7 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     checkBinary: input.checkBinary,
     envApplications: input.envApplications ?? [],
     hardwareFindings: input.hardwareFindings ?? [],
+    nodes: input.nodes ?? createNoopNodeHub(),
   };
 };
 

@@ -1,14 +1,26 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import type { FlowDefinition } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
-import type { DocumentPort, StepRecord } from '@trawlarr/engine';
+import { FlowAbort, type DocumentPort, type StepRecord } from '@trawlarr/engine';
 import type { JobPayload } from './job-payload.js';
-import { runPayload, type RunPayloadPorts } from './run-payload.js';
+import {
+  runPayload,
+  SupersededError,
+  type CommitGate,
+  type RunPayloadPorts,
+} from './run-payload.js';
+import { resolveStagingDir } from '../library/paths.js';
+import { workDirPrefix } from '../library/staging-dir.js';
+import { probeFile } from '../probe/ffprobe.js';
 import { corpusAvailable, pluginPath } from '../../../engine/test/compat/corpus.js';
+import { toolAvailableSync } from '../../../../test-support/tool-availability.js';
 
 // NOTE: nothing in this file opens, imports or constructs a database. That is
 // the property under test, not an accident of the fixtures — see the
@@ -78,6 +90,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   logPath: null,
   // Only first-party plugins here: nothing installed to resolve.
   pluginPaths: {},
+  pluginBundles: {},
 });
 
 const payloadForFixture = (name: 'two-node-flow'): JobPayload => {
@@ -592,6 +605,304 @@ describe('runPayload', () => {
     // looking stale from birth) plus one per completed step.
     expect(beats).toHaveLength(report.steps.length + 1);
     expect([...beats].sort((a, b) => a - b)).toEqual(beats);
+  });
+});
+
+/**
+ * THE COMMIT GATE. Before any step that can write to the library, the run
+ * asks for a grant; a refusal means this worker's claim on the file was
+ * released and another worker may now own it.
+ *
+ * The transcode cases are real runs over a real generated file — a real
+ * encode, the real Verify and Replace runners — because the property that
+ * matters is what is on DISK afterwards, and a stubbed runner cannot say.
+ */
+const execFileAsync = promisify(execFile);
+const ffmpegAvailable = toolAvailableSync('ffmpeg');
+
+/** Start -> not hevc? -> encode to hevc -> Execute -> Verify -> Replace. */
+const TRANSCODE_FLOW: FlowDefinition = {
+  nodes: [
+    { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'check',
+      pluginId: 'trawlarr:checkVideoCodec',
+      pluginVersion: '1.0.0',
+      inputs: { codec: 'hevc' },
+    },
+    { id: 'begin', pluginId: 'trawlarr:beginCommand', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'encoder',
+      pluginId: 'trawlarr:setVideoEncoder',
+      pluginVersion: '1.0.0',
+      inputs: { encoder: 'libx265', quality: '30' },
+    },
+    { id: 'execute', pluginId: 'trawlarr:execute', pluginVersion: '1.0.0', inputs: {} },
+    {
+      id: 'verify',
+      pluginId: 'trawlarr:verifyOutput',
+      pluginVersion: '1.0.0',
+      inputs: { durationToleranceSeconds: '1', minSizeRatio: '0.05' },
+    },
+    {
+      id: 'replace',
+      pluginId: 'trawlarr:replaceOriginal',
+      pluginVersion: '1.0.0',
+      inputs: { trashRetentionDays: '14', allowCrossDevice: 'true' },
+    },
+  ],
+  edges: [
+    { fromNodeId: 'start', outputNumber: 1, toNodeId: 'check' },
+    { fromNodeId: 'check', outputNumber: 2, toNodeId: 'begin' },
+    { fromNodeId: 'begin', outputNumber: 1, toNodeId: 'encoder' },
+    { fromNodeId: 'encoder', outputNumber: 1, toNodeId: 'execute' },
+    { fromNodeId: 'execute', outputNumber: 1, toNodeId: 'verify' },
+    { fromNodeId: 'verify', outputNumber: 1, toNodeId: 'replace' },
+  ],
+};
+
+/**
+ * The same flow plus a flow-wide error handler that logs. Were a refused
+ * commit routed like a plugin error, On Error and Write to Log would both
+ * appear in the step trace.
+ */
+const withOnErrorNode = (payload: JobPayload): JobPayload => ({
+  ...payload,
+  flow: {
+    ...payload.flow,
+    definition: {
+      nodes: [
+        ...payload.flow.definition.nodes,
+        { id: 'error', pluginId: 'trawlarr:onError', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'log',
+          pluginId: 'trawlarr:writeToLog',
+          pluginVersion: '1.0.0',
+          inputs: { message: 'the error handler ran' },
+        },
+      ],
+      edges: [
+        ...payload.flow.definition.edges,
+        { fromNodeId: 'error', outputNumber: 1, toNodeId: 'log' },
+      ],
+    },
+  },
+});
+
+/** This job's scratch directories still present in the library's staging dir. */
+const listStagingDirs = (payload: JobPayload): string[] => {
+  const staging = resolveStagingDir({ library: payload.library, filePath: payload.path });
+  if (!existsSync(staging)) return [];
+  return readdirSync(staging).filter((name) => name.startsWith(workDirPrefix(payload.jobId)));
+};
+
+/** A real h264 file in a fresh library root, and a payload describing it. */
+const realTranscodePayload = async (): Promise<JobPayload> => {
+  const root = mkdtempSync(join(tmpdir(), 'trawlarr-commit-gate-'));
+  const path = join(root, 'sample.mkv');
+  await execFileAsync('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc=duration=2:size=320x240:rate=10',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=440:duration=2',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-c:a',
+    'aac',
+    path,
+  ]);
+  const stats = await stat(path);
+  const base = payloadFor(TRANSCODE_FLOW);
+  return {
+    ...base,
+    path,
+    sizeBytes: stats.size,
+    originalSizeBytes: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs,
+    probe: await probeFile({ ffprobePath: 'ffprobe', path }),
+    library: { ...base.library, roots: [root] },
+  };
+};
+
+describe('runPayload commit gate', () => {
+  it('asks with kind plugin before an installed third-party plugin, naming it as the flow does', async () => {
+    const asked: { kind: string; pluginId: string }[] = [];
+    const absPath = passThroughPluginPath();
+    const payload = payloadFor(flowEndingIn('tdarr:passThrough'));
+    const report = await runPayload({
+      payload: { ...payload, pluginPaths: { 'tdarr:passThrough': absPath } },
+      ports: {
+        ...quietPorts(),
+        commitGate: async (request) => {
+          asked.push(request);
+        },
+      },
+    });
+
+    // Start is inert and does not ask. The installed plugin is `unknown` to
+    // the engine — it can write anywhere — so it asks, by the id the flow
+    // author wrote rather than the path it resolved to.
+    expect(asked).toEqual([{ kind: 'plugin', pluginId: 'tdarr:passThrough' }]);
+    expect(report.success).toBe(true);
+  });
+
+  it.each([
+    { gate: 'refused', expected: SupersededError },
+    { gate: 'unanswerable', expected: FlowAbort },
+  ])('never runs a plugin whose commit is $gate, and no error handler runs', async (scenario) => {
+    const marker = join(mkdtempSync(join(tmpdir(), 'trawlarr-gate-marker-')), 'ran');
+    const touching = writePlugin(`
+exports.details = () => ({
+  name: 'Touch', description: 'x', style: {}, tags: '', isStartPlugin: false, pType: '',
+  sidebarPosition: 1, icon: '', inputs: [], outputs: [{ number: 1, tooltip: 'ok' }],
+  requiresVersion: '1.0.0',
+});
+exports.plugin = (args) => {
+  require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x');
+  return { outputNumber: 1, outputFileObj: { _id: args.inputFileObj._id }, variables: args.variables };
+};
+`);
+    const steps: StepRecord[] = [];
+    await expect(
+      runPayload({
+        payload: withOnErrorNode(payloadFor(flowEndingIn(touching))),
+        ports: {
+          ...quietPorts(),
+          onStep: (step) => steps.push(step),
+          commitGate: async () => {
+            // An unanswerable gate (the IPC channel gone, say) has not
+            // granted either, and must not fall into On Error just because
+            // its failure is an ordinary Error.
+            throw scenario.gate === 'refused'
+              ? new SupersededError('released')
+              : new Error('channel closed');
+          },
+        },
+      }),
+    ).rejects.toSatisfy(
+      (error) =>
+        error instanceof scenario.expected &&
+        (scenario.gate === 'refused') === error instanceof SupersededError,
+    );
+    expect(existsSync(marker)).toBe(false);
+    expect(steps.map((step) => step.pluginId)).toEqual(['trawlarr:start']);
+  });
+
+  it('a SupersededError carries its reason and a stable name', () => {
+    const error = new SupersededError('claim released to node b');
+    expect(error.reason).toBe('claim released to node b');
+    expect(error.name).toBe('SupersededError');
+    expect(error.message).toContain('claim released to node b');
+  });
+
+  describe.runIf(ffmpegAvailable)('on a real transcode', () => {
+    it('asks the commit gate before Replace Original File and not before Execute', async () => {
+      const payload = await realTranscodePayload();
+      const asked: { kind: string; pluginId: string }[] = [];
+      const report = await runPayload({
+        payload,
+        ports: {
+          ...quietPorts(),
+          commitGate: async (request) => {
+            asked.push(request);
+          },
+        },
+      });
+      expect(asked).toEqual([{ kind: 'replace', pluginId: 'trawlarr:replaceOriginal' }]);
+      expect(report.success).toBe(true);
+      expect(report.replaced).not.toBeNull();
+    }, 180_000);
+
+    it('a refused gate leaves the original byte-identical, removes staging, and bypasses onFlowError', async () => {
+      const payload = await realTranscodePayload();
+      const before = await readFile(payload.path);
+      const stepsSeen: StepRecord[] = [];
+      const gate: CommitGate = async () => {
+        throw new SupersededError('released');
+      };
+      await expect(
+        runPayload({
+          payload: withOnErrorNode(payload),
+          ports: { ...quietPorts(), onStep: (step) => stepsSeen.push(step), commitGate: gate },
+        }),
+      ).rejects.toBeInstanceOf(SupersededError);
+
+      expect(await readFile(payload.path)).toEqual(before);
+      expect(listStagingDirs(payload)).toEqual([]);
+      // The encode really ran and verified, so the refusal is what stopped
+      // the install — not an earlier failure that would make this vacuous.
+      expect(stepsSeen.map((step) => step.pluginId)).toContain('trawlarr:execute');
+      expect(stepsSeen.at(-1)?.pluginId).toBe('trawlarr:verifyOutput');
+      expect(stepsSeen.some((step) => step.pluginId === 'trawlarr:onError')).toBe(false);
+      expect(stepsSeen.some((step) => step.pluginId === 'trawlarr:writeToLog')).toBe(false);
+    }, 180_000);
+
+    it('reports a landed replacement when a later commit is refused, instead of losing it in the abort', async () => {
+      // Replace installs, then a community plugin's commit is refused (an
+      // operator cancel, or a lease that ran out). Rethrowing the abort here
+      // threw away `replaced`: the row was requeued with its OLD identity
+      // though the file on disk had already changed.
+      const payload = await realTranscodePayload();
+      const before = await readFile(payload.path);
+      const community = passThroughPluginPath();
+      const flow = payload.flow.definition;
+      const withCommunity: JobPayload = {
+        ...payload,
+        pluginPaths: { 'tdarr:afterReplace': community },
+        flow: {
+          ...payload.flow,
+          definition: {
+            nodes: [
+              ...flow.nodes,
+              {
+                id: 'after',
+                pluginId: 'tdarr:afterReplace',
+                pluginVersion: '1.0.0',
+                inputs: {},
+              },
+            ],
+            edges: [...flow.edges, { fromNodeId: 'replace', outputNumber: 1, toNodeId: 'after' }],
+          },
+        },
+      };
+      const gate: CommitGate = async (request) => {
+        if (request.kind === 'plugin') throw new SupersededError('cancelled by an operator');
+      };
+
+      const report = await runPayload({
+        payload: withCommunity,
+        ports: { ...quietPorts(), commitGate: gate },
+      });
+
+      expect(report.failed).toBe(true);
+      expect(report.success).toBe(false);
+      expect(report.superseded).toBe(true);
+      expect(report.error).toContain('cancelled by an operator');
+      expect(report.outcome).toContain('cancelled by an operator');
+      expect(report.replaced).not.toBeNull();
+      expect(report.replaced!.probe).not.toBeNull();
+      expect(report.postFacts).not.toBeNull();
+      expect(report.steps.map((step) => step.pluginId)).toContain('trawlarr:replaceOriginal');
+      const after = await readFile(report.replaced!.path);
+      expect(after.equals(before)).toBe(false);
+      expect(listStagingDirs(payload)).toEqual([]);
+    }, 180_000);
+
+    it('with no commitGate port, behaves exactly as before', async () => {
+      const payload = await realTranscodePayload();
+      const report = await runPayload({ payload, ports: quietPorts() });
+      expect(report.success).toBe(true);
+      expect(report.replaced).not.toBeNull();
+    }, 180_000);
   });
 });
 

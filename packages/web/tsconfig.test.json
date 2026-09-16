@@ -1,0 +1,20 @@
+{
+  // The component tests' type-check gate, run by the root `pnpm typecheck`.
+  //
+  // It cannot be `tsconfig.typecheck.json` at the root: that one compiles with
+  // `lib: ES2023` and no DOM, which is right for every other package and wrong
+  // for a file that renders React into a document. And it cannot be
+  // `tsconfig.app.json` either: that one has `types: []`, so
+  // `@testing-library/jest-dom`'s matcher augmentation would not be in scope
+  // and every `toBeInTheDocument()` would be an error there.
+  //
+  // Why it needs a gate at all: several of these tests assert on values whose
+  // types are the point (`NodeResource` fixtures must stay field-for-field
+  // what `GET /nodes` returns), and an untyped fixture drifts silently.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["@testing-library/jest-dom"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test-setup.ts"],
+  "exclude": []
+}
