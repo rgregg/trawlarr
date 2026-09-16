@@ -610,8 +610,19 @@
   align-items: flex-start;
 }
 
-.node-add-form input {
+.node-add-form input,
+.node-join-dialog input {
   width: 100%;
+}
+
+/* The join dialog is `role="alert"`, so everything in it inherits `--bad`.
+   Right for the one-time-token warning, wrong for a field label: a red
+   "Server URL" reads as a field this dialog has already rejected, before
+   anything has been typed into it. */
+.node-join-dialog label {
+  color: var(--ink);
+  font-weight: 500;
+  font-size: var(--text-sm);
 }
 
 .node-command {
