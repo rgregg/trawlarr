@@ -1334,9 +1334,11 @@ const SystemTab = (props: { client: ApiClient }): JSX.Element => (
 /**
  * The Configure screen: tabs behind one `?tab=` route.
  *
- * Deliberately untested, the same split every other screen in this package
- * uses: `config-model.ts` holds the parsing and the arithmetic a test can
- * reach without a DOM, and this file is a thin renderer over it.
+ * The same split every other screen in this package uses: `config-model.ts`
+ * holds the parsing and the arithmetic a test can reach without a DOM, and
+ * this file is a thin renderer over it. `Config.test.tsx` covers the Workers
+ * tab through this component, because the two counts that tab prints answer
+ * different questions and only a rendered DOM shows which one it shows.
  */
 export const Config = (props: {
   client: ApiClient;

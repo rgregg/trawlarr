@@ -5,9 +5,11 @@
  * `HH:MM`; getting that wrong silently sets a window nobody asked for, which
  * has already happened once by hand — see `parseWindow`/`formatWindow`.
  *
- * `Config.tsx` is deliberately untested (there is no DOM testing library in
- * this repo), so every branch worth asserting lives here instead, where
- * `config-model.test.ts` can reach it with no DOM at all.
+ * Every branch worth asserting lives here rather than in `Config.tsx`, where
+ * `config-model.test.ts` can reach it with no DOM at all. `Config.tsx` itself
+ * is not untested any more — `Config.test.tsx` renders the Workers tab — but
+ * that suite stays deliberately narrow: a component test is for what only a
+ * rendered DOM can show.
  */
 
 /**
