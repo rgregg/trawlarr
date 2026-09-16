@@ -207,12 +207,10 @@ const WorkersTab = (props: { client: ApiClient; live: LiveState }): JSX.Element 
         ))}
       </div>
 
-      {/* Verbatim, per the brief: a measured result on this exact hardware,
-          not a general recommendation. */}
-      <p className="help worker-count-warning">
-        Raising transcode workers from 1 to 3 measurably reduced throughput on this hardware (6
-        vCPU, one GPU).
-      </p>
+      {/* No note here about what a worker count does to throughput: the one
+          that used to sit here stated a measured result ("1 to 3 reduced
+          throughput on 6 vCPU, one GPU") that this screen measures nothing to
+          back, on hardware it never inspects. */}
 
       {failure !== null && (
         <div role="alert" className="failure">

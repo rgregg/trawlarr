@@ -209,13 +209,6 @@
   width: 8rem;
 }
 
-/* The measured warning from the brief: a caution, same vocabulary as every
-   other `--warn` note in this sheet, never hidden behind a tooltip. */
-.worker-count-warning {
-  color: var(--warn);
-  max-width: 34rem;
-}
-
 /* --- schedule -------------------------------------------------------------- */
 
 .schedule-windows {
