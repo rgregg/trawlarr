@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --build && pnpm -r --if-present run build:sql && pnpm --filter @trawlarr/web run build",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json && tsc --noEmit -p packages/web/tsconfig.test.json",
     "test:watch": "vitest",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",

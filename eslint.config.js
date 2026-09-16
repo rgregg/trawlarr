@@ -56,7 +56,11 @@ export default tseslint.config(
     // rather than a test for the same reason core's clock ban is: it has to
     // fire on the line someone is writing, not in a suite they might not run.
     files: ['packages/web/src/**/*.ts', 'packages/web/src/**/*.tsx'],
-    ignores: ['packages/web/src/shell/time.ts', 'packages/web/src/**/*.test.ts'],
+    ignores: [
+      'packages/web/src/shell/time.ts',
+      'packages/web/src/**/*.test.ts',
+      'packages/web/src/**/*.test.tsx',
+    ],
     rules: {
       'no-restricted-syntax': [
         'error',
