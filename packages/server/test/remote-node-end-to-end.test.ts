@@ -694,12 +694,26 @@ describe.runIf(available)('remote node end-to-end: a real daemon and a real node
 
     await h.daemon.api('POST', `/nodes/${h.nodeId}/revoke`);
 
-    const refusals = (): number =>
-      (h.nodeProcess!.output().match(/Unexpected server response: 401/g) ?? []).length;
-    await until('the node to be refused at least twice', () => refusals() >= 2, {
-      timeoutMs: 30_000,
-      describe: () => h.nodeProcess!.output(),
-    });
+    // The node says its credentials were refused, once — not the bare ws
+    // "Unexpected server response: 401" that used to spam on every retry.
+    await until(
+      'the node to log its credentials being refused',
+      () => h.nodeProcess!.output().includes("refused this node's credentials"),
+      { timeoutMs: 30_000, describe: () => h.nodeProcess!.output() },
+    );
+    const connectAttemptsBefore = h.proxy.requests.filter((path) =>
+      path.startsWith('/api/v1/nodes/connect'),
+    ).length;
+    // Still retrying underneath the single log line: count raw connect
+    // attempts at the proxy, since the node itself only logs the refusal once.
+    await until(
+      'the node to keep retrying the connection',
+      () =>
+        h.proxy.requests.filter((path) => path.startsWith('/api/v1/nodes/connect')).length >=
+        connectAttemptsBefore + 2,
+      { timeoutMs: 30_000, describe: () => h.nodeProcess!.output() },
+    );
+    expect(h.nodeProcess!.output().split("refused this node's credentials").length - 1).toBe(1);
     expect(h.nodeProcess!.exited()).toBe(false);
 
     const resource = await h.nodeResource();
