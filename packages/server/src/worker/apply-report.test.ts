@@ -273,6 +273,45 @@ describe('applyJobReport', () => {
     expect(createJobRepo(db).listForFile(payload.fileId)[0]?.state).toBe('succeeded');
   });
 
+  it('reports the installed path only when the library file actually changed', () => {
+    // What notification rides on. A converged library runs its flow over
+    // every file and replaces none of them; if this said "installed" for
+    // those, every pass would tell the media server to rescan the world.
+    const { payload } = seeded();
+
+    const changed = applyJobReport({
+      db,
+      payload,
+      report: reportWithReplacement(payload),
+      nowMs: () => NOW,
+    });
+    expect(changed.installedPath).toBe('/lib/movie.mp4');
+  });
+
+  it('reports no installed path for a run that succeeded without replacing anything', () => {
+    const { payload } = seeded();
+
+    const applied = applyJobReport({
+      db,
+      payload,
+      report: {
+        success: true,
+        held: false,
+        reviewReason: null,
+        cancelled: false,
+        outcome: 'Flow finished: end-of-flow.',
+        replaced: null,
+        preFacts: null,
+        postFacts: null,
+        steps: [],
+      } as unknown as JobReport,
+      nowMs: () => NOW,
+    });
+    // Success is not change: this is the distinction the whole ledger rests on.
+    expect(applied.state).toBe('good');
+    expect(applied.installedPath).toBeNull();
+  });
+
   it('records a replacement even when the run as a whole failed afterwards', () => {
     // The first of the four "job succeeded != file changed" defects:
     // persistence gated on success threw away the record of a real

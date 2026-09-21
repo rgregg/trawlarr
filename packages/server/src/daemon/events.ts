@@ -43,6 +43,17 @@ export type TrawlarrEvent =
     }
   | { type: 'job.log'; jobId: string; text: string }
   | { type: 'job.finished'; jobId: string; fileId: string; state: FileState; outcome: string }
+  /**
+   * A run INSTALLED a replacement in the library: the file at `path` is not
+   * the file that was there before.
+   *
+   * Distinct from `job.finished`, and deliberately so — "the job succeeded"
+   * and "the file on disk changed" are different questions, and conflating
+   * them is this repo's most expensive recurring defect. This event carries
+   * the second one, decided by `applyJobReport` from the replacement's own
+   * identity, so a subscriber never has to infer it from an outcome string.
+   */
+  | { type: 'file.replaced'; libraryId: string; fileId: string; path: string }
   | { type: 'scan.progress'; libraryId: string; seen: number }
   | { type: 'scan.finished'; libraryId: string; summary: ScanSummary }
   /**

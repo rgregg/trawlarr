@@ -10,6 +10,7 @@ import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { createNodeRepo } from '../db/node-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { applyEnvSettings, type EnvApplication } from '../config/env-settings.js';
+import { createPlexNotifier, type PlexNotifier } from '../library/plex-notify.js';
 import { sweepLibraryTrash } from '../library/trash-sweep.js';
 import { sweepLibraryStaging } from '../library/staging-sweep.js';
 import { sweepJobLogs } from '../job-log/job-log-store.js';
@@ -126,6 +127,8 @@ export interface StartDaemonInput {
   /** Seams. Production sets none of them. */
   watchPort?: WatchPort;
   createAgent?: CreateAgentFn;
+  /** Seam: a test drives notification without a Plex server or a real timer. */
+  plexNotifier?: PlexNotifier;
 }
 
 const messageOf = (error: unknown): string =>
@@ -305,6 +308,44 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       onError(error, { phase: `nodes:${context}` });
     },
   });
+  /**
+   * Tell each library's media server to re-read what changed.
+   *
+   * Driven by `file.replaced` rather than by a node in the flow: the event
+   * fires from the identity comparison that decides the library file
+   * actually changed, so a converged library that runs its flow and replaces
+   * nothing sends no requests at all. A library with no Plex settings is the
+   * default and costs nothing.
+   *
+   * Nothing here can fail a job — `emit` isolates a throwing listener, and
+   * the notifier reports its own errors rather than raising them.
+   */
+  const plexNotifier: PlexNotifier =
+    input.plexNotifier ??
+    createPlexNotifier({
+      fetchImpl: (url, init) => fetch(url, init),
+      setTimer,
+      clearTimer,
+      onError: (message) => {
+        console.error(`[daemon] plex: ${message}`);
+      },
+    });
+
+  const notifyLibraries = createLibraryRepo(db);
+  bus.subscribe((event) => {
+    if (event.type !== 'file.replaced') return;
+    // Read fresh rather than trusting the payload's copy: the settings may
+    // have been edited while this job was running.
+    const library = notifyLibraries.getById(event.libraryId);
+    if (library?.plex == null) return;
+    plexNotifier.fileReplaced({
+      libraryId: library.id,
+      config: library.plex,
+      roots: library.roots,
+      path: event.path,
+    });
+  });
+
   const scans: ScanCoordinator = createScanCoordinator({
     db,
     bus,
@@ -680,6 +721,10 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
       for (const handle of timers) clearTimer(handle);
       timers.clear();
+      // Drop any pending refresh: telling Plex to rescan after the daemon has
+      // gone is worse than not telling it, because nothing is left to report
+      // the failure.
+      plexNotifier.stop();
       await scans.stop();
 
       let deadlineHandle: unknown = null;

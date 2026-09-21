@@ -34,6 +34,7 @@ const baseLibrary = (overrides: Partial<LibraryRecord> = {}): LibraryRecord => (
   enabled: true,
   pausedReason: null,
   userVariables: {},
+  plex: null,
   createdAt: 0,
   ...overrides,
 });

@@ -20,6 +20,7 @@ const makeLibrary = (overrides: Partial<LibraryRecord> & { roots: string[] }): L
   enabled: true,
   pausedReason: null,
   userVariables: {},
+  plex: null,
   createdAt: NOW,
   ...overrides,
 });

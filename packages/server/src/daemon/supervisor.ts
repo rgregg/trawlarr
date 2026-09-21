@@ -385,6 +385,8 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
   ): void => {
     let state: FileState;
     let text: string;
+    // Null unless the run actually swapped a file in — see AppliedOutcome.
+    let installedPath: string | null = null;
     try {
       if (outcome.ok && outcome.report.cancelled) {
         state = applyJobCancelled({ db, payload, report: outcome.report, nowMs }).state;
@@ -396,7 +398,9 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         text = outcome.report.outcome;
         state = settleSuperseded(payload, text, outcome.report);
       } else if (outcome.ok) {
-        state = applyJobReport({ db, payload, report: outcome.report, nowMs }).state;
+        const applied = applyJobReport({ db, payload, report: outcome.report, nowMs });
+        state = applied.state;
+        installedPath = applied.installedPath;
         text = outcome.report.outcome;
       } else if (outcome.error instanceof AgentFailure && outcome.error.cancelled) {
         // The worker was cancelled and died before it could report the
@@ -435,6 +439,17 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
       text = `Unhandled error: ${messageOf(error)}`;
       state =
         row === null ? 'failed' : applyThrownFailure({ db, row, payload, error, nowMs }).state;
+    }
+
+    // Before `job.finished`, so a subscriber that reacts to the file's new
+    // state has already been told the file changed.
+    if (installedPath !== null) {
+      bus.emit({
+        type: 'file.replaced',
+        libraryId: payload.libraryId,
+        fileId: payload.fileId,
+        path: installedPath,
+      });
     }
 
     bus.emit({

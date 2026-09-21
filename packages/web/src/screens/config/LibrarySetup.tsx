@@ -4,6 +4,7 @@ import {
   describeFailure,
   draftProblems,
   toCreateBody,
+  toPlexPatch,
   type LibraryDraft,
 } from './library-form-model.js';
 import type { LibraryRow } from './Libraries.js';
@@ -16,6 +17,10 @@ const draftFrom = (library: LibraryRow | null): LibraryDraft => ({
   extensions: (library?.extensions ?? []).join(', '),
   allowHardlinked: library?.allowHardlinked ?? false,
   stagingDir: library?.stagingDir ?? '',
+  plexUrl: library?.plex?.url ?? '',
+  plexToken: library?.plex?.token ?? '',
+  plexSectionId: library?.plex?.sectionId ?? '',
+  plexPathPrefix: library?.plex?.pathPrefix ?? '',
 });
 
 /**
@@ -59,7 +64,10 @@ export const LibrarySetup = (props: {
       const saved =
         existing === null
           ? await props.client.post<LibraryRow>('/libraries', body)
-          : await props.client.patch<LibraryRow>(`/libraries/${existing.id}`, body);
+          : await props.client.patch<LibraryRow>(`/libraries/${existing.id}`, {
+              ...body,
+              plex: toPlexPatch(draft),
+            });
       props.onSaved(saved);
     } catch (error) {
       setFailure(describeFailure(error));
@@ -143,6 +151,67 @@ export const LibrarySetup = (props: {
         Empty stages inside each root. A different filesystem needs <code>allowCrossDevice</code> on
         Replace Original File.
       </p>
+
+      {/* Edit only: the section number has to be read out of Plex, which
+          cannot have been done before this library existed. */}
+      {editing && (
+        <>
+          <h3>Plex</h3>
+
+          <label htmlFor="library-plex-url">Plex URL</label>
+          <input
+            id="library-plex-url"
+            value={draft.plexUrl}
+            aria-describedby="library-plex-url-help"
+            placeholder="http://plex.lan:32400"
+            onChange={(event) => {
+              patch({ plexUrl: event.target.value });
+            }}
+          />
+          <p id="library-plex-url-help" className="help">
+            Empty sends nothing. Plex may already pick up changes on its own.
+          </p>
+
+          <label htmlFor="library-plex-token">Plex token</label>
+          <input
+            id="library-plex-token"
+            type="password"
+            value={draft.plexToken}
+            onChange={(event) => {
+              patch({ plexToken: event.target.value });
+            }}
+          />
+
+          <label htmlFor="library-plex-section">Plex library number</label>
+          <input
+            id="library-plex-section"
+            value={draft.plexSectionId}
+            aria-describedby="library-plex-section-help"
+            placeholder="2"
+            onChange={(event) => {
+              patch({ plexSectionId: event.target.value });
+            }}
+          />
+          <p id="library-plex-section-help" className="help">
+            From the <code>source=</code> number in Plex&rsquo;s own URL for the library.
+          </p>
+
+          <label htmlFor="library-plex-path">Plex library path</label>
+          <input
+            id="library-plex-path"
+            value={draft.plexPathPrefix}
+            aria-describedby="library-plex-path-help"
+            placeholder="Default: refresh the whole library"
+            onChange={(event) => {
+              patch({ plexPathPrefix: event.target.value });
+            }}
+          />
+          {/* The one field that fails silently when wrong, so it says so. */}
+          <p id="library-plex-path-help" className="help">
+            This root as Plex sees it. Wrong here means Plex accepts the refresh and scans nothing.
+          </p>
+        </>
+      )}
 
       {problems.length > 0 && (
         <ul className="problems">

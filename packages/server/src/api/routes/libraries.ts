@@ -7,6 +7,7 @@ import {
   type LibraryRecord,
 } from '../../db/library-repo.js';
 import { createMediaFileRepo } from '../../db/media-file-repo.js';
+import type { PlexConfig } from '../../library/plex-notify.js';
 import { explainPause } from '../../library/pause-explanation.js';
 import {
   accepted,
@@ -49,7 +50,61 @@ export const toLibraryResource = (library: LibraryRecord) => {
     pausedBy: pause?.owner ?? null,
     pausedExplanation: pause?.explanation ?? null,
     userVariables: library.userVariables,
+    // The token travels with the rest of the settings, as the daemon's own
+    // API key and the OIDC client secret already do: every one of these
+    // endpoints is authenticated, and a write-only field cannot be shown
+    // back to the person editing it.
+    plex: library.plex,
     createdAt: library.createdAt,
+  };
+};
+
+/**
+ * The `plex` field of a PATCH: absent leaves the setting alone, explicit
+ * null turns notification off, an object replaces it.
+ *
+ * The URL is validated here rather than at send time because a typo is a
+ * configuration mistake the person is looking at right now, whereas a
+ * notifier that discovers it hours later can only write it to a log.
+ */
+const parsePlexPatch = (patch: Record<string, unknown>): PlexConfig | null | undefined => {
+  if (!('plex' in patch)) return undefined;
+  if (patch.plex === null) return null;
+  const value = patch.plex as Record<string, unknown>;
+  const url = String(value.url ?? '').trim();
+  if (url !== '') {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new ApiError(
+        400,
+        'invalid-plex-url',
+        `"${url}" is not a URL. Give the Plex server's origin, e.g. "http://plex.lan:32400".`,
+      );
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new ApiError(
+        400,
+        'invalid-plex-url',
+        `Plex URL must be http or https, not "${parsed.protocol}".`,
+      );
+    }
+  }
+  const pathPrefix = String(value.pathPrefix ?? '').trim();
+  if (pathPrefix !== '' && !pathPrefix.startsWith('/')) {
+    throw new ApiError(
+      400,
+      'invalid-plex-path-prefix',
+      `Plex library path must be absolute, as Plex itself reports it (e.g. "/data/usenet/shows"). ` +
+        `Leave it empty to refresh the whole section instead.`,
+    );
+  }
+  return {
+    url,
+    token: String(value.token ?? ''),
+    sectionId: String(value.sectionId ?? '').trim(),
+    pathPrefix: pathPrefix === '' ? null : pathPrefix,
   };
 };
 
@@ -192,6 +247,7 @@ export const libraryRoutes: Route[] = [
           flowId: patch.flowId as string | null | undefined,
           allowHardlinked: optionalBoolean(body, 'allowHardlinked'),
           userVariables: patch.userVariables as Record<string, string> | undefined,
+          plex: parsePlexPatch(patch),
         });
       } catch (error) {
         return asLibraryError(error);

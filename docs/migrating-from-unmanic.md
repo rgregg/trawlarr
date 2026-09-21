@@ -555,7 +555,8 @@ through moving your library.
 | Transcode or normalise audio (AAC, EAC3, loudness) | `Ensure Audio Stream`, `Normalize Audio` (community) — but read "Ensure Audio Stream adds, it does not convert" below | **Supported** |
 | Strip tracks by language, drop commentary, keep subtitles | `Remove Stream By Property` (community) | **Supported** |
 | Rename, move or copy the result to another directory | `Move To Directory`, `Rename File`, `Copy To Directory` (community) | **Supported** |
-| Notify a webhook / Discord / Telegram / Plex on completion | `Send Web Request`, `Apprise`, `Notify Radarr or Sonarr` (community) | **Supported** |
+| Notify Plex on completion | Built in: a per-library setting, see §4.6 | **Supported** |
+| Notify a webhook / Discord / Telegram on completion | `Send Web Request`, `Apprise`, `Notify Radarr or Sonarr` (community) | **Supported** |
 | Extract or burn in subtitles | — | **Not yet.** No community flow plugin covers it. |
 | Any specific community Unmanic plugin | — | **Not applicable.** Trawlarr runs *Tdarr flow* plugins, not Unmanic plugins. Unmanic plugins cannot be imported, and no shim is planned. |
 
@@ -717,22 +718,71 @@ card first.
 
 ### 4.6 Telling Plex, concretely
 
-There is no Plex node, and none is needed: a Plex partial scan is one HTTP
-GET, and the community `Send Web Request` node sends it.
+This is a **library setting, not a flow node**. Edit the library and fill in
+the Plex section:
 
-- Node: `tdarr:webRequest` (Tools → Send Web Request)
-- `method`: `get`
-- `requestUrl`: `http://<plex-host>:32400/library/sections/<section id>/refresh?X-Plex-Token=<token>`
-- `output2OnNetworkError`: **on**
+- **Plex URL** — the server's origin, e.g. `http://plex.lan:32400`. Empty
+  means trawlarr sends nothing at all, which is the default.
+- **Plex token** — your `X-Plex-Token`. It travels in a header, not the query
+  string.
+- **Plex library number** — the `source=` number in Plex's own URL for that
+  library.
+- **Plex library path** — this library's root *as Plex sees it*, e.g.
+  `/data/usenet/shows` where trawlarr sees `/library/shows`. Leave it empty to
+  refresh the whole library instead. Single-root libraries only.
 
-That last input matters. With it on, a Plex that is down routes to output 2
-instead of failing the flow — a media server being unreachable must not
-invalidate a transcode that already succeeded. Route output 2 onward to the
-same next node, or leave it as an end, but do not let it fail the file.
+Two things follow from it being a library setting rather than a node.
 
-One caution: a flow node fires **once per file**, so a library-wide conversion
-will send Plex thousands of refreshes. For a first bulk run, consider leaving
-the node out and doing one manual scan at the end.
+**It fires from the file having changed, not from the flow having run.** The
+trigger is the identity comparison that decides a replacement really was
+installed, so a converged library that re-runs its flow and replaces nothing
+sends no requests. A flow node cannot do this: it fires once per file
+whichever way the flow went, so a converged library would tell Plex to rescan
+once per file per pass.
+
+**A burst becomes one refresh per directory.** Replacements inside a ten-second
+window are gathered and de-duplicated, and a burst wide enough that naming
+every directory would cost more than one whole-library scan falls back to
+exactly that. A season pack of twelve episodes is one request.
+
+**It never fails a file.** A Plex that is down, a wrong token, a wrong section
+— each is logged and dropped. The file on disk is converged whether or not
+Plex heard about it.
+
+One limit: notification is the **daemon's**. A `trawlarr run` drain converges
+files without telling Plex, because that command deliberately runs without a
+daemon (and refuses to run beside one).
+
+The one setting that fails quietly when wrong is **Plex library path**. Plex
+answers `200` to a `path` outside the section and scans nothing — it records
+the refusal only in its own log:
+
+```
+ERROR - '/library/shows/Andor/Season 1' was not inside any known section location, skipping.
+```
+
+So if notification looks like it is working and Plex never updates, that log
+line is where it says why. Get the value from Plex itself rather than guessing:
+`GET /library/sections` lists every section with its `<Location path="...">`,
+and the path you want is the one your library's root is under. A section can
+hold several locations, which is why the field is only honoured for a
+single-root library; a library with more than one root always refreshes the
+whole section.
+
+You may not need this at all. Where the library is a path Plex can watch
+directly — the same host, a bind mount both containers see — Plex's own
+filesystem watching already picks up a replacement within seconds. The setting
+earns its place when Plex cannot watch the library (a remote Plex, a mount it
+reads over the network), or when you want one directory rescanned instead of
+the whole section.
+
+If you would rather drive it from the flow anyway — to notify only on one
+branch, or to call something that is not Plex — the community
+`tdarr:webRequest` node (Tools → Send Web Request) sends any HTTP request;
+turn its `output2OnNetworkError` on and route output 2 onward, so an
+unreachable server cannot fail the file. Note that a node's inputs are
+literal strings: trawlarr does not expand `{{...}}` into third-party plugin
+inputs, so that route can only refresh a whole section.
 
 ### 4.7 A note on hardlinks before you start
 

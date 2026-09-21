@@ -139,6 +139,12 @@ export const runJob = async (input: RunJobInput): Promise<RunJobResult> => {
       },
     });
 
+    // `installedPath` is deliberately dropped here. Media-server notification
+    // hangs off the daemon's event bus, and this is the `trawlarr run` drain,
+    // which has no bus and refuses to run beside a daemon that does. So a CLI
+    // drain converges files without telling Plex; the operator is present and
+    // can trigger a scan. Stated rather than silent, because "notification is
+    // configured but nothing arrived" is otherwise a mystery.
     const { state } = applyJobReport({ db, payload, report, nowMs: input.nowMs });
     return { jobId, state, stepCount: report.steps.length, outcome: report.outcome };
   } catch (error) {
