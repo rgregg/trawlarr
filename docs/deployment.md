@@ -5,8 +5,8 @@ becomes that daemon's API client inside the same container), and `ffmpeg` /
 `ffprobe` — without those two the daemon can probe nothing and transcode
 nothing, so they are part of the image rather than something you mount in.
 
-The same image is used for a CPU-only deployment and for an NVIDIA one; only
-the compose file differs.
+The same image is used for a CPU-only deployment, for an NVIDIA one, and for a
+remote node (§11); only the compose file differs.
 
 ## 1. Quick start
 
@@ -630,7 +630,99 @@ To cut a release, set the same version in `packages/server/package.json` and
 matching tag: `git tag v0.1.0 && git push origin v0.1.0`. A tag that does not
 match the package version fails the publish.
 
-## 11. Licensing of the image
+## 11. Remote nodes
+
+A node runs jobs for a server on another machine — typically a GPU host next
+to a server with none. It is **the same image** with `TRAWLARR_MODE=node`:
+the entrypoint then starts `trawlarr node` instead of the daemon, so a node
+always runs exactly the build you point it at. A node has no database and no
+web UI. It connects out to the server over the API port and never accepts a
+connection itself.
+
+### Adding one
+
+In the UI, **Config → Nodes → Add node**. It issues an enrollment token (shown
+once, valid 24 hours) and a `docker run` command built from it. Or use
+`docker/compose.node.yml`:
+
+```bash
+docker compose -f docker/compose.node.yml up -d
+# or, for an NVENC node:
+docker compose -f docker/compose.node.yml --profile nvidia up -d
+```
+
+Set `TRAWLARR_SERVER` to the URL the **node** reaches the server on (not
+necessarily the one your browser uses) and `TRAWLARR_NODE_TOKEN` to the token.
+The token is only needed on the first start; after enrollment the node's own
+secret is in `/config/node.json`, and the variable can be removed.
+
+### What differs from the server's compose file
+
+| Setting                | Node                                           | Why                                                                                                                                              |
+| ---------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TRAWLARR_MODE`        | `node`                                         | Selects the node command. Any other value than `server` or `node` exits 78.                                                                      |
+| `ports:`               | none                                           | The node only connects out.                                                                                                                      |
+| `healthcheck`          | `disable: true`                                | The image's check polls the daemon's HTTP port, which a node does not run; left on it reports unhealthy for ever.                               |
+| `stop_grace_period`    | `15s`                                          | A node's jobs are stopped by process group with a ~5 s grace, not drained. See _Stopping a node_ below.                                          |
+| `/config`              | its own volume                                 | The node's secret (`node.json`), its job journal, its plugin cache and its job logs. Never share it with a server or another node (§2).         |
+| `hostname`             | not needed                                     | Nodes are identified by their secret, not by hostname.                                                                                          |
+
+`PUID`/`PGID`, `TZ`, `TRAWLARR_HARDWARE` and `TRAWLARR_HARDWARE_CAPS` mean
+what they mean on a server (§4–§7) — the node declares its own hardware.
+`TRAWLARR_NODE_BUNDLE_CACHE_BYTES` caps the plugin cache (2 GiB by default).
+
+### The library mount and the path map
+
+There is no file transfer: **a node must mount the library itself**, and
+every job reads and replaces the file in place, over that mount. The node's
+paths need not match the server's. Each node has a path map (Config → Nodes →
+the node) from the server's path to the node's path for the same files.
+
+With the server's library at `/library/movies` and the node mounting the same
+NFS export at `/media/movies`:
+
+```yaml
+volumes:
+  - /mnt/nas/movies:/media/movies
+```
+
+the map's row is `/library/movies` → `/media/movies`.
+
+**Staging and trash must map too.** Left at their defaults they live inside
+each library root (§3), so the root's entry covers them. A library with an
+explicit `stagingDir` or `trashDir` needs a path-map entry for each, and that
+path must exist **on the node**. A staging directory on the server's own local
+disk is a path the node cannot reach — for a node, either unset it, or map it
+to a directory on the node, remembering that the same-filesystem rule in §3
+applies to wherever it lands.
+
+The node checks each library's roots every five minutes and reports any it
+cannot reach on its card. A node is only offered files from libraries it
+reported as reachable.
+
+### Disconnects
+
+If the connection drops mid-job, the job keeps running on the node. The file
+stays claimed for a grace window (one hour by default); a node that reconnects
+inside it reports its result as normal. Past it, the file is released and the
+node can no longer install its result, even if it finishes.
+
+### Stopping a node
+
+Stopping the container stops its running jobs; they are not drained. On the
+next start the node reports them as lost and the files are picked up again. To
+stop a node without losing work, **pause** it from its card first, wait for its
+running jobs to finish, then stop it.
+
+### Exposure
+
+Remote nodes mean the server's API port is reachable from another machine.
+The API is plain HTTP (§8): a node's secret and enrollment token cross the
+network in the clear unless you put TLS in front of the server and point
+`TRAWLARR_SERVER` at `https://`. **Revoke** a node from its card to cut it off
+immediately.
+
+## 12. Licensing of the image
 
 Trawlarr's own code is **MIT** — see [`LICENSE`](../LICENSE).
 
@@ -658,7 +750,7 @@ and point `binaries.ffmpeg` / `binaries.ffprobe` at them — trawlarr resolves
 both by bare name on `PATH` by default, so a drop-in replacement needs no
 configuration at all.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom                                              | Cause                                                                                                                       |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -669,4 +761,6 @@ configuration at all.
 | Files probe fine but every replacement fails          | `PUID`/`PGID` do not own the *directory*. See §7.                                                                            |
 | Every job fails immediately on an NVIDIA host         | `TRAWLARR_HARDWARE=nvenc` declared without the GPU actually reaching the container — most often `NVIDIA_DRIVER_CAPABILITIES` without `video`. The daemon said so once at start: `docker logs trawlarr \| grep hardware.available`, or read `.hardwareProblems` from `GET /api/v1/system/version`. See §6. |
 | Replacements are slow and the disk churns             | A `stagingDir` was pointed at another filesystem. See §3.                                                                    |
+| A node's card says a library is unreachable            | The node cannot `stat` that root at the path its map gives. Check the node's library mount and its path map. See §11.        |
+| A node is online and reachable but never runs anything | The node is paused, has no transcode workers, or a library's explicit `stagingDir`/`trashDir` has no path on the node. See §11. |
 | `docker logs` no longer shows the API key             | By design; it is printed only on the run that minted it. Read it from `GET /api/v1/system/settings`, or set it explicitly.    |
