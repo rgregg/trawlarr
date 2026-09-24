@@ -18,6 +18,7 @@ import { createNodeHub, type NodeHub } from '../nodes/hub.js';
 import { createNodeHttpHandler } from '../nodes/node-http.js';
 import { reapStalled, stallUnsentRemoteJobs } from '../worker/reap-stalled.js';
 import { buildCommitFrom } from './build-info.js';
+import { describeFailure } from './describe-failure.js';
 import { createEventBus } from './events.js';
 import { checkAllLibraries } from './library-health.js';
 import { acquireDaemonLock, type DaemonLock } from './lockfile.js';
@@ -241,7 +242,10 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   const onError =
     input.onError ??
     ((error: unknown, context: { phase: string }): void => {
-      console.error(`[daemon] ${context.phase} failed: ${messageOf(error)}`);
+      // `describeFailure`, not `messageOf`: a background failure is reported
+      // to a log nobody is watching at the time, so the line has to carry
+      // enough to diagnose it after the fact — the frame above all.
+      console.error(`[daemon] ${context.phase} failed: ${describeFailure(error)}`);
     });
 
   const dataDir = resolve(input.dataDir);

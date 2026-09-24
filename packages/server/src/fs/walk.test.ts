@@ -67,4 +67,65 @@ describe('walkFiles', () => {
   it('yields nothing for an empty extension list', async () => {
     expect(await collect(tree(), [])).toEqual([]);
   });
+
+  /**
+   * A directory that fails PART WAY THROUGH being read, which is different
+   * from one that cannot be opened at all.
+   *
+   * `opendir` succeeds and the failure surfaces from the async iterator on a
+   * later batch: the directory was removed, the mount went stale (`ESTALE`,
+   * which is what an NFS export does when a file is replaced underneath a
+   * reader), or a permission changed mid-walk. Before this was guarded, that
+   * error escaped `walkFiles` entirely and aborted the whole library pass —
+   * thousands of untouched files left unscanned because one entry moved.
+   */
+  const throwingDir = (error: NodeJS.ErrnoException): AsyncIterable<never> => ({
+    async *[Symbol.asyncIterator]() {
+      throw error;
+    },
+  });
+
+  it('skips a directory whose iteration fails, and still walks the other roots', async () => {
+    const good = tree();
+    const bad = tree();
+    const stale: NodeJS.ErrnoException = Object.assign(new Error('ESTALE: stale file handle'), {
+      code: 'ESTALE',
+    });
+
+    const found: string[] = [];
+    for await (const entry of walkFiles({
+      roots: [bad, good],
+      extensions: ['mkv'],
+      openDir: async (path) => {
+        // `opendir` SUCCEEDS for the bad root; the failure arrives from the
+        // iterator, which is the case a try around `opendir` cannot catch.
+        if (path === bad) return throwingDir(stale);
+        const { opendir } = await import('node:fs/promises');
+        return opendir(path);
+      },
+    })) {
+      found.push(entry.path);
+    }
+
+    // Everything under the healthy root is still found: one bad directory
+    // costs its own subtree, never the whole pass.
+    expect(found.filter((p) => p.startsWith(good))).toHaveLength(3);
+    expect(found.filter((p) => p.startsWith(bad))).toHaveLength(0);
+  });
+
+  it('lets an error thrown BY THE CONSUMER out, rather than swallowing it as a bad directory', async () => {
+    // The reason the guard steps the iterator by hand instead of wrapping a
+    // `for await` body: a caller's own failure must not be mistaken for an
+    // unreadable directory and silently truncate the walk.
+    const root = tree();
+    const boom = new Error('consumer exploded');
+    await expect(
+      (async () => {
+        for await (const entry of walkFiles({ roots: [root], extensions: ['mkv'] })) {
+          expect(entry.path).toContain(root);
+          throw boom;
+        }
+      })(),
+    ).rejects.toThrow('consumer exploded');
+  });
 });
