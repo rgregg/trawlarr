@@ -1,6 +1,8 @@
 services:
   trawlarr:
-    image: ghcr.io/rgregg/trawlarr:latest
+    # :main, not :latest — :latest is pushed only by a release tag, and there
+    # has not been one yet, so a compose file naming it cannot be pulled.
+    image: ghcr.io/rgregg/trawlarr:main
     container_name: trawlarr
     # Fixed, because trawlarr recognises a worker a killed daemon left behind by
     # (hostname, pid), and the default hostname is the container id, which

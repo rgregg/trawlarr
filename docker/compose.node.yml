@@ -5,7 +5,7 @@
 # it connects out to the server and never accepts inbound connections.
 services:
   trawlarr-node:
-    image: ghcr.io/rgregg/trawlarr:latest
+    image: ghcr.io/rgregg/trawlarr:main
     container_name: trawlarr-node
     restart: unless-stopped
     # Shorter than the server's 5-minute drain: a node's own agents are
@@ -41,7 +41,7 @@ services:
   # driver at run time.
   trawlarr-node-nvidia:
     profiles: ['nvidia']
-    image: ghcr.io/rgregg/trawlarr:latest
+    image: ghcr.io/rgregg/trawlarr:main
     container_name: trawlarr-node-nvidia
     restart: unless-stopped
     stop_grace_period: 15s

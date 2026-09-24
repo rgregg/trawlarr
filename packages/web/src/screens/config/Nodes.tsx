@@ -108,6 +108,9 @@ const JoinDialog = (props: {
       ) : (
         <>
           <p className="detail">Docker</p>
+          {commands.imagePublished ? null : (
+            <p className="help">No published image for this build; :main may not match it.</p>
+          )}
           <CopyableCommand command={commands.docker} />
           <p className="detail">CLI</p>
           <CopyableCommand command={commands.cli} />
