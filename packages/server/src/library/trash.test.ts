@@ -50,6 +50,7 @@ const libraryFor = (root: string, over: Partial<LibraryRecord> = {}): LibraryRec
   enabled: true,
   pausedReason: null,
   userVariables: {},
+  plex: null,
   createdAt: NOW,
   ...over,
 });

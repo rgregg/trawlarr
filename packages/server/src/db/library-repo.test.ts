@@ -223,3 +223,58 @@ describe('lookup and mutation', () => {
     expect(repo.getById(lib.id)).toMatchObject({ enabled: true, pausedReason: null });
   });
 });
+
+describe('plex notification settings', () => {
+  it('is off until both an address and a section are given', () => {
+    const lib = repo.create({ name: 'Movies', roots: ['/a'], nowMs: NOW });
+    expect(lib.plex).toBeNull();
+
+    // Half-configured stays off rather than sending to /library/sections//refresh.
+    expect(
+      repo.update({
+        id: lib.id,
+        plex: { url: 'http://plex.lan:32400', token: 't', sectionId: '', pathPrefix: null },
+      }).plex,
+    ).toBeNull();
+  });
+
+  it('round-trips a full configuration', () => {
+    const lib = repo.create({ name: 'Shows', roots: ['/library/shows'], nowMs: NOW });
+    const updated = repo.update({
+      id: lib.id,
+      plex: {
+        url: 'http://plex.lan:32400',
+        token: 'tok-123',
+        sectionId: '2',
+        pathPrefix: '/data/usenet/shows',
+      },
+    });
+    expect(updated.plex).toEqual({
+      url: 'http://plex.lan:32400',
+      token: 'tok-123',
+      sectionId: '2',
+      pathPrefix: '/data/usenet/shows',
+    });
+    expect(repo.getById(lib.id)?.plex?.sectionId).toBe('2');
+  });
+
+  it('leaves the configuration alone when an edit does not mention it', () => {
+    // The whole reason every update field is optional: a client that has
+    // never heard of Plex must not blank a working configuration.
+    const lib = repo.create({ name: 'Shows', roots: ['/library/shows'], nowMs: NOW });
+    repo.update({
+      id: lib.id,
+      plex: { url: 'http://plex.lan:32400', token: 'tok', sectionId: '2', pathPrefix: null },
+    });
+    expect(repo.update({ id: lib.id, name: 'Shows renamed' }).plex?.sectionId).toBe('2');
+  });
+
+  it('turns notification off when explicitly cleared', () => {
+    const lib = repo.create({ name: 'Shows', roots: ['/library/shows'], nowMs: NOW });
+    repo.update({
+      id: lib.id,
+      plex: { url: 'http://plex.lan:32400', token: 'tok', sectionId: '2', pathPrefix: null },
+    });
+    expect(repo.update({ id: lib.id, plex: null }).plex).toBeNull();
+  });
+});

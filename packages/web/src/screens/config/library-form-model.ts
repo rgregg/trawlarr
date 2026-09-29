@@ -6,6 +6,18 @@ export interface LibraryDraft {
   extensions: string;
   allowHardlinked: boolean;
   stagingDir: string;
+  plexUrl: string;
+  plexToken: string;
+  plexSectionId: string;
+  plexPathPrefix: string;
+}
+
+/** What the daemon stores for a library's media-server notification. */
+export interface PlexPatch {
+  url: string;
+  token: string;
+  sectionId: string;
+  pathPrefix: string | null;
 }
 
 export interface LibraryCreateBody {
@@ -49,7 +61,38 @@ export const draftProblems = (draft: LibraryDraft): string[] => {
     );
   }
 
+  const plexUrl = draft.plexUrl.trim();
+  if (plexUrl !== '' && !/^https?:\/\//.test(plexUrl)) {
+    problems.push('Plex URL needs a scheme, e.g. http://plex.lan:32400.');
+  }
+  if (plexUrl !== '' && draft.plexSectionId.trim() === '') {
+    problems.push('Give the Plex library number, from the section URL in Plex.');
+  }
+  const plexPath = draft.plexPathPrefix.trim();
+  if (plexPath !== '' && !plexPath.startsWith('/')) {
+    // Plex answers 200 for a path outside the section and scans nothing, so a
+    // wrong value here is a notification that succeeds and does nothing.
+    problems.push('Plex library path must be absolute, as Plex sees it, e.g. /data/movies.');
+  }
+
   return problems;
+};
+
+/**
+ * The `plex` field of an edit: null turns notification off, which is what an
+ * emptied URL means. Never sent on create — a section number can only be read
+ * out of Plex once the library exists, so the fields are shown on edit only.
+ */
+export const toPlexPatch = (draft: LibraryDraft): PlexPatch | null => {
+  const url = draft.plexUrl.trim();
+  if (url === '') return null;
+  const pathPrefix = draft.plexPathPrefix.trim();
+  return {
+    url,
+    token: draft.plexToken.trim(),
+    sectionId: draft.plexSectionId.trim(),
+    pathPrefix: pathPrefix === '' ? null : pathPrefix,
+  };
 };
 
 export const toCreateBody = (draft: LibraryDraft): LibraryCreateBody => {

@@ -19,6 +19,12 @@ export interface LibraryRow extends LibraryResource {
   allowHardlinked: boolean;
   stagingDir?: string | null;
   trashDir?: string | null;
+  plex?: {
+    url: string;
+    token: string;
+    sectionId: string;
+    pathPrefix: string | null;
+  } | null;
 }
 
 type View =

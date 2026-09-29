@@ -4,6 +4,7 @@ import {
   describeFailure,
   draftProblems,
   toCreateBody,
+  toPlexPatch,
   type LibraryDraft,
 } from './library-form-model.js';
 
@@ -13,6 +14,10 @@ const draft = (patch: Partial<LibraryDraft> = {}): LibraryDraft => ({
   extensions: 'mkv, mp4',
   allowHardlinked: false,
   stagingDir: '',
+  plexUrl: '',
+  plexToken: '',
+  plexSectionId: '',
+  plexPathPrefix: '',
   ...patch,
 });
 
@@ -101,5 +106,57 @@ describe('describeFailure', () => {
         'after it stopped.',
       retryable: true,
     });
+  });
+});
+
+describe('plex notification', () => {
+  it('is off when no URL is given', () => {
+    expect(toPlexPatch(draft())).toBeNull();
+  });
+
+  it('carries the four fields, with an empty library path meaning whole-section', () => {
+    expect(
+      toPlexPatch(
+        draft({
+          plexUrl: ' http://plex.lan:32400 ',
+          plexToken: 'tok',
+          plexSectionId: ' 2 ',
+          plexPathPrefix: '',
+        }),
+      ),
+    ).toEqual({
+      url: 'http://plex.lan:32400',
+      token: 'tok',
+      sectionId: '2',
+      pathPrefix: null,
+    });
+  });
+
+  it('asks for a scheme rather than letting a host:port through', () => {
+    expect(draftProblems(draft({ plexUrl: 'plex.lan:32400', plexSectionId: '2' }))).toContain(
+      'Plex URL needs a scheme, e.g. http://plex.lan:32400.',
+    );
+  });
+
+  it('asks for the section number once a URL is given', () => {
+    expect(draftProblems(draft({ plexUrl: 'http://plex.lan:32400' }))).toContain(
+      'Give the Plex library number, from the section URL in Plex.',
+    );
+  });
+
+  it('rejects a relative Plex library path, which Plex would silently ignore', () => {
+    expect(
+      draftProblems(
+        draft({
+          plexUrl: 'http://plex.lan:32400',
+          plexSectionId: '2',
+          plexPathPrefix: 'data/movies',
+        }),
+      ),
+    ).toContain('Plex library path must be absolute, as Plex sees it, e.g. /data/movies.');
+  });
+
+  it('leaves a draft with no Plex fields entirely clean', () => {
+    expect(draftProblems(draft())).toEqual([]);
   });
 });

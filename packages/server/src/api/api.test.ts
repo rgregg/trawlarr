@@ -473,6 +473,59 @@ describe('libraries', () => {
     expect(after.allowHardlinked).toBe(true);
   });
 
+  it('configures Plex notification, and turns it off again', async () => {
+    const library = seedLibrary();
+
+    const on = await api('PATCH', `/libraries/${library.id}`, {
+      plex: {
+        url: 'http://plex.lan:32400',
+        token: 'tok-123',
+        sectionId: '2',
+        pathPrefix: '/data/usenet/shows',
+      },
+    });
+    expect(on.status).toBe(200);
+    expect(createLibraryRepo(db).getById(library.id)!.plex).toEqual({
+      url: 'http://plex.lan:32400',
+      token: 'tok-123',
+      sectionId: '2',
+      pathPrefix: '/data/usenet/shows',
+    });
+
+    // An edit that never mentions Plex must not blank it.
+    await api('PATCH', `/libraries/${library.id}`, { extensions: ['mkv'] });
+    expect(createLibraryRepo(db).getById(library.id)!.plex?.sectionId).toBe('2');
+
+    const off = await api('PATCH', `/libraries/${library.id}`, { plex: null });
+    expect(off.status).toBe(200);
+    expect(createLibraryRepo(db).getById(library.id)!.plex).toBeNull();
+  });
+
+  it('refuses a Plex URL that is not one, naming what a good one looks like', async () => {
+    const library = seedLibrary();
+    const response = await api('PATCH', `/libraries/${library.id}`, {
+      plex: { url: 'plex.lan:32400', token: '', sectionId: '2', pathPrefix: '' },
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('invalid-plex-url');
+    // Rejected means unchanged, not half-applied.
+    expect(createLibraryRepo(db).getById(library.id)!.plex).toBeNull();
+  });
+
+  it('refuses a relative Plex library path, which Plex would silently ignore', async () => {
+    const library = seedLibrary();
+    const response = await api('PATCH', `/libraries/${library.id}`, {
+      plex: {
+        url: 'http://plex.lan:32400',
+        token: '',
+        sectionId: '2',
+        pathPrefix: 'data/usenet/shows',
+      },
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('invalid-plex-path-prefix');
+  });
+
   /**
    * The defect the daemon end-to-end suite found. Watchers were derived once,
    * at daemon start, so a library created through the API — the only way a UI

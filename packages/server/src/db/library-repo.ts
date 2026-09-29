@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 import type { Db } from './connection.js';
+import type { PlexConfig } from '../library/plex-notify.js';
 import { pathContains } from '../fs/path-contains.js';
 
 export interface LibraryRecord {
@@ -16,6 +17,14 @@ export interface LibraryRecord {
   enabled: boolean;
   pausedReason: string | null;
   userVariables: Record<string, string>;
+  /**
+   * Where to send a "re-read this" after a file under this library is
+   * replaced, or null when notification is off (the default). Per-library
+   * rather than per-flow: two libraries commonly share one flow and never
+   * share a Plex section, and a token inside a flow definition would change
+   * the definition's hash, which is the convergence signature.
+   */
+  plex: PlexConfig | null;
   createdAt: number;
 }
 
@@ -48,6 +57,7 @@ export interface UpdateLibraryInput {
   flowId?: string | null;
   allowHardlinked?: boolean;
   userVariables?: Record<string, string>;
+  plex?: PlexConfig | null;
 }
 
 export interface LibraryRepo {
@@ -168,8 +178,28 @@ interface LibraryRow {
   enabled: number;
   paused_reason: string | null;
   user_variables_json: string;
+  plex_url: string;
+  plex_token: string;
+  plex_section_id: string;
+  plex_path_prefix: string;
   created_at: number;
 }
+
+/**
+ * A library notifies Plex only when it has both an address and a section to
+ * name. Half-configured is off, not an error: the fields arrive empty on
+ * every existing library and a partially-filled form must not start sending
+ * requests to `/library/sections//refresh`.
+ */
+const toPlexConfig = (row: LibraryRow): PlexConfig | null =>
+  row.plex_url.trim() === '' || row.plex_section_id.trim() === ''
+    ? null
+    : {
+        url: row.plex_url.trim(),
+        token: row.plex_token,
+        sectionId: row.plex_section_id.trim(),
+        pathPrefix: row.plex_path_prefix.trim() === '' ? null : row.plex_path_prefix.trim(),
+      };
 
 const toRecord = (row: LibraryRow): LibraryRecord => ({
   id: row.id,
@@ -184,6 +214,7 @@ const toRecord = (row: LibraryRow): LibraryRecord => ({
   enabled: row.enabled === 1,
   pausedReason: row.paused_reason,
   userVariables: JSON.parse(row.user_variables_json) as Record<string, string>,
+  plex: toPlexConfig(row),
   createdAt: row.created_at,
 });
 
@@ -309,11 +340,14 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
         excludeLibraryId: current.id,
       });
 
+      const nextPlex = input.plex === undefined ? current.plex : input.plex;
+
       db.prepare(
         `UPDATE library
             SET name = ?, roots_json = ?, extensions_json = ?, companion_extensions_json = ?,
                 staging_dir = ?, trash_dir = ?, flow_id = ?, allow_hardlinked = ?,
-                user_variables_json = ?
+                user_variables_json = ?,
+                plex_url = ?, plex_token = ?, plex_section_id = ?, plex_path_prefix = ?
           WHERE id = ?`,
       ).run(
         input.name ?? current.name,
@@ -325,6 +359,10 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
         input.flowId === undefined ? current.flowId : input.flowId,
         (input.allowHardlinked ?? current.allowHardlinked) ? 1 : 0,
         JSON.stringify(input.userVariables ?? current.userVariables),
+        nextPlex?.url ?? '',
+        nextPlex?.token ?? '',
+        nextPlex?.sectionId ?? '',
+        nextPlex?.pathPrefix ?? '',
         current.id,
       );
 

@@ -24,6 +24,22 @@ import type { JobReport, ReplacedFile } from './run-payload.js';
 /** What a database-side fold reports back: the state the file landed in. */
 export interface AppliedOutcome {
   state: FileState;
+  /**
+   * Where the run INSTALLED a replacement in the library, or null when the
+   * library file was not changed.
+   *
+   * This is the same `claimedModified` judgement the ledger runs on — an
+   * identity comparison against the row's stored keys — exposed rather than
+   * recomputed, so a downstream consumer (the Plex notifier) cannot drift
+   * into answering "did the file change?" from a node's output number or
+   * from whether the flow reached the end, which this repo has four defects
+   * from having done.
+   *
+   * Null on every path that does not record a replacement: a stall, a
+   * cancellation, an unchanged no-op run, and a run whose replacement could
+   * not be recorded (that throws before returning).
+   */
+  installedPath: string | null;
 }
 
 const identityOf = (replaced: ReplacedFile): IdentityCandidate =>
@@ -63,7 +79,7 @@ const stallAttempt = (input: {
     nowMs: input.nowMs(),
   });
 
-  return { state: stalled.state };
+  return { state: stalled.state, installedPath: null };
 };
 
 const requireRow = (db: Db, fileId: string): MediaFileRow => {
@@ -272,7 +288,13 @@ export const applyJobReport = (input: {
     nowMs: input.nowMs(),
   });
 
-  return { state: nextRecord.state };
+  return {
+    state: nextRecord.state,
+    // `claimedModified` is only ever true for a report that carried a
+    // replacement (it is derived from that replacement's identity), so the
+    // `?? null` is a type narrowing, not a second condition.
+    installedPath: claimedModified ? (report.replaced?.path ?? null) : null,
+  };
 };
 
 /**
@@ -416,7 +438,7 @@ export const applyJobCancelled = (input: {
     nowMs: input.nowMs(),
   });
 
-  return { state: requireRow(input.db, input.payload.fileId).state };
+  return { state: requireRow(input.db, input.payload.fileId).state, installedPath: null };
 };
 
 /**
@@ -453,5 +475,5 @@ export const applyJobUnmapped = (input: {
       nowMs: input.nowMs(),
     });
   })();
-  return { state: requireRow(input.db, input.payload.fileId).state };
+  return { state: requireRow(input.db, input.payload.fileId).state, installedPath: null };
 };

@@ -16,6 +16,7 @@ import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { AgentFailure, type AgentHandle } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
+import type { PlexConfig, PlexNotifier } from '../library/plex-notify.js';
 import {
   LEASE_SWEEP_INTERVAL_MS,
   leaseSweepIntervalMs,
@@ -719,5 +720,147 @@ describe('the hardware preflight', () => {
       { hardwareType: 'nvenc', expectedEncoder: 'hevc_nvenc', present: false },
     ]);
     expect((await health(daemon.port)).status).toBe(200);
+  });
+});
+
+/**
+ * An agent that finishes, reporting whatever the test hands it. The fake
+ * above never settles on purpose; this one must, because what is under test
+ * happens AFTER a report is applied.
+ */
+const reportingAgent = (report: JobReport): { createAgent: CreateAgentFn; ran: () => boolean } => {
+  let ran = false;
+  return {
+    ran: () => ran,
+    createAgent: () => ({
+      id: 'reporting',
+      pid: undefined,
+      exited: Promise.resolve(0),
+      run: (payload: JobPayload) => {
+        ran = true;
+        return Promise.resolve({ ...report, jobId: payload.jobId } as JobReport);
+      },
+      cancel: () => {},
+      kill: () => {},
+    }),
+  };
+};
+
+/** A report that installed a genuinely different file at the library path. */
+const replacedReport = (path: string): JobReport =>
+  ({
+    success: true,
+    held: false,
+    reviewReason: null,
+    cancelled: false,
+    outcome: 'Flow finished: end-of-flow.',
+    preFacts: FACTS,
+    postFacts: FACTS,
+    steps: [],
+    replaced: {
+      path,
+      deviceId: '2049',
+      inode: '9999',
+      hash: 'aa',
+      nlink: 1,
+      sizeBytes: 2048,
+      mtimeMs: NOW + 1,
+      ctimeMs: NOW + 1,
+      container: 'mkv',
+      probe: PROBE,
+      probeError: null,
+    },
+  }) as unknown as JobReport;
+
+/** A report that ran the flow and changed nothing — the converged-library case. */
+const unchangedReport = (): JobReport =>
+  ({
+    success: true,
+    held: false,
+    reviewReason: null,
+    cancelled: false,
+    outcome: 'Flow finished: end-of-flow.',
+    preFacts: FACTS,
+    postFacts: FACTS,
+    steps: [],
+    replaced: null,
+  }) as unknown as JobReport;
+
+describe('media server notification', () => {
+  const recordingNotifier = (): {
+    notifier: PlexNotifier;
+    calls: { libraryId: string; path: string; config: PlexConfig }[];
+  } => {
+    const calls: { libraryId: string; path: string; config: PlexConfig }[] = [];
+    return {
+      calls,
+      notifier: {
+        fileReplaced: ({ libraryId, path, config }) => calls.push({ libraryId, path, config }),
+        stop: () => {},
+      },
+    };
+  };
+
+  const configurePlex = (dataDir: string, libraryId: string): void => {
+    const db = openDataDb(dataDir);
+    createLibraryRepo(db).update({
+      id: libraryId,
+      plex: {
+        url: 'http://plex.lan:32400',
+        token: 'tok-123',
+        sectionId: '2',
+        pathPrefix: '/data/usenet/movies',
+      },
+    });
+    db.close();
+  };
+
+  it('notifies with the installed path when a run replaces the library file', async () => {
+    const dataDir = newDataDir();
+    const seeded = seedLibrary(dataDir);
+    configurePlex(dataDir, seeded.libraryId);
+    const installed = join(seeded.root, 'file.mkv');
+    const { notifier, calls } = recordingNotifier();
+    const agent = reportingAgent(replacedReport(installed));
+
+    const daemon = await start({ dataDir, createAgent: agent.createAgent, plexNotifier: notifier });
+    await daemon.stop();
+
+    expect(agent.ran()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ libraryId: seeded.libraryId, path: installed });
+    expect(calls[0]!.config.sectionId).toBe('2');
+  });
+
+  it('says nothing when the run changed no file, however well it went', async () => {
+    // The reason this is driven by identity and not by job success: a
+    // converged library runs its flow over every file on every flow edit and
+    // replaces none of them. Notifying there would rescan the whole section
+    // for nothing, once per file.
+    const dataDir = newDataDir();
+    const seeded = seedLibrary(dataDir);
+    configurePlex(dataDir, seeded.libraryId);
+    const { notifier, calls } = recordingNotifier();
+    const agent = reportingAgent(unchangedReport());
+
+    const daemon = await start({ dataDir, createAgent: agent.createAgent, plexNotifier: notifier });
+    await daemon.stop();
+
+    expect(agent.ran()).toBe(true);
+    expect(rowFor(dataDir, seeded.fileId).state).toBe('good');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('says nothing for a library with no Plex settings', async () => {
+    const dataDir = newDataDir();
+    const seeded = seedLibrary(dataDir);
+    const { notifier, calls } = recordingNotifier();
+    const agent = reportingAgent(replacedReport(join(seeded.root, 'file.mkv')));
+
+    const daemon = await start({ dataDir, createAgent: agent.createAgent, plexNotifier: notifier });
+    await daemon.stop();
+
+    expect(agent.ran()).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });
