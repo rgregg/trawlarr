@@ -42,3 +42,22 @@ describe('the image workflow', () => {
     );
   });
 });
+
+describe('the cluster CI job', () => {
+  it('runs the cluster suite in a way that cannot pass by skipping', () => {
+    expect(ci).toContain('\n  cluster:');
+    const job = ci.slice(ci.indexOf('\n  cluster:'), ci.indexOf('\n  image:'));
+    // Without this, a runner with no docker reports the suite green.
+    expect(job).toMatch(/TRAWLARR_REQUIRE_DOCKER: '1'/);
+    // The image under test is built from this commit and loaded, not pulled.
+    expect(job).toMatch(/load: true/);
+    expect(job).toMatch(/tags: trawlarr-cluster:dev/);
+    // The suite refuses an image that does not record the commit under test.
+    expect(job).toMatch(/TRAWLARR_COMMIT=\$\{\{ github\.sha \}\}/);
+    // Both flags: the root vitest workspace wins over --config alone, and the
+    // run then finds no cluster test at all.
+    expect(job).toMatch(
+      /vitest run --config vitest\.cluster\.config\.ts --workspace vitest\.cluster\.workspace\.ts/,
+    );
+  });
+});

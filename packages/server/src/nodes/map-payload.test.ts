@@ -4,6 +4,7 @@ import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport, ReplacedFile } from '../worker/run-payload.js';
 import type { LibraryRecord } from '../db/library-repo.js';
 import {
+  libraryDirsForNode,
   libraryRootsForNode,
   payloadToNode,
   reportToServer,
@@ -204,6 +205,21 @@ describe('reportToServer', () => {
       reportToServer(fixtureReport({ replaced: { path: '/mnt/shows/a.mp4' } }), legacy).replaced
         ?.path,
     ).toBe('/media/tv/a.mp4');
+  });
+});
+
+describe('libraryDirsForNode', () => {
+  it('lists nothing for a library that leaves staging and trash at their defaults', () => {
+    // The defaults sit inside a root, so the root's own entry covers them.
+    expect(libraryDirsForNode(baseLibrary({ stagingDir: null, trashDir: null }), MAP)).toEqual([]);
+  });
+
+  it('maps a configured staging and trash dir, and returns null for one the map does not cover', () => {
+    const library = baseLibrary({ stagingDir: '/staging', trashDir: '/media/trash' });
+    expect(libraryDirsForNode(library, MAP)).toEqual([
+      { kind: 'staging', path: null },
+      { kind: 'trash', path: '/mnt/nas/trash' },
+    ]);
   });
 });
 

@@ -707,9 +707,9 @@ describe('startNodeHost', () => {
       server,
       [],
       [
-        { libraryId: 'ok', name: 'OK', nodeRoots: [present] },
-        { libraryId: 'unmapped', name: 'U', nodeRoots: [present, null] },
-        { libraryId: 'missing', name: 'M', nodeRoots: [missing] },
+        { libraryId: 'ok', name: 'OK', nodeRoots: [present], nodeDirs: [] },
+        { libraryId: 'unmapped', name: 'U', nodeRoots: [present, null], nodeDirs: [] },
+        { libraryId: 'missing', name: 'M', nodeRoots: [missing], nodeDirs: [] },
       ],
     );
     await host.started;
@@ -723,6 +723,56 @@ describe('startNodeHost', () => {
     expect(byId.get('unmapped')!.detail).not.toMatch(/mapped/i);
     expect(byId.get('missing')).toMatchObject({ reachable: false });
     expect(byId.get('missing')!.detail).toContain('ENOENT');
+  });
+
+  it('probes a library whose staging or trash dir has no path on this node as unreachable, naming which', async () => {
+    // The server maps both into every job it sends. A node that only checked
+    // roots reported such a library reachable, was claimed, failed to map, and
+    // went round again for ever with nothing on its card.
+    const { server, start } = await setup();
+    const present = mkdtempSync(join(tmpdir(), 'trawlarr-node-lib-'));
+    const notADir = join(present, 'file');
+    writeFileSync(notADir, '');
+    const host = await start();
+    const { conn } = await welcome(
+      server,
+      [],
+      [
+        {
+          libraryId: 'unmapped',
+          name: 'U',
+          nodeRoots: [present],
+          nodeDirs: [
+            { kind: 'staging', path: null },
+            { kind: 'trash', path: null },
+          ],
+        },
+        {
+          // Both are created on first use, so not existing yet is fine.
+          libraryId: 'not-yet',
+          name: 'N',
+          nodeRoots: [present],
+          nodeDirs: [{ kind: 'staging', path: join(present, 'staging-not-made-yet') }],
+        },
+        {
+          libraryId: 'file',
+          name: 'F',
+          nodeRoots: [present],
+          nodeDirs: [{ kind: 'trash', path: notADir }],
+        },
+      ],
+    );
+    await host.started;
+
+    const frame = await conn.next('libraries');
+    const byId = new Map(frame.libraries.map((probe) => [probe.libraryId, probe]));
+    expect(byId.get('unmapped')).toEqual({
+      libraryId: 'unmapped',
+      reachable: false,
+      detail: 'staging: no path on this node; trash: no path on this node',
+    });
+    expect(byId.get('not-yet')).toMatchObject({ reachable: true });
+    expect(byId.get('file')).toMatchObject({ reachable: false, detail: `${notADir}: ENOTDIR` });
   });
 
   it('says once that the server refused its credentials, and again only when the refusal changes', async () => {
