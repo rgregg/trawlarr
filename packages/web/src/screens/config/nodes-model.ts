@@ -280,20 +280,25 @@ export const normalizeServerUrl = (value: string): string => {
  * just issued.
  *
  * The image tag is `:sha-<short commit>` — what CI publishes for every build
- * (`docker/metadata-action`'s 7-character short sha) — and `:main` when the
- * server reports no commit. Never `:<version>`: a main build's version is
- * `0.0.0`, which is never pushed, so that command failed as pasted. The
- * library volume is a visible placeholder because only the operator knows
- * where this machine mounts the library; without any `-v` for it the node
- * probes every library as unreachable.
+ * (`docker/metadata-action`'s 7-character short sha). Never `:<version>`: a
+ * main build's version is `0.0.0`, which is never pushed, so that command
+ * failed as pasted. The library volume is a visible placeholder because only
+ * the operator knows where this machine mounts the library; without any `-v`
+ * for it the node probes every library as unreachable.
+ *
+ * A server that reports no commit was not built by CI's image job — the only
+ * thing that sets `TRAWLARR_COMMIT` — so no image of it exists. The command
+ * still names `:main`, a tag that does pull, but `imagePublished` is false so
+ * the dialog can say it may not be this server's code rather than print a
+ * command that looks exact and isn't.
  */
 export const joinCommand = (input: {
   serverUrl: string;
   token: string;
   commit: string | null;
-}): { docker: string; cli: string } => {
-  const tag =
-    input.commit === null || input.commit === '' ? 'main' : `sha-${input.commit.slice(0, 7)}`;
+}): { docker: string; cli: string; imagePublished: boolean } => {
+  const imagePublished = input.commit !== null && input.commit !== '';
+  const tag = imagePublished ? `sha-${(input.commit ?? '').slice(0, 7)}` : 'main';
   return {
     docker:
       `docker run -d --name trawlarr-node -e TRAWLARR_MODE=node ` +
@@ -301,6 +306,7 @@ export const joinCommand = (input: {
       `-v <library-path>:<path-this-node-uses> -v trawlarr-node:/config ` +
       `ghcr.io/rgregg/trawlarr:${tag}`,
     cli: `trawlarr node --server ${input.serverUrl} --token ${input.token}`,
+    imagePublished,
   };
 };
 

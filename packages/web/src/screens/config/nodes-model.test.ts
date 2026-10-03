@@ -270,16 +270,17 @@ describe('joinCommand', () => {
         '-v <library-path>:<path-this-node-uses> -v trawlarr-node:/config ' +
         'ghcr.io/rgregg/trawlarr:sha-0341860',
       cli: 'trawlarr node --server http://trawlarr.example.com:8787 --token tok_abc123',
+      imagePublished: true,
     });
   });
 
-  it('falls back to :main when the server reports no commit, never an unpublished version tag', () => {
+  it('falls back to :main when the server reports no commit, and says no image of it was published', () => {
     // `version` is 0.0.0 on every main build, and no :0.0.0 is ever pushed.
-    expect(
-      joinCommand({ serverUrl: 'http://s', token: 't', commit: null }).docker.endsWith(
-        'ghcr.io/rgregg/trawlarr:main',
-      ),
-    ).toBe(true);
+    for (const commit of [null, '']) {
+      const command = joinCommand({ serverUrl: 'http://s', token: 't', commit });
+      expect(command.docker.endsWith('ghcr.io/rgregg/trawlarr:main')).toBe(true);
+      expect(command.imagePublished).toBe(false);
+    }
   });
 });
 

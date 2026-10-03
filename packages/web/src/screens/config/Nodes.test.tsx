@@ -389,12 +389,15 @@ describe('Nodes tab', () => {
   });
 
   describe('the join dialog', () => {
-    const openDialog = async (user: ReturnType<typeof userEvent.setup>) => {
+    const openDialog = async (
+      user: ReturnType<typeof userEvent.setup>,
+      commit: string | null = 'deadbeefcafe',
+    ) => {
       const created = remoteNode({ id: 'node-2', name: 'attic', enrolled: false });
       const client = createFakeClient({
         'GET /nodes': [localNode()],
         'GET /libraries': [],
-        'GET /system/version': { commit: 'deadbeefcafe' },
+        'GET /system/version': { commit },
         'POST /nodes': {
           node: mutationResponse(created),
           enrollToken: 'tok-secret',
@@ -428,6 +431,23 @@ describe('Nodes tab', () => {
       await user.click(screen.getByRole('button', { name: 'Done' }));
       await cardFor('This daemon');
       expect(document.body.textContent ?? '').not.toContain('tok-secret');
+    });
+
+    it('says a build with no published image may not match :main', async () => {
+      const user = userEvent.setup();
+      await openDialog(user, null);
+
+      expect(screen.getAllByText(/tok-secret/)[0]).toHaveTextContent(
+        'ghcr.io/rgregg/trawlarr:main',
+      );
+      expect(screen.getByText(/No published image for this build/)).toBeInTheDocument();
+    });
+
+    it('shows no image caveat for a build CI published', async () => {
+      const user = userEvent.setup();
+      await openDialog(user);
+
+      expect(screen.queryByText(/No published image/)).toBeNull();
     });
 
     it('rebuilds both commands when the Server URL is edited', async () => {

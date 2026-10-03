@@ -363,7 +363,7 @@ docker compose -f docker/compose.nvidia.yml up -d
 ```yaml
 services:
   trawlarr:
-    image: ghcr.io/rgregg/trawlarr:latest
+    image: ghcr.io/rgregg/trawlarr:main
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -613,7 +613,7 @@ CI publishes `ghcr.io/rgregg/trawlarr` only after its checks pass:
 
 | Tag            | What it is                                                   |
 | -------------- | ------------------------------------------------------------ |
-| `:latest`      | The newest release.                                          |
+| `:latest`      | The newest release. There is none yet, so use `:main`.       |
 | `:X.Y.Z`       | A release, from the git tag `vX.Y.Z`.                        |
 | `:X.Y.Z-rc.N`  | A pre-release. Never moves `:X.Y`, `:X` or `:latest`.        |
 | `:X.Y`         | The newest release in that minor series.                     |
@@ -648,12 +648,12 @@ built **without** `--enable-nonfree`, so it is redistributable. The exact terms
 of the copy you are running are in the image itself:
 
 ```bash
-docker run --rm --entrypoint ffmpeg ghcr.io/rgregg/trawlarr:latest -hide_banner -version | head -3
-docker run --rm --entrypoint cat ghcr.io/rgregg/trawlarr:latest /usr/share/doc/ffmpeg/copyright
+docker run --rm --entrypoint ffmpeg ghcr.io/rgregg/trawlarr:main -hide_banner -version | head -3
+docker run --rm --entrypoint cat ghcr.io/rgregg/trawlarr:main /usr/share/doc/ffmpeg/copyright
 ```
 
 If your deployment needs an LGPL-only or otherwise differently-licensed ffmpeg,
-build an image `FROM ghcr.io/rgregg/trawlarr:latest` that replaces the binaries
+build an image `FROM ghcr.io/rgregg/trawlarr:main` that replaces the binaries
 and point `binaries.ffmpeg` / `binaries.ffprobe` at them — trawlarr resolves
 both by bare name on `PATH` by default, so a drop-in replacement needs no
 configuration at all.
