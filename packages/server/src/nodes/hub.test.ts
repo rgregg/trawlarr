@@ -410,6 +410,48 @@ describe('createNodeHub', () => {
     expect([...online!.reachableLibraryIds]).toEqual([libA.id]);
   });
 
+  it('sends a configured staging and trash dir mapped for the node, and offers no work when one has no path there', async () => {
+    const libraries = createLibraryRepo(db);
+    const covered = libraries.create({
+      name: 'Covered',
+      roots: ['/media/a'],
+      stagingDir: '/media/staging',
+      nowMs: now,
+    });
+    const uncovered = libraries.create({
+      name: 'Uncovered',
+      roots: ['/media/b'],
+      stagingDir: '/staging',
+      trashDir: '/media/trash',
+      nowMs: now,
+    });
+    const client = await connectNode();
+    const welcome = (await client.hello()) as Extract<ServerFrame, { type: 'welcome' }>;
+    const dirs = Object.fromEntries(
+      welcome.config.libraries.map((library) => [library.name, library.nodeDirs]),
+    );
+    expect(dirs).toEqual({
+      Covered: [{ kind: 'staging', path: '/mnt/nas/staging' }],
+      Uncovered: [
+        { kind: 'staging', path: null },
+        { kind: 'trash', path: '/mnt/nas/trash' },
+      ],
+    });
+
+    // Even a node that says it can reach the library (an older build probes
+    // roots only) is offered nothing from it: the claim would fail to map.
+    const before = nodesChanged;
+    client.send({
+      type: 'libraries',
+      libraries: [
+        { libraryId: covered.id, reachable: true, detail: '' },
+        { libraryId: uncovered.id, reachable: true, detail: '' },
+      ],
+    });
+    await waitFor(() => nodesChanged > before, 'onNodesChanged');
+    expect([...hub.onlineNodes()[0]!.reachableLibraryIds]).toEqual([covered.id]);
+  });
+
   it('treats a library probe taken before a config push as stale until a fresh one arrives', async () => {
     // The node probed the library list it was last sent. After a library or
     // map edit that probe says nothing about what a claim would now send it.

@@ -35,6 +35,7 @@ pnpm check:refs       # tsconfig project references match package deps (CI runs 
 pnpm audit:licenses
 pnpm compat:fetch     # fetch the pinned community-plugin corpus into cache/ (gitignored)
 pnpm bench:scan       # synthetic 100k-file scan benchmark
+pnpm test:cluster     # build the image, then run a server + nodes in containers (needs docker)
 ```
 
 Single test file / single test:
@@ -62,6 +63,16 @@ file and test get counted twice.
 Suites that need real `ffmpeg`/`ffprobe` gate on `test-support/tool-availability.ts`.
 Only `ENOENT` skips; a check that _fails_ throws, because a skipped suite is green and
 this repo has been bitten twice by silently-skipped real-media tests.
+
+**The cluster suite is separate from `pnpm test`.** `docker/cluster/*.cluster.test.ts` starts
+one server and several nodes as containers from the image tagged `trawlarr-cluster:dev`, and
+asserts multi-node behaviour on file bytes and database rows: claims shared between nodes,
+per-node mount paths, a staging directory a node cannot reach, a network cut inside and past
+the grace window, and a node killed mid-job. `pnpm test:cluster` builds the image first, and the suite refuses an image that was not built from the checked-out commit; run one scenario with `pnpm test:cluster -- docker/cluster/<file>`. A
+network cut takes about a minute to be noticed (the server's 45 s offline timeout), so the
+suite takes about four minutes. It does not reproduce NFS: containers sharing a volume see the
+same device number, so the cross-host identity case stays with unit tests and a real second
+machine.
 
 ## Workspace layout
 

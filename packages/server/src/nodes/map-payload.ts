@@ -2,6 +2,7 @@ import { mapPath, type PathMapping } from '@trawlarr/core';
 import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
 import type { LibraryRecord } from '../db/library-repo.js';
+import type { NodeLibraryDir } from './node-frames.js';
 
 /**
  * A server path with no entry in a node's path map.
@@ -109,6 +110,30 @@ export const reportToServer = (report: JobReport, map: readonly PathMapping[]): 
     );
   }
   return { ...report, replaced: { ...report.replaced, path: serverPath } };
+};
+
+/**
+ * The staging and trash directories a library CONFIGURES, mapped for the
+ * node. One left at its default is not listed: it sits inside a root
+ * (`library/paths.ts`), so the root's own mapping covers it.
+ *
+ * `payloadToNode` maps both into every job and throws when either is not
+ * covered. Roots alone were probed, so a node could report a library
+ * reachable, be claimed, fail to map, spend no attempt, re-probe as
+ * reachable, and loop without ever running a job or saying why.
+ */
+export const libraryDirsForNode = (
+  library: LibraryRecord,
+  map: readonly PathMapping[],
+): NodeLibraryDir[] => {
+  const dirs: NodeLibraryDir[] = [];
+  if (library.stagingDir !== null) {
+    dirs.push({ kind: 'staging', path: mapPath(map, library.stagingDir, 'toNode') });
+  }
+  if (library.trashDir !== null) {
+    dirs.push({ kind: 'trash', path: mapPath(map, library.trashDir, 'toNode') });
+  }
+  return dirs;
 };
 
 /**

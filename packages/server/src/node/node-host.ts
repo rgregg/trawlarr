@@ -716,6 +716,21 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
         problems.push(`${root}: ${codeOf(error) ?? messageOf(error)}`);
       }
     }
+    // A configured staging or trash dir is part of every job this library
+    // sends. Unlike a root it need not exist yet — both are created on first
+    // use — but it must have a path here and must not be something else.
+    for (const dir of library.nodeDirs) {
+      if (dir.path === null) {
+        problems.push(`${dir.kind}: no path on this node`);
+        continue;
+      }
+      try {
+        if (!(await stat(dir.path)).isDirectory()) problems.push(`${dir.path}: ENOTDIR`);
+      } catch (error) {
+        if (codeOf(error) === 'ENOENT') continue;
+        problems.push(`${dir.path}: ${codeOf(error) ?? messageOf(error)}`);
+      }
+    }
     return {
       libraryId: library.libraryId,
       reachable: problems.length === 0,

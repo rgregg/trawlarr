@@ -13,6 +13,9 @@ export default defineConfig({
       'test-support/**/*.test.ts',
       'docker/**/*.test.ts',
     ],
+    // The container suite (docker/cluster/) starts a multi-container cluster
+    // per file. It has its own config and its own command, `pnpm test:cluster`.
+    exclude: ['**/node_modules/**', '**/dist/**', '**/*.cluster.test.ts'],
     environment: 'node',
     // NO `typecheck` PROJECT HERE, deliberately — see the `typecheck` script
     // in package.json.
