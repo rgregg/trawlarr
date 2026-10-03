@@ -183,7 +183,12 @@ const OBSERVE_ATTEMPTS = 3;
  * the container (that rule is load-bearing elsewhere: the filename belongs
  * to the user, so a replacement can never adopt the staged file's name), so
  * a running row's file can legally appear at exactly one other path — same
- * directory, same stem, different extension — and nowhere else.
+ * directory, same stem, different extension — and nowhere else. (A
+ * cross-device replacement also stages a `.trawlarr-replace-<uuid>` copy in
+ * that directory first. This guard never sees it: `walkFiles` refuses
+ * trawlarr's scratch files by name, because a stem match cannot cover a name
+ * with no stem in common, and a copy orphaned by a killed worker has no
+ * running row to be matched against at all.)
  *
  * This closes the window between the swap landing on disk and `runJob`
  * recording the new identity (`updateAfterRun`). Inside it the file's

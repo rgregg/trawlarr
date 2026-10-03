@@ -1,6 +1,7 @@
 import { opendir, stat } from 'node:fs/promises';
 import type { Dirent, Stats } from 'node:fs';
 import { extname, join } from 'node:path';
+import { isWorkingFileName } from '@trawlarr/core';
 import { pathContains } from './path-contains.js';
 
 /**
@@ -19,6 +20,10 @@ import { pathContains } from './path-contains.js';
  * matters beyond performance: a half-written staged transcode must never
  * be probed mid-write, and a trashed file must never be re-admitted as
  * library media.
+ *
+ * Files named as trawlarr's own scratch ({@link isWorkingFileName}) are
+ * skipped wherever they appear: those live in the media's own directory, so
+ * no excluded subtree can cover them.
  *
  * NOTHING A SINGLE DIRECTORY DOES CAN ABORT THE WALK. A directory that
  * cannot be opened is skipped, and so is one that fails part way THROUGH
@@ -79,6 +84,15 @@ export async function* walkFiles(input: {
         continue;
       }
       if (!entry.isFile()) continue;
+
+      // Trawlarr's own scratch, written beside the media because it has to be
+      // on the media's filesystem — never library media, whatever extension
+      // it carries. Refused by NAME rather than by asking whether a run owns
+      // it: a cross-device staging copy orphaned by a killed worker has no
+      // run left to ask, and was scanned, probed and marked good. Files only:
+      // a DIRECTORY that happens to be called `.trawlarr-old` is the user's,
+      // and is walked like any other.
+      if (isWorkingFileName(entry.name)) continue;
 
       const extension = extname(entry.name).slice(1).toLowerCase();
       if (!wanted.has(extension)) continue;

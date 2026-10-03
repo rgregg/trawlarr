@@ -37,6 +37,21 @@ describe('walkFiles', () => {
     expect(await collect(root, ['mkv'])).not.toContain('notes.txt');
   });
 
+  it("never yields trawlarr's own scratch files, even though they carry a media extension", async () => {
+    // A cross-device replacement stages its copy in the media's own directory
+    // as `.trawlarr-replace-<uuid>.mkv`. Yielded, it became a library row: a
+    // scan mid-copy made the owning run fail on a duplicate identity and
+    // re-encode the file, and a copy orphaned by a killed worker was tracked
+    // as a finished movie while the real one sat in trash.
+    const root = tree();
+    writeFileSync(
+      join(root, 'nested', '.trawlarr-replace-520ab0c8-a5bb-4c6e-8bed-7d19026f12fc.mkv'),
+      'x',
+    );
+    writeFileSync(join(root, 'nested', '.trawlarr-reserve-c.mkv'), 'x');
+    expect(await collect(root, ['mkv'])).toEqual(['a.mkv', 'nested/c.mkv', 'nested/deep/d.mkv']);
+  });
+
   it('yields a stat alongside each path, so callers need not stat again', async () => {
     const root = tree();
     for await (const entry of walkFiles({ roots: [root], extensions: ['mkv'] })) {
