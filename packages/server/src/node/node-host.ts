@@ -550,23 +550,36 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
   const bundleCacheMaxBytes = input.bundleCacheMaxBytes ?? bundleCacheMaxBytesFrom(process.env);
 
   /**
-   * Keep the bundle cache under its cap. Only while no job is running: prune
-   * removes whole bundle directories by least-recent use, and a running
-   * agent `require`s plugin files lazily from the one it was given.
+   * Keep the bundle cache under its cap. Run whenever a job settles, busy or
+   * not: a running agent `require`s plugin files lazily from its bundle, and
+   * the cache keeps every bundle a job holds (`heldBundles`), so prune only
+   * ever removes ones nothing is using. Waiting for an idle node instead
+   * meant a node that was never idle never pruned.
    */
   const pruneBundles = (): void => {
-    if (stopping || running.size > 0) return;
+    if (stopping) return;
     input.onBundleCachePrune?.(bundleCacheMaxBytes);
     bundleCache.prune(bundleCacheMaxBytes).catch((error: unknown) => {
       log(`[node] Could not prune the bundle cache: ${messageOf(error)}`);
     });
   };
 
+  /** The bundles each job holds in the cache, released when its run settles. */
+  const heldBundles = new Map<string, string[]>();
+
+  const releaseBundles = (jobId: string): void => {
+    for (const bundle of heldBundles.get(jobId) ?? []) bundleCache.release(bundle);
+    heldBundles.delete(jobId);
+  };
+
   const runJob = async (jobId: string, payload: JobPayload): Promise<void> => {
     const pluginPaths: Record<string, string> = { ...payload.pluginPaths };
+    const held: string[] = [];
+    heldBundles.set(jobId, held);
     for (const [pluginId, { bundle, relPath }] of Object.entries(payload.pluginBundles ?? {})) {
       try {
         const root = await bundleCache.ensure(bundle);
+        held.push(bundle);
         const path = resolve(root, relPath);
         // The relPath is data from the network; it names a place INSIDE the
         // verified bundle, or nothing.
@@ -665,6 +678,9 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
       })
       .finally(() => {
         runs.delete(jobId);
+        // `runJob` resolves only once the agent has finished, so nothing is
+        // still loading from these. Released before the prune they allow.
+        releaseBundles(jobId);
         pruneBundles();
       });
     runs.set(jobId, run);

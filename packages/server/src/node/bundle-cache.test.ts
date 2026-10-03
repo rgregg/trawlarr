@@ -151,6 +151,8 @@ describe('createBundleCache', () => {
 
     await cache.ensure(hashA);
     await cache.ensure(hashB);
+    cache.release(hashA);
+    cache.release(hashB);
 
     // Force a deterministic recency order without a real sleep.
     const older = new Date(Date.now() - 60_000);
@@ -163,6 +165,91 @@ describe('createBundleCache', () => {
 
     expect(existsSync(join(cacheDir, hashA))).toBe(false);
     expect(existsSync(join(cacheDir, hashB))).toBe(true);
+  });
+
+  it('prune leaves a bundle a job still holds, however far over the cap, and removes it once released', async () => {
+    // A running agent `require`s plugin files lazily out of its bundle, so
+    // the bundle must outlive the job. Pruning used to be skipped entirely
+    // while any job ran instead, and a node that was never idle never pruned.
+    const root = makeSourceTree({ 'index.js': 'held by a job' });
+    const { hash } = await store.manifestFor(root);
+    const cache = createBundleCache({ dir: cacheDir, ...fetchersFor(root) });
+
+    await cache.ensure(hash);
+    await cache.ensure(hash); // a second job on the same bundle
+    await cache.prune(0);
+    expect(existsSync(join(cacheDir, hash, 'index.js'))).toBe(true);
+
+    cache.release(hash);
+    await cache.prune(0);
+    expect(existsSync(join(cacheDir, hash))).toBe(true);
+
+    cache.release(hash);
+    await cache.prune(0);
+    expect(existsSync(join(cacheDir, hash))).toBe(false);
+  });
+
+  it('never hands out a bundle a prune under way goes on to delete', async () => {
+    // Prune reads the directory, then deletes. A job that asked for a bundle
+    // in between was given a directory that then vanished, its plugin failed
+    // to load, and the file spent an attempt.
+    const root = makeSourceTree({ 'index.js': 'raced' });
+    const { hash } = await store.manifestFor(root);
+    const fetchers = fetchersFor(root);
+    const cache = createBundleCache({ dir: cacheDir, ...fetchers });
+    await cache.ensure(hash);
+    cache.release(hash);
+
+    const pruning = cache.prune(0);
+    const dir = await cache.ensure(hash);
+    await pruning;
+
+    expect(existsSync(join(dir, 'index.js'))).toBe(true);
+  });
+
+  it('downloads a bundle again when it is asked for while being deleted', async () => {
+    const root = makeSourceTree({ 'index.js': 'again' });
+    const { hash } = await store.manifestFor(root);
+    const fetchers = fetchersFor(root);
+    let asked: Promise<string> | null = null;
+    const cache = createBundleCache({
+      dir: cacheDir,
+      ...fetchers,
+      // The moment the removal starts is the moment a job asks for it.
+      onRemoving: (removing) => {
+        if (removing === hash) asked = cache.ensure(hash);
+      },
+    });
+    await cache.ensure(hash);
+    cache.release(hash);
+
+    await cache.prune(0);
+    expect(asked).not.toBeNull();
+    const dir = await asked!;
+
+    expect(existsSync(join(dir, 'index.js'))).toBe(true);
+    expect(fetchers.manifestCalls).toBe(2);
+  });
+
+  it('releases its hold on a bundle that failed to download', async () => {
+    const root = makeSourceTree({ 'index.js': 'ok' });
+    const { hash } = await store.manifestFor(root);
+    const fetchers = fetchersFor(root);
+    let fail = true;
+    const cache = createBundleCache({
+      dir: cacheDir,
+      fetchManifest: (h) =>
+        fail ? Promise.reject(new Error('offline')) : fetchers.fetchManifest(h),
+      fetchFile: fetchers.fetchFile,
+    });
+    await expect(cache.ensure(hash)).rejects.toThrow('offline');
+
+    fail = false;
+    await cache.ensure(hash);
+    cache.release(hash);
+    await cache.prune(0);
+    // Still held by the failed call, this would have survived for ever.
+    expect(existsSync(join(cacheDir, hash))).toBe(false);
   });
 
   it('shares one download across concurrent ensure() calls for the same hash', async () => {
