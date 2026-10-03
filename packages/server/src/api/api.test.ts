@@ -768,6 +768,31 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('held');
   });
 
+  it('refuses to requeue a file that is being deleted, so no worker can claim it mid-unlink', async () => {
+    // DELETE parks the row as `held` far in the future while it unlinks the
+    // file. A requeue landing in that window cleared the hold, and the row
+    // was claimable with its file half gone.
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/going.mkv', state: 'good' });
+    // A different repo instance, as a concurrent request would have.
+    const deleting = createMediaFileRepo(db);
+    const reservation = deleting.reserveForDeletion({ fileId, nowMs: NOW });
+    expect(reservation).not.toBeNull();
+    const parked = createMediaFileRepo(db).getById(fileId);
+
+    const during = await api('POST', `/files/${fileId}/requeue`);
+
+    expect(during.status).toBe(409);
+    expect(during.body.error.code).toBe('file-deleting');
+    expect(createMediaFileRepo(db).getById(fileId)).toEqual(parked);
+
+    // The delete failed and put the row back: it is an ordinary file again.
+    deleting.restoreFromDeletion({ fileId, ...reservation! });
+    const after = await api('POST', `/files/${fileId}/requeue`);
+    expect(after.status).toBe(200);
+    expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
+  });
+
   it('requeues a file whose only jobs have ended', async () => {
     const library = seedLibrary();
     const fileId = seedFile({ libraryId: library.id, path: '/media/done.mkv', state: 'failed' });

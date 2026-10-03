@@ -429,6 +429,25 @@ describe('applyJobCancelled', () => {
     expect(jobRepo.getById(holder)?.endedAt).toBeNull();
   });
 
+  it('still requeues when an OLDER job row for the file was never closed', () => {
+    // A job row a dead worker left open is not a rival: this job claimed the
+    // file after it. Treating it as one left the cancelled file in `running`
+    // with no worker, and requeue then refused it as "being processed".
+    const { payload: holder } = seededWithAttempts(0);
+    const jobRepo = createJobRepo(db);
+    const orphan = jobRepo.start({
+      fileId: holder.fileId,
+      flowId: holder.flow.id,
+      flowHash: holder.flow.definitionHash,
+      nowMs: NOW - 10_000,
+    });
+
+    const { state } = applyJobCancelled({ db, payload: holder, nowMs: () => NOW });
+
+    expect(state).toBe('queued');
+    expect(jobRepo.getById(orphan)?.endedAt).toBeNull();
+  });
+
   it('still requeues when an OLDER job for the file exists, ended', () => {
     // History is not a rival claim: only a newer or still-running job is.
     const { payload: claimed } = seededWithAttempts(0);

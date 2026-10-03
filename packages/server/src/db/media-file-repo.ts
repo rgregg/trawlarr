@@ -129,6 +129,34 @@ export interface UpdateAfterRunInput {
  */
 const DELETION_RESERVATION_MS = 60 * 60 * 1000;
 
+/** Why `requeueUnlessClaimed` left a row alone. */
+export type RequeueBlocked =
+  /** A job holds the file. `jobId` is null when the row says `running` but no job row is open. */
+  | { reason: 'running'; jobId: string | null }
+  /** A delete of this file is in flight. */
+  | { reason: 'deleting' };
+
+/**
+ * Files a `DELETE` has parked and not yet finished with, per database.
+ *
+ * In memory, not a column: a reservation lives for one request in the one
+ * process that may write this database (the daemon holds the data directory
+ * by a kernel lock), and every repo instance over the same `Db` must see it —
+ * the route builds a fresh repo per request. A daemon that dies mid-delete
+ * takes this set with it, which is right: the row is then just a held row
+ * whose file may or may not exist, and requeue is the way out of that.
+ */
+const deletionReservations = new WeakMap<Db, Set<string>>();
+
+const reservedForDeletion = (db: Db): Set<string> => {
+  let reserved = deletionReservations.get(db);
+  if (reserved === undefined) {
+    reserved = new Set();
+    deletionReservations.set(db, reserved);
+  }
+  return reserved;
+};
+
 /** What a row looked like before `reserveForDeletion` parked it. */
 export interface DeletionReservation {
   previousState: FileState;
@@ -250,17 +278,20 @@ export interface MediaFileRepo {
    */
   requeue(fileId: string): void;
   /**
-   * `requeue`, refused while a job holds the file. Returns null when it
-   * requeued, or the id of the job in the way (null-safe: `''` is never
-   * returned; a `running` row with no open job answers `'unknown'`).
+   * `requeue`, refused while something else holds the file. Returns null when
+   * it requeued, or what is in the way.
    *
    * The check and the write are one transaction. Resetting a claimed row put
    * it straight back in front of `claimNext`, and a second worker started on
    * a file the first was still transcoding — both headed for Replace Original
-   * File. The same test `reserveForDeletion` uses: the row's own state is not
-   * enough, because a hold can be written over a live run.
+   * File. "Claimed" is the test `reserveForDeletion` uses: the row's own
+   * state is not enough, because a hold can be written over a live run.
+   *
+   * A row parked by `reserveForDeletion` is refused too. It reads as an
+   * ordinary `held` row, and requeueing it cleared the hold that keeps
+   * `claimNext` away while the file is being unlinked.
    */
-  requeueUnlessClaimed(fileId: string): { blockedByJobId: string } | null;
+  requeueUnlessClaimed(fileId: string): RequeueBlocked | null;
   /**
    * Files in this library, by ledger state, EXCLUDING rows whose file is
    * missing from disk. The convergence percentage the CLI reports is
@@ -834,12 +865,13 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     requeue: requeueRow,
 
     requeueUnlessClaimed(fileId) {
-      const attempt = db.transaction((id: string): { blockedByJobId: string } | null => {
+      const attempt = db.transaction((id: string): RequeueBlocked | null => {
         const row = selectById.get(id) as MediaFileRow | undefined;
         if (row === undefined) throw new Error(`Unknown media file: ${id}`);
+        if (reservedForDeletion(db).has(id)) return { reason: 'deleting' };
         const holder = runningJobForFile.get(id) as { id: string } | undefined;
-        if (holder !== undefined) return { blockedByJobId: holder.id };
-        if (row.state === 'running') return { blockedByJobId: 'unknown' };
+        if (holder !== undefined) return { reason: 'running', jobId: holder.id };
+        if (row.state === 'running') return { reason: 'running', jobId: null };
         requeueRow(id);
         return null;
       });
@@ -930,6 +962,8 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         db.prepare(
           `UPDATE media_file SET state = 'held', hold_until_ms = ?, updated_at = ? WHERE id = ?`,
         ).run(nowMs + DELETION_RESERVATION_MS, nowMs, fileId);
+        // So a requeue cannot un-park it: see `requeueUnlessClaimed`.
+        reservedForDeletion(db).add(fileId);
 
         return { previousState: row.state, previousHoldUntilMs: row.hold_until_ms };
       });
@@ -942,9 +976,11 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         input.previousHoldUntilMs,
         input.fileId,
       );
+      reservedForDeletion(db).delete(input.fileId);
     },
 
     delete(fileId) {
+      reservedForDeletion(db).delete(fileId);
       return deleteById.run(fileId).changes > 0;
     },
   };

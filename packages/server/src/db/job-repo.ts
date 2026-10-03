@@ -208,9 +208,13 @@ export interface JobRepo {
    */
   requestCancel(input: { jobId: string; nowMs: number }): void;
   /**
-   * Has another job taken this job's file: one still running, or one that
-   * started after it? Either way the file is that job's to settle now, and
-   * this one must not write the row.
+   * Has another job claimed this job's file SINCE this job did? Then the file
+   * is that job's to settle, and this one must not write the row.
+   *
+   * Only a LATER job counts. An older row that is still open is a job a dead
+   * worker never closed, not a rival: counting it left a cancelled file in
+   * `running` with nothing running it. Two jobs started in the same
+   * millisecond cannot be ordered, so each defers to the other while it runs.
    */
   otherJobHoldsFile(input: { jobId: string; fileId: string }): boolean;
 }
@@ -483,12 +487,13 @@ export const createJobRepo = (db: Db): JobRepo => {
         db
           .prepare(
             `SELECT 1 FROM job
-              WHERE file_id = ? AND id != ?
-                AND (state = 'running'
-                     OR started_at > (SELECT started_at FROM job WHERE id = ?))
+              WHERE file_id = @fileId AND id != @jobId
+                AND (started_at > (SELECT started_at FROM job WHERE id = @jobId)
+                     OR (started_at = (SELECT started_at FROM job WHERE id = @jobId)
+                         AND state = 'running'))
               LIMIT 1`,
           )
-          .get(input.fileId, input.jobId, input.jobId) !== undefined
+          .get({ fileId: input.fileId, jobId: input.jobId }) !== undefined
       );
     },
   };

@@ -132,13 +132,25 @@ export const fileRoutes: Route[] = [
       // row let the supervisor claim it again, and two workers ran one file.
       // Stopping a run is its own, explicit action.
       const blocked = repo.requeueUnlessClaimed(row.id);
+      if (blocked?.reason === 'deleting') {
+        throw new ApiError(
+          409,
+          'file-deleting',
+          `"${row.path}" is being deleted right now. Requeueing it would let a worker claim a ` +
+            `file that is half gone. If the delete fails, the file is put back and can be requeued.`,
+        );
+      }
       if (blocked !== null) {
+        const which = blocked.jobId === null ? '' : ` (job ${blocked.jobId})`;
+        const how =
+          blocked.jobId === null
+            ? `Cancel its job first, then requeue.`
+            : `Cancel that job first (POST /jobs/${blocked.jobId}/cancel), then requeue.`;
         throw new ApiError(
           409,
           'file-running',
-          `"${row.path}" is being processed right now (job ${blocked.blockedByJobId}). Requeueing ` +
-            `it would start a second worker on the same file. Cancel that job first ` +
-            `(POST /jobs/${blocked.blockedByJobId}/cancel), then requeue.`,
+          `"${row.path}" is being processed right now${which}. Requeueing it would start a ` +
+            `second worker on the same file. ${how}`,
         );
       }
       // Requeueing puts work in the queue; a supervisor that only noticed on
