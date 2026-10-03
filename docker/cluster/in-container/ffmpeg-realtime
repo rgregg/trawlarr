@@ -1,0 +1,3 @@
+#!/bin/sh
+# ffmpeg at native frame rate. See TRAWLARR_FFMPEG in compose.cluster.yml.
+exec /usr/bin/ffmpeg -re "$@"

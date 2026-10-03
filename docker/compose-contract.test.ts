@@ -18,9 +18,15 @@ const RUNTIME_VARS = new Set([
   'TRAWLARR_NODE_TOKEN',
 ]);
 
+// The cluster file is a TEST FIXTURE (docker/cluster/), not a deployment: it
+// sets NODE_ENV=test and test-only seams, has no fixed hostname and no drain
+// period. It is held to its own contract below, not to a deployment's.
+const CLUSTER_FIXTURE = join('docker', 'compose.cluster.yml');
+
 const composeFiles = readdirSync('docker')
   .filter((name) => name.startsWith('compose') && name.endsWith('.yml'))
-  .map((name) => join('docker', name));
+  .map((name) => join('docker', name))
+  .filter((file) => file !== CLUSTER_FIXTURE);
 
 // Files that run the DAEMON (a server): a fixed hostname, a 5-minute drain
 // and the published API port all exist because of the daemon's own
@@ -135,5 +141,40 @@ describe('the NVIDIA variant', () => {
   it('declares nvenc and a session cap, because a card fails jobs past its limit', () => {
     expect(/TRAWLARR_HARDWARE=(\S+)/.exec(body)![1]!.split(',')).toContain('nvenc');
     expect(body).toMatch(/TRAWLARR_HARDWARE_CAPS=nvenc=\d+/);
+  });
+});
+
+describe('the cluster test fixture', () => {
+  const cluster = readFileSync(CLUSTER_FIXTURE, 'utf8');
+
+  it('is the only compose file that runs the daemon with NODE_ENV=test', () => {
+    // NODE_ENV=test is what lets TRAWLARR_TEST_ALLOW_SHORT_GRACE lower the
+    // lease grace floor. In a deployment file that would let a setting cut
+    // the window a disconnected node has to a few seconds.
+    expect(cluster).toMatch(/^\s*- NODE_ENV=test$/m);
+    for (const file of composeFiles) {
+      expect(readFileSync(file, 'utf8'), file).not.toMatch(/NODE_ENV=test/);
+    }
+  });
+
+  it('never builds or pulls: it runs the image the harness was given', () => {
+    expect(cluster).not.toMatch(/^\s*build:/m);
+    expect(cluster.match(/pull_policy: never/g)).toHaveLength(2);
+    expect(
+      cluster.match(/image: \$\{TRAWLARR_CLUSTER_IMAGE:-trawlarr-cluster:dev\}/g),
+    ).toHaveLength(2);
+  });
+
+  it('gives no node the server staging volume', () => {
+    // Scenario 3 depends on it: a staging directory on the server's own disk
+    // must be a path a node cannot reach.
+    const nodeService = cluster.slice(cluster.indexOf('\n  node:'));
+    expect(nodeService).not.toContain('server-staging:/');
+  });
+
+  it('says at the top that it is not a deployment example', () => {
+    expect(cluster.split('\n')[0]).toBe(
+      '# TEST FIXTURE. Not a deployment example: see compose.node.yml.',
+    );
   });
 });

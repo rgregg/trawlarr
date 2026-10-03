@@ -1,0 +1,45 @@
+# TEST FIXTURE. Not a deployment example: see compose.node.yml.
+#
+# Driven by docker/cluster/cluster.ts, never by hand. NODE_ENV=test is what
+# lets the two TRAWLARR_TEST_* seams lower the lease grace window and speed up
+# the lease sweep; both are ignored under any other NODE_ENV.
+services:
+  server:
+    image: ${TRAWLARR_CLUSTER_IMAGE:-trawlarr-cluster:dev}
+    pull_policy: never
+    environment:
+      - NODE_ENV=test
+      - TRAWLARR_TEST_ALLOW_SHORT_GRACE=1
+      - TRAWLARR_TEST_LEASE_SWEEP_MS=500
+    volumes:
+      - config:/config
+      - library:/library
+      # The server's own disk. No node mounts it, which is the point.
+      - server-staging:/staging
+      - ./cluster/in-container:/cluster:ro
+    ports:
+      # An ephemeral host port, so two runs never collide. Read back with
+      # `docker compose port server 8265`.
+      - '127.0.0.1::8265'
+
+  node:
+    image: ${TRAWLARR_CLUSTER_IMAGE:-trawlarr-cluster:dev}
+    pull_policy: never
+    # Never started by `up`: the harness starts one container per node with
+    # `compose run`, each with its own token and its own library mount path.
+    profiles: ['node']
+    environment:
+      - TRAWLARR_MODE=node
+      - TRAWLARR_SERVER=http://server:8265
+      # Real-time ffmpeg, so an N-second clip takes N seconds on any machine
+      # and "mid-encode" is a window a test can hit.
+      - TRAWLARR_FFMPEG=/cluster/ffmpeg-realtime
+    volumes:
+      - ./cluster/in-container:/cluster:ro
+    healthcheck:
+      disable: true
+
+volumes:
+  config:
+  library:
+  server-staging:

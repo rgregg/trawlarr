@@ -12,6 +12,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json && tsc --noEmit -p packages/web/tsconfig.test.json",
     "test:watch": "vitest",
+    "test:cluster": "docker build --build-arg TRAWLARR_COMMIT=$(git rev-parse HEAD) -t trawlarr-cluster:dev . && vitest run --config vitest.cluster.config.ts --workspace vitest.cluster.workspace.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "audit:licenses": "node scripts/audit-licenses.mjs",

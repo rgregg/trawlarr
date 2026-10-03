@@ -24,7 +24,17 @@ const config: NodeConfigFrame = {
   schedule: { timezone: 'UTC', baseCounts: { transcode: 1, health: 1 }, windows: [] },
   paused: false,
   pathMap: [{ serverPath: '/media', nodePath: '/mnt/media' }],
-  libraries: [{ libraryId: 'lib-1', name: 'Movies', nodeRoots: ['/mnt/media/movies', null] }],
+  libraries: [
+    {
+      libraryId: 'lib-1',
+      name: 'Movies',
+      nodeRoots: ['/mnt/media/movies', null],
+      nodeDirs: [
+        { kind: 'staging', path: null },
+        { kind: 'trash', path: '/mnt/media/trash' },
+      ],
+    },
+  ],
 };
 
 describe('parseNodeFrame', () => {
