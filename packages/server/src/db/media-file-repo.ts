@@ -243,7 +243,24 @@ export interface MediaFileRepo {
    * exactly that guarantee for a job that started mid-scan.
    */
   listRunningPaths(libraryId: string): string[];
+  /**
+   * Reset the row to `queued`, whatever holds it. For callers that ARE the
+   * holder (a cancelled or interrupted run folding itself) or that know there
+   * is no daemon. An operator's request goes through `requeueUnlessClaimed`.
+   */
   requeue(fileId: string): void;
+  /**
+   * `requeue`, refused while a job holds the file. Returns null when it
+   * requeued, or the id of the job in the way (null-safe: `''` is never
+   * returned; a `running` row with no open job answers `'unknown'`).
+   *
+   * The check and the write are one transaction. Resetting a claimed row put
+   * it straight back in front of `claimNext`, and a second worker started on
+   * a file the first was still transcoding — both headed for Replace Original
+   * File. The same test `reserveForDeletion` uses: the row's own state is not
+   * enough, because a hold can be written over a live run.
+   */
+  requeueUnlessClaimed(fileId: string): { blockedByJobId: string } | null;
   /**
    * Files in this library, by ledger state, EXCLUDING rows whose file is
    * missing from disk. The convergence percentage the CLI reports is
@@ -445,6 +462,31 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
     byContentKey: (key) =>
       (byContent.get(libraryId, key) as { id: string } | undefined)?.id ?? null,
   });
+
+  const requeueRow = (fileId: string): void => {
+    const current = selectById.get(fileId) as MediaFileRow | undefined;
+    if (current === undefined) throw new Error(`Unknown media file: ${fileId}`);
+    const record: LedgerRecord = {
+      state: current.state,
+      signature: current.signature,
+      attemptCount: current.attempt_count,
+      consecutiveNoopCount: current.consecutive_noop_count,
+      holdUntilMs: current.hold_until_ms,
+      reviewReason: current.review_reason,
+    };
+    const requeued = applyRequeue(record);
+    db.prepare(
+      `UPDATE media_file
+          SET state = ?, attempt_count = ?, consecutive_noop_count = ?, hold_until_ms = ?, review_reason = NULL, review_path = NULL
+        WHERE id = ?`,
+    ).run(
+      requeued.state,
+      requeued.attemptCount,
+      requeued.consecutiveNoopCount,
+      requeued.holdUntilMs,
+      fileId,
+    );
+  };
 
   return {
     identityLookup,
@@ -789,29 +831,19 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       return (runningPaths.all(libraryId) as { path: string }[]).map((row) => row.path);
     },
 
-    requeue(fileId) {
-      const current = selectById.get(fileId) as MediaFileRow | undefined;
-      if (current === undefined) throw new Error(`Unknown media file: ${fileId}`);
-      const record: LedgerRecord = {
-        state: current.state,
-        signature: current.signature,
-        attemptCount: current.attempt_count,
-        consecutiveNoopCount: current.consecutive_noop_count,
-        holdUntilMs: current.hold_until_ms,
-        reviewReason: current.review_reason,
-      };
-      const requeued = applyRequeue(record);
-      db.prepare(
-        `UPDATE media_file
-            SET state = ?, attempt_count = ?, consecutive_noop_count = ?, hold_until_ms = ?, review_reason = NULL, review_path = NULL
-          WHERE id = ?`,
-      ).run(
-        requeued.state,
-        requeued.attemptCount,
-        requeued.consecutiveNoopCount,
-        requeued.holdUntilMs,
-        fileId,
-      );
+    requeue: requeueRow,
+
+    requeueUnlessClaimed(fileId) {
+      const attempt = db.transaction((id: string): { blockedByJobId: string } | null => {
+        const row = selectById.get(id) as MediaFileRow | undefined;
+        if (row === undefined) throw new Error(`Unknown media file: ${id}`);
+        const holder = runningJobForFile.get(id) as { id: string } | undefined;
+        if (holder !== undefined) return { blockedByJobId: holder.id };
+        if (row.state === 'running') return { blockedByJobId: 'unknown' };
+        requeueRow(id);
+        return null;
+      });
+      return attempt(fileId);
     },
 
     reviewHeldCount(libraryId) {

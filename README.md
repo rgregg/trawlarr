@@ -159,6 +159,10 @@ trawlarr requeue --library Movies --state failed          # all of them
 `requeue` clears the file's attempt count and backoff and puts it back in
 `queued`, so the next `run` claims it.
 
+A file a worker is processing right now is refused (`409 file-running`):
+requeueing it would start a second worker on the same file. Cancel its job
+first, then requeue.
+
 A row left `running` by a worker that was killed mid-job is reclaimed by the
 reaper instead:
 

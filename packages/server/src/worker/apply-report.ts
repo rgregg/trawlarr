@@ -418,6 +418,27 @@ export const applyJobCancelled = (input: {
   nowMs: () => number;
 }): AppliedOutcome => {
   const mediaFileRepo = createMediaFileRepo(input.db);
+  const jobRepo = createJobRepo(input.db);
+  // Throws for a file that no longer exists: a cancel for a row that has been
+  // deleted is a bug worth surfacing, not something to swallow.
+  requireRow(input.db, input.payload.fileId);
+
+  // ONLY THE JOB THAT HOLDS THE FILE MAY WRITE ITS ROW. Requeueing here
+  // unconditionally pulled the row out from under a different job that had
+  // claimed the file since, and a third worker was then claimed on it. When
+  // another job holds the file, this one only closes its own job row.
+  if (jobRepo.otherJobHoldsFile({ jobId: input.payload.jobId, fileId: input.payload.fileId })) {
+    jobRepo.finish({
+      jobId: input.payload.jobId,
+      state: 'cancelled',
+      outcome:
+        'Cancelled: the job was stopped by an operator. The file was left alone, because ' +
+        'another job has claimed it since.',
+      nowMs: input.nowMs(),
+    });
+    return { state: requireRow(input.db, input.payload.fileId).state, installedPath: null };
+  }
+
   if (input.report?.replaced != null) {
     recordReplacement({
       db: input.db,
@@ -426,12 +447,9 @@ export const applyJobCancelled = (input: {
       nowMs: input.nowMs,
     });
   }
-  // Throws for a file that no longer exists, exactly as `requireRow` would:
-  // a cancel for a row that has been deleted is a bug worth surfacing, not
-  // something to swallow.
   mediaFileRepo.requeue(input.payload.fileId);
 
-  createJobRepo(input.db).finish({
+  jobRepo.finish({
     jobId: input.payload.jobId,
     state: 'cancelled',
     outcome: 'Cancelled: the job was stopped by an operator, so the file was requeued unpenalised.',

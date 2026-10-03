@@ -207,6 +207,12 @@ export interface JobRepo {
    * an ended job is left alone: there is nothing left to cancel.
    */
   requestCancel(input: { jobId: string; nowMs: number }): void;
+  /**
+   * Has another job taken this job's file: one still running, or one that
+   * started after it? Either way the file is that job's to settle now, and
+   * this one must not write the row.
+   */
+  otherJobHoldsFile(input: { jobId: string; fileId: string }): boolean;
 }
 
 interface JobRowRaw {
@@ -470,6 +476,20 @@ export const createJobRepo = (db: Db): JobRepo => {
 
     appendOutcome(input) {
       appendOutcomeJob.run(input.text, input.text, input.jobId);
+    },
+
+    otherJobHoldsFile(input) {
+      return (
+        db
+          .prepare(
+            `SELECT 1 FROM job
+              WHERE file_id = ? AND id != ?
+                AND (state = 'running'
+                     OR started_at > (SELECT started_at FROM job WHERE id = ?))
+              LIMIT 1`,
+          )
+          .get(input.fileId, input.jobId, input.jobId) !== undefined
+      );
     },
   };
 };

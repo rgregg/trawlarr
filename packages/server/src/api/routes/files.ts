@@ -128,7 +128,19 @@ export const fileRoutes: Route[] = [
     handler: ({ params, ctx }) => {
       const row = requireFile(ctx, params.id!);
       const repo = createMediaFileRepo(ctx.db);
-      repo.requeue(row.id);
+      // Refused, not forced, while a job holds the file: resetting a claimed
+      // row let the supervisor claim it again, and two workers ran one file.
+      // Stopping a run is its own, explicit action.
+      const blocked = repo.requeueUnlessClaimed(row.id);
+      if (blocked !== null) {
+        throw new ApiError(
+          409,
+          'file-running',
+          `"${row.path}" is being processed right now (job ${blocked.blockedByJobId}). Requeueing ` +
+            `it would start a second worker on the same file. Cancel that job first ` +
+            `(POST /jobs/${blocked.blockedByJobId}/cancel), then requeue.`,
+        );
+      }
       // Requeueing puts work in the queue; a supervisor that only noticed on
       // its next timer tick would leave an idle pool next to a queued file.
       void ctx.supervisor.tick();
@@ -241,8 +253,8 @@ export const fileRoutes: Route[] = [
       // was not enough on two counts: `claimNext` could take a queued row
       // while the unlink was in flight, and `POST /files/:id/hold` can write
       // `held` over a live run, which made the state say "idle" about a file
-      // a worker was transcoding. `requeue` is how an operator gets a
-      // running file back.
+      // a worker was transcoding. Cancelling the job is how an operator
+      // gets a running file back; requeue refuses one for the same reason.
       const reservation = repo.reserveForDeletion({ fileId: row.id, nowMs: ctx.nowMs() });
       if (reservation === null) {
         throw new ApiError(
