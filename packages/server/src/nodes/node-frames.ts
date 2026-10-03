@@ -76,6 +76,13 @@ export type NodeFrame =
   | { type: 'job-state'; jobId: string; state: JournalState }
   | { type: 'log-backfill'; jobId: string; fromLine: number; lines: string[] };
 
+/** A library's explicitly configured staging or trash directory, as a node sees it. */
+export interface NodeLibraryDir {
+  kind: 'staging' | 'trash';
+  /** The node's path for it; null when the node's path map does not cover it. */
+  path: string | null;
+}
+
 /**
  * Node-scoped configuration the daemon pushes down: the node's own schedule
  * and pause state, its path map, and every library's roots ALREADY mapped
@@ -89,8 +96,18 @@ export interface NodeConfigFrame {
   schedule: ScheduleConfig;
   paused: boolean;
   pathMap: PathMapping[];
-  /** Server-side roots per library, already mapped to node paths; null when unmapped. */
-  libraries: { libraryId: string; name: string; nodeRoots: (string | null)[] }[];
+  /**
+   * Server-side roots per library, already mapped to node paths; null when
+   * unmapped. `nodeDirs` is the same for a staging or trash directory the
+   * library configures — every job is sent both, so the node must be able to
+   * vouch for them as it does for roots.
+   */
+  libraries: {
+    libraryId: string;
+    name: string;
+    nodeRoots: (string | null)[];
+    nodeDirs: NodeLibraryDir[];
+  }[];
 }
 
 /** Messages the daemon sends down to a node. */
@@ -225,6 +242,26 @@ const parsePathMap = (value: unknown): PathMapping[] | null => {
   return pathMap;
 };
 
+/**
+ * Absent means none, not malformed: a server built before this field existed
+ * sends no `nodeDirs`, and refusing its whole config frame would take a node
+ * that worked off the air for a field it can do without.
+ */
+const parseNodeDirs = (value: unknown): NodeLibraryDir[] | null => {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const dirs: NodeLibraryDir[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return null;
+    const kind = entry['kind'];
+    const path = entry['path'];
+    if (kind !== 'staging' && kind !== 'trash') return null;
+    if (path !== null && typeof path !== 'string') return null;
+    dirs.push({ kind, path });
+  }
+  return dirs;
+};
+
 const parseConfigFrame = (raw: Record<string, unknown>): NodeConfigFrame | null => {
   if (typeof raw['nodeId'] !== 'string') return null;
   const schedule = parseSchedule(raw['schedule']);
@@ -248,10 +285,13 @@ const parseConfigFrame = (raw: Record<string, unknown>): NodeConfigFrame | null 
     for (const root of entry['nodeRoots']) {
       nodeRoots.push(root === null ? null : (root as string));
     }
+    const nodeDirs = parseNodeDirs(entry['nodeDirs']);
+    if (nodeDirs === null) return null;
     libraries.push({
       libraryId: entry['libraryId'],
       name: entry['name'],
       nodeRoots,
+      nodeDirs,
     });
   }
   return {

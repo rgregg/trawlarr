@@ -696,9 +696,10 @@ disk is a path the node cannot reach — for a node, either unset it, or map it
 to a directory on the node, remembering that the same-filesystem rule in §3
 applies to wherever it lands.
 
-The node checks each library's roots every five minutes and reports any it
-cannot reach on its card. A node is only offered files from libraries it
-reported as reachable.
+The node checks each library's roots, and a configured staging or trash
+directory, every five minutes, and reports any it cannot reach on its card —
+`staging: no path on this node` is the path map missing that entry. A node is
+only offered files from libraries it reported as reachable.
 
 ### Disconnects
 
@@ -761,6 +762,6 @@ configuration at all.
 | Files probe fine but every replacement fails          | `PUID`/`PGID` do not own the *directory*. See §7.                                                                            |
 | Every job fails immediately on an NVIDIA host         | `TRAWLARR_HARDWARE=nvenc` declared without the GPU actually reaching the container — most often `NVIDIA_DRIVER_CAPABILITIES` without `video`. The daemon said so once at start: `docker logs trawlarr \| grep hardware.available`, or read `.hardwareProblems` from `GET /api/v1/system/version`. See §6. |
 | Replacements are slow and the disk churns             | A `stagingDir` was pointed at another filesystem. See §3.                                                                    |
-| A node's card says a library is unreachable            | The node cannot `stat` that root at the path its map gives. Check the node's library mount and its path map. See §11.        |
-| A node is online and reachable but never runs anything | The node is paused, has no transcode workers, or a library's explicit `stagingDir`/`trashDir` has no path on the node. See §11. |
+| A node's card says a library is unreachable            | The node cannot `stat` that root at the path its map gives, or the library's `stagingDir`/`trashDir` has no path-map entry. Check the node's library mount and its path map. See §11. |
+| A node is online and reachable but never runs anything | The node is paused, or has no transcode workers. See §11.                                                                    |
 | `docker logs` no longer shows the API key             | By design; it is printed only on the run that minted it. Read it from `GET /api/v1/system/settings`, or set it explicitly.    |
