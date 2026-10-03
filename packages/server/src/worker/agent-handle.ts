@@ -105,12 +105,15 @@ export class AgentFailure extends Error {
    */
   readonly unmapped: boolean;
   /**
-   * The job never reached its remote node: the node was offline when the
-   * frame was sent, or reconnected with no record of a job it had never said
-   * a word about. Like `unmapped`, nothing ran and nothing about the file is
-   * in question, so the supervisor requeues it unpenalised. Without this a
-   * node that flapped cost every file it was mid-claim on an attempt, and
-   * enough flaps pushed healthy files to `failed`.
+   * The job never left the server: its remote node was offline when the
+   * frame was to be sent. Like `unmapped`, nothing ran and nothing about the
+   * file is in question, so the supervisor requeues it unpenalised. Without
+   * this a node that flapped cost every file it was mid-claim on an attempt,
+   * and enough flaps pushed healthy files to `failed`.
+   *
+   * Set ONLY where the send is known not to have happened. An offline node is
+   * offered no claims, so this cannot loop; anything inferred later (a node
+   * that reconnects with no record of the job) stays an ordinary attempt.
    */
   readonly unsent: boolean;
   readonly exitCode: number | null;

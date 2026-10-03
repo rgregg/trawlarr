@@ -676,10 +676,10 @@ describe('createNodeHub', () => {
     expect((first.outcome.error as Error).message).toBe(
       'Node garage restarted while running this job.',
     );
-    // The node journals a job the moment it arrives, so one it has no
-    // record of, and never said a word about, never reached it.
-    expect((bError as Error).message).toBe('Node garage has no record of this job.');
-    expect((bError as AgentFailure).unsent).toBe(true);
+    expect((bError as Error).message).toBe('Node garage restarted while running this job.');
+    // An attempt, not a free requeue: "no record" does not prove the job
+    // never arrived, and a node that silently refuses one would loop for ever.
+    expect((bError as AgentFailure).unsent).toBe(false);
   });
 
   it('does not release a job whose report is waiting on the server stat', async () => {
@@ -711,13 +711,14 @@ describe('createNodeHub', () => {
     });
     await waitFor(() => statting, 'the stat to start');
 
+    // The node restarts and says hello with no record of the job, which
+    // releases it as lost. Released here, the run settled as a vanished
+    // worker and the report — with a replacement already on disk — was dropped.
     client.ws.close();
     await waitFor(() => leaseOf(payload.jobId).state === 'grace', 'grace');
-    now += GRACE_MS + 1;
-    hub.sweepLeases();
-    // Released here, the run settled as a vanished worker and the report —
-    // with a replacement already on disk — was dropped.
-    expect(leaseOf(payload.jobId).state).toBe('grace');
+    const again = await connectNode();
+    await again.hello([]);
+    expect(leaseOf(payload.jobId).state).not.toBe('expired');
     expect(outcome.settled).toBe(false);
 
     answer();

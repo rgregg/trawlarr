@@ -6,7 +6,11 @@ import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
 import { payloadToNode } from './map-payload.js';
 import type { ServerFrame } from './node-frames.js';
-import { createRemoteAgentHandle, type RemoteAgentInput } from './remote-agent.js';
+import {
+  createRemoteAgentHandle,
+  SETTLING_WAIT_MS,
+  type RemoteAgentInput,
+} from './remote-agent.js';
 
 const SERVER_NOW = 1_700_000_000_000;
 
@@ -200,22 +204,26 @@ describe('createRemoteAgentHandle', () => {
     expect(sent).toEqual([]);
   });
 
-  it('keeps an abandon unsent only while the node has said nothing about the job', async () => {
-    const lost = () => new AgentFailure('no record', { reported: false, unsent: true });
-
-    const silent = harness();
-    const silentRun = silent.handle.run(payloadFixture()).catch((caught: unknown) => caught);
+  it('stops protecting a report whose server stat never answers', async () => {
+    // A hung mount: without a bound the handle could never be released, and
+    // its file would sit in `running` until the daemon restarted.
+    let clock = SERVER_NOW;
+    const { handle } = harness({
+      nowMs: () => clock,
+      statPath: () => new Promise(() => {}),
+    });
+    const run = handle.run(payloadFixture()).catch((caught: unknown) => caught);
     await flush();
-    silent.handle.abandon(lost());
-    expect(((await silentRun) as AgentFailure).unsent).toBe(true);
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
 
-    // One frame is enough: the node had the job, so losing it is an attempt.
-    const heard = harness();
-    const heardRun = heard.handle.run(payloadFixture()).catch((caught: unknown) => caught);
-    await flush();
-    heard.handle.receive({ type: 'ready', pid: 1 });
-    heard.handle.abandon(lost());
-    expect(((await heardRun) as AgentFailure).unsent).toBe(false);
+    clock += SETTLING_WAIT_MS - 1;
+    expect(handle.settling).toBe(true);
+    clock += 1;
+    expect(handle.settling).toBe(false);
+    handle.abandon(new AgentFailure('sent no sign of life', { reported: false }));
+    const error = await run;
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect((error as AgentFailure).message).toBe('sent no sign of life');
   });
 
   it('rejects as a reported failure when prepare throws, and sends nothing', async () => {

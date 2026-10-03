@@ -364,25 +364,20 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
    * handle's run rejects so the supervisor stalls the attempt, and the node
    * is told to stop if it is connected.
    */
-  const release = (
-    row: { jobId: string; nodeId: string; lease: Lease },
-    message: string,
-    options: { unsent?: boolean } = {},
-  ): void => {
+  const release = (row: { jobId: string; nodeId: string; lease: Lease }, message: string): void => {
     const handle = handles.get(row.jobId);
     // Its report has arrived and is one server `stat` from being applied.
     // Released now, the run settled as a vanished worker and the report —
     // possibly carrying a replacement already on disk — was dropped. Left
-    // leased, the sweep simply looks again next time.
+    // leased, the sweep looks again next time; `settling` gives up on a stat
+    // that never answers, so this cannot hold a file for ever.
     if (handle?.settling === true) return;
     jobRepo.setLease({
       jobId: row.jobId,
       lease: { state: 'expired', expiresAtMs: row.lease.expiresAtMs },
     });
     if (handle !== undefined) {
-      handle.abandon(
-        new AgentFailure(message, { reported: false, unsent: options.unsent === true }),
-      );
+      handle.abandon(new AgentFailure(message, { reported: false }));
       return;
     }
     const conn = welcomedConnection(row.nodeId);
@@ -396,9 +391,6 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
 
   const lostMessage = (nodeId: string): string =>
     `Node ${nodeName(nodeId)} restarted while running this job.`;
-
-  const noRecordMessage = (nodeId: string): string =>
-    `Node ${nodeName(nodeId)} has no record of this job.`;
 
   const decideCommitFor = (
     jobId: string,
@@ -624,15 +616,17 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       }
     }
 
-    // A leased job the node no longer knows about was lost with it — or
-    // never reached it. A node journals a job the moment the frame arrives,
-    // so one it has no record of and never sent a frame about was dropped
-    // with the connection it was sent on; the handle keeps `unsent` only in
-    // that case, and the file is requeued without spending an attempt.
+    // A leased job the node no longer knows about was lost with it.
+    //
+    // Deliberately an ordinary failed attempt, never `unsent`, even for a
+    // job the node said nothing about. "No record" does not prove the frame
+    // never arrived: a node that refuses a job (a full data directory) drops
+    // it just as silently, and requeueing that unpenalised would claim and
+    // lose the same file for ever with no attempt ever spent.
     for (const leased of jobRepo.listLeased()) {
       if (leased.nodeId !== nodeId || mentioned.has(leased.jobId)) continue;
       if (leased.lease.state === 'expired') continue;
-      release(leased, noRecordMessage(nodeId), { unsent: true });
+      release(leased, lostMessage(nodeId));
     }
 
     return { jobs, reconnect, cancelWithoutHandle };

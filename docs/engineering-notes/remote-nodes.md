@@ -203,12 +203,12 @@ matter how they are invoked.
 - **A granted `plugin` commit holds `committing` for the whole plugin run.** Grace never
   expires a committing lease, so a long community plugin that writes near its end and loses
   its connection is reclaimed only by the 24 h floor.
-- **A job lost on a connection that drops after the frame is written but before the node reads it
-  still costs an attempt if the node had already spoken about it.** A job that never reached its
-  node is requeued unpenalised (`AgentFailure.unsent`): the node was offline at the send, or it
-  reconnected with no journal entry for a job it had never sent a frame about. One frame from the
-  node is taken as proof it had the job, so a node that received it, said `ready`, and then lost its
-  journal is still an ordinary failed attempt.
+- **A job frame written to a connection that drops before the node reads it still costs an
+  attempt.** A job the server knows it never sent (the node was offline at the send) is requeued
+  unpenalised (`AgentFailure.unsent`). One written to a dying socket is not: the node reconnects
+  with no record of it, which looks exactly like a node that refused the job, and treating that
+  guess as "never sent" would let a refusing node claim and lose the same file for ever without
+  spending an attempt.
 - **The rendered Nodes tab is not component-tested.** `packages/web` has no DOM test setup (no
   `jsdom`/`@testing-library` harness in the workspace), so `nodes-model.test.ts` covers the tab's pure
   logic (status labels, `unreachableSummary`, path-map validation) but nothing renders the actual
