@@ -218,10 +218,11 @@ pushes to `main`:
 - independent of `check` (it does not wait for it, and `image` does not wait
   for `cluster`);
 - builds the image with buildx and the same `type=gha` cache the `image` job
-  uses, loads it into the runner's Docker, and passes its tag to the suite so
-  compose does not build it again;
-- runs `pnpm test:cluster` with `TRAWLARR_REQUIRE_DOCKER=1`;
-- uploads container logs as an artifact on failure.
+  uses, and loads it into the runner's Docker as `trawlarr-cluster:dev`;
+- runs the suite's vitest command directly (not `pnpm test:cluster`, which
+  would build the image again) with `TRAWLARR_REQUIRE_DOCKER=1`;
+- uploads nothing: a failed scenario already prints every container's log
+  and the job and file rows into the test output.
 
 Whether `cluster` becomes a required check is left for after it has been
 green for a while.
