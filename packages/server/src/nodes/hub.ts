@@ -35,7 +35,12 @@ import type { JobPayload } from '../worker/job-payload.js';
 import { PROTOCOL_VERSION, type AgentToDaemon } from '../worker/protocol.js';
 import { DEFAULT_STALE_AFTER_MS, stallOpenJob } from '../worker/reap-stalled.js';
 import type { BundleStore } from './bundles.js';
-import { libraryRootsForNode, payloadToNode, UnmappedPathError } from './map-payload.js';
+import {
+  libraryDirsForNode,
+  libraryRootsForNode,
+  payloadToNode,
+  UnmappedPathError,
+} from './map-payload.js';
 import {
   MAX_FRAME_BYTES,
   parseNodeFrame,
@@ -519,6 +524,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       libraryId: library.id,
       name: library.name,
       nodeRoots: libraryRootsForNode(library, node.pathMap),
+      nodeDirs: libraryDirsForNode(library, node.pathMap),
     })),
   });
 
@@ -963,9 +969,12 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
         if (!conn.welcomed) continue;
         const node = nodes.getById(conn.nodeId);
         if (node === null || node.revokedAt !== null) continue;
-        // A probe only vouches for the roots the node was sent. Every root
-        // must also map under the map as it is NOW, or a claim made on the
-        // strength of that probe fails in `prepare` with UnmappedPathError.
+        // A probe only vouches for the paths the node was sent. Every root,
+        // and a configured staging or trash dir, must also map under the map
+        // as it is NOW, or a claim made on the strength of that probe fails
+        // in `prepare` with UnmappedPathError. (Checked here as well as in
+        // the node's probe: a node built before it probed those two dirs
+        // still reports such a library reachable.)
         //
         // A stored map that fails today's validation (saved before a rule
         // existed) vouches for nothing: its round trip can record a report
@@ -978,7 +987,8 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
                 return (
                   probe.reachable &&
                   library !== undefined &&
-                  libraryRootsForNode(library, node.pathMap).every((root) => root !== null)
+                  libraryRootsForNode(library, node.pathMap).every((root) => root !== null) &&
+                  libraryDirsForNode(library, node.pathMap).every((dir) => dir.path !== null)
                 );
               })
             : [];
