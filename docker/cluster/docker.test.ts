@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
-  assertImagePresent,
+  assertImageCurrent,
   DockerCheckFailedError,
   dockerAvailableSync,
   leakedProjects,
+  ownerOf,
+  projectName,
+  projectsOwnedBy,
   type SpawnSync,
 } from './docker.js';
 
@@ -37,35 +40,83 @@ describe('dockerAvailableSync', () => {
   });
 });
 
-describe('assertImagePresent', () => {
-  it('passes when the image exists', async () => {
-    await expect(
-      assertImagePresent(() => Promise.resolve('sha256:abc\n')),
-    ).resolves.toBeUndefined();
+describe('assertImageCurrent', () => {
+  const HEAD = 'a'.repeat(40);
+
+  it('passes when the image was built from the checked-out commit', async () => {
+    await expect(assertImageCurrent(HEAD, () => Promise.resolve(`${HEAD}\n`))).resolves.toBe(HEAD);
   });
 
   it('says how to build the image when it is missing', async () => {
     const run = () => Promise.reject(new Error('No such image: trawlarr-cluster:dev'));
-    await expect(assertImagePresent(run)).rejects.toThrow(
-      /docker build -t trawlarr-cluster:dev \./,
+    await expect(assertImageCurrent(HEAD, run)).rejects.toThrow(/pnpm test:cluster/);
+  });
+
+  it('refuses an image built from another commit, naming both', async () => {
+    // The tag is machine-wide and the direct vitest command does not build:
+    // without this, a fix is "tested" against the image from before it.
+    const other = 'b'.repeat(40);
+    await expect(assertImageCurrent(HEAD, () => Promise.resolve(`${other}\n`))).rejects.toThrow(
+      new RegExp(`${other.slice(0, 12)}.*${HEAD.slice(0, 12)}`, 's'),
+    );
+  });
+
+  it('refuses an image that records no commit at all', async () => {
+    await expect(assertImageCurrent(HEAD, () => Promise.resolve('\n'))).rejects.toThrow(
+      /records no commit/,
     );
   });
 });
 
+describe('project names', () => {
+  it('carry the pid of the run that owns them', () => {
+    const name = projectName(4242);
+    expect(name).toMatch(/^trawlarr-cluster-4242-[0-9a-f]{8}$/);
+    expect(ownerOf(name)).toBe(4242);
+  });
+
+  it('have no owner when they are not in that form', () => {
+    expect(ownerOf('trawlarr-cluster-ab12')).toBeNull();
+    expect(ownerOf('trawlarr')).toBeNull();
+  });
+});
+
+const listing = (names: string[]) => () =>
+  Promise.resolve(JSON.stringify(names.map((Name) => ({ Name, Status: 'running(3)' }))));
+
 describe('leakedProjects', () => {
-  it('lists only compose projects this suite created', async () => {
-    const run = () =>
-      Promise.resolve(
-        JSON.stringify([
-          { Name: 'trawlarr-cluster-ab12', Status: 'running(3)' },
-          { Name: 'trawlarr', Status: 'running(1)' },
-          { Name: 'trawlarr-cluster-cd34', Status: 'exited(2)' },
-        ]),
-      );
-    expect(await leakedProjects(run)).toEqual(['trawlarr-cluster-ab12', 'trawlarr-cluster-cd34']);
+  it("lists clusters whose owning run is dead, and never a live run's", async () => {
+    // Another worktree's run is live: removing its containers mid-test made
+    // it fail with docker errors that named nothing useful.
+    const run = listing([
+      'trawlarr-cluster-100-aaaaaaaa',
+      'trawlarr-cluster-200-bbbbbbbb',
+      'trawlarr',
+    ]);
+    expect(await leakedProjects((pid) => pid === 200, run)).toEqual([
+      'trawlarr-cluster-100-aaaaaaaa',
+    ]);
+  });
+
+  it('lists a cluster whose name carries no owner, which nothing else will ever remove', async () => {
+    expect(await leakedProjects(() => true, listing(['trawlarr-cluster-ab12']))).toEqual([
+      'trawlarr-cluster-ab12',
+    ]);
   });
 
   it('is empty when compose lists nothing', async () => {
-    expect(await leakedProjects(() => Promise.resolve('[]'))).toEqual([]);
+    expect(
+      await leakedProjects(
+        () => true,
+        () => Promise.resolve('[]'),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('projectsOwnedBy', () => {
+  it('lists only the clusters this run started', async () => {
+    const run = listing(['trawlarr-cluster-100-aaaaaaaa', 'trawlarr-cluster-200-bbbbbbbb']);
+    expect(await projectsOwnedBy(200, run)).toEqual(['trawlarr-cluster-200-bbbbbbbb']);
   });
 });

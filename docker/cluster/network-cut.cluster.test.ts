@@ -16,6 +16,10 @@ const jobMidEncode = async (c: Cluster): Promise<JobRow> => {
 const jobById = async (c: Cluster, id: string): Promise<JobRow> =>
   (await c.jobs()).find((job) => job.id === id)!;
 
+const isFfmpeg = (commandLine: string): boolean => commandLine.includes('/usr/bin/ffmpeg');
+/** The forked worker running the job (`worker/agent.js`), as opposed to the node host. */
+const isAgent = (commandLine: string): boolean => commandLine.includes('worker/agent.js');
+
 describe.runIf(available)('a node cut off from the server mid-encode', () => {
   let cluster: Cluster | null = null;
 
@@ -85,16 +89,30 @@ describe.runIf(available)('a node cut off from the server mid-encode', () => {
     // The data-safety assertion: the original is untouched.
     expect(await c.hashOf(path)).toBe(c.originalHashes[path]);
 
+    // THE PREMISE, asserted rather than assumed: a finished encode is sitting
+    // on the node with a live worker waiting to install it. Without these the
+    // rest passes just as well when the worker died during the cut and there
+    // was never a late result to refuse.
+    expect(await node.exec(['ls', '/config/journal'])).toContain(`${job.id}.json`);
+    await c.until(
+      'the node to finish encoding while cut off',
+      async () => !(await node.processes()).some(isFfmpeg),
+    );
+    expect((await node.processes()).filter(isAgent)).toHaveLength(1);
+    expect(await c.hashOf(path)).toBe(c.originalHashes[path]);
+
     // Paused before it comes back, so it is offered nothing new: anything it
     // does to the file from here would be the abandoned job's doing.
     await c.api('PUT', `/nodes/${node.id}`, { paused: true });
     await node.reconnect();
     await c.until('the node to come back online', async () => (await node.view()).online);
-    // The node finished encoding while cut off and is waiting at its commit
-    // gate. On reconnect it is told to abandon; its journal then empties.
-    await c.until('the node to drop the abandoned job', async () => {
-      const listed = await node.exec(['sh', '-c', 'ls /config/journal 2>/dev/null || true']);
-      return !listed.includes('.json');
+    // On reconnect the node is told to abandon. The journal entry goes at
+    // once, but the worker is a separate process that has not yet heard: the
+    // run is only over when that process is gone, and only then is the hash
+    // below a statement about what the abandoned run did.
+    await c.until('the abandoned run to end', async () => {
+      const journal = await node.exec(['ls', '/config/journal']);
+      return !journal.includes('.json') && !(await node.processes()).some(isAgent);
     });
 
     expect(await c.hashOf(path)).toBe(c.originalHashes[path]);

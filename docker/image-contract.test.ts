@@ -52,6 +52,8 @@ describe('the cluster CI job', () => {
     // The image under test is built from this commit and loaded, not pulled.
     expect(job).toMatch(/load: true/);
     expect(job).toMatch(/tags: trawlarr-cluster:dev/);
+    // The suite refuses an image that does not record the commit under test.
+    expect(job).toMatch(/TRAWLARR_COMMIT=\$\{\{ github\.sha \}\}/);
     // Both flags: the root vitest workspace wins over --config alone, and the
     // run then finds no cluster test at all.
     expect(job).toMatch(

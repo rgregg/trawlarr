@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 
 /** The image under test. CI builds and loads it; `pnpm test:cluster` builds it. */
 export const CLUSTER_IMAGE = process.env.TRAWLARR_CLUSTER_IMAGE ?? 'trawlarr-cluster:dev';
@@ -74,24 +75,91 @@ export const dockerAvailableSync = (
   }
 };
 
-/** Stop with one clear message when the image under test has not been built. */
-export const assertImagePresent = async (run: Run = docker): Promise<void> => {
+const BUILD_HINT =
+  'Build it from this checkout: `pnpm test:cluster` (which builds, then runs), or ' +
+  '`docker build --build-arg TRAWLARR_COMMIT=$(git rev-parse HEAD) -t trawlarr-cluster:dev .`';
+
+/**
+ * The image under test must exist AND have been built from `head`, the commit
+ * checked out here. Resolves the revision it carries.
+ *
+ * The tag is machine-wide and only `pnpm test:cluster` builds. Running the
+ * vitest command directly after a fix — the natural way to re-run one
+ * scenario — tested the image from before it, and another worktree's build
+ * replaced the image under this one. Either way the suite reported on code
+ * that was not the code in front of the person reading the result.
+ *
+ * It compares commits, so uncommitted product changes are still on whoever
+ * runs it: the Dockerfile records `TRAWLARR_COMMIT`, not a tree hash.
+ */
+export const assertImageCurrent = async (head: string, run: Run = docker): Promise<string> => {
+  let revision: string;
   try {
-    await run(['image', 'inspect', '--format', '{{.Id}}', CLUSTER_IMAGE]);
+    revision = (
+      await run([
+        'image', 'inspect', '--format',
+        '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+        CLUSTER_IMAGE,
+      ])
+    ).trim(); // prettier-ignore
   } catch (cause) {
     throw new Error(
-      `The image "${CLUSTER_IMAGE}" does not exist, so there is nothing to test. Build it from ` +
-        `the working tree first: docker build -t ${CLUSTER_IMAGE} . (or run \`pnpm test:cluster\`, ` +
-        `which does).`,
+      `The image "${CLUSTER_IMAGE}" does not exist, so there is nothing to test. ${BUILD_HINT}`,
       { cause },
     );
   }
+  if (revision === '') {
+    throw new Error(
+      `The image "${CLUSTER_IMAGE}" records no commit, so it cannot be shown to be this ` +
+        `checkout's code. ${BUILD_HINT}`,
+    );
+  }
+  if (revision !== head) {
+    throw new Error(
+      `The image "${CLUSTER_IMAGE}" was built from ${revision.slice(0, 12)}, but this checkout ` +
+        `is at ${head.slice(0, 12)}: the suite would test other code. ${BUILD_HINT}`,
+    );
+  }
+  return revision;
 };
 
-/** Compose projects a killed run left behind. */
-export const leakedProjects = async (run: Run = docker): Promise<string[]> => {
+/**
+ * A compose project name that says which run owns it: the pid of the vitest
+ * main process. Several runs can share a machine (one per worktree), and a
+ * sweep must be able to tell a killed run's leftovers from a live run's
+ * cluster.
+ */
+export const projectName = (ownerPid: number): string =>
+  `${PROJECT_PREFIX}${String(ownerPid)}-${randomBytes(4).toString('hex')}`;
+
+/** The owning pid in a name `projectName` made; null for any other name. */
+export const ownerOf = (name: string): number | null => {
+  const match = /^trawlarr-cluster-(\d+)-[0-9a-f]{8}$/.exec(name);
+  return match === null ? null : Number(match[1]);
+};
+
+const clusterProjects = async (run: Run): Promise<string[]> => {
   const listed = JSON.parse(await run(['compose', 'ls', '--all', '--format', 'json'])) as {
     Name: string;
   }[];
   return listed.map((project) => project.Name).filter((name) => name.startsWith(PROJECT_PREFIX));
 };
+
+/**
+ * Clusters a killed run left behind: the owner is no longer alive, or the
+ * name carries no owner at all (nothing else would ever remove it). A live
+ * run's cluster is never listed — sweeping every `trawlarr-cluster-*` project
+ * deleted the containers out from under a run in another worktree.
+ */
+export const leakedProjects = async (
+  isAlive: (pid: number) => boolean,
+  run: Run = docker,
+): Promise<string[]> =>
+  (await clusterProjects(run)).filter((name) => {
+    const owner = ownerOf(name);
+    return owner === null || !isAlive(owner);
+  });
+
+/** The clusters one run started, for that run's own teardown. */
+export const projectsOwnedBy = async (ownerPid: number, run: Run = docker): Promise<string[]> =>
+  (await clusterProjects(run)).filter((name) => ownerOf(name) === ownerPid);

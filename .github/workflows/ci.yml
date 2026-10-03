@@ -47,6 +47,10 @@ jobs:
           context: .
           load: true
           tags: trawlarr-cluster:dev
+          # The suite refuses an image that was not built from the commit
+          # checked out here (docker/cluster/docker.ts).
+          build-args: |
+            TRAWLARR_COMMIT=${{ github.sha }}
           cache-from: type=gha
       # Not `pnpm test:cluster`: that would build the image a second time.
       # Both flags are needed: vitest loads the root workspace file whatever

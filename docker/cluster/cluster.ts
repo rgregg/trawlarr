@@ -1,7 +1,6 @@
-import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { until } from '../../test-support/until.js';
-import { docker, PROJECT_PREFIX } from './docker.js';
+import { docker, projectName } from './docker.js';
 
 export interface ClusterOptions {
   /** One entry per node: where that node mounts the library, and its transcode workers (default 1). */
@@ -53,6 +52,8 @@ export interface ClusterNode {
   /** SIGKILL, no shutdown path. */
   kill(): Promise<void>;
   exec(argv: readonly string[]): Promise<string>;
+  /** The command line of every process in the container, one per entry. */
+  processes(): Promise<string[]>;
   logs(): Promise<string>;
 }
 
@@ -121,7 +122,9 @@ export const STEPS_BEFORE_EXECUTE = 3;
 const tail = (text: string, lines = 40): string => text.trim().split('\n').slice(-lines).join('\n');
 
 export const startCluster = async (options: ClusterOptions): Promise<Cluster> => {
-  const project = `${PROJECT_PREFIX}${randomBytes(4).toString('hex')}`;
+  // The owner is the vitest main process (global-setup.ts), so its teardown
+  // can find this cluster and no other run's sweep will take it.
+  const project = projectName(Number(process.env.TRAWLARR_CLUSTER_OWNER ?? process.pid));
   const graceMs = options.graceMs ?? 300_000;
   const localWorkers = options.localWorkers ?? 0;
   const compose = async (args: readonly string[]): Promise<string> =>
@@ -299,6 +302,18 @@ export const startCluster = async (options: ClusterOptions): Promise<Cluster> =>
           await docker(['kill', container]);
         },
         exec: async (argv) => await docker(['exec', container, ...argv]),
+        // From /proc, because the image has no `ps`. A process can exit
+        // between the glob and the read; that one is simply not listed.
+        processes: async () =>
+          (
+            await docker([
+              'exec', container, 'sh', '-c',
+              'for f in /proc/[0-9]*/cmdline; do { tr "\\0" " " < "$f"; echo; } 2>/dev/null; done',
+            ])
+          )
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line !== ''), // prettier-ignore
       });
     }
 
