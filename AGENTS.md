@@ -68,7 +68,7 @@ this repo has been bitten twice by silently-skipped real-media tests.
 one server and several nodes as containers from the image tagged `trawlarr-cluster:dev`, and
 asserts multi-node behaviour on file bytes and database rows: claims shared between nodes,
 per-node mount paths, a staging directory a node cannot reach, a network cut inside and past
-the grace window, and a node killed mid-job. `pnpm test:cluster` builds the image first. A
+the grace window, and a node killed mid-job. `pnpm test:cluster` builds the image first, and the suite refuses an image that was not built from the checked-out commit; run one scenario with `pnpm test:cluster -- docker/cluster/<file>`. A
 network cut takes about a minute to be noticed (the server's 45 s offline timeout), so the
 suite takes about four minutes. It does not reproduce NFS: containers sharing a volume see the
 same device number, so the cross-host identity case stays with unit tests and a real second
