@@ -18,8 +18,17 @@ import { bundleHash, type BundleFile, type BundleManifest } from '../nodes/bundl
  */
 
 export interface BundleCache {
-  /** Ensure the bundle is present and verified; returns its root directory. */
+  /**
+   * Ensure the bundle is present and verified; returns its root directory.
+   *
+   * The bundle is HELD from the moment this is called until a matching
+   * `release`: `prune` never removes a held bundle. A call that rejects holds
+   * nothing.
+   */
   ensure(hash: string): Promise<string>;
+  /** Give up one hold taken by a successful `ensure`. */
+  release(hash: string): void;
+  /** Remove least-recently-used bundles nothing holds until the cache fits `maxBytes`. */
   prune(maxBytes: number): Promise<void>;
 }
 
@@ -105,8 +114,38 @@ export const createBundleCache = (input: {
   dir: string;
   fetchManifest: (hash: string) => Promise<unknown>;
   fetchFile: (hash: string, relPath: string) => Promise<Buffer>;
+  /** Seam for tests: called as a bundle's removal begins. */
+  onRemoving?: (hash: string) => void;
 }): BundleCache => {
   const { dir, fetchManifest, fetchFile } = input;
+
+  /**
+   * How many unreleased `ensure` calls each bundle has.
+   *
+   * A running agent `require`s plugin files lazily out of its bundle, so a
+   * bundle must outlive every job using it. That used to be arranged by only
+   * pruning while the node was idle — which meant a node that was never idle
+   * never pruned, and the cache grew without bound. Counting holds lets prune
+   * run at any time and skip exactly the bundles in use.
+   */
+  const holds = new Map<string, number>();
+
+  /**
+   * Bundles being deleted right now. `ensure` waits one out and downloads
+   * afresh rather than `existsSync`-ing a directory that is half gone: prune
+   * used to decide, then delete, and a job that asked in between was handed
+   * a path that vanished, failed to load its plugin, and spent an attempt.
+   */
+  const removing = new Map<string, Promise<void>>();
+
+  const hold = (hash: string): void => {
+    holds.set(hash, (holds.get(hash) ?? 0) + 1);
+  };
+  const unhold = (hash: string): void => {
+    const count = holds.get(hash) ?? 0;
+    if (count <= 1) holds.delete(hash);
+    else holds.set(hash, count - 1);
+  };
 
   const bundleDir = (hash: string): string => join(dir, hash);
   const manifestPath = (hash: string): string => join(dir, `${hash}${MANIFEST_SUFFIX}`);
@@ -198,21 +237,35 @@ export const createBundleCache = (input: {
       if (!HEX64.test(hash)) {
         throw new BundleCacheError(`Bundle hash "${hash}" is not a sha256 hex digest.`);
       }
-      const finalDir = bundleDir(hash);
-      if (existsSync(finalDir)) {
-        await touch(hash);
-        return finalDir;
+      // Held BEFORE the first await: prune checks holds in the same tick it
+      // commits to a removal, so from here it can no longer pick this bundle.
+      hold(hash);
+      try {
+        // Unless it already had. Wait for that removal to finish, then fall
+        // through to a fresh download.
+        await removing.get(hash);
+
+        const finalDir = bundleDir(hash);
+        if (existsSync(finalDir)) {
+          await touch(hash);
+          return finalDir;
+        }
+
+        const existing = inFlight.get(hash);
+        if (existing !== undefined) return await existing;
+
+        const promise = downloadAndInstall(hash, finalDir).finally(() => {
+          inFlight.delete(hash);
+        });
+        inFlight.set(hash, promise);
+        return await promise;
+      } catch (error) {
+        unhold(hash);
+        throw error;
       }
-
-      const existing = inFlight.get(hash);
-      if (existing !== undefined) return existing;
-
-      const promise = downloadAndInstall(hash, finalDir).finally(() => {
-        inFlight.delete(hash);
-      });
-      inFlight.set(hash, promise);
-      return promise;
     },
+
+    release: unhold,
 
     async prune(maxBytes) {
       let names: string[];
@@ -265,9 +318,24 @@ export const createBundleCache = (input: {
       let total = entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
       for (const entry of entries) {
         if (total <= maxBytes) break;
-        await rm(bundleDir(entry.hash), { recursive: true, force: true });
-        await rm(manifestPath(entry.hash), { force: true });
-        await rm(lastUsedPath(entry.hash), { force: true });
+        const { hash } = entry;
+        // Checked here, not when the directory was listed: a job may have
+        // taken a hold during any await above. A held bundle still counts
+        // toward the total — it is on disk — so the cache can sit over its
+        // cap while jobs need what is in it.
+        if (holds.has(hash) || removing.has(hash)) continue;
+        // No await between that check and this `set`, so an `ensure` either
+        // held the bundle first (and it is skipped) or sees the removal.
+        const removal = (async (): Promise<void> => {
+          await rm(bundleDir(hash), { recursive: true, force: true });
+          await rm(manifestPath(hash), { force: true });
+          await rm(lastUsedPath(hash), { force: true });
+        })().finally(() => {
+          removing.delete(hash);
+        });
+        removing.set(hash, removal);
+        input.onRemoving?.(hash);
+        await removal;
         total -= entry.sizeBytes;
       }
     },

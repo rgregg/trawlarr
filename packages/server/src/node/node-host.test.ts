@@ -519,6 +519,34 @@ describe('startNodeHost', () => {
     expect(pruned).toEqual([12_345]);
   });
 
+  it('prunes when a job settles even while another is still running', async () => {
+    // It used to wait for an idle node, and a node that is never idle never
+    // pruned at all.
+    const pruned: number[] = [];
+    const { server, factory, start } = await setup({
+      bundleCacheMaxBytes: 12_345,
+      onBundleCachePrune: (maxBytes) => {
+        pruned.push(maxBytes);
+      },
+    });
+    const host = await start();
+    const { conn } = await welcome(server);
+    await host.started;
+
+    conn.send({ type: 'job', jobId: 'job-a', payload: payloadFor('job-a', server.bundle) });
+    conn.send({ type: 'job', jobId: 'job-b', payload: payloadFor('job-b', server.bundle) });
+    await waitFor(() => factory.agents.length === 2 && factory.agents[1]?.payload != null);
+    factory.agents[0]!.resolve(reportFor('job-a'));
+    await waitFor(() => pruned.length > 0);
+    expect(pruned).toEqual([12_345]);
+
+    // The bundle the second job is still loading plugins from is untouched.
+    const pluginPath = Object.values(factory.agents[1]!.payload!.pluginPaths)[0]!;
+    expect(existsSync(pluginPath)).toBe(true);
+    factory.agents[1]!.resolve(reportFor('job-b'));
+    await conn.next('agent', (f) => f.jobId === 'job-b' && f.message.type === 'done');
+  });
+
   it('reads the bundle cache cap from TRAWLARR_NODE_BUNDLE_CACHE_BYTES, defaulting to 2 GiB', () => {
     expect(DEFAULT_BUNDLE_CACHE_MAX_BYTES).toBe(2 * 1024 * 1024 * 1024);
     expect(bundleCacheMaxBytesFrom({})).toBe(DEFAULT_BUNDLE_CACHE_MAX_BYTES);
