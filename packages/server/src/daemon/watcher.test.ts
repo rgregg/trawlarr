@@ -127,6 +127,31 @@ describe('chokidar watch port', () => {
     expect(seen.some((path) => path.includes('.trawlarr'))).toBe(false);
   });
 
+  it('ignores the scratch files a replacement writes beside the media', async () => {
+    // These are outside `.trawlarr`, in the media's own directory, so the
+    // reserved-directory list cannot cover them. An event for one triggers a
+    // scan while the copy it names is still being written.
+    const seen: string[] = [];
+    watchLibrary((path) => seen.push(path));
+
+    const staged = join(root, 'shows', '.trawlarr-replace-520ab0c8.mkv');
+    const reservation = join(root, 'shows', '.trawlarr-reserve-real.mkv');
+    const real = join(root, 'shows', 'real.mkv');
+
+    let generation = 0;
+    await waitUntil(() => seen.filter((path) => path === real).length >= 3, {
+      poke: () => {
+        generation += 1;
+        const content = `content ${String(generation)}`;
+        writeFileSync(staged, content);
+        writeFileSync(reservation, content);
+        writeFileSync(real, content);
+      },
+    });
+
+    expect(seen.some((path) => path.includes('.trawlarr-'))).toBe(false);
+  });
+
   it('stops reporting once closed', async () => {
     const closedSeen: string[] = [];
     const stillOpen: string[] = [];

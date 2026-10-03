@@ -7,6 +7,7 @@ import type {
   PluginOutputArgs,
   ProbeData,
 } from '@trawlarr/plugin-api';
+import { WORKING_FILE_PREFIX } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { canonicalPath } from './encode-target.js';
 import { BYTES_PER_MEGABYTE } from '../host/file-object.js';
@@ -198,7 +199,7 @@ const eexistAt = (path: string): NodeJS.ErrnoException =>
 
 /** The hidden name that stands for "this destination is claimed". */
 const reservationPathFor = (finalPath: string): string =>
-  join(dirname(finalPath), `.trawlarr-reserve-${basename(finalPath)}`);
+  join(dirname(finalPath), `${WORKING_FILE_PREFIX}reserve-${basename(finalPath)}`);
 
 /** A reservation this worker holds, identified so it can only release its own. */
 interface HeldReservation {
@@ -1242,10 +1243,12 @@ const swapIntoPlace = async (input: {
 
   const extension = extname(input.finalPath);
   // A UUID, so the staging name cannot collide with a concurrent replacement's
-  // even before the exclusive create below has a chance to say so.
+  // even before the exclusive create below has a chance to say so. The prefix
+  // is what keeps the scanner from taking this copy for library media while
+  // it sits in the media's own directory — it must stay `WORKING_FILE_PREFIX`.
   const stagedPath = join(
     dirname(input.finalPath),
-    `.trawlarr-replace-${randomUUID()}${extension}`,
+    `${WORKING_FILE_PREFIX}replace-${randomUUID()}${extension}`,
   );
   input.state.stagedPath = stagedPath;
   try {
