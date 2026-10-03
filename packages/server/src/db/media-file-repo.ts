@@ -344,6 +344,13 @@ export interface MediaFileRepo {
   /** Puts back what `reserveForDeletion` replaced, when the delete did not happen. */
   restoreFromDeletion(input: { fileId: string } & DeletionReservation): void;
   /**
+   * The delete that reserved this row is over, however it ended. Idempotent.
+   * `restoreFromDeletion` and `delete` already do this; a caller's `finally`
+   * calls it so an error nobody planned for cannot leave the row refused by
+   * `requeueUnlessClaimed` for the life of the process.
+   */
+  endDeletion(fileId: string): void;
+  /**
    * Delete a media file row and its associated job history (via CASCADE).
    * Returns true if a row was deleted, false if no row existed with that id.
    */
@@ -977,6 +984,10 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
         input.fileId,
       );
       reservedForDeletion(db).delete(input.fileId);
+    },
+
+    endDeletion(fileId) {
+      reservedForDeletion(db).delete(fileId);
     },
 
     delete(fileId) {

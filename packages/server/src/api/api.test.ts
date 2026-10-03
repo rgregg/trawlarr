@@ -786,6 +786,12 @@ describe('files', () => {
     expect(during.body.error.code).toBe('file-deleting');
     expect(createMediaFileRepo(db).getById(fileId)).toEqual(parked);
 
+    // A delete that ended without restoring or removing the row (an error
+    // nobody planned for) must not leave it refused for the life of the daemon.
+    deleting.endDeletion(fileId);
+    expect(createMediaFileRepo(db).requeueUnlessClaimed(fileId)).toBeNull();
+    createMediaFileRepo(db).reserveForDeletion({ fileId, nowMs: NOW });
+
     // The delete failed and put the row back: it is an ordinary file again.
     deleting.restoreFromDeletion({ fileId, ...reservation! });
     const after = await api('POST', `/files/${fileId}/requeue`);

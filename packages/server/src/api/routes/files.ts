@@ -285,27 +285,33 @@ export const fileRoutes: Route[] = [
       // count and no record that anyone ever tried to delete it.
       let fileExisted = true;
       try {
-        await unlink(row.path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          // Already gone — that is the outcome that was asked for, and a row
-          // whose file has vanished is exactly what this deletes next.
-          fileExisted = false;
-        } else {
-          // Put the row back exactly as it was: the file is still on disk, so
-          // it is still the library's file and still belongs in the queue.
-          repo.restoreFromDeletion({ fileId: row.id, ...reservation });
-          throw new ApiError(
-            500,
-            'delete-failed',
-            `"${row.path}" could not be deleted: ${(error as Error).message}. The file and its ` +
-              `history are both untouched.`,
-          );
+        try {
+          await unlink(row.path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            // Already gone — that is the outcome that was asked for, and a row
+            // whose file has vanished is exactly what this deletes next.
+            fileExisted = false;
+          } else {
+            // Put the row back exactly as it was: the file is still on disk, so
+            // it is still the library's file and still belongs in the queue.
+            repo.restoreFromDeletion({ fileId: row.id, ...reservation });
+            throw new ApiError(
+              500,
+              'delete-failed',
+              `"${row.path}" could not be deleted: ${(error as Error).message}. The file and its ` +
+                `history are both untouched.`,
+            );
+          }
         }
-      }
 
-      // Cascades to `job` and, through it, `job_step` — see `MediaFileRepo.delete`.
-      repo.delete(row.id);
+        // Cascades to `job` and, through it, `job_step` — see `MediaFileRepo.delete`.
+        repo.delete(row.id);
+      } finally {
+        // However this ended, the reservation is over: an error nobody
+        // planned for must not leave the row refused by requeue for ever.
+        repo.endDeletion(row.id);
+      }
 
       return {
         deleted: true,

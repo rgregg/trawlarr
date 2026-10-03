@@ -423,17 +423,39 @@ export const applyJobCancelled = (input: {
   // deleted is a bug worth surfacing, not something to swallow.
   requireRow(input.db, input.payload.fileId);
 
-  // ONLY THE JOB THAT HOLDS THE FILE MAY WRITE ITS ROW. Requeueing here
+  // ONLY THE JOB THAT HOLDS THE FILE MAY REQUEUE IT. Requeueing here
   // unconditionally pulled the row out from under a different job that had
-  // claimed the file since, and a third worker was then claimed on it. When
-  // another job holds the file, this one only closes its own job row.
-  if (jobRepo.otherJobHoldsFile({ jobId: input.payload.jobId, fileId: input.payload.fileId })) {
+  // claimed the file, and a third worker was then claimed on it. When another
+  // job holds the file, this one closes its own job row and leaves the
+  // ledger alone.
+  const rivals = jobRepo.rivalsFor({ jobId: input.payload.jobId, fileId: input.payload.fileId });
+  if (rivals.holds) {
+    // What it still owes the row is the TRUTH about the disk: a replacement
+    // this run installed is on disk whoever holds the claim, and a holder
+    // that retried from the old identity and probe would transcode a file
+    // that is no longer there. Not when a later job has already finished,
+    // though: what that job recorded is newer than this.
+    let note = '';
+    if (input.report?.replaced != null && !rivals.laterEnded) {
+      try {
+        recordReplacement({
+          db: input.db,
+          row: requireRow(input.db, input.payload.fileId),
+          report: input.report,
+          nowMs: input.nowMs,
+        });
+      } catch (error) {
+        note = ` Its replacement could not be recorded: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
     jobRepo.finish({
       jobId: input.payload.jobId,
       state: 'cancelled',
       outcome:
-        'Cancelled: the job was stopped by an operator. The file was left alone, because ' +
-        'another job has claimed it since.',
+        'Cancelled: the job was stopped by an operator. The file was not requeued, because ' +
+        `another job holds it.${note}`,
       nowMs: input.nowMs(),
     });
     return { state: requireRow(input.db, input.payload.fileId).state, installedPath: null };

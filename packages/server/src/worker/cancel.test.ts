@@ -429,23 +429,28 @@ describe('applyJobCancelled', () => {
     expect(jobRepo.getById(holder)?.endedAt).toBeNull();
   });
 
-  it('still requeues when an OLDER job row for the file was never closed', () => {
-    // A job row a dead worker left open is not a rival: this job claimed the
-    // file after it. Treating it as one left the cancelled file in `running`
-    // with no worker, and requeue then refused it as "being processed".
-    const { payload: holder } = seededWithAttempts(0);
+  it('leaves the file alone when an OLDER job is still open on it', () => {
+    // An older open job may be a live worker, and the database cannot tell
+    // that from a row a dead worker never closed. Requeueing here would put a
+    // second worker beside a live one, which is the thing that destroys a
+    // file; leaving the row for the reaper costs at most a wait.
+    const { payload: later } = seededWithAttempts(0);
     const jobRepo = createJobRepo(db);
-    const orphan = jobRepo.start({
-      fileId: holder.fileId,
-      flowId: holder.flow.id,
-      flowHash: holder.flow.definitionHash,
+    const mediaFileRepo = createMediaFileRepo(db);
+    const older = jobRepo.start({
+      fileId: later.fileId,
+      flowId: later.flow.id,
+      flowHash: later.flow.definitionHash,
       nowMs: NOW - 10_000,
     });
+    const before = mediaFileRepo.getById(later.fileId);
 
-    const { state } = applyJobCancelled({ db, payload: holder, nowMs: () => NOW });
+    applyJobCancelled({ db, payload: later, nowMs: () => NOW });
 
-    expect(state).toBe('queued');
-    expect(jobRepo.getById(orphan)?.endedAt).toBeNull();
+    expect(mediaFileRepo.getById(later.fileId)).toEqual(before);
+    expect(jobRepo.getById(later.jobId)?.state).toBe('cancelled');
+    expect(jobRepo.getById(later.jobId)?.outcome).toContain('another job');
+    expect(jobRepo.getById(older)?.endedAt).toBeNull();
   });
 
   it('still requeues when an OLDER job for the file exists, ended', () => {
