@@ -392,6 +392,84 @@ describe('applyJobCancelled', () => {
     expect(jobRepo.getSteps(claimed.jobId)).toHaveLength(1);
   });
 
+  it('leaves the file alone when another job has claimed it since', () => {
+    // The second half of #56: cancelling the superseded job requeued the row
+    // out from under the job that now held it, and a third worker was claimed.
+    const { payload: superseded } = seededWithAttempts(1);
+    const jobRepo = createJobRepo(db);
+    const mediaFileRepo = createMediaFileRepo(db);
+    const holder = jobRepo.start({
+      fileId: superseded.fileId,
+      flowId: superseded.flow.id,
+      flowHash: superseded.flow.definitionHash,
+      nowMs: NOW + 1,
+    });
+    mediaFileRepo.setLedger({
+      fileId: superseded.fileId,
+      record: {
+        state: 'running',
+        signature: null,
+        attemptCount: 1,
+        consecutiveNoopCount: 0,
+        holdUntilMs: null,
+      },
+      lastRunId: holder,
+    });
+    const before = mediaFileRepo.getById(superseded.fileId);
+
+    const { state } = applyJobCancelled({ db, payload: superseded, nowMs: () => NOW + 5 });
+
+    // Still the holder's: not queued, attempt count untouched.
+    expect(state).toBe('running');
+    expect(mediaFileRepo.getById(superseded.fileId)).toEqual(before);
+    const cancelled = jobRepo.getById(superseded.jobId);
+    expect(cancelled?.state).toBe('cancelled');
+    expect(cancelled?.outcome).toContain('another job');
+    // And the holder is untouched.
+    expect(jobRepo.getById(holder)?.endedAt).toBeNull();
+  });
+
+  it('leaves the file alone when an OLDER job is still open on it', () => {
+    // An older open job may be a live worker, and the database cannot tell
+    // that from a row a dead worker never closed. Requeueing here would put a
+    // second worker beside a live one, which is the thing that destroys a
+    // file; leaving the row for the reaper costs at most a wait.
+    const { payload: later } = seededWithAttempts(0);
+    const jobRepo = createJobRepo(db);
+    const mediaFileRepo = createMediaFileRepo(db);
+    const older = jobRepo.start({
+      fileId: later.fileId,
+      flowId: later.flow.id,
+      flowHash: later.flow.definitionHash,
+      nowMs: NOW - 10_000,
+    });
+    const before = mediaFileRepo.getById(later.fileId);
+
+    applyJobCancelled({ db, payload: later, nowMs: () => NOW });
+
+    expect(mediaFileRepo.getById(later.fileId)).toEqual(before);
+    expect(jobRepo.getById(later.jobId)?.state).toBe('cancelled');
+    expect(jobRepo.getById(later.jobId)?.outcome).toContain('another job');
+    expect(jobRepo.getById(older)?.endedAt).toBeNull();
+  });
+
+  it('still requeues when an OLDER job for the file exists, ended', () => {
+    // History is not a rival claim: only a newer or still-running job is.
+    const { payload: claimed } = seededWithAttempts(0);
+    const jobRepo = createJobRepo(db);
+    const earlier = jobRepo.start({
+      fileId: claimed.fileId,
+      flowId: claimed.flow.id,
+      flowHash: claimed.flow.definitionHash,
+      nowMs: NOW - 10_000,
+    });
+    jobRepo.finish({ jobId: earlier, state: 'failed', outcome: 'earlier', nowMs: NOW - 9_000 });
+
+    const { state } = applyJobCancelled({ db, payload: claimed, nowMs: () => NOW });
+
+    expect(state).toBe('queued');
+  });
+
   it('refuses to fold a cancel for a row that no longer exists', () => {
     const { payload: claimed } = seededWithAttempts(0);
     db.prepare(`DELETE FROM media_file WHERE id = ?`).run(claimed.fileId);

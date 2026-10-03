@@ -128,7 +128,31 @@ export const fileRoutes: Route[] = [
     handler: ({ params, ctx }) => {
       const row = requireFile(ctx, params.id!);
       const repo = createMediaFileRepo(ctx.db);
-      repo.requeue(row.id);
+      // Refused, not forced, while a job holds the file: resetting a claimed
+      // row let the supervisor claim it again, and two workers ran one file.
+      // Stopping a run is its own, explicit action.
+      const blocked = repo.requeueUnlessClaimed(row.id);
+      if (blocked?.reason === 'deleting') {
+        throw new ApiError(
+          409,
+          'file-deleting',
+          `"${row.path}" is being deleted right now. Requeueing it would let a worker claim a ` +
+            `file that is half gone. If the delete fails, the file is put back and can be requeued.`,
+        );
+      }
+      if (blocked !== null) {
+        const which = blocked.jobId === null ? '' : ` (job ${blocked.jobId})`;
+        const how =
+          blocked.jobId === null
+            ? `Cancel its job first, then requeue.`
+            : `Cancel that job first (POST /jobs/${blocked.jobId}/cancel), then requeue.`;
+        throw new ApiError(
+          409,
+          'file-running',
+          `"${row.path}" is being processed right now${which}. Requeueing it would start a ` +
+            `second worker on the same file. ${how}`,
+        );
+      }
       // Requeueing puts work in the queue; a supervisor that only noticed on
       // its next timer tick would leave an idle pool next to a queued file.
       void ctx.supervisor.tick();
@@ -241,8 +265,8 @@ export const fileRoutes: Route[] = [
       // was not enough on two counts: `claimNext` could take a queued row
       // while the unlink was in flight, and `POST /files/:id/hold` can write
       // `held` over a live run, which made the state say "idle" about a file
-      // a worker was transcoding. `requeue` is how an operator gets a
-      // running file back.
+      // a worker was transcoding. Cancelling the job is how an operator
+      // gets a running file back; requeue refuses one for the same reason.
       const reservation = repo.reserveForDeletion({ fileId: row.id, nowMs: ctx.nowMs() });
       if (reservation === null) {
         throw new ApiError(
@@ -261,27 +285,33 @@ export const fileRoutes: Route[] = [
       // count and no record that anyone ever tried to delete it.
       let fileExisted = true;
       try {
-        await unlink(row.path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          // Already gone — that is the outcome that was asked for, and a row
-          // whose file has vanished is exactly what this deletes next.
-          fileExisted = false;
-        } else {
-          // Put the row back exactly as it was: the file is still on disk, so
-          // it is still the library's file and still belongs in the queue.
-          repo.restoreFromDeletion({ fileId: row.id, ...reservation });
-          throw new ApiError(
-            500,
-            'delete-failed',
-            `"${row.path}" could not be deleted: ${(error as Error).message}. The file and its ` +
-              `history are both untouched.`,
-          );
+        try {
+          await unlink(row.path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            // Already gone — that is the outcome that was asked for, and a row
+            // whose file has vanished is exactly what this deletes next.
+            fileExisted = false;
+          } else {
+            // Put the row back exactly as it was: the file is still on disk, so
+            // it is still the library's file and still belongs in the queue.
+            repo.restoreFromDeletion({ fileId: row.id, ...reservation });
+            throw new ApiError(
+              500,
+              'delete-failed',
+              `"${row.path}" could not be deleted: ${(error as Error).message}. The file and its ` +
+                `history are both untouched.`,
+            );
+          }
         }
-      }
 
-      // Cascades to `job` and, through it, `job_step` — see `MediaFileRepo.delete`.
-      repo.delete(row.id);
+        // Cascades to `job` and, through it, `job_step` — see `MediaFileRepo.delete`.
+        repo.delete(row.id);
+      } finally {
+        // However this ended, the reservation is over: an error nobody
+        // planned for must not leave the row refused by requeue for ever.
+        repo.endDeletion(row.id);
+      }
 
       return {
         deleted: true,

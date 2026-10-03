@@ -723,6 +723,95 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
   });
 
+  it('refuses to requeue a file a worker is running, and leaves the row exactly as it was', async () => {
+    // Requeue used to reset the row whatever its state. The supervisor then
+    // claimed it again, and two workers ran the same file, both headed for
+    // Replace Original File (#56, seen on a real library).
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/busy.mkv', state: 'running' });
+    createJobRepo(db).start({
+      id: 'job-live',
+      fileId,
+      flowId: 'flow-1',
+      flowHash: 'hash-1',
+      nowMs: NOW,
+    });
+    const before = createMediaFileRepo(db).getById(fileId);
+
+    const response = await api('POST', `/files/${fileId}/requeue`);
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('file-running');
+    // The way out is named, with the job to cancel.
+    expect(response.body.error.message).toContain('job-live');
+    expect(response.body.error.message).toMatch(/cancel/i);
+    expect(createMediaFileRepo(db).getById(fileId)).toEqual(before);
+  });
+
+  it('refuses to requeue a file whose row says held while a job is still running on it', async () => {
+    // `POST /files/:id/hold` can write `held` over a live run, so the row's
+    // own state is not enough to say nobody holds the file.
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/held.mkv', state: 'held' });
+    createJobRepo(db).start({
+      id: 'job-under-hold',
+      fileId,
+      flowId: 'flow-1',
+      flowHash: 'hash-1',
+      nowMs: NOW,
+    });
+
+    const response = await api('POST', `/files/${fileId}/requeue`);
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('file-running');
+    expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('held');
+  });
+
+  it('refuses to requeue a file that is being deleted, so no worker can claim it mid-unlink', async () => {
+    // DELETE parks the row as `held` far in the future while it unlinks the
+    // file. A requeue landing in that window cleared the hold, and the row
+    // was claimable with its file half gone.
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/going.mkv', state: 'good' });
+    // A different repo instance, as a concurrent request would have.
+    const deleting = createMediaFileRepo(db);
+    const reservation = deleting.reserveForDeletion({ fileId, nowMs: NOW });
+    expect(reservation).not.toBeNull();
+    const parked = createMediaFileRepo(db).getById(fileId);
+
+    const during = await api('POST', `/files/${fileId}/requeue`);
+
+    expect(during.status).toBe(409);
+    expect(during.body.error.code).toBe('file-deleting');
+    expect(createMediaFileRepo(db).getById(fileId)).toEqual(parked);
+
+    // A delete that ended without restoring or removing the row (an error
+    // nobody planned for) must not leave it refused for the life of the daemon.
+    deleting.endDeletion(fileId);
+    expect(createMediaFileRepo(db).requeueUnlessClaimed(fileId)).toBeNull();
+    createMediaFileRepo(db).reserveForDeletion({ fileId, nowMs: NOW });
+
+    // The delete failed and put the row back: it is an ordinary file again.
+    deleting.restoreFromDeletion({ fileId, ...reservation! });
+    const after = await api('POST', `/files/${fileId}/requeue`);
+    expect(after.status).toBe(200);
+    expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
+  });
+
+  it('requeues a file whose only jobs have ended', async () => {
+    const library = seedLibrary();
+    const fileId = seedFile({ libraryId: library.id, path: '/media/done.mkv', state: 'failed' });
+    const jobRepo = createJobRepo(db);
+    jobRepo.start({ id: 'job-old', fileId, flowId: 'flow-1', flowHash: 'hash-1', nowMs: NOW });
+    jobRepo.finish({ jobId: 'job-old', state: 'failed', outcome: 'gave up', nowMs: NOW });
+
+    const response = await api('POST', `/files/${fileId}/requeue`);
+
+    expect(response.status).toBe(200);
+    expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
+  });
+
   it('deletes the file from disk and the row with it', async () => {
     const library = seedLibrary();
     const dir = mkdtempSync(join(tmpdir(), 'trawlarr-delete-'));

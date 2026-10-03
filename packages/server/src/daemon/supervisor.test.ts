@@ -676,6 +676,71 @@ describe('the supervisor', () => {
     expect(createJobRepo(db).getById(agent.payload.jobId)?.state).toBe('cancelled');
   });
 
+  it("records a cancelled run's landed replacement even when another job holds the file, without requeueing it", async () => {
+    // The file on disk changed; the row must say so whoever holds the claim,
+    // or the holder's retry starts from an identity and probe of a file that
+    // is no longer there.
+    const { supervisor, agents, db, cancelledReport } = harness({
+      queued: 1,
+      target: { transcode: 1, health: 0 },
+    });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+    const fileId = agent.payload.fileId;
+    const holder = createJobRepo(db).start({
+      fileId,
+      flowId: agent.payload.flow.id,
+      flowHash: agent.payload.flow.definitionHash,
+      nowMs: NOW + 1,
+    });
+
+    await agent.finish({
+      ...cancelledReport(agent),
+      failed: true,
+      superseded: true,
+      replaced: replacedFile(agent.payload.path),
+      postFacts: HEVC_FACTS,
+    });
+
+    const row = rowFor(db, fileId);
+    expect(row.inode_key).toBe('9:4242');
+    // Still the holder's: not requeued.
+    expect(row.state).toBe('running');
+    expect(createJobRepo(db).getById(agent.payload.jobId)?.state).toBe('cancelled');
+    expect(createJobRepo(db).getById(holder)?.endedAt).toBeNull();
+  });
+
+  it("does not let a cancelled run's replacement overwrite what a later, finished job recorded", async () => {
+    const { supervisor, agents, db, cancelledReport } = harness({
+      queued: 1,
+      target: { transcode: 1, health: 0 },
+    });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+    const fileId = agent.payload.fileId;
+    const jobRepo = createJobRepo(db);
+    const later = jobRepo.start({
+      fileId,
+      flowId: agent.payload.flow.id,
+      flowHash: agent.payload.flow.definitionHash,
+      nowMs: NOW + 1,
+    });
+    jobRepo.finish({ jobId: later, state: 'succeeded', outcome: 'done', nowMs: NOW + 2 });
+    const before = rowFor(db, fileId);
+
+    await agent.finish({
+      ...cancelledReport(agent),
+      failed: true,
+      superseded: true,
+      replaced: replacedFile(agent.payload.path),
+      postFacts: HEVC_FACTS,
+    });
+
+    expect(rowFor(db, fileId)).toEqual(before);
+  });
+
   it('leaves a cancelled file as claimable as one that was never claimed', async () => {
     // The documented consequence of `applyJobCancelled` (see its own comment:
     // "eligible again the moment a worker is free"). A cancel is a stop, not

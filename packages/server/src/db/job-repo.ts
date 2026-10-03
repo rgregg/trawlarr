@@ -207,6 +207,20 @@ export interface JobRepo {
    * an ended job is left alone: there is nothing left to cancel.
    */
   requestCancel(input: { jobId: string; nowMs: number }): void;
+  /**
+   * The other jobs on this job's file, as far as they bear on who may write
+   * the file's row.
+   *
+   * `holds`: another job is still open on the file, or one started after
+   * this job did. Either way the row is not this job's to requeue. An OLDER
+   * open job counts: it may be a live worker, and the database cannot tell
+   * that from a row a dead worker never closed. Guessing "dead" would put a
+   * second worker beside a live one.
+   *
+   * `laterEnded`: a job that started after this one has already finished, so
+   * whatever it recorded about the file is newer than anything this job knows.
+   */
+  rivalsFor(input: { jobId: string; fileId: string }): { holds: boolean; laterEnded: boolean };
 }
 
 interface JobRowRaw {
@@ -470,6 +484,20 @@ export const createJobRepo = (db: Db): JobRepo => {
 
     appendOutcome(input) {
       appendOutcomeJob.run(input.text, input.text, input.jobId);
+    },
+
+    rivalsFor(input) {
+      const row = db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(other.ended_at IS NULL OR other.started_at > mine.started_at), 0) AS holds,
+             COALESCE(SUM(other.ended_at IS NOT NULL AND other.started_at > mine.started_at), 0)
+               AS laterEnded
+           FROM job AS other, job AS mine
+          WHERE mine.id = @jobId AND other.file_id = @fileId AND other.id != @jobId`,
+        )
+        .get({ fileId: input.fileId, jobId: input.jobId }) as { holds: number; laterEnded: number };
+      return { holds: row.holds > 0, laterEnded: row.laterEnded > 0 };
     },
   };
 };
