@@ -6,7 +6,11 @@ import type { JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
 import { payloadToNode } from './map-payload.js';
 import type { ServerFrame } from './node-frames.js';
-import { createRemoteAgentHandle, type RemoteAgentInput } from './remote-agent.js';
+import {
+  createRemoteAgentHandle,
+  SETTLING_WAIT_MS,
+  type RemoteAgentInput,
+} from './remote-agent.js';
 
 const SERVER_NOW = 1_700_000_000_000;
 
@@ -162,6 +166,64 @@ describe('createRemoteAgentHandle', () => {
     expect((JSON.parse(setRemoteCalls[0]!.payloadJson) as JobPayload).path).toBe(
       '/media/movies/a.mkv',
     );
+  });
+
+  it('lets a report whose server stat is still pending win over an abandon', async () => {
+    // The lease sweep or a revoke landing inside that one `stat` used to
+    // settle the run as a vanished worker, dropping a report that carried a
+    // replacement already on disk.
+    let answer: (stats: typeof SERVER_STAT) => void = () => {};
+    const { handle, sent } = harness({
+      statPath: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    const run = handle.run(payloadFixture());
+    await flush();
+    expect(handle.settling).toBe(false);
+
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    expect(handle.settling).toBe(true);
+    handle.abandon(new AgentFailure('grace ran out', { reported: false }));
+    // Nor is the node told to drop a job whose report is being applied.
+    expect(sent.filter((frame) => frame.type === 'abandon')).toEqual([]);
+
+    answer(SERVER_STAT);
+    const report = await run;
+    expect(report.replaced?.inode).toBe(SERVER_STAT.ino);
+    expect(handle.settling).toBe(false);
+  });
+
+  it('marks a job its node went offline before receiving as unsent', async () => {
+    const { handle, state, sent } = harness();
+    state.online = false;
+    const error = await handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect((error as AgentFailure).unsent).toBe(true);
+    expect(sent).toEqual([]);
+  });
+
+  it('stops protecting a report whose server stat never answers', async () => {
+    // A hung mount: without a bound the handle could never be released, and
+    // its file would sit in `running` until the daemon restarted.
+    let clock = SERVER_NOW;
+    const { handle } = harness({
+      nowMs: () => clock,
+      statPath: () => new Promise(() => {}),
+    });
+    const run = handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    await flush();
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+
+    clock += SETTLING_WAIT_MS - 1;
+    expect(handle.settling).toBe(true);
+    clock += 1;
+    expect(handle.settling).toBe(false);
+    handle.abandon(new AgentFailure('sent no sign of life', { reported: false }));
+    const error = await run;
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect((error as AgentFailure).message).toBe('sent no sign of life');
   });
 
   it('rejects as a reported failure when prepare throws, and sends nothing', async () => {

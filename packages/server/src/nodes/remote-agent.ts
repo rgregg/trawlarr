@@ -100,10 +100,28 @@ export const withServerStat = async (
   };
 };
 
+/**
+ * How long a report may wait on the server's `stat` before a release is
+ * allowed to win again. A healthy `stat` answers in milliseconds, so this
+ * only ever runs out on a mount that has stopped answering.
+ */
+export const SETTLING_WAIT_MS = 60_000;
+
 export interface RemoteAgentHandle extends AgentHandle {
   readonly nodeId: string;
   /** The job this handle runs, once `run` has been called. */
   readonly jobId: string | null;
+  /**
+   * A `done` report has arrived and is waiting on the server's own `stat` of
+   * the replaced path. The run is over and its outcome is that report; the
+   * hub must not release the job out from under it.
+   *
+   * True for at most `SETTLING_WAIT_MS`. A `stat` on a hung mount never
+   * answers, and a handle that stayed settling for ever could never be
+   * released — not by grace, not by a revoke, not by the 24 h floor — which
+   * would pin its file in `running` until the daemon restarted.
+   */
+  readonly settling: boolean;
   /** Hub → handle: a frame for this job arrived. */
   receive(message: AgentToDaemon): void;
   /** Hub → handle: the lease expired or the node reported the job lost. */
@@ -142,6 +160,10 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
   let earlyFailure: AgentFailure | null = null;
   let settle: ((outcome: Outcome) => void) | null = null;
   let settledOnce = false;
+  /** When a `done` report began waiting on the server's stat; see `RemoteAgentHandle.settling`. */
+  let settlingSinceMs: number | null = null;
+  const isSettling = (): boolean =>
+    settlingSinceMs !== null && input.nowMs() - settlingSinceMs < SETTLING_WAIT_MS;
 
   let resolveExited: (code: number | null) => void = () => {};
   const exited = new Promise<number | null>((resolve) => {
@@ -168,6 +190,7 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
     const done = settle;
     settle = null;
     settledOnce = true;
+    settlingSinceMs = null;
     resolveExited(null);
     done(outcome);
   };
@@ -223,6 +246,9 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
 
   const receive = (message: AgentToDaemon): void => {
     if (settle === null) return; // not running, or already settled: nothing to route to
+    // The report is in hand; a duplicate, or anything else the node says
+    // about a finished job, changes nothing.
+    if (settlingSinceMs !== null) return;
     switch (message.type) {
       case 'ready':
         return;
@@ -271,6 +297,11 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
           report = { ...report, cancelled: true };
         }
         const serverPath = report.replaced?.path ?? null;
+        // From here the run's outcome is this report. An `abandon` landing
+        // while the stat was pending (the lease sweep, a revoke) used to win
+        // and settle the run as a vanished worker, dropping a report whose
+        // replacement was already on disk.
+        settlingSinceMs = input.nowMs();
         withServerStat(report, statPath).then(
           (restated) => {
             finish({ ok: true, report: restated });
@@ -341,7 +372,7 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
         ok: false,
         error: new AgentFailure(
           `Node ${input.nodeId} went offline before this job could be sent to it.`,
-          { reported: false, cancelled },
+          { reported: false, cancelled, unsent: true },
         ),
       });
     }
@@ -372,6 +403,9 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
     exited,
     get jobId() {
       return jobId;
+    },
+    get settling() {
+      return isSettling();
     },
 
     run: (payload: JobPayload): Promise<JobReport> => {
@@ -408,7 +442,9 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
     receive,
 
     abandon: (given: AgentFailure): void => {
-      if (settledOnce) return;
+      // The hub checks `settling` before it releases; this is the same rule
+      // for any abandon that reaches the handle anyway.
+      if (settledOnce || isSettling()) return;
       // A job cancelled while its node was offline, whose grace then ran
       // out, is still the operator's cancel: without the flag the supervisor
       // stalls it as a vanished worker and spends an attempt.
@@ -418,6 +454,7 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
               reported: given.reported,
               superseded: given.superseded,
               unmapped: given.unmapped,
+              unsent: given.unsent,
               cancelled: true,
             })
           : given;

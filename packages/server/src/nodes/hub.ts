@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { closeSync, openSync, readSync } from 'node:fs';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
@@ -205,13 +205,27 @@ const sameLease = (a: Lease, b: Lease): boolean =>
 /** Lines already in the server's copy of a job log: what a reconnecting node need not resend. */
 const countLogLines = (path: string | null): number => {
   if (path === null) return 0;
+  // Read through one fixed buffer rather than `readFileSync`: this runs once
+  // per journal entry inside a node's hello, and a long transcode's log read
+  // whole put its entire size on the heap for each one.
+  let fd: number;
   try {
-    const bytes = readFileSync(path);
-    let lines = 0;
-    for (const byte of bytes) if (byte === 0x0a) lines += 1;
-    return lines;
+    fd = openSync(path, 'r');
   } catch {
     return 0;
+  }
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let lines = 0;
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) return lines;
+      for (let index = 0; index < read; index += 1) if (buffer[index] === 0x0a) lines += 1;
+    }
+  } catch {
+    return 0;
+  } finally {
+    closeSync(fd);
   }
 };
 
@@ -316,7 +330,10 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       }
       for (const line of lines) writer.append(line);
     } catch (error) {
-      failedLogs.add(jobId);
+      // Remembered only for a job with a live handle, whose settling clears
+      // it. A backfill for a job with none has nothing that ever would, and
+      // each one left its id here for the life of the daemon.
+      if (handles.has(jobId)) failedLogs.add(jobId);
       closeLogWriter(jobId);
       reportError(`the server log for job ${jobId} could not be written`, error);
     } finally {
@@ -353,11 +370,17 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
    * is told to stop if it is connected.
    */
   const release = (row: { jobId: string; nodeId: string; lease: Lease }, message: string): void => {
+    const handle = handles.get(row.jobId);
+    // Its report has arrived and is one server `stat` from being applied.
+    // Released now, the run settled as a vanished worker and the report —
+    // possibly carrying a replacement already on disk — was dropped. Left
+    // leased, the sweep looks again next time; `settling` gives up on a stat
+    // that never answers, so this cannot hold a file for ever.
+    if (handle?.settling === true) return;
     jobRepo.setLease({
       jobId: row.jobId,
       lease: { state: 'expired', expiresAtMs: row.lease.expiresAtMs },
     });
-    const handle = handles.get(row.jobId);
     if (handle !== undefined) {
       handle.abandon(new AgentFailure(message, { reported: false }));
       return;
@@ -600,6 +623,12 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
     }
 
     // A leased job the node no longer knows about was lost with it.
+    //
+    // Deliberately an ordinary failed attempt, never `unsent`, even for a
+    // job the node said nothing about. "No record" does not prove the frame
+    // never arrived: a node that refuses a job (a full data directory) drops
+    // it just as silently, and requeueing that unpenalised would claim and
+    // lose the same file for ever with no attempt ever spent.
     for (const leased of jobRepo.listLeased()) {
       if (leased.nodeId !== nodeId || mentioned.has(leased.jobId)) continue;
       if (leased.lease.state === 'expired') continue;

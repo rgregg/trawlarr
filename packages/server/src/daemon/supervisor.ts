@@ -349,14 +349,37 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
   const settleSuperseded = (payload: JobPayload, text: string, report?: JobReport): FileState => {
     const job = jobRepo.getById(payload.jobId);
     const file = mediaFileRepo.getById(payload.fileId);
-    if (job !== null && job.endedAt !== null) {
-      // Even a report carrying a replacement: the row was released and a
-      // newer claim may own the file now. That job re-probes it; writing an
-      // identity from here could overwrite what the newer job recorded.
-      jobRepo.appendOutcome({ jobId: payload.jobId, text });
-      return file?.state ?? 'failed';
-    }
     const latest = jobRepo.listForFile(payload.fileId)[0];
+    if (job !== null && job.endedAt !== null) {
+      // The row was released, and a newer claim may own the file now. That
+      // job re-probes it; writing an identity from here could overwrite what
+      // the newer job recorded.
+      //
+      // But when NO job has claimed the file since (released into backoff,
+      // say), nothing is going to re-probe it, and the row would name a file
+      // that is no longer on disk until the next scan. The replacement is
+      // recorded then, and only that: the release already folded the attempt.
+      if (
+        report?.replaced != null &&
+        file !== null &&
+        file.state !== 'running' &&
+        latest?.id === payload.jobId
+      ) {
+        try {
+          recordReplacement({ db, row: file, report, nowMs });
+        } catch (error) {
+          // Unprobeable, or an identity collision: the next scan sorts it out,
+          // as it would have before. The closed row says why.
+          jobRepo.appendOutcome({
+            jobId: payload.jobId,
+            text: `${text} (The replacement could not be recorded: ${messageOf(error)})`,
+          });
+          return mediaFileRepo.getById(payload.fileId)?.state ?? 'failed';
+        }
+      }
+      jobRepo.appendOutcome({ jobId: payload.jobId, text });
+      return mediaFileRepo.getById(payload.fileId)?.state ?? 'failed';
+    }
     if (file !== null && file.state === 'running' && latest?.id === payload.jobId) {
       // Still ours: a replacement that landed before the refusal is recorded
       // before the stall, or the retry would start from the old identity and
@@ -408,9 +431,13 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         // file's fault: requeue rather than count an attempt.
         state = applyJobCancelled({ db, payload, nowMs }).state;
         text = 'Cancelled by an operator; the file was requeued unpenalised.';
-      } else if (outcome.error instanceof AgentFailure && outcome.error.unmapped) {
-        // A map or library edit raced the claim, so the job was never sent:
-        // requeued without spending an attempt, with the path in the outcome.
+      } else if (
+        outcome.error instanceof AgentFailure &&
+        (outcome.error.unmapped || outcome.error.unsent)
+      ) {
+        // A map or library edit raced the claim, or the node went away before
+        // the job reached it. Either way nothing ran: requeued without
+        // spending an attempt, with the reason in the outcome.
         text = messageOf(outcome.error);
         state = applyJobUnmapped({ db, payload, reason: text, nowMs }).state;
       } else if (outcome.error instanceof AgentFailure && outcome.error.superseded) {

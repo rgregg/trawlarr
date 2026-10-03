@@ -81,7 +81,13 @@ let clients: WebSocket[];
 let extraHubs: NodeHub[];
 let hubErrors: string[];
 
-const makeHub = (over: { pingIntervalMs?: number; offlineAfterMs?: number } = {}): NodeHub => {
+const makeHub = (
+  over: {
+    pingIntervalMs?: number;
+    offlineAfterMs?: number;
+    statPath?: NonNullable<Parameters<typeof createNodeHub>[0]['statPath']>;
+  } = {},
+): NodeHub => {
   const bus = createEventBus();
   bus.subscribe((event) => events.push(event));
   return createNodeHub({
@@ -713,6 +719,54 @@ describe('createNodeHub', () => {
       'Node garage restarted while running this job.',
     );
     expect((bError as Error).message).toBe('Node garage restarted while running this job.');
+    // An attempt, not a free requeue: "no record" does not prove the job
+    // never arrived, and a node that silently refuses one would loop for ever.
+    expect((bError as AgentFailure).unsent).toBe(false);
+  });
+
+  it('does not release a job whose report is waiting on the server stat', async () => {
+    let statting = false;
+    let answer: () => void = () => {};
+    await hub.close();
+    hub = makeHub({
+      statPath: () =>
+        new Promise((resolve) => {
+          statting = true;
+          answer = () => {
+            resolve({ dev: 1, ino: 1, nlink: 1, mtimeMs: now, ctimeMs: now, size: 1 });
+          };
+        }),
+    });
+    hub.attach(server);
+    const { client, payload, outcome } = await startRemoteJob();
+    client.send({
+      type: 'agent',
+      jobId: payload.jobId,
+      message: {
+        type: 'done',
+        report: {
+          jobId: payload.jobId,
+          outcome: 'ok',
+          replaced: { path: payload.path.replace('/media', '/mnt/nas') },
+        },
+      },
+    });
+    await waitFor(() => statting, 'the stat to start');
+
+    // The node restarts and says hello with no record of the job, which
+    // releases it as lost. Released here, the run settled as a vanished
+    // worker and the report — with a replacement already on disk — was dropped.
+    client.ws.close();
+    await waitFor(() => leaseOf(payload.jobId).state === 'grace', 'grace');
+    const again = await connectNode();
+    await again.hello([]);
+    expect(leaseOf(payload.jobId).state).not.toBe('expired');
+    expect(outcome.settled).toBe(false);
+
+    answer();
+    await waitFor(() => outcome.settled, 'run to settle');
+    expect(outcome.error).toBeNull();
+    expect(outcome.report?.replaced?.path).toBe(payload.path);
   });
 
   it('replaces an older connection for the same node with close 4000, without moving its leases', async () => {

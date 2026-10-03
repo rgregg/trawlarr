@@ -179,6 +179,15 @@ describe('createNodeRepo', () => {
     expect(() => repo.remove(node.id)).toThrow(NodeRepoError);
   });
 
+  it("finds a node's open job through an index, not by walking the job table", () => {
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT id FROM job WHERE node_id = ? AND ended_at IS NULL LIMIT 1`,
+      )
+      .all('node-1') as { detail: string }[];
+    expect(plan.map((row) => row.detail).join('\n')).toContain('job_node_open_idx');
+  });
+
   it('names must be unique and non-empty', async () => {
     await repo.create({ name: 'gpu-box', nowMs: 0 });
     await expect(repo.create({ name: 'gpu-box', nowMs: 1 })).rejects.toThrow(NodeRepoError);
