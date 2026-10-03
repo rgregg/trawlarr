@@ -1,4 +1,6 @@
+import { basename } from 'node:path';
 import { watch as chokidarWatch } from 'chokidar';
+import { isWorkingFileName } from '@trawlarr/core';
 import { pathContains } from '../fs/path-contains.js';
 
 export interface WatchInput {
@@ -86,7 +88,18 @@ export const createChokidarWatchPort = (): WatchPort => ({
     // arriving or leaving. Distinguishing them here would be the beginning
     // of a second scanner — one that decides from an event what happened
     // to a file. Nothing here decides anything: the walk does.
-    watcher.on('all', (_event, path) => {
+    //
+    // The one thing dropped is a FILE event for trawlarr's own scratch, by
+    // the same `isWorkingFileName` the walk skips files with. Those sit
+    // beside the media rather than under a reserved directory, so `ignored`
+    // cannot cover them, and an event for one starts a scan while the
+    // cross-device copy it names is still being written. The rename that
+    // finishes the copy is still reported: it is an `add` at the media's own
+    // path. Directory events are left alone because the walk descends a
+    // directory whatever it is called (`.trawlarr-old` holds real media).
+    watcher.on('all', (event, path) => {
+      const isFileEvent = event === 'add' || event === 'change' || event === 'unlink';
+      if (isFileEvent && isWorkingFileName(basename(path))) return;
       input.onChange(path);
     });
 

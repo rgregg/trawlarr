@@ -105,6 +105,27 @@ const convergedSignature = (row: MediaFileRow, flowDefinitionHash: string): stri
 };
 
 describe('scanLibrary', () => {
+  it('opens no row for a cross-device staging copy, whether or not a run still owns it', async () => {
+    // The in-flight guard only covers a file sharing a RUNNING row's stem. A
+    // staged `.trawlarr-replace-<uuid>` copy shares no stem with anything, and
+    // once its worker has been killed there is no running row either — so it
+    // has to be refused by name. This one is a real, probeable media file on
+    // purpose: prod's orphan probed cleanly and was marked good.
+    const staged = join(root, 'sub', '.trawlarr-replace-520ab0c8-a5bb-4c6e-8bed-7d19026f12fc.mkv');
+    await makeMedia(staged);
+    try {
+      await scan();
+    } finally {
+      unlinkSync(staged);
+    }
+
+    const paths = createMediaFileRepo(db)
+      .listByLibrary({ libraryId })
+      .map((row) => row.path)
+      .sort();
+    expect(paths).toEqual([join(root, 'one.mkv'), join(root, 'sub', 'two.mkv')]);
+  }, 60_000);
+
   it('adopts externally replaced content at a held path without opening a claimable second row', async () => {
     await scan();
     const repo = createMediaFileRepo(db);
