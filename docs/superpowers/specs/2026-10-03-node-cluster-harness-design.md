@@ -46,10 +46,10 @@ multi-node guarantees on file bytes, job rows and ledger state.
 
 | Path | What it is |
 | --- | --- |
-| `docker/compose.cluster.yml` | One `server` service and one `node` service, on a private network, both `build:` from the repo `Dockerfile`. |
+| `docker/compose.cluster.yml` | One `server` service and one `node` service, on a private network, both running the image tagged `trawlarr-cluster:dev`. The harness never builds or pulls it: `pnpm test:cluster` and CI build it from the working tree first. |
 | `docker/cluster/cluster.ts` | `startCluster()` and the handles it returns. All `docker` invocations live here. |
-| `docker/cluster/media.ts` | Generates the test library with `lavfi testsrc`. |
-| `docker/cluster/ffmpeg-realtime` | A shell wrapper that runs `ffmpeg -re "$@"`. |
+| `docker/cluster/docker.ts` | Runs `docker`, checks it is available, checks the image exists, lists leaked clusters. |
+| `docker/cluster/in-container/` | Files mounted into the containers: an `ffmpeg -re` wrapper, a script that seeds settings, and one that runs read-only SQL. |
 | `docker/cluster/*.cluster.test.ts` | The scenarios. |
 | `vitest.cluster.config.ts` | Includes only `docker/cluster/**/*.cluster.test.ts`; long timeouts; files run one at a time. |
 
@@ -65,7 +65,8 @@ The compose file is a test fixture, not a deployment example: it sets
 ```yaml
 services:
   server:
-    build: { context: .. }
+    image: ${TRAWLARR_CLUSTER_IMAGE:-trawlarr-cluster:dev}
+    pull_policy: never
     environment:
       - NODE_ENV=test
       - TRAWLARR_TEST_ALLOW_SHORT_GRACE=1
@@ -76,14 +77,15 @@ services:
       - server-staging:/staging # the server's own disk: no node mounts it
     ports: ['127.0.0.1::8265'] # an ephemeral host port, read back with `docker compose port`
   node:
-    build: { context: .. }
+    image: ${TRAWLARR_CLUSTER_IMAGE:-trawlarr-cluster:dev}
+    pull_policy: never
     profiles: ['node'] # never started by `up`; the harness starts each one
     environment:
       - TRAWLARR_MODE=node
       - TRAWLARR_SERVER=http://server:8265
       - TRAWLARR_FFMPEG=/cluster/ffmpeg-realtime
     volumes:
-      - ./cluster/ffmpeg-realtime:/cluster/ffmpeg-realtime:ro
+      - ./cluster/in-container:/cluster:ro
     healthcheck: { disable: true }
 ```
 
@@ -169,25 +171,34 @@ project still present, for a run that was killed.
 
 ## Scenarios
 
-Each is one test file, with its own cluster.
+Each is one test, with its own cluster.
 
 | # | Scenario | Setup | Asserts |
 | --- | --- | --- | --- |
-| 1 | Two nodes share a library | 2 nodes, 1 worker each, 4 files, no local workers | Every file ends `good`; each file has exactly one job in state `succeeded`; both node ids appear in `job.node_id`; every file's hash changed |
-| 2 | Different mount paths | Node A at `/media`, node B at `/mnt/nas` | As 1, and no path in any job or file row begins with `/media` or `/mnt/nas` |
+| 1 | Two nodes share a library | 2 nodes, 1 worker each, 4 files, no local workers | Every file ends `good`; each file has exactly one job, in state `succeeded`; both node ids appear in `job.node_id`; every file's hash changed |
+| 2 | Different mount paths | Node A at `/media`, node B at `/mnt/nas` | As 1, and every file path is in the server's view; no job outcome names a node's mount path |
 | 3 | Staging the nodes cannot reach | Library `stagingDir: '/staging'`, 1 node, 1 local worker | The node's library probe is unreachable with detail `staging: no path on this node`; no job has that node's id; the local worker finishes every file |
-| 4 | Network cut inside grace | 1 node, `graceMs` longer than the cut | The job's lease goes to `grace`, then back; the job finishes; the file has one job and `attempt_count` 0 at the end |
-| 5 | Network cut past grace | 1 node, cut held past `graceMs`, 0 local workers | The file is released with the grace message; after reconnect the node's result is not installed: the file's hash equals the original's until a later job replaces it; the released job row gains the "late result" line |
-| 6 | Node killed mid-job | 2 nodes; kill the one running the first job | No file stays `running`; the file is finished by the other node; the killed node's job ends failed |
+| 4 | Network cut inside grace | 1 node, grace far longer than the cut | The job's lease goes to `grace` with the row still open; after reconnect the same job succeeds; one job, `attempt_count` 0, hash changed |
+| 5 | Network cut past grace | 1 node, 3 s grace, no local workers | The job ends `failed` naming the grace window; the file's hash equals the original's; the node is paused, reconnected, and drops the job; the hash still equals the original's and no job succeeded |
+| 6 | Node killed mid-job | 2 nodes; kill the one running the first job | The job ends `failed`; its file is out of `running` with one attempt spent and its original bytes; once requeued, the other node finishes it |
 
 Scenario 5 is the data-safety case: it is asserted on the bytes of the file,
 not on the absence of an error.
 
-Job and file state is read through the API (`/jobs`, `/files`,
-`/libraries/:id/stats`, `/nodes`). Scenario 4 needs a job's lease state; the
-job row carries it (`leaseState`), and if the jobs route does not return it
-the harness reads that one column from the server's database with
-`serverExec` rather than widening the API for a test.
+Four facts about the product shape these, found while planning:
+
+- **State is read from the database.** A script mounted into the server
+  container runs read-only SQL and prints JSON, as the existing end-to-end
+  suite reads its rows. Node probes and settings go through the API.
+- **"Mid-encode" is a step count.** `job_step` gets a row as each flow node
+  finishes; three rows mean Execute is running. Progress events are not
+  durable.
+- **A cut takes about a minute to notice.** `docker network disconnect`
+  drops packets without closing the socket, and the server declares a node
+  offline after 45 s without a pong. Scenarios 4 and 5 wait for that. No seam
+  is added to shorten it.
+- **A released file is in backoff for five minutes.** Scenario 6 requeues it
+  through `POST /files/:id/requeue` to see the other node take it.
 
 ## When the harness itself fails
 
