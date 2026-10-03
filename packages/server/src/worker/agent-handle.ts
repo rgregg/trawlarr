@@ -104,6 +104,15 @@ export class AgentFailure extends Error {
    * requeues it unpenalised rather than spending an attempt on the edit.
    */
   readonly unmapped: boolean;
+  /**
+   * The job never reached its remote node: the node was offline when the
+   * frame was sent, or reconnected with no record of a job it had never said
+   * a word about. Like `unmapped`, nothing ran and nothing about the file is
+   * in question, so the supervisor requeues it unpenalised. Without this a
+   * node that flapped cost every file it was mid-claim on an attempt, and
+   * enough flaps pushed healthy files to `failed`.
+   */
+  readonly unsent: boolean;
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
 
@@ -114,6 +123,7 @@ export class AgentFailure extends Error {
       reported?: boolean;
       superseded?: boolean;
       unmapped?: boolean;
+      unsent?: boolean;
       exitCode?: number | null;
       signal?: NodeJS.Signals | null;
     } = {},
@@ -124,6 +134,7 @@ export class AgentFailure extends Error {
     this.reported = options.reported ?? false;
     this.superseded = options.superseded ?? false;
     this.unmapped = options.unmapped ?? false;
+    this.unsent = options.unsent ?? false;
     this.exitCode = options.exitCode ?? null;
     this.signal = options.signal ?? null;
   }

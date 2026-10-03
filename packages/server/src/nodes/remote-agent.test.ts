@@ -164,6 +164,60 @@ describe('createRemoteAgentHandle', () => {
     );
   });
 
+  it('lets a report whose server stat is still pending win over an abandon', async () => {
+    // The lease sweep or a revoke landing inside that one `stat` used to
+    // settle the run as a vanished worker, dropping a report that carried a
+    // replacement already on disk.
+    let answer: (stats: typeof SERVER_STAT) => void = () => {};
+    const { handle, sent } = harness({
+      statPath: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    const run = handle.run(payloadFixture());
+    await flush();
+    expect(handle.settling).toBe(false);
+
+    handle.receive({ type: 'done', report: reportFixture('/mnt/nas/movies/a.mkv') });
+    expect(handle.settling).toBe(true);
+    handle.abandon(new AgentFailure('grace ran out', { reported: false }));
+    // Nor is the node told to drop a job whose report is being applied.
+    expect(sent.filter((frame) => frame.type === 'abandon')).toEqual([]);
+
+    answer(SERVER_STAT);
+    const report = await run;
+    expect(report.replaced?.inode).toBe(SERVER_STAT.ino);
+    expect(handle.settling).toBe(false);
+  });
+
+  it('marks a job its node went offline before receiving as unsent', async () => {
+    const { handle, state, sent } = harness();
+    state.online = false;
+    const error = await handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentFailure);
+    expect((error as AgentFailure).unsent).toBe(true);
+    expect(sent).toEqual([]);
+  });
+
+  it('keeps an abandon unsent only while the node has said nothing about the job', async () => {
+    const lost = () => new AgentFailure('no record', { reported: false, unsent: true });
+
+    const silent = harness();
+    const silentRun = silent.handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    await flush();
+    silent.handle.abandon(lost());
+    expect(((await silentRun) as AgentFailure).unsent).toBe(true);
+
+    // One frame is enough: the node had the job, so losing it is an attempt.
+    const heard = harness();
+    const heardRun = heard.handle.run(payloadFixture()).catch((caught: unknown) => caught);
+    await flush();
+    heard.handle.receive({ type: 'ready', pid: 1 });
+    heard.handle.abandon(lost());
+    expect(((await heardRun) as AgentFailure).unsent).toBe(false);
+  });
+
   it('rejects as a reported failure when prepare throws, and sends nothing', async () => {
     const { handle, sent, setRemoteCalls } = harness({
       prepare: () =>

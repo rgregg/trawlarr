@@ -1050,9 +1050,10 @@ describe('the supervisor, across remote nodes', () => {
     expect(createJobRepo(db).getById(agent.payload.jobId)?.endedAt).not.toBeNull();
   });
 
-  it('only appends a superseded report to a job row that already ended, even with a replacement', async () => {
-    // The release closed the row and a newer claim may own the file: that
-    // job re-probes; this late report must not write the file's identity.
+  it('records a replacement from a superseded report whose job row ended, when nothing has claimed the file since', async () => {
+    // Released into backoff with no newer job: nothing else is going to
+    // re-probe the file, so without this the row names a file that is no
+    // longer on disk until the next scan.
     const { supervisor, agents, addNode, libraryId, db, successReport } = harness({
       queued: 1,
       target: { transcode: 0, health: 0 },
@@ -1062,6 +1063,44 @@ describe('the supervisor, across remote nodes', () => {
     supervisor.pause();
     const agent = agents.running()[0]!;
     applyJobFailure({ db, payload: agent.payload, reason: 'released', nowMs: () => NOW });
+    const before = rowFor(db, agent.payload.fileId);
+
+    await agent.finish({
+      ...successReport(agent),
+      success: false,
+      failed: true,
+      superseded: true,
+      outcome: 'Flow aborted after a replacement: refused',
+      replaced: replacedFile(agent.payload.path),
+      postFacts: HEVC_FACTS,
+    });
+
+    const row = rowFor(db, agent.payload.fileId);
+    expect(row.inode_key).toBe('9:4242');
+    // The release's own fold stands: no second attempt, no state change.
+    expect(row.state).toBe(before.state);
+    expect(row.attempt_count).toBe(before.attempt_count);
+    expect(createJobRepo(db).getById(agent.payload.jobId)?.outcome).toContain('refused');
+  });
+
+  it('only appends a superseded report to an ended job row once a newer job has claimed the file', async () => {
+    // The newer job re-probes; this late report must not write over what it
+    // records.
+    const { supervisor, agents, addNode, libraryId, db, successReport } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+    applyJobFailure({ db, payload: agent.payload, reason: 'released', nowMs: () => NOW });
+    createJobRepo(db).start({
+      fileId: agent.payload.fileId,
+      flowId: agent.payload.flow.id,
+      flowHash: agent.payload.flow.definitionHash,
+      nowMs: NOW + 1,
+    });
     const before = rowFor(db, agent.payload.fileId);
 
     await agent.finish({
@@ -1101,6 +1140,33 @@ describe('the supervisor, across remote nodes', () => {
     const job = createJobRepo(db).getById(agent.payload.jobId);
     expect(job?.endedAt).not.toBeNull();
     expect(job?.outcome).toContain(agent.payload.path);
+  });
+
+  it('requeues unpenalised when the node went away before the job reached it', async () => {
+    // A flapping node used to cost every file it was mid-claim on an attempt,
+    // for a reason that says nothing about the file.
+    const { supervisor, agents, addNode, libraryId, db } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    supervisor.pause();
+    const agent = agents.running()[0]!;
+
+    await agent.fail(
+      new AgentFailure('Node node-x went offline before this job could be sent to it.', {
+        reported: false,
+        unsent: true,
+      }),
+    );
+
+    const row = rowFor(db, agent.payload.fileId);
+    expect(row.state).toBe('queued');
+    expect(row.attempt_count).toBe(0);
+    const job = createJobRepo(db).getById(agent.payload.jobId);
+    expect(job?.endedAt).not.toBeNull();
+    expect(job?.outcome).toContain('went offline');
   });
 
   it('calls settled() exactly once, after the job row has ended', async () => {

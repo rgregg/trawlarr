@@ -1,4 +1,15 @@
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { AgentToDaemon } from '../worker/protocol.js';
@@ -103,6 +114,39 @@ export const createJournal = (dir: string): Journal => {
     renameSync(tmp, entryPath(entry.jobId));
   };
 
+  /**
+   * `writeEntry`, forced to disk before it returns: the file's bytes, then
+   * the directory entry the rename made.
+   *
+   * For the held report only. The node sends that report the moment `hold`
+   * returns, and the whole promise of the journal is that it can be offered
+   * again after a crash. Without the fsync a power cut in the next few
+   * seconds could leave the rename unwritten — the entry still `running` on
+   * disk — and a finished job, replacement and all, came back as lost.
+   */
+  const writeEntryDurably = (entry: JournalEntry): void => {
+    const tmp = join(dir, `.${entry.jobId}.tmp-${randomBytes(6).toString('hex')}`);
+    const fd = openSync(tmp, 'w');
+    try {
+      writeSync(fd, JSON.stringify(entry));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, entryPath(entry.jobId));
+    try {
+      const dirFd = openSync(dir, 'r');
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+    } catch {
+      // A directory cannot be opened or synced on every platform (Windows);
+      // the file's own bytes are already on disk.
+    }
+  };
+
   const requireEntry = (jobId: string): JournalEntry => {
     const entry = memory.get(jobId);
     if (entry === undefined) {
@@ -194,7 +238,7 @@ export const createJournal = (dir: string): Journal => {
       const entry = requireEntry(jobId);
       entry.state = 'held-report';
       entry.final = final;
-      writeEntry(entry);
+      writeEntryDurably(entry);
       lastFlushMs.set(jobId, Date.now());
     },
 
