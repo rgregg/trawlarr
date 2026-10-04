@@ -625,10 +625,10 @@ To see which build a container is running, open **Config** in the UI (it
 shows e.g. `Trawlarr 0.1.0 (40e7cc1)`), or read `version` and `commit` from
 `GET /api/v1/system/version`.
 
-To cut a release, set the same version in `packages/server/package.json` and
-`DAEMON_VERSION` (`packages/server/src/daemon/daemon.ts`), merge, then push a
-matching tag: `git tag v0.1.0 && git push origin v0.1.0`. A tag that does not
-match the package version fails the publish.
+To cut a release, push a tag: `git tag -a v0.1.0 -m v0.1.0 && git push origin v0.1.0`.
+The tag is the only place the version is written; the build reads it from
+`git describe` (builds after a tag report e.g. `0.1.0+5.g1a2b3c4`, and a
+checkout with no tag reports `0.0.0+g<sha>`).
 
 ## 11. Remote nodes
 

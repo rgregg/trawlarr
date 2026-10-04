@@ -8,7 +8,7 @@
   },
   "packageManager": "pnpm@9.12.0",
   "scripts": {
-    "build": "tsc --build && pnpm -r --if-present run build:sql && pnpm --filter @trawlarr/web run build",
+    "build": "tsc --build && pnpm -r --if-present run build:sql && node scripts/stamp-version.mjs && pnpm --filter @trawlarr/web run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json && tsc --noEmit -p packages/web/tsconfig.test.json",
     "test:watch": "vitest",
