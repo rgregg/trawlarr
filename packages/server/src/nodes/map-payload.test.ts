@@ -36,6 +36,7 @@ const baseLibrary = (overrides: Partial<LibraryRecord> = {}): LibraryRecord => (
   pausedReason: null,
   userVariables: {},
   plex: null,
+  runtime: { kind: null, url: '', apiKey: '', percent: 5, minutes: 3 },
   createdAt: 0,
   ...overrides,
 });

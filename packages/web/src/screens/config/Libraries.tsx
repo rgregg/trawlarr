@@ -25,6 +25,13 @@ export interface LibraryRow extends LibraryResource {
     sectionId: string;
     pathPrefix: string | null;
   } | null;
+  runtime?: {
+    kind: 'radarr' | 'sonarr' | null;
+    url: string;
+    hasApiKey: boolean;
+    percent: number;
+    minutes: number;
+  };
 }
 
 type View =

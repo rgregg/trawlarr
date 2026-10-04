@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 import type { Db } from './connection.js';
+import type { RuntimeThreshold } from '@trawlarr/core';
 import type { PlexConfig } from '../library/plex-notify.js';
 import { pathContains } from '../fs/path-contains.js';
 
@@ -25,7 +26,21 @@ export interface LibraryRecord {
    * the definition's hash, which is the convergence signature.
    */
   plex: PlexConfig | null;
+  runtime: RuntimeSourceConfig;
   createdAt: number;
+}
+
+/**
+ * Where a library's expected runtimes come from, and how far a file may stray
+ * from one. `kind` null means no Radarr/Sonarr: the global TMDB key (if any)
+ * is the only source. Per-library for the reasons Plex is: two libraries
+ * rarely share an arr instance, and a key in the flow would change the
+ * convergence signature.
+ */
+export interface RuntimeSourceConfig extends RuntimeThreshold {
+  kind: 'radarr' | 'sonarr' | null;
+  url: string;
+  apiKey: string;
 }
 
 export interface CreateLibraryInput {
@@ -58,6 +73,7 @@ export interface UpdateLibraryInput {
   allowHardlinked?: boolean;
   userVariables?: Record<string, string>;
   plex?: PlexConfig | null;
+  runtime?: RuntimeSourceConfig;
 }
 
 export interface LibraryRepo {
@@ -182,6 +198,11 @@ interface LibraryRow {
   plex_token: string;
   plex_section_id: string;
   plex_path_prefix: string;
+  runtime_source_kind: string;
+  runtime_source_url: string;
+  runtime_source_key: string;
+  runtime_threshold_percent: number;
+  runtime_threshold_minutes: number;
   created_at: number;
 }
 
@@ -201,6 +222,22 @@ const toPlexConfig = (row: LibraryRow): PlexConfig | null =>
         pathPrefix: row.plex_path_prefix.trim() === '' ? null : row.plex_path_prefix.trim(),
       };
 
+/** Half-configured (a kind with no address) is off, as it is for Plex. */
+const toRuntimeConfig = (row: LibraryRow): RuntimeSourceConfig => {
+  const kind =
+    (row.runtime_source_kind === 'radarr' || row.runtime_source_kind === 'sonarr') &&
+    row.runtime_source_url.trim() !== ''
+      ? row.runtime_source_kind
+      : null;
+  return {
+    kind,
+    url: row.runtime_source_url.trim(),
+    apiKey: row.runtime_source_key,
+    percent: row.runtime_threshold_percent,
+    minutes: row.runtime_threshold_minutes,
+  };
+};
+
 const toRecord = (row: LibraryRow): LibraryRecord => ({
   id: row.id,
   name: row.name,
@@ -215,6 +252,7 @@ const toRecord = (row: LibraryRow): LibraryRecord => ({
   pausedReason: row.paused_reason,
   userVariables: JSON.parse(row.user_variables_json) as Record<string, string>,
   plex: toPlexConfig(row),
+  runtime: toRuntimeConfig(row),
   createdAt: row.created_at,
 });
 
@@ -341,13 +379,16 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
       });
 
       const nextPlex = input.plex === undefined ? current.plex : input.plex;
+      const nextRuntime = input.runtime ?? current.runtime;
 
       db.prepare(
         `UPDATE library
             SET name = ?, roots_json = ?, extensions_json = ?, companion_extensions_json = ?,
                 staging_dir = ?, trash_dir = ?, flow_id = ?, allow_hardlinked = ?,
                 user_variables_json = ?,
-                plex_url = ?, plex_token = ?, plex_section_id = ?, plex_path_prefix = ?
+                plex_url = ?, plex_token = ?, plex_section_id = ?, plex_path_prefix = ?,
+                runtime_source_kind = ?, runtime_source_url = ?, runtime_source_key = ?,
+                runtime_threshold_percent = ?, runtime_threshold_minutes = ?
           WHERE id = ?`,
       ).run(
         input.name ?? current.name,
@@ -363,6 +404,11 @@ export const createLibraryRepo = (db: Db): LibraryRepo => {
         nextPlex?.token ?? '',
         nextPlex?.sectionId ?? '',
         nextPlex?.pathPrefix ?? '',
+        nextRuntime.kind ?? '',
+        nextRuntime.url,
+        nextRuntime.apiKey,
+        nextRuntime.percent,
+        nextRuntime.minutes,
         current.id,
       );
 

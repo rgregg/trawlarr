@@ -5,6 +5,7 @@ import {
   draftProblems,
   toCreateBody,
   toPlexPatch,
+  toRuntimePatch,
   type LibraryDraft,
 } from './library-form-model.js';
 
@@ -18,6 +19,11 @@ const draft = (patch: Partial<LibraryDraft> = {}): LibraryDraft => ({
   plexToken: '',
   plexSectionId: '',
   plexPathPrefix: '',
+  runtimeKind: '',
+  runtimeUrl: '',
+  runtimeApiKey: '',
+  runtimePercent: '5',
+  runtimeMinutes: '3',
   ...patch,
 });
 
@@ -158,5 +164,41 @@ describe('plex notification', () => {
 
   it('leaves a draft with no Plex fields entirely clean', () => {
     expect(draftProblems(draft())).toEqual([]);
+  });
+});
+
+describe('expected length settings', () => {
+  it('needs a URL with a scheme once a source is chosen', () => {
+    expect(draftProblems(draft({ runtimeKind: 'radarr', runtimeUrl: 'radarr.lan' }))).toContain(
+      'Radarr/Sonarr URL needs a scheme, e.g. http://radarr.lan:7878.',
+    );
+    expect(
+      draftProblems(draft({ runtimeKind: 'radarr', runtimeUrl: 'http://radarr.lan:7878' })),
+    ).toEqual([]);
+  });
+
+  it('rejects a tolerance that is not a number in range', () => {
+    expect(draftProblems(draft({ runtimePercent: '' }))).toHaveLength(1);
+    expect(draftProblems(draft({ runtimePercent: '101' }))).toHaveLength(1);
+    expect(draftProblems(draft({ runtimeMinutes: 'x' }))).toHaveLength(1);
+  });
+
+  it('omits a blank API key so the stored one survives', () => {
+    const patch = toRuntimePatch(
+      draft({ runtimeKind: 'sonarr', runtimeUrl: ' http://s:8989 ', runtimePercent: '10' }),
+    );
+    expect(patch).toEqual({ kind: 'sonarr', url: 'http://s:8989', percent: 10, minutes: 3 });
+    expect('apiKey' in patch).toBe(false);
+    expect(toRuntimePatch(draft({ runtimeKind: 'sonarr', runtimeApiKey: 'k' })).apiKey).toBe('k');
+  });
+
+  it('clears the address and key when no source is chosen', () => {
+    expect(toRuntimePatch(draft())).toEqual({
+      kind: null,
+      url: '',
+      apiKey: '',
+      percent: 5,
+      minutes: 3,
+    });
   });
 });

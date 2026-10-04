@@ -4,7 +4,15 @@ import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { formatBytes, type ApiFile } from '../files/files-model.js';
-import { groupProblems, PROBLEM_STATES, type ProblemGroup } from './diagnose-model.js';
+import {
+  groupProblems,
+  PROBLEM_STATES,
+  sortMismatches,
+  summariseMismatch,
+  withoutMismatch,
+  type ProblemGroup,
+  type RuntimeMismatch,
+} from './diagnose-model.js';
 
 // The three states worth diagnosing. `unknown`, `queued` and `running` are
 // not problems — they are work still ahead of the queue — so they never
@@ -98,6 +106,138 @@ const RequeueControl = (props: { client: ApiClient; group: ProblemGroup }): JSX.
         </p>
       )}
     </div>
+  );
+};
+
+/**
+ * One file with the wrong length, and the three things a person can do about
+ * it. Reverify and Delete are the same endpoints the file screen uses, so a
+ * file a job holds is refused here exactly as it is there; the refusal is
+ * shown verbatim.
+ */
+const MismatchRow = (props: {
+  client: ApiClient;
+  item: RuntimeMismatch;
+  navigate: (to: string) => void;
+  onGone: (id: string) => void;
+}): JSX.Element => {
+  const { client, item, navigate, onGone } = props;
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [queued, setQueued] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const summary = summariseMismatch(item);
+
+  const act = (run: () => Promise<void>): void => {
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      try {
+        await run();
+      } catch (failure) {
+        setError(describeFailure(failure).message);
+        setConfirming(false);
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  return (
+    <li className="mismatch-row">
+      <div className="mismatch-main">
+        <Link
+          to={formatRoute({
+            name: 'file',
+            id: item.id,
+            filters: { library: null, state: null, q: null },
+          })}
+          navigate={navigate}
+        >
+          {basename(item.path)}
+        </Link>
+        <span className={`mismatch-delta mismatch-${summary.direction}`}>{summary.delta}</span>
+        <span className="mismatch-detail">
+          {summary.actual} of {summary.expected}
+          {summary.source !== '' && ` · ${summary.source}`}
+        </span>
+      </div>
+
+      {queued ? (
+        <span className="mismatch-queued" role="status">
+          Queued
+        </span>
+      ) : (
+        <div className="mismatch-actions">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              act(async () => {
+                await client.post(`/files/${item.id}/requeue`);
+                setQueued(true);
+              });
+            }}
+          >
+            Reverify
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              act(async () => {
+                await client.post(`/files/${item.id}/runtime/ignore`);
+                onGone(item.id);
+              });
+            }}
+          >
+            Ignore
+          </button>
+          {confirming ? (
+            <>
+              <button
+                type="button"
+                className="btn-danger"
+                disabled={busy}
+                onClick={() => {
+                  act(async () => {
+                    await client.del(`/files/${item.id}`);
+                    onGone(item.id);
+                  });
+                }}
+              >
+                Confirm delete
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setConfirming(false);
+                }}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setConfirming(true);
+              }}
+            >
+              Delete
+            </button>
+          )}
+        </div>
+      )}
+
+      {error !== null && (
+        <p className="problem-requeue-fail" role="alert">
+          {error}
+        </p>
+      )}
+    </li>
   );
 };
 
@@ -206,6 +346,7 @@ export const Diagnose = (props: {
   const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [groups, setGroups] = useState<ProblemGroup[]>([]);
+  const [mismatches, setMismatches] = useState<RuntimeMismatch[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -235,7 +376,19 @@ export const Diagnose = (props: {
         );
         if (cancelled) return;
 
+        // SECONDARY data, like the reasons above: a failure here costs the
+        // wrong-length list, not the failed/held cards that already arrived.
+        let wrongLength: RuntimeMismatch[] = [];
+        try {
+          const page = await client.get<{ items: RuntimeMismatch[] }>('/diagnose/runtime');
+          wrongLength = sortMismatches(page.items);
+        } catch {
+          wrongLength = [];
+        }
+        if (cancelled) return;
+
         setGroups(groupProblems({ files, reasons }));
+        setMismatches(wrongLength);
         setLoading(false);
       } catch (error) {
         if (cancelled) return;
@@ -275,7 +428,7 @@ export const Diagnose = (props: {
         </div>
       )}
 
-      {failure === null && !loading && groups.length === 0 && (
+      {failure === null && !loading && groups.length === 0 && mismatches.length === 0 && (
         <div className="problem-empty" role="status">
           {/* This screen has never counted libraries — it fetches files by
               state — so it must not claim how many there are. It said "both
@@ -296,6 +449,25 @@ export const Diagnose = (props: {
             <ProblemCard key={group.key} client={client} group={group} navigate={navigate} />
           ))}
         </ul>
+      )}
+
+      {failure === null && !loading && mismatches.length > 0 && (
+        <section className="mismatch-section">
+          <h3>Wrong length</h3>
+          <ul className="mismatch-list">
+            {mismatches.map((item) => (
+              <MismatchRow
+                key={item.id}
+                client={client}
+                item={item}
+                navigate={navigate}
+                onGone={(id) => {
+                  setMismatches((current) => withoutMismatch(current, id));
+                }}
+              />
+            ))}
+          </ul>
+        </section>
       )}
     </div>
   );

@@ -214,3 +214,74 @@
     justify-content: center;
   }
 }
+
+/* Files whose length is wrong for their title. Quieter than a failure card:
+   nothing has errored, so no accent edge, just rows. */
+.mismatch-section {
+  margin-top: var(--space-5);
+}
+
+.mismatch-section h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.mismatch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mismatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+
+.mismatch-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mismatch-delta {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mismatch-short {
+  color: var(--bad);
+}
+
+.mismatch-long {
+  color: var(--warn);
+}
+
+.mismatch-detail,
+.mismatch-queued {
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.mismatch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mismatch-row .problem-requeue-fail {
+  flex-basis: 100%;
+  margin: 0;
+}

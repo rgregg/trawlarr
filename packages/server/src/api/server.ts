@@ -20,6 +20,7 @@ import { createAccountRepo, type AccountRepo } from '../db/account-repo.js';
 import { authRoutes } from './routes/auth.js';
 import { createStaticHandler, resolveWebRoot } from './static-files.js';
 import { fileRoutes } from './routes/files.js';
+import { runtimeRoutes } from './routes/runtime.js';
 import { flowRoutes } from './routes/flows.js';
 import { jobRoutes } from './routes/jobs.js';
 import { libraryRoutes } from './routes/libraries.js';
@@ -46,6 +47,7 @@ export const ALL_ROUTES: Route[] = [
   ...authRoutes,
   ...libraryRoutes,
   ...fileRoutes,
+  ...runtimeRoutes,
   ...flowRoutes,
   ...pluginRoutes,
   ...jobRoutes,

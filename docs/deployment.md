@@ -595,6 +595,15 @@ That refusal does cost the file an attempt: it is `held` with a backoff, and
 after three attempts `failed`, which is terminal and needs
 `trawlarr requeue --library Movies --state failed`.
 
+### Wrong-length detection needs outbound HTTP
+
+Diagnose's "Wrong length" list compares a file's duration with the title's
+expected runtime. The daemon calls the library's Radarr/Sonarr (set per
+library in the UI; the container must be able to reach that address) and, as
+the fallback, `api.themoviedb.org` with the global TMDB key (Configure →
+System). Both are optional; with neither configured nothing is looked up. The
+keys live in the `/config` database and are never returned by the API.
+
 ## 10. Upgrading
 
 ```bash

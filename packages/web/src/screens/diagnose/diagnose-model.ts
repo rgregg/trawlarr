@@ -144,3 +144,66 @@ export const groupProblems = (input: {
 
   return result.sort((left, right) => right.files.length - left.files.length);
 };
+
+/**
+ * A file whose length is wrong for its title, as `GET /diagnose/runtime`
+ * reports it. The server does the comparing (thresholds are per library);
+ * this side only presents.
+ */
+export interface RuntimeMismatch {
+  id: string;
+  libraryId: string;
+  path: string;
+  sizeBytes: number;
+  state: string;
+  durationMs: number;
+  expectedMs: number;
+  source: string | null;
+  /** What the file is measured against: the accepted length once one was ignored, else expected. */
+  baselineMs: number;
+  /** actual - baseline; negative is short. */
+  diffMs: number;
+}
+
+const SOURCE_LABELS: Record<string, string> = { radarr: 'Radarr', sonarr: 'Sonarr', tmdb: 'TMDB' };
+
+/** `1h 02m` or `42m`, rounded to the minute; seconds are noise at this scale. */
+export const formatSpan = (ms: number): string => {
+  const total = Math.round(Math.abs(ms) / 60_000);
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return hours === 0
+    ? `${String(minutes)}m`
+    : `${String(hours)}h ${String(minutes).padStart(2, '0')}m`;
+};
+
+export interface MismatchSummary {
+  direction: 'short' | 'long';
+  /** e.g. `1h 00m short` */
+  delta: string;
+  actual: string;
+  expected: string;
+  source: string;
+}
+
+export const summariseMismatch = (item: RuntimeMismatch): MismatchSummary => {
+  const direction = item.diffMs < 0 ? 'short' : 'long';
+  return {
+    direction,
+    delta: `${formatSpan(item.diffMs)} ${direction}`,
+    actual: formatSpan(item.durationMs),
+    expected: formatSpan(item.baselineMs),
+    source: item.source === null ? '' : (SOURCE_LABELS[item.source] ?? item.source),
+  };
+};
+
+/** Furthest from right first: the file most likely to be truncated or wrong leads. */
+export const sortMismatches = (items: RuntimeMismatch[]): RuntimeMismatch[] =>
+  [...items].sort(
+    (left, right) =>
+      Math.abs(right.diffMs) - Math.abs(left.diffMs) || left.path.localeCompare(right.path),
+  );
+
+/** The list after one file is dealt with (deleted, ignored or sent to reverify). */
+export const withoutMismatch = (items: RuntimeMismatch[], id: string): RuntimeMismatch[] =>
+  items.filter((item) => item.id !== id);

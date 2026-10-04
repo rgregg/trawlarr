@@ -10,6 +10,12 @@ export interface LibraryDraft {
   plexToken: string;
   plexSectionId: string;
   plexPathPrefix: string;
+  runtimeKind: '' | 'radarr' | 'sonarr';
+  runtimeUrl: string;
+  /** Blank keeps the stored key: the daemon never sends it back. */
+  runtimeApiKey: string;
+  runtimePercent: string;
+  runtimeMinutes: string;
 }
 
 /** What the daemon stores for a library's media-server notification. */
@@ -18,6 +24,14 @@ export interface PlexPatch {
   token: string;
   sectionId: string;
   pathPrefix: string | null;
+}
+
+export interface RuntimePatch {
+  kind: 'radarr' | 'sonarr' | null;
+  url: string;
+  apiKey?: string;
+  percent: number;
+  minutes: number;
 }
 
 export interface LibraryCreateBody {
@@ -75,7 +89,37 @@ export const draftProblems = (draft: LibraryDraft): string[] => {
     problems.push('Plex library path must be absolute, as Plex sees it, e.g. /data/movies.');
   }
 
+  const runtimeUrl = draft.runtimeUrl.trim();
+  if (draft.runtimeKind !== '' && !/^https?:\/\//.test(runtimeUrl)) {
+    problems.push('Radarr/Sonarr URL needs a scheme, e.g. http://radarr.lan:7878.');
+  }
+  for (const [label, raw, max] of [
+    ['Length tolerance %', draft.runtimePercent, 100],
+    ['Length tolerance minutes', draft.runtimeMinutes, 600],
+  ] as const) {
+    const value = Number(raw);
+    if (raw.trim() === '' || !Number.isFinite(value) || value < 0 || value > max) {
+      problems.push(`${label} must be a number from 0 to ${String(max)}.`);
+    }
+  }
+
   return problems;
+};
+
+/**
+ * The `runtime` field of an edit. No source (kind empty) clears the address
+ * and key; otherwise a blank key is OMITTED so the stored one survives.
+ */
+export const toRuntimePatch = (draft: LibraryDraft): RuntimePatch => {
+  const apiKey = draft.runtimeApiKey.trim();
+  const base = { percent: Number(draft.runtimePercent), minutes: Number(draft.runtimeMinutes) };
+  if (draft.runtimeKind === '') return { kind: null, url: '', apiKey: '', ...base };
+  return {
+    kind: draft.runtimeKind,
+    url: draft.runtimeUrl.trim(),
+    ...(apiKey === '' ? {} : { apiKey }),
+    ...base,
+  };
 };
 
 /**

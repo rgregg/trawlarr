@@ -1,5 +1,63 @@
 import { describe, expect, it } from 'vitest';
-import { groupProblems, normaliseReason } from './diagnose-model.js';
+import {
+  formatSpan,
+  groupProblems,
+  normaliseReason,
+  sortMismatches,
+  summariseMismatch,
+  withoutMismatch,
+  type RuntimeMismatch,
+} from './diagnose-model.js';
+
+const MIN = 60_000;
+const mismatch = (id: string, durationMin: number, baselineMin: number): RuntimeMismatch => ({
+  id,
+  libraryId: 'lib-1',
+  path: `/m/${id}.mkv`,
+  sizeBytes: 1,
+  state: 'good',
+  durationMs: durationMin * MIN,
+  expectedMs: baselineMin * MIN,
+  source: 'radarr',
+  baselineMs: baselineMin * MIN,
+  diffMs: (durationMin - baselineMin) * MIN,
+});
+
+describe('runtime mismatches', () => {
+  it('formats spans to the minute', () => {
+    expect(formatSpan(42 * MIN)).toBe('42m');
+    expect(formatSpan(62 * MIN)).toBe('1h 02m');
+    expect(formatSpan(-60 * MIN)).toBe('1h 00m');
+  });
+
+  it('says which way the file is wrong and where the expectation came from', () => {
+    expect(summariseMismatch(mismatch('a', 60, 120))).toEqual({
+      direction: 'short',
+      delta: '1h 00m short',
+      actual: '1h 00m',
+      expected: '2h 00m',
+      source: 'Radarr',
+    });
+    expect(summariseMismatch(mismatch('b', 140, 120)).direction).toBe('long');
+    expect(summariseMismatch({ ...mismatch('c', 60, 120), source: 'tmdb' }).source).toBe('TMDB');
+    expect(summariseMismatch({ ...mismatch('d', 60, 120), source: null }).source).toBe('');
+  });
+
+  it('puts the file furthest from right first', () => {
+    const sorted = sortMismatches([
+      mismatch('small', 115, 120),
+      mismatch('big', 30, 120),
+      mismatch('long', 150, 120),
+    ]);
+    expect(sorted.map((i) => i.id)).toEqual(['big', 'long', 'small']);
+  });
+
+  it('drops one file from the list without touching the others', () => {
+    const list = [mismatch('a', 60, 120), mismatch('b', 60, 120)];
+    expect(withoutMismatch(list, 'a').map((i) => i.id)).toEqual(['b']);
+    expect(list).toHaveLength(2);
+  });
+});
 
 const file = (id: string, state: string, sizeBytes: number) => ({
   id,
