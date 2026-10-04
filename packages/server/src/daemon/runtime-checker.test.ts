@@ -1,11 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RUNTIME_RETRY_MS } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { migrate } from '../db/migrate.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import type { RuntimeFetch } from '../library/runtime-sources.js';
-import { createRuntimeChecker } from './runtime-checker.js';
+import { createRuntimeChecker, runtimeFetch } from './runtime-checker.js';
 
 const NOW = 1_700_000_000_000;
 const MIN = 60_000;
@@ -150,5 +150,23 @@ describe('runtime checker', () => {
 
     await checker(f).runOnce();
     expect(row('a')).toEqual({ e: 95 * MIN, s: 'tmdb', c: NOW });
+  });
+});
+
+describe('runtimeFetch', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('hands fetch the redirect mode it was asked for, so the arr key is never re-sent', async () => {
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response('{}')));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await runtimeFetch('http://r:7878/api/v3/parse', {
+      headers: { 'X-Api-Key': 'k' },
+      redirect: 'manual',
+    });
+
+    const init = (fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.redirect).toBe('manual');
+    expect(init.headers).toEqual({ 'X-Api-Key': 'k' });
   });
 });

@@ -148,6 +148,32 @@ describe('payloadToNode', () => {
     expect(payload.library.runtime.apiKey).toBe('secret-key');
   });
 
+  it('has decided what to do with every field of a library before it is sent to a node', () => {
+    // `payloadToNode` spreads the whole record, so a field added to
+    // LibraryRecord reaches every node by default. If this fails, a field was
+    // added: decide whether a node may see it, blank it in `mapPayload` if not
+    // (as `plex.token` and `runtime.apiKey` are), then add it here.
+    expect(Object.keys(baseLibrary()).sort()).toEqual(
+      [
+        'allowHardlinked',
+        'companionExtensions',
+        'createdAt',
+        'enabled',
+        'extensions',
+        'flowId',
+        'id',
+        'name',
+        'pausedReason',
+        'plex',
+        'roots',
+        'runtime',
+        'stagingDir',
+        'trashDir',
+        'userVariables',
+      ].sort(),
+    );
+  });
+
   it('does not mutate its input', () => {
     const original = fixturePayload();
     const originalCopy = JSON.parse(JSON.stringify(original)) as JobPayload;

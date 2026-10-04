@@ -27,8 +27,17 @@ export interface RuntimeChecker {
   runOnce(): Promise<number>;
 }
 
-const defaultFetch: RuntimeFetch = (url, init) =>
-  fetch(url, { headers: init.headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+/**
+ * `redirect` MUST be forwarded: `arrRuntime` asks for `manual` so a source
+ * that redirects is never handed the API key, and a wrapper that rebuilt the
+ * init without it silently restored fetch's default of following the redirect.
+ */
+export const runtimeFetch: RuntimeFetch = (url, init) =>
+  fetch(url, {
+    headers: init.headers,
+    redirect: init.redirect,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
 
 /**
  * Lazy, background, rate-limited expected-runtime lookups.
@@ -52,7 +61,7 @@ export const createRuntimeChecker = (input: {
 }): RuntimeChecker => {
   const repo = createRuntimeCheckRepo(input.db);
   const libraries = createLibraryRepo(input.db);
-  const fetchImpl = input.fetchImpl ?? defaultFetch;
+  const fetchImpl = input.fetchImpl ?? runtimeFetch;
   const pause =
     input.pause ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const batch = input.batch ?? RUNTIME_CHECK_BATCH;
