@@ -14,7 +14,7 @@ export interface RuntimeLookup {
 
 export type RuntimeFetch = (
   url: string,
-  init: { headers: Record<string, string> },
+  init: { headers: Record<string, string>; redirect: 'manual' },
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
 /**
@@ -49,7 +49,11 @@ const getJson = async (
 ): Promise<unknown> => {
   let response;
   try {
-    response = await fetchImpl(url, { headers });
+    // `manual`: a followed redirect re-sends custom headers such as
+    // `X-Api-Key` to the new host (fetch only strips `Authorization` across
+    // origins), so a source that redirects would be handed the key. A 3xx is
+    // reported as a failed lookup instead.
+    response = await fetchImpl(url, { headers, redirect: 'manual' });
   } catch (error) {
     throw new RuntimeSourceError(`${label} did not answer: ${(error as Error).message}`);
   }

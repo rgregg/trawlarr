@@ -77,10 +77,12 @@ const mapPayload = (
       payload.library.stagingDir === null ? null : toNodeOrThrow(map, payload.library.stagingDir),
     trashDir:
       payload.library.trashDir === null ? null : toNodeOrThrow(map, payload.library.trashDir),
-    // A node runs a plugin and an encode; it never looks up a runtime. The
-    // Radarr/Sonarr key is the server's secret, and a node is a different
-    // machine, so the spread above must not carry it across.
+    // A node runs a plugin and an encode; it never looks up a runtime or
+    // notifies Plex (both happen on the server). The Radarr/Sonarr key and the
+    // Plex token are the server's secrets, and a node is a different machine,
+    // so the spread above must not carry them across.
     runtime: { ...payload.library.runtime, apiKey: '' },
+    plex: payload.library.plex === null ? null : { ...payload.library.plex, token: '' },
   },
   logPath: null,
 });

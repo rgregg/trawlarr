@@ -134,6 +134,15 @@ describe('payloadToNode', () => {
 
     const mapped = payloadToNode(payload, MAP);
 
+    payload.library.plex = {
+      url: 'http://plex.lan:32400',
+      token: 'plex-secret',
+      sectionId: '1',
+      pathPrefix: null,
+    };
+    const mappedWithPlex = payloadToNode(payload, MAP);
+    expect(JSON.stringify(mappedWithPlex)).not.toContain('plex-secret');
+    expect(payload.library.plex?.token).toBe('plex-secret');
     expect(JSON.stringify(mapped)).not.toContain('secret-key');
     expect(mapped.library.runtime.url).toBe('http://radarr.lan:7878');
     expect(payload.library.runtime.apiKey).toBe('secret-key');

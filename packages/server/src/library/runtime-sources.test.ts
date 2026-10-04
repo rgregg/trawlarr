@@ -39,6 +39,19 @@ describe('arrRuntime', () => {
     expect(f.calls[0]!.headers['X-Api-Key']).toBe('k');
   });
 
+  it('never follows a redirect, which would re-send the key to another host', async () => {
+    const inits: { redirect: string }[] = [];
+    const redirecting: RuntimeFetch = (_url, init) => {
+      inits.push(init);
+      return Promise.resolve({ ok: false, status: 302, json: () => Promise.resolve(null) });
+    };
+
+    await expect(
+      arrRuntime({ kind: 'radarr', url: 'http://r:7878', apiKey: 'k' }, '/m/Heat.mkv', redirecting),
+    ).rejects.toThrow(/302/);
+    expect(inits[0]!.redirect).toBe('manual');
+  });
+
   it('sums the episodes Sonarr matched, falling back to the series runtime', async () => {
     const f = fakeFetch({
       '/api/v3/parse': { series: { runtime: 22 }, episodes: [{ runtime: 24 }, {}] },
