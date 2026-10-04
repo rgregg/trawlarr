@@ -815,6 +815,30 @@ describe('files', () => {
       expect(createLibraryRepo(db).getById(library.id)!.runtime.apiKey).toBe('sekrit');
     });
 
+    it('drops the stored key when the address moves to another origin without a new key', async () => {
+      const library = seedLibrary();
+      await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { kind: 'radarr', url: 'http://radarr.lan:7878', apiKey: 'sekrit' },
+      });
+      const repo = createLibraryRepo(db);
+
+      // Same origin, different path: still the same server, so the key stays.
+      await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { url: 'http://radarr.lan:7878/radarr' },
+      });
+      expect(repo.getById(library.id)!.runtime.apiKey).toBe('sekrit');
+
+      // Another host would receive it on the next lookup.
+      await api('PATCH', `/libraries/${library.id}`, { runtime: { url: 'http://evil.example' } });
+      expect(repo.getById(library.id)!.runtime.apiKey).toBe('');
+
+      // A new address with a new key is an ordinary edit.
+      await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { url: 'http://other.lan:7878', apiKey: 'fresh' },
+      });
+      expect(repo.getById(library.id)!.runtime.apiKey).toBe('fresh');
+    });
+
     it('rejects a bad arr address, kind or threshold', async () => {
       const library = seedLibrary();
       for (const runtime of [

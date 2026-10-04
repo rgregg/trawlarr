@@ -77,6 +77,10 @@ const mapPayload = (
       payload.library.stagingDir === null ? null : toNodeOrThrow(map, payload.library.stagingDir),
     trashDir:
       payload.library.trashDir === null ? null : toNodeOrThrow(map, payload.library.trashDir),
+    // A node runs a plugin and an encode; it never looks up a runtime. The
+    // Radarr/Sonarr key is the server's secret, and a node is a different
+    // machine, so the spread above must not carry it across.
+    runtime: { ...payload.library.runtime, apiKey: '' },
   },
   logPath: null,
 });

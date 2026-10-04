@@ -122,6 +122,23 @@ describe('payloadToNode', () => {
     expect(mapped.logPath).toBeNull();
   });
 
+  it("never sends the library's Radarr/Sonarr key to a node", () => {
+    const payload = fixturePayload();
+    payload.library.runtime = {
+      kind: 'radarr',
+      url: 'http://radarr.lan:7878',
+      apiKey: 'secret-key',
+      percent: 5,
+      minutes: 3,
+    };
+
+    const mapped = payloadToNode(payload, MAP);
+
+    expect(JSON.stringify(mapped)).not.toContain('secret-key');
+    expect(mapped.library.runtime.url).toBe('http://radarr.lan:7878');
+    expect(payload.library.runtime.apiKey).toBe('secret-key');
+  });
+
   it('does not mutate its input', () => {
     const original = fixturePayload();
     const originalCopy = JSON.parse(JSON.stringify(original)) as JobPayload;

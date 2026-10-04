@@ -120,6 +120,30 @@ const parsePlexPatch = (patch: Record<string, unknown>): PlexConfig | null | und
 };
 
 /**
+ * A stored key is only ever sent to the address it was saved for. Without this
+ * a PATCH that changed `url` and omitted `apiKey` kept the key, so anyone who
+ * could call the API could point the address at a host they run and have the
+ * next lookup deliver the (otherwise write-only) key to it. Moving to another
+ * origin therefore drops the key unless a new one comes with it.
+ */
+const runtimeApiKey = (
+  v: Record<string, unknown>,
+  current: RuntimeSourceConfig,
+  url: string,
+): string => {
+  if (typeof v.apiKey === 'string') return v.apiKey.trim();
+  return originOf(url) === originOf(current.url) ? current.apiKey : '';
+};
+
+const originOf = (url: string): string => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+};
+
+/**
  * The `runtime` field of a PATCH. Fields not sent keep their stored value, so
  * a form that only edits the threshold cannot blank the address; `apiKey`
  * absent keeps the stored key (it is never shown, so a client cannot echo it).
@@ -178,7 +202,7 @@ const parseRuntimePatch = (
   return {
     kind,
     url,
-    apiKey: typeof v.apiKey === 'string' ? v.apiKey.trim() : current.apiKey,
+    apiKey: runtimeApiKey(v, current, url),
     percent: number('percent', 100),
     minutes: number('minutes', 600),
   };
