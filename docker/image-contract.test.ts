@@ -25,6 +25,15 @@ describe('the image records the commit it was built from', () => {
   });
 });
 
+describe('the image reports the version the tag names', () => {
+  it('bakes TRAWLARR_VERSION in before the build that stamps it, and CI passes it', () => {
+    const arg = dockerfile.indexOf('ARG TRAWLARR_VERSION=');
+    expect(arg).toBeGreaterThan(-1);
+    expect(arg).toBeLessThan(dockerfile.indexOf('RUN pnpm build'));
+    expect(ci).toMatch(/TRAWLARR_VERSION=\$\{\{ steps\.version\.outputs\.version \}\}/);
+  });
+});
+
 describe('the image workflow', () => {
   it('publishes only after the checks pass', () => {
     expect(ci).toMatch(/^ {2}image:\n {4}needs: check$/m);

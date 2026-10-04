@@ -31,6 +31,9 @@ COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 RUN pnpm install --frozen-lockfile
 
+# .git is dockerignored, so the version is passed in (CI derives it from the tag).
+ARG TRAWLARR_VERSION=
+ENV TRAWLARR_VERSION=${TRAWLARR_VERSION}
 COPY . .
 RUN pnpm build \
  && pnpm deploy --filter @trawlarr/server --prod /out

@@ -51,6 +51,7 @@ jobs:
           # checked out here (docker/cluster/docker.ts).
           build-args: |
             TRAWLARR_COMMIT=${{ github.sha }}
+            TRAWLARR_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
       # Not `pnpm test:cluster`: that would build the image a second time.
       # Both flags are needed: vitest loads the root workspace file whatever
@@ -77,19 +78,12 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      # A tag that disagrees with the version the daemon reports would publish
-      # :0.2.0 of a build that calls itself 0.1.0. `build-info.test.ts` already
-      # holds DAEMON_VERSION equal to this file, so checking the tag against it
-      # closes the loop.
-      - name: Release tag matches the server package version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./packages/server/package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match packages/server/package.json version $pkg"
-            exit 1
-          fi
+        # Full history and tags: `git describe` needs them to name the version.
+        with: { fetch-depth: 0 }
+      # The tag is the version: the image reports what `git describe` says, so
+      # a published :0.2.0 cannot call itself anything else.
+      - id: version
+        run: echo "version=$(node scripts/stamp-version.mjs --print)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -126,5 +120,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             TRAWLARR_COMMIT=${{ github.sha }}
+            TRAWLARR_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

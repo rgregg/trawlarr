@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { buildCommitFrom } from './build-info.js';
-import { DAEMON_VERSION } from './daemon.js';
+import { versionFrom } from './version.js';
 
 describe('buildCommitFrom', () => {
   it('reports the commit the image was built from', () => {
@@ -19,12 +18,15 @@ describe('buildCommitFrom', () => {
   });
 });
 
-describe('DAEMON_VERSION', () => {
-  it('matches packages/server/package.json, which the image workflow checks release tags against', () => {
-    const manifest = JSON.parse(
-      readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
-    ) as { version: string };
+describe('versionFrom', () => {
+  it('reads the version the build stamped', () => {
+    expect(versionFrom('{"version":"0.1.0+5.g1a2b3c4"}\n')).toBe('0.1.0+5.g1a2b3c4');
+  });
 
-    expect(DAEMON_VERSION).toBe(manifest.version);
+  it('treats a missing, damaged or empty stamp as no version', () => {
+    expect(versionFrom(null)).toBeNull();
+    expect(versionFrom('not json')).toBeNull();
+    expect(versionFrom('{"version":""}')).toBeNull();
+    expect(versionFrom('{"version":3}')).toBeNull();
   });
 });
