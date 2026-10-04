@@ -238,5 +238,14 @@ export const reduceLive = (state: LiveState, event: TrawlarrEvent): LiveState =>
 
     case 'nodes.changed':
       return bump(state, 'nodes');
+
+    // The daemon emits frames this union does not name (`file.replaced`,
+    // `plugin.sync.*`), and a newer daemon can add more than this bundle
+    // knows. Without a default the switch fell off the end and returned
+    // `undefined`, so the next render read `live.staleness` of nothing and the
+    // whole app crashed. An unknown frame describes no state this client
+    // shows, so it changes none.
+    default:
+      return state;
   }
 };
