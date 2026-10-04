@@ -36,6 +36,7 @@ const baseLibrary = (overrides: Partial<LibraryRecord> = {}): LibraryRecord => (
   pausedReason: null,
   userVariables: {},
   plex: null,
+  runtime: { kind: null, url: '', apiKey: '', percent: 5, minutes: 3 },
   createdAt: 0,
   ...overrides,
 });
@@ -119,6 +120,58 @@ describe('payloadToNode', () => {
     expect(mapped.library.stagingDir).toBe('/mnt/nas/.stage');
     expect(mapped.library.trashDir).toBeNull();
     expect(mapped.logPath).toBeNull();
+  });
+
+  it("never sends the library's Radarr/Sonarr key to a node", () => {
+    const payload = fixturePayload();
+    payload.library.runtime = {
+      kind: 'radarr',
+      url: 'http://radarr.lan:7878',
+      apiKey: 'secret-key',
+      percent: 5,
+      minutes: 3,
+    };
+
+    const mapped = payloadToNode(payload, MAP);
+
+    payload.library.plex = {
+      url: 'http://plex.lan:32400',
+      token: 'plex-secret',
+      sectionId: '1',
+      pathPrefix: null,
+    };
+    const mappedWithPlex = payloadToNode(payload, MAP);
+    expect(JSON.stringify(mappedWithPlex)).not.toContain('plex-secret');
+    expect(payload.library.plex?.token).toBe('plex-secret');
+    expect(JSON.stringify(mapped)).not.toContain('secret-key');
+    expect(mapped.library.runtime.url).toBe('http://radarr.lan:7878');
+    expect(payload.library.runtime.apiKey).toBe('secret-key');
+  });
+
+  it('has decided what to do with every field of a library before it is sent to a node', () => {
+    // `payloadToNode` spreads the whole record, so a field added to
+    // LibraryRecord reaches every node by default. If this fails, a field was
+    // added: decide whether a node may see it, blank it in `mapPayload` if not
+    // (as `plex.token` and `runtime.apiKey` are), then add it here.
+    expect(Object.keys(baseLibrary()).sort()).toEqual(
+      [
+        'allowHardlinked',
+        'companionExtensions',
+        'createdAt',
+        'enabled',
+        'extensions',
+        'flowId',
+        'id',
+        'name',
+        'pausedReason',
+        'plex',
+        'roots',
+        'runtime',
+        'stagingDir',
+        'trashDir',
+        'userVariables',
+      ].sort(),
+    );
   });
 
   it('does not mutate its input', () => {

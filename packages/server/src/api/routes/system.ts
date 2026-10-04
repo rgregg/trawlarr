@@ -82,6 +82,8 @@ const readSettings = (ctx: ApiContext) => ({
   // legitimate reason to leave the server, and disclosing it would let any
   // caller mint a session for any account.
   auth: publicAuth(ctx.settings.getAuth()),
+  // The TMDB key is write-only: shown as whether one is set, never as the key.
+  metadata: { tmdbConfigured: ctx.settings.getMetadata().tmdbApiKey !== '' },
   environment: envProvenance({
     settings: ctx.settings,
     env: process.env,
@@ -179,6 +181,10 @@ export const systemRoutes: Route[] = [
         if (patch.binaries !== undefined) ctx.settings.setBinaries(patch.binaries as never);
         if (patch.scan !== undefined) ctx.settings.setScan(patch.scan as never);
         if (patch.hardware !== undefined) ctx.settings.setHardware(patch.hardware as never);
+        if (patch.metadata !== undefined) {
+          const metadata = patch.metadata as { tmdbApiKey?: unknown };
+          ctx.settings.setMetadata({ tmdbApiKey: metadata.tmdbApiKey as string });
+        }
         // `sessionSecret` is not a patchable field: it is never returned by
         // `readSettings` above, so there is nothing for a client to echo
         // back, and accepting one here would let a caller overwrite the

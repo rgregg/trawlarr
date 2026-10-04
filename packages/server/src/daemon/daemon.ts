@@ -17,6 +17,7 @@ import { sweepJobLogs } from '../job-log/job-log-store.js';
 import { createBundleStore } from '../nodes/bundles.js';
 import { createNodeHub, type NodeHub } from '../nodes/hub.js';
 import { createNodeHttpHandler } from '../nodes/node-http.js';
+import { createRuntimeChecker } from './runtime-checker.js';
 import { reapStalled, stallUnsentRemoteJobs } from '../worker/reap-stalled.js';
 import { buildCommitFrom } from './build-info.js';
 import { describeFailure } from './describe-failure.js';
@@ -33,6 +34,9 @@ export { DAEMON_VERSION };
 
 /** How often the supervisor reconciles the pool with the schedule and the queue. */
 export const SUPERVISOR_TICK_MS = 30_000;
+
+/** How often the expected-runtime lookup runs a pass (each pass is a small, paced batch). */
+const RUNTIME_CHECK_INTERVAL_MS = 30_000;
 
 /** How often stalled `running` rows are reclaimed (`reapStalled`'s own threshold is a day). */
 export const REAP_INTERVAL_MS = 60 * 60 * 1000;
@@ -586,6 +590,21 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
   every(leaseSweepIntervalMs(), 'lease sweep', () => {
     hub.sweepLeases();
+  });
+
+  // Expected-runtime lookups for the Diagnose page: their own timer, never
+  // part of a scan, so a slow or dead Radarr/TMDB cannot hold a scan up.
+  const runtimeChecker = createRuntimeChecker({
+    db,
+    settings,
+    nowMs,
+    stopping: () => stopping,
+    onError: (message) => {
+      console.error(`[daemon] ${message}`);
+    },
+  });
+  every(RUNTIME_CHECK_INTERVAL_MS, 'runtime check', async () => {
+    await runtimeChecker.runOnce();
   });
 
   every(REAP_INTERVAL_MS, 'stall reaper', () => {

@@ -723,6 +723,144 @@ describe('files', () => {
     expect(createMediaFileRepo(db).getById(fileId)!.state).toBe('queued');
   });
 
+  describe('runtime mismatch', () => {
+    const MIN = 60_000;
+    const seedTimed = (
+      libraryId: string,
+      path: string,
+      input: { durationMin: number; expectedMin: number | null; state?: string },
+    ): string => {
+      const id = seedFile({ libraryId, path, state: input.state });
+      db.prepare(
+        `UPDATE media_file SET duration_ms = ?, expected_runtime_ms = ?,
+                expected_runtime_source = 'radarr', runtime_checked_at = ? WHERE id = ?`,
+      ).run(
+        input.durationMin * MIN,
+        input.expectedMin === null ? null : input.expectedMin * MIN,
+        NOW,
+        id,
+      );
+      return id;
+    };
+
+    it('lists only files whose length is wrong, and never one with no expected runtime', async () => {
+      const library = seedLibrary();
+      const short = seedTimed(library.id, '/media/short.mkv', {
+        durationMin: 60,
+        expectedMin: 120,
+      });
+      seedTimed(library.id, '/media/fine.mkv', { durationMin: 119, expectedMin: 120 });
+      seedTimed(library.id, '/media/unknown.mkv', { durationMin: 5, expectedMin: null });
+
+      const response = await api('GET', '/diagnose/runtime');
+
+      expect(response.status).toBe(200);
+      expect(response.body.items).toEqual([
+        expect.objectContaining({
+          id: short,
+          durationMs: 60 * MIN,
+          expectedMs: 120 * MIN,
+          diffMs: -60 * MIN,
+          source: 'radarr',
+        }),
+      ]);
+    });
+
+    it('uses the library threshold', async () => {
+      const library = seedLibrary();
+      seedTimed(library.id, '/media/a.mkv', { durationMin: 100, expectedMin: 120 });
+      await api('PATCH', `/libraries/${library.id}`, { runtime: { percent: 50 } });
+
+      const response = await api('GET', '/diagnose/runtime');
+
+      expect(response.body.items).toEqual([]);
+    });
+
+    it('ignore accepts the current length, and the file returns only if the length changes', async () => {
+      const library = seedLibrary();
+      const id = seedTimed(library.id, '/media/a.mkv', { durationMin: 60, expectedMin: 120 });
+
+      const ignored = await api('POST', `/files/${id}/runtime/ignore`);
+      expect(ignored.status).toBe(200);
+      expect((await api('GET', '/diagnose/runtime')).body.items).toEqual([]);
+
+      db.prepare(`UPDATE media_file SET duration_ms = ? WHERE id = ?`).run(30 * MIN, id);
+      expect((await api('GET', '/diagnose/runtime')).body.items).toHaveLength(1);
+    });
+
+    it('refuses to ignore a file with no measured duration, and an unknown file', async () => {
+      const library = seedLibrary();
+      const id = seedFile({ libraryId: library.id, path: '/media/a.mkv' });
+      expect((await api('POST', `/files/${id}/runtime/ignore`)).status).toBe(409);
+      expect((await api('POST', `/files/nope/runtime/ignore`)).status).toBe(404);
+    });
+
+    it('stores the arr key without ever returning it, and keeps it across edits', async () => {
+      const library = seedLibrary();
+      const on = await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { kind: 'radarr', url: 'http://radarr.lan:7878', apiKey: 'sekrit' },
+      });
+      expect(on.status).toBe(200);
+      expect(on.body.runtime).toEqual({
+        kind: 'radarr',
+        url: 'http://radarr.lan:7878',
+        hasApiKey: true,
+        percent: 5,
+        minutes: 3,
+      });
+      expect(JSON.stringify(on.body)).not.toContain('sekrit');
+
+      const edited = await api('PATCH', `/libraries/${library.id}`, { runtime: { minutes: 10 } });
+      expect(edited.body.runtime.minutes).toBe(10);
+      expect(createLibraryRepo(db).getById(library.id)!.runtime.apiKey).toBe('sekrit');
+    });
+
+    it('drops the stored key when the address moves to another origin without a new key', async () => {
+      const library = seedLibrary();
+      await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { kind: 'radarr', url: 'http://radarr.lan:7878', apiKey: 'sekrit' },
+      });
+      const repo = createLibraryRepo(db);
+
+      // Same origin, different path: still the same server, so the key stays.
+      await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { url: 'http://radarr.lan:7878/radarr' },
+      });
+      expect(repo.getById(library.id)!.runtime.apiKey).toBe('sekrit');
+
+      // Another host would receive it on the next lookup.
+      await api('PATCH', `/libraries/${library.id}`, { runtime: { url: 'http://evil.example' } });
+      expect(repo.getById(library.id)!.runtime.apiKey).toBe('');
+
+      // A new address with a new key is an ordinary edit.
+      await api('PATCH', `/libraries/${library.id}`, {
+        runtime: { url: 'http://other.lan:7878', apiKey: 'fresh' },
+      });
+      expect(repo.getById(library.id)!.runtime.apiKey).toBe('fresh');
+    });
+
+    it('rejects a bad arr address, kind or threshold', async () => {
+      const library = seedLibrary();
+      for (const runtime of [
+        { kind: 'radarr', url: 'radarr.lan' },
+        { kind: 'plex' },
+        { percent: -1 },
+      ]) {
+        const response = await api('PATCH', `/libraries/${library.id}`, { runtime });
+        expect(response.status).toBe(400);
+      }
+    });
+
+    it('stores the TMDB key write-only', async () => {
+      const response = await api('PATCH', '/system/settings', {
+        metadata: { tmdbApiKey: 'tmdb-secret' },
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.metadata).toEqual({ tmdbConfigured: true });
+      expect(JSON.stringify(response.body)).not.toContain('tmdb-secret');
+    });
+  });
+
   it('refuses to requeue a file a worker is running, and leaves the row exactly as it was', async () => {
     // Requeue used to reset the row whatever its state. The supervisor then
     // claimed it again, and two workers ran the same file, both headed for

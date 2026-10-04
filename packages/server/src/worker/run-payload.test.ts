@@ -81,6 +81,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
     pausedReason: null,
     userVariables: {},
     plex: null,
+    runtime: { kind: null, url: '', apiKey: '', percent: 5, minutes: 3 },
     createdAt: NOW - 10_000,
   },
   flow: { id: 'flow-1', definition: flow, definitionHash: 'flow-hash' },

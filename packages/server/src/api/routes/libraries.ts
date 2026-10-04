@@ -5,6 +5,7 @@ import {
   RelativeReservedDirectoryError,
   ReservedDirectoryOverlapsRootError,
   type LibraryRecord,
+  type RuntimeSourceConfig,
 } from '../../db/library-repo.js';
 import { createMediaFileRepo } from '../../db/media-file-repo.js';
 import type { PlexConfig } from '../../library/plex-notify.js';
@@ -55,6 +56,16 @@ export const toLibraryResource = (library: LibraryRecord) => {
     // endpoints is authenticated, and a write-only field cannot be shown
     // back to the person editing it.
     plex: library.plex,
+    // Unlike the Plex token above, the arr API key is NEVER sent back: the
+    // form shows whether one is stored, and an absent `apiKey` on PATCH
+    // keeps it. `hasApiKey` is what makes that distinction visible.
+    runtime: {
+      kind: library.runtime.kind,
+      url: library.runtime.url,
+      hasApiKey: library.runtime.apiKey !== '',
+      percent: library.runtime.percent,
+      minutes: library.runtime.minutes,
+    },
     createdAt: library.createdAt,
   };
 };
@@ -105,6 +116,95 @@ const parsePlexPatch = (patch: Record<string, unknown>): PlexConfig | null | und
     token: String(value.token ?? ''),
     sectionId: String(value.sectionId ?? '').trim(),
     pathPrefix: pathPrefix === '' ? null : pathPrefix,
+  };
+};
+
+/**
+ * A stored key is only ever sent to the address it was saved for. Without this
+ * a PATCH that changed `url` and omitted `apiKey` kept the key, so anyone who
+ * could call the API could point the address at a host they run and have the
+ * next lookup deliver the (otherwise write-only) key to it. Moving to another
+ * origin therefore drops the key unless a new one comes with it.
+ */
+const runtimeApiKey = (
+  v: Record<string, unknown>,
+  current: RuntimeSourceConfig,
+  url: string,
+): string => {
+  if (typeof v.apiKey === 'string') return v.apiKey.trim();
+  return originOf(url) === originOf(current.url) ? current.apiKey : '';
+};
+
+const originOf = (url: string): string => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * The `runtime` field of a PATCH. Fields not sent keep their stored value, so
+ * a form that only edits the threshold cannot blank the address; `apiKey`
+ * absent keeps the stored key (it is never shown, so a client cannot echo it).
+ */
+const parseRuntimePatch = (
+  patch: Record<string, unknown>,
+  current: RuntimeSourceConfig,
+): RuntimeSourceConfig | undefined => {
+  if (!('runtime' in patch)) return undefined;
+  const value = patch.runtime;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(400, 'invalid-runtime', `"runtime" must be an object.`);
+  }
+  const v = value as Record<string, unknown>;
+
+  const kind = 'kind' in v ? v.kind : current.kind;
+  if (kind !== null && kind !== 'radarr' && kind !== 'sonarr') {
+    throw new ApiError(
+      400,
+      'invalid-runtime',
+      `runtime.kind must be "radarr", "sonarr" or null, got ${JSON.stringify(kind)}.`,
+    );
+  }
+  const url = 'url' in v ? String(v.url ?? '').trim() : current.url;
+  if (url !== '') {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new ApiError(
+        400,
+        'invalid-runtime-url',
+        `"${url}" is not a URL. Give the address, e.g. "http://radarr.lan:7878".`,
+      );
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new ApiError(
+        400,
+        'invalid-runtime-url',
+        `Address must be http or https, not "${parsed.protocol}".`,
+      );
+    }
+  }
+  const number = (field: 'percent' | 'minutes', max: number): number => {
+    if (!(field in v)) return current[field];
+    const n = v[field];
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > max) {
+      throw new ApiError(
+        400,
+        'invalid-runtime',
+        `runtime.${field} must be a number between 0 and ${String(max)}, got ${JSON.stringify(n)}.`,
+      );
+    }
+    return n;
+  };
+  return {
+    kind,
+    url,
+    apiKey: runtimeApiKey(v, current, url),
+    percent: number('percent', 100),
+    minutes: number('minutes', 600),
   };
 };
 
@@ -248,6 +348,7 @@ export const libraryRoutes: Route[] = [
           allowHardlinked: optionalBoolean(body, 'allowHardlinked'),
           userVariables: patch.userVariables as Record<string, string> | undefined,
           plex: parsePlexPatch(patch),
+          runtime: parseRuntimePatch(patch, library.runtime),
         });
       } catch (error) {
         return asLibraryError(error);

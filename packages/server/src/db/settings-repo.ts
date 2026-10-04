@@ -80,6 +80,14 @@ export interface NodesSettings {
   leaseGraceMs: number;
 }
 
+/**
+ * Global metadata lookups. The TMDB key is the fallback source of expected
+ * runtimes for libraries with no Radarr/Sonarr; empty turns TMDB off.
+ */
+export interface MetadataSettings {
+  tmdbApiKey: string;
+}
+
 export interface SettingsRepo {
   getDaemon(): DaemonSettings;
   setDaemon(patch: Partial<DaemonSettings>): void;
@@ -95,6 +103,8 @@ export interface SettingsRepo {
   setAuth(patch: Partial<AuthSettings>): void;
   getNodes(): NodesSettings;
   setNodes(value: NodesSettings): void;
+  getMetadata(): MetadataSettings;
+  setMetadata(patch: Partial<MetadataSettings>): void;
   isSet(key: string): boolean;
 }
 
@@ -120,6 +130,7 @@ const SETTING_KEYS = {
   schedule: 'schedule',
   auth: 'auth',
   nodes: 'nodes',
+  metadata: 'metadata',
 } as const;
 
 /** Five minutes: see `NodesSettings`. */
@@ -498,7 +509,25 @@ export const createSettingsRepo = (input: {
     writeField(SETTING_KEYS.nodes, 'leaseGraceMs', next.leaseGraceMs);
   };
 
+  const getMetadata = (): MetadataSettings => ({
+    tmdbApiKey: requireString(
+      readField(SETTING_KEYS.metadata, 'tmdbApiKey') ?? '',
+      'metadata.tmdbApiKey',
+    ).trim(),
+  });
+
+  const setMetadata = (patch: Partial<MetadataSettings>): void => {
+    const next = { ...getMetadata(), ...patch };
+    writeField(
+      SETTING_KEYS.metadata,
+      'tmdbApiKey',
+      requireString(next.tmdbApiKey, 'metadata.tmdbApiKey').trim(),
+    );
+  };
+
   return {
+    getMetadata,
+    setMetadata,
     getDaemon,
     setDaemon,
     getBinaries,

@@ -307,6 +307,24 @@ GROUP, which is what reaches an ffmpeg a plugin spawned for itself. A daemon
 that exited leaving an orphaned ffmpeg writing into a library nothing is
 watching would be a defect, not a shortcut.
 
+### Catch files with the wrong length
+
+A truncated download or a sample filed under the real name passes every codec
+check; only its length is wrong. Trawlarr compares each file's measured duration
+with what its title should run and lists mismatches on **Diagnose → Wrong
+length**, each with **Reverify** (requeue), **Ignore** and **Delete**. Ignore
+accepts the file's current length, so it returns only if the length changes
+again.
+
+Expected runtimes come from Radarr or Sonarr when the library names one
+(**Configure → Libraries → Edit → Expected length**: source, URL, API key), and
+from TMDB otherwise (**Configure → System → TMDB**, one global key or v4 read
+token; the title, year and season/episode are read from the filename). A file is
+flagged when it differs by more than the larger of 5% and 3 minutes; both are
+per-library settings. Lookups run in the background, a few per minute, never
+inside a scan. A source that is down or does not know a title flags nothing. API
+keys are write-only: the API reports whether one is set, never the key.
+
 ### Edit flows visually
 
 Open **Configure → Flows** to see every flow, including flows not attached to

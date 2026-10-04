@@ -51,6 +51,7 @@ const libraryFor = (root: string, over: Partial<LibraryRecord> = {}): LibraryRec
   pausedReason: null,
   userVariables: {},
   plex: null,
+  runtime: { kind: null, url: '', apiKey: '', percent: 5, minutes: 3 },
   createdAt: NOW,
   ...over,
 });

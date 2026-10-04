@@ -1322,11 +1322,104 @@ const AccountTab = (props: { client: ApiClient; account: AccountResource }): JSX
   );
 };
 
+/**
+ * The global TMDB key: the fallback source of expected runtimes for libraries
+ * with no Radarr/Sonarr. Write-only: the daemon reports whether one is set,
+ * never the key, so the field is blank and a blank save changes nothing.
+ */
+const MetadataSection = (props: { client: ApiClient }): JSX.Element => {
+  const { client } = props;
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [key, setKey] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<ReturnType<typeof describeFailure> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const settings = await client.get<{ metadata?: { tmdbConfigured: boolean } }>(
+          '/system/settings',
+        );
+        if (!cancelled) setConfigured(settings.metadata?.tmdbConfigured ?? false);
+      } catch (error) {
+        if (!cancelled) setFailure(describeFailure(error));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  const save = async (next: string): Promise<void> => {
+    setSaving(true);
+    setFailure(null);
+    try {
+      const saved = await client.patch<{ metadata: { tmdbConfigured: boolean } }>(
+        '/system/settings',
+        { metadata: { tmdbApiKey: next } },
+      );
+      setConfigured(saved.metadata.tmdbConfigured);
+      setKey('');
+    } catch (error) {
+      setFailure(describeFailure(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="config-section">
+      <h3>TMDB</h3>
+      <label htmlFor="tmdb-key">API key or read token</label>
+      <input
+        id="tmdb-key"
+        type="password"
+        autoComplete="off"
+        value={key}
+        placeholder={configured === true ? 'Saved' : ''}
+        onChange={(event) => {
+          setKey(event.target.value);
+        }}
+      />
+      <div className="row-actions">
+        <button
+          type="button"
+          disabled={saving || key.trim() === ''}
+          onClick={() => {
+            void save(key);
+          }}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {configured === true && (
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => {
+              void save('');
+            }}
+          >
+            Remove
+          </button>
+        )}
+      </div>
+      {failure !== null && (
+        <div role="alert" className="failure">
+          <strong>{failure.title}</strong>
+          <p className="verbatim">{failure.message}</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const SystemTab = (props: { client: ApiClient }): JSX.Element => (
   <section className="system-tab">
     <ScheduleSection client={props.client} />
     <TrashSection client={props.client} />
     <HardwareSection client={props.client} />
+    <MetadataSection client={props.client} />
     <AuthSection client={props.client} />
   </section>
 );

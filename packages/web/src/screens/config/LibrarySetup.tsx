@@ -5,6 +5,7 @@ import {
   draftProblems,
   toCreateBody,
   toPlexPatch,
+  toRuntimePatch,
   type LibraryDraft,
 } from './library-form-model.js';
 import type { LibraryRow } from './Libraries.js';
@@ -21,6 +22,11 @@ const draftFrom = (library: LibraryRow | null): LibraryDraft => ({
   plexToken: library?.plex?.token ?? '',
   plexSectionId: library?.plex?.sectionId ?? '',
   plexPathPrefix: library?.plex?.pathPrefix ?? '',
+  runtimeKind: library?.runtime?.kind ?? '',
+  runtimeUrl: library?.runtime?.url ?? '',
+  runtimeApiKey: '',
+  runtimePercent: String(library?.runtime?.percent ?? 5),
+  runtimeMinutes: String(library?.runtime?.minutes ?? 3),
 });
 
 /**
@@ -67,6 +73,7 @@ export const LibrarySetup = (props: {
           : await props.client.patch<LibraryRow>(`/libraries/${existing.id}`, {
               ...body,
               plex: toPlexPatch(draft),
+              runtime: toRuntimePatch(draft),
             });
       props.onSaved(saved);
     } catch (error) {
@@ -209,6 +216,79 @@ export const LibrarySetup = (props: {
           {/* The one field that fails silently when wrong, so it says so. */}
           <p id="library-plex-path-help" className="help">
             This root as Plex sees it. Wrong here means Plex accepts the refresh and scans nothing.
+          </p>
+        </>
+      )}
+
+      {editing && (
+        <>
+          <h3>Expected length</h3>
+
+          <label htmlFor="library-runtime-kind">Source</label>
+          <select
+            id="library-runtime-kind"
+            value={draft.runtimeKind}
+            onChange={(event) => {
+              patch({ runtimeKind: event.target.value as LibraryDraft['runtimeKind'] });
+            }}
+          >
+            <option value="">TMDB only</option>
+            <option value="radarr">Radarr</option>
+            <option value="sonarr">Sonarr</option>
+          </select>
+
+          {draft.runtimeKind !== '' && (
+            <>
+              <label htmlFor="library-runtime-url">URL</label>
+              <input
+                id="library-runtime-url"
+                value={draft.runtimeUrl}
+                placeholder={
+                  draft.runtimeKind === 'radarr'
+                    ? 'http://radarr.lan:7878'
+                    : 'http://sonarr.lan:8989'
+                }
+                onChange={(event) => {
+                  patch({ runtimeUrl: event.target.value });
+                }}
+              />
+
+              <label htmlFor="library-runtime-key">API key</label>
+              <input
+                id="library-runtime-key"
+                type="password"
+                autoComplete="off"
+                value={draft.runtimeApiKey}
+                placeholder={existing?.runtime?.hasApiKey === true ? 'Saved' : ''}
+                onChange={(event) => {
+                  patch({ runtimeApiKey: event.target.value });
+                }}
+              />
+            </>
+          )}
+
+          <label htmlFor="library-runtime-percent">Tolerance %</label>
+          <input
+            id="library-runtime-percent"
+            inputMode="decimal"
+            value={draft.runtimePercent}
+            onChange={(event) => {
+              patch({ runtimePercent: event.target.value });
+            }}
+          />
+
+          <label htmlFor="library-runtime-minutes">Tolerance minutes</label>
+          <input
+            id="library-runtime-minutes"
+            inputMode="decimal"
+            value={draft.runtimeMinutes}
+            aria-describedby="library-runtime-minutes-help"
+            onChange={(event) => {
+              patch({ runtimeMinutes: event.target.value });
+            }}
+          />
+          <p id="library-runtime-minutes-help" className="help">
+            Flagged beyond the larger of the two.
           </p>
         </>
       )}

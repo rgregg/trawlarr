@@ -21,6 +21,7 @@ const makeLibrary = (overrides: Partial<LibraryRecord> & { roots: string[] }): L
   pausedReason: null,
   userVariables: {},
   plex: null,
+  runtime: { kind: null, url: '', apiKey: '', percent: 5, minutes: 3 },
   createdAt: NOW,
   ...overrides,
 });
