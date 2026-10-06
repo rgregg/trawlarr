@@ -173,6 +173,7 @@ const libraryRow = (dataDir: string): { enabled: number; paused_reason: string |
 interface FakeAgent {
   readonly cancelled: boolean;
   readonly payload: JobPayload | null;
+  cancel(): void;
 }
 
 const fakeAgents = (): { agents: FakeAgent[]; createAgent: CreateAgentFn } => {
