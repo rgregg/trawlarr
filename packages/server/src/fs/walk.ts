@@ -39,6 +39,12 @@ export async function* walkFiles(input: {
   roots: readonly string[];
   extensions: readonly string[];
   exclude?: readonly string[];
+  /**
+   * Told about each scratch file the walk skips, so a caller that wants to
+   * clean up after dead workers does not have to walk the library a second time
+   * (on a network mount that is the whole cost).
+   */
+  onWorkingFile?: (path: string) => void;
   /** Seam: a test drives a directory that fails mid-iteration. */
   openDir?: (path: string) => Promise<AsyncIterable<Dirent>>;
 }): AsyncGenerator<{ path: string; stat: Stats }> {
@@ -92,7 +98,10 @@ export async function* walkFiles(input: {
       // run left to ask, and was scanned, probed and marked good. Files only:
       // a DIRECTORY that happens to be called `.trawlarr-old` is the user's,
       // and is walked like any other.
-      if (isWorkingFileName(entry.name)) continue;
+      if (isWorkingFileName(entry.name)) {
+        input.onWorkingFile?.(path);
+        continue;
+      }
 
       const extension = extname(entry.name).slice(1).toLowerCase();
       if (!wanted.has(extension)) continue;

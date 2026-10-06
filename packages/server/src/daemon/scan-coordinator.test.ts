@@ -34,6 +34,8 @@ const summaryOf = (patch: Partial<ScanSummary> = {}): ScanSummary => ({
   missing: 0,
   restored: 0,
   rootsUnavailable: 0,
+  workingFilesRemoved: 0,
+  swapsRestored: 0,
   ...patch,
 });
 

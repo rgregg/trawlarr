@@ -14,6 +14,7 @@ import type { ProbeData } from '@trawlarr/plugin-api';
 import { walkFiles } from '../fs/walk.js';
 import { reconcileMissing } from './reconcile.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
+import { sweepWorkingFiles } from '../library/working-file-sweep.js';
 import { partialHashFile, identityFromStat } from '../fs/partial-hash.js';
 import { probeFile, ProbeError } from '../probe/ffprobe.js';
 import { DEFAULT_CHUNK_SIZE, runChunked } from '../db/chunked.js';
@@ -61,6 +62,10 @@ export interface ScanSummary {
    * down: the scan's other counters describe only the roots that were up.
    */
   rootsUnavailable: number;
+  /** Orphaned `.trawlarr-*` scratch files this scan removed (see `sweepWorkingFiles`). */
+  workingFilesRemoved: number;
+  /** Interrupted replacements whose original this scan put back from trash. */
+  swapsRestored: number;
 }
 
 export interface ScanLibraryInput {
@@ -315,6 +320,8 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     missing: 0,
     restored: 0,
     rootsUnavailable: 0,
+    workingFilesRemoved: 0,
+    swapsRestored: 0,
   };
 
   /**
@@ -494,10 +501,12 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   // deliberately happens between transactions, never inside one: spawning
   // ffprobe while holding sqlite's write lock would block every other writer
   // for the length of an external process.
+  const workingFiles: string[] = [];
   for await (const entry of walkFiles({
     roots: library.roots,
     extensions: library.extensions,
     exclude: reservedDirsForLibrary(library),
+    onWorkingFile: (path) => workingFiles.push(path),
   })) {
     summary.seen += 1;
     onProgress?.(summary.seen);
@@ -667,6 +676,26 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   });
   summary.missing = reconciled.missing;
   summary.rootsUnavailable = reconciled.rootsUnavailable;
+
+  // Only reached by a walk that ran to completion, and only for roots that
+  // could be shown to be present: an unmounted share walks as empty and
+  // contributes no candidates. A failure here costs one pass of tidying, never
+  // the scan that already succeeded.
+  if (reconciled.rootsUnavailable === 0) {
+    try {
+      const swept = await sweepWorkingFiles({
+        db,
+        libraryId,
+        files: workingFiles,
+        nowMs: nowMs(),
+        onEvent: (message) => console.warn(`[scan] ${message}`),
+      });
+      summary.workingFilesRemoved = swept.removed;
+      summary.swapsRestored = swept.swapsRestored;
+    } catch (error) {
+      console.warn(`[scan] working-file sweep failed: ${String(error)}`);
+    }
+  }
 
   return summary;
 };

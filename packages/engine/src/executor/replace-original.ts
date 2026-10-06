@@ -11,6 +11,7 @@ import { WORKING_FILE_PREFIX } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { canonicalPath } from './encode-target.js';
 import { BYTES_PER_MEGABYTE } from '../host/file-object.js';
+import { journalPathFor, removeSwapJournal, writeSwapJournal } from './swap-journal.js';
 import { compareDurations, type DurationComparison } from './verify-output.js';
 import { describeSizeChange } from './size-change.js';
 
@@ -873,8 +874,11 @@ export const createReplaceOriginalRunner =
         // conservative call, and it can be relaxed later far more safely than
         // it could be retracted.
         let originalIsSymlink: boolean;
+        let originalIdentity: { dev: number; ino: number };
         try {
-          originalIsSymlink = (await lstat(originalPath)).isSymbolicLink();
+          const originalLstat = await lstat(originalPath);
+          originalIsSymlink = originalLstat.isSymbolicLink();
+          originalIdentity = { dev: originalLstat.dev, ino: originalLstat.ino };
         } catch (error) {
           return refuse(
             `the original "${originalPath}" could not be examined (${messageOf(error)}).`,
@@ -926,15 +930,80 @@ export const createReplaceOriginalRunner =
           );
         }
 
+        // --- The new file is made complete BESIDE its destination first. ---
+        // Only now does anything of the user's move. The order is the point:
+        // on a cross-device deployment (library on NFS, staging on a local
+        // SSD — every replacement) the copy takes minutes, and with the
+        // original already in trash a worker killed inside it left the library
+        // path empty with only a truncated temp (2026-10-03). Staged first, a
+        // kill during the copy leaves the original in place and a stray temp
+        // for the orphan sweep; the original is trashed only once a verified
+        // full-size copy exists, and the remaining window is two metadata
+        // operations, covered by the swap journal below.
+        let staged: StagedReplacement | null = null;
+        if (!alreadyInPlace) {
+          try {
+            staged = await stageReplacement({
+              newPath,
+              finalPath,
+              expectedSize: newStats.size,
+              statFile: input.statFile,
+              linkFile,
+              unlinkFile,
+              copy,
+              onCopyProgress: input.onProgress,
+              copyProgressIntervalMs: input.copyProgressIntervalMs ?? COPY_PROGRESS_INTERVAL_MS,
+              allowCrossDevice: booleanInput(args.inputs.allowCrossDevice, true),
+              crossDeviceError,
+              say,
+            });
+          } catch (error) {
+            return refuse(
+              `the new file could not be staged beside "${finalPath}" (${messageOf(error)}). ` +
+                `The original stays where it is.`,
+              originalPath,
+            );
+          }
+        }
+
         // --- From here on, the filesystem changes. ---
         const trashDir = input.trashDirFor(originalPath);
+        const trashNowMs = input.nowMs();
+        // Written before the original moves, removed once the outcome is
+        // settled; a worker that dies in between leaves it for the sweep to
+        // act on. Only a staged swap has the short window it is for.
+        let journalPath: string | null = null;
+        if (staged !== null) {
+          const candidate = journalPathFor(finalPath);
+          try {
+            await writeSwapJournal(candidate, {
+              version: 1,
+              originalPath,
+              finalPath,
+              stagedPath: staged.path,
+              trashDir,
+              trashNowMs,
+              originalDev: originalIdentity.dev,
+              originalIno: originalIdentity.ino,
+            });
+            journalPath = candidate;
+          } catch (error) {
+            await unlinkFile(staged.path).catch(() => {});
+            return refuse(
+              `the swap could not be recorded (${messageOf(error)}), and nothing is moved ` +
+                `without a record a crashed run can be repaired from. The original stays where ` +
+                `it is.`,
+              originalPath,
+            );
+          }
+        }
         let trashPath: string;
         try {
           await mkdir(trashDir, { recursive: true });
           trashPath = await moveToTrash({
             trashDir,
             originalPath,
-            nowMs: input.nowMs(),
+            nowMs: trashNowMs,
             linkFile,
             renameFile,
             unlinkFile,
@@ -948,6 +1017,10 @@ export const createReplaceOriginalRunner =
           // also failed leaves it with a twin in trash — reporting that as a
           // clean no-op would hide the state that makes every later run refuse
           // this file.
+          // The original did not move, so neither the note nor the staged copy
+          // has a purpose. (The staged copy is a duplicate, never the only one.)
+          if (journalPath !== null) await removeSwapJournal(journalPath);
+          if (staged !== null) await unlinkFile(staged.path).catch(() => {});
           const stranded = await input
             .statFile(originalPath)
             .then((stats) => stats.nlink > 1)
@@ -967,7 +1040,7 @@ export const createReplaceOriginalRunner =
             `it; the timestamp in that name is what the sweep ages it by).`,
         );
 
-        const restoreOriginal = async (): Promise<void> => {
+        const restoreOriginal = async (): Promise<boolean> => {
           try {
             // Exclusive, like every other move here: if anything claimed the
             // original's path during the swap window, restoring over it would
@@ -987,11 +1060,13 @@ export const createReplaceOriginalRunner =
               noteLinkFallback,
             });
             say(`Restored the original to "${originalPath}".`);
+            return true;
           } catch (error) {
             say(
               `URGENT: the original could not be restored to "${originalPath}" ` +
                 `(${messageOf(error)}). It is intact at "${trashPath}" — move it back by hand.`,
             );
+            return false;
           }
         };
 
@@ -1000,6 +1075,7 @@ export const createReplaceOriginalRunner =
           await swapIntoPlace({
             newPath,
             finalPath,
+            staged,
             state: swapState,
             renameFile,
             crossDeviceError,
@@ -1030,7 +1106,11 @@ export const createReplaceOriginalRunner =
           });
           if (!landed) {
             say(`Replacement failed: ${messageOf(error)}`);
-            await restoreOriginal();
+            // The note outlives a restore that failed: it is what lets the
+            // sweep try again once whatever blocked it has cleared.
+            if ((await restoreOriginal()) && journalPath !== null) {
+              await removeSwapJournal(journalPath);
+            }
             return {
               outputNumber: 2,
               outputFileObj: { _id: originalPath },
@@ -1049,6 +1129,7 @@ export const createReplaceOriginalRunner =
             .statFile(finalPath)
             .then((stats) => stats.nlink > 1)
             .catch(() => false);
+          if (journalPath !== null) await removeSwapJournal(journalPath);
           if (leftLinked) {
             say(
               `"${finalPath}" now has more than one name, so it will be refused as ` +
@@ -1073,6 +1154,10 @@ export const createReplaceOriginalRunner =
             };
           }
         }
+
+        // The replacement is installed (or reported as landed above): the
+        // note has done its job.
+        if (journalPath !== null) await removeSwapJournal(journalPath);
 
         await describeReplacement({
           args,
@@ -1171,6 +1256,98 @@ const copyReportingProgress = async (input: {
 };
 
 /**
+ * A complete copy of the new file beside its destination. `viaLink` says it is
+ * a second NAME for the staged file (same filesystem), not a copy of its
+ * bytes: installing it leaves the file under two names until the staging name
+ * is removed, which therefore has to succeed.
+ */
+interface StagedReplacement {
+  path: string;
+  viaLink: boolean;
+}
+
+/**
+ * Make a complete, verified copy of the new file beside its destination, before
+ * anything of the user's has moved. Returns null when the filesystem gives no
+ * answer this can act on, in which case the swap keeps its older behaviour.
+ *
+ * `link(2)` is the probe: it either makes a second name in the library
+ * directory (same filesystem, so the swap will be an atomic rename and the
+ * "copy" is instant), or fails `EXDEV` (the cross-device case this exists
+ * for), where the bytes are copied and the copy's size is checked against the
+ * source. A short copy is refused here, with the original still in place; a
+ * truncated file must never be the thing a later step installs.
+ *
+ * The name carries {@link WORKING_FILE_PREFIX}: this file sits in the media's
+ * directory for as long as the copy takes, and the scanner must never take it
+ * for media, nor the orphan sweep leave it behind if the worker dies.
+ */
+const stageReplacement = async (input: {
+  newPath: string;
+  finalPath: string;
+  expectedSize: number;
+  statFile: StatFileFn;
+  linkFile: LinkFileFn;
+  unlinkFile: UnlinkFileFn;
+  copy: CopyFileFn;
+  onCopyProgress: ((percent: number) => void) | undefined;
+  copyProgressIntervalMs: number;
+  allowCrossDevice: boolean;
+  crossDeviceError: CrossDeviceErrorFn;
+  say: (text: string) => void;
+}): Promise<StagedReplacement | null> => {
+  const stagedPath = join(
+    dirname(input.finalPath),
+    `${WORKING_FILE_PREFIX}replace-${randomUUID()}${extname(input.finalPath)}`,
+  );
+  try {
+    await input.linkFile(input.newPath, stagedPath);
+    return { path: stagedPath, viaLink: true };
+  } catch (error) {
+    if (codeOf(error) !== 'EXDEV') return null;
+  }
+  if (!input.allowCrossDevice) {
+    throw input.crossDeviceError({
+      stagingDir: dirname(input.newPath),
+      filePath: input.finalPath,
+    });
+  }
+  input.say(
+    `The new file is on a different filesystem, so an atomic rename is not possible. ` +
+      `Cross-device copy into "${dirname(input.finalPath)}" first; the original is moved only ` +
+      `once the copy is complete and verified; this is slower.`,
+  );
+  try {
+    await copyReportingProgress({
+      copy: input.copy,
+      from: input.newPath,
+      to: stagedPath,
+      onProgress: input.onCopyProgress,
+      intervalMs: input.copyProgressIntervalMs,
+    });
+    const copied = await input.statFile(stagedPath);
+    if (copied.size !== input.expectedSize) {
+      throw new Error(
+        `the copy is ${String(copied.size)} bytes but the new file is ` +
+          `${String(input.expectedSize)}`,
+      );
+    }
+  } catch (error) {
+    await input.unlinkFile(stagedPath).catch((cause: unknown) => {
+      // An orphaned full-size copy in the library directory is a silent
+      // disk-filler; naming it is the difference between a stray file someone
+      // can delete and one nobody knows about.
+      input.say(
+        `The cross-device staging copy at "${stagedPath}" could not be removed ` +
+          `(${messageOf(cause)}); delete it by hand.`,
+      );
+    });
+    throw error;
+  }
+  return { path: stagedPath, viaLink: false };
+};
+
+/**
  * Put the new file at `finalPath` without ever overwriting what is there.
  *
  * Two separate hazards, and both cost a user their data if handled loosely:
@@ -1202,11 +1379,78 @@ const swapIntoPlace = async (input: {
   allowCrossDevice: boolean;
   say: (text: string) => void;
   noteLinkFallback: (text: string) => void;
+  /** A complete copy already beside `finalPath` (see `stageReplacement`), or null. */
+  staged: StagedReplacement | null;
   /** Filled in when the cross-device path stages a copy, so a failure
    * afterwards can still be recognised as a completed replacement. */
   state: { stagedPath: string | null };
 }): Promise<void> => {
   if (canonicalPath(input.newPath) === canonicalPath(input.finalPath)) return; // already there
+  if (input.staged !== null) {
+    // The copy was made and verified before the original moved, so what is
+    // left is the exclusive create and the removal of the staging source.
+    const stagedPath = input.staged.path;
+    input.state.stagedPath = stagedPath;
+    try {
+      await moveExclusively({
+        from: stagedPath,
+        to: input.finalPath,
+        linkFile: input.linkFile,
+        renameFile: input.renameFile,
+        unlinkFile: input.unlinkFile,
+        openExclusive: input.openExclusive,
+        nowMs: input.nowMs,
+        note: input.say,
+        noteLinkFallback: input.noteLinkFallback,
+      });
+    } catch (error) {
+      await input.unlinkFile(stagedPath).catch((cause: unknown) => {
+        input.say(
+          `The staged copy at "${stagedPath}" could not be removed (${messageOf(cause)}); ` +
+            `delete it by hand.`,
+        );
+      });
+      if (codeOf(error) === 'EEXIST') {
+        throw new Error(
+          `"${input.finalPath}" was claimed by something else while this replacement was in ` +
+            `progress. Refusing to overwrite it.`,
+        );
+      }
+      throw error;
+    }
+    if (input.staged.viaLink) {
+      // The installed file and the staging file are one inode, so a staging
+      // name that cannot be removed leaves the library file at nlink 2, which
+      // the hardlink guard then refuses on every later run. Undo the install
+      // instead, exactly as a failed source removal does in `moveExclusively`.
+      try {
+        await input.unlinkFile(input.newPath);
+      } catch (error) {
+        let rolledBack = true;
+        await input.unlinkFile(input.finalPath).catch(() => {
+          rolledBack = false;
+        });
+        throw new Error(
+          rolledBack
+            ? `"${input.newPath}" was linked to "${input.finalPath}" but could not be removed ` +
+                `from its old name (${messageOf(error)}). The extra link has been removed, so ` +
+                `the file is back to a single name and nothing was lost.`
+            : `"${input.newPath}" was linked to "${input.finalPath}" and NEITHER could be ` +
+                `removed (${messageOf(error)}). The file now has two names — "${input.newPath}" ` +
+                `and "${input.finalPath}" — and will be refused as hardlinked until one of them ` +
+                `is deleted.`,
+        );
+      }
+      return;
+    }
+    await input.unlinkFile(input.newPath).catch((cause: unknown) => {
+      input.say(
+        `The new file at "${input.newPath}" was installed but could not be removed from ` +
+          `staging (${messageOf(cause)}); it is a full-size duplicate, delete it by hand.`,
+      );
+    });
+    return;
+  }
   try {
     await moveExclusively({
       from: input.newPath,

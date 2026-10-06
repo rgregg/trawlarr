@@ -221,6 +221,17 @@ copy-then-exclusive-create with the same verification. It is a deliberate
 escape hatch for the one deployment that genuinely needs it — not a default,
 and not a speed-up.
 
+On that path the order of operations is what keeps a killed worker from costing
+you a file. The new file is copied into the library directory as a hidden
+`.trawlarr-replace-*` temp and its size is checked against the source **before**
+the original is moved to trash; only then does the original move and the temp
+take its place. A worker killed during the copy leaves the original untouched.
+A swap note (`.trawlarr-swap-*.json`) covers the two metadata operations
+between "original in trash" and "replacement in place": if a worker dies
+there, the next library scan puts the original back from trash. The same scan
+removes `.trawlarr-replace-*` / `.trawlarr-reserve-*` leftovers once nothing
+running could own them and they have sat unmodified for a day.
+
 ## 4. Environment variables
 
 Two kinds, and the difference matters.
