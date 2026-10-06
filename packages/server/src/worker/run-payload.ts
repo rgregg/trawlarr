@@ -43,6 +43,7 @@ import { probeFile } from '../probe/ffprobe.js';
 import { partialHashFile } from '../fs/partial-hash.js';
 import { createJobLogWriter } from '../job-log/job-log-writer.js';
 import type { JobPayload } from './job-payload.js';
+import { observeCurrentFile } from './fresh-observation.js';
 
 /**
  * Everything `runPayload` is allowed to reach the outside world through.
@@ -345,10 +346,15 @@ export const runPayload = async (input: {
     // call, which is exactly wrong for "facts as of the moment this run
     // started" once the run itself goes on to touch the row (see its doc
     // comment). Here it cannot even be attempted: there is no row to read.
+    //
+    // Unless the file has changed since the row was written: a retry after a
+    // failed reconcile starts from the row's pre-transcode probe while the
+    // file on disk is already converted (see `observeCurrentFile`).
+    const observed = await observeCurrentFile({ payload, log: onLog });
     const preFacts = extractFacts({
-      probe: payload.probe,
-      container: payload.container,
-      sizeBytes: payload.sizeBytes,
+      probe: observed.probe,
+      container: observed.container,
+      sizeBytes: observed.sizeBytes,
     });
 
     // A fresh `running` job is not yet stale, but it should read that way from
@@ -397,12 +403,12 @@ export const runPayload = async (input: {
         libraryId: payload.libraryId,
         footprintId: payload.footprintId,
         path: payload.path,
-        container: payload.container,
-        sizeBytes: payload.sizeBytes,
+        container: observed.container,
+        sizeBytes: observed.sizeBytes,
         originalSizeBytes: payload.originalSizeBytes,
-        mtimeMs: payload.mtimeMs,
-        ctimeMs: payload.ctimeMs,
-        probe: payload.probe,
+        mtimeMs: observed.mtimeMs,
+        ctimeMs: observed.ctimeMs,
+        probe: observed.probe,
         state: payload.state,
         lastRunModified: false,
         holdUntilMs: payload.holdUntilMs,
