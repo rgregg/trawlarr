@@ -1,5 +1,8 @@
 import {
   existsSync,
+  lstatSync,
+  lutimesSync,
+  symlinkSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -10,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
@@ -78,7 +81,7 @@ const trackWithJob = async (path: string, open: boolean): Promise<string> => {
 };
 
 const sweep = (files: string[]) =>
-  sweepWorkingFiles({ db, libraryId: library.id, files, nowMs: NOW });
+  sweepWorkingFiles({ db, libraryId: library.id, files, roots: [root], nowMs: NOW });
 
 describe('sweepWorkingFiles', () => {
   it('removes an old orphan no job could own', async () => {
@@ -235,5 +238,98 @@ describe('scanLibrary', () => {
     expect(summary.workingFilesRemoved).toBe(1);
     expect(existsSync(orphan)).toBe(false);
     expect(existsSync(movie)).toBe(true);
+  });
+});
+
+describe('sweepWorkingFiles never acts outside what it owns', () => {
+  it('ignores a candidate outside the library roots, whatever its name or age', async () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), 'trawlarr-elsewhere-'));
+    dirs.push(elsewhere);
+    const foreign = scratch(elsewhere, '.trawlarr-replace-abc.mkv', 30 * DAY_MS);
+
+    const summary = await sweep([foreign]);
+
+    expect(summary.removed).toBe(0);
+    expect(existsSync(foreign)).toBe(true);
+  });
+
+  it('does not follow a symlinked directory out of the root', async () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), 'trawlarr-elsewhere-'));
+    dirs.push(elsewhere);
+    const victim = scratch(elsewhere, '.trawlarr-replace-abc.mkv', 30 * DAY_MS);
+    symlinkSync(elsewhere, join(root, 'escape'));
+
+    const summary = await sweep([join(root, 'escape', '.trawlarr-replace-abc.mkv')]);
+
+    expect(summary.removed).toBe(0);
+    expect(existsSync(victim)).toBe(true);
+  });
+
+  it('never removes a name that is not scratch, even when listed', async () => {
+    const media = join(root, 'Movie.mkv');
+    writeFileSync(media, 'media');
+    const old = new Date(NOW - 30 * DAY_MS);
+    utimesSync(media, old, old);
+    const dotfile = scratch(root, '.trawlarr-notes.txt', 30 * DAY_MS);
+    const relative = '.trawlarr-replace-abc.mkv';
+
+    const summary = await sweep([
+      media,
+      dotfile,
+      relative,
+      join(root, '..', basename(root), 'Movie.mkv'),
+    ]);
+
+    expect(summary.removed).toBe(0);
+    expect(existsSync(media)).toBe(true);
+    expect(existsSync(dotfile)).toBe(true);
+  });
+
+  it('removes a symlink named like scratch never, and its target never', async () => {
+    const target = join(root, 'Movie.mkv');
+    writeFileSync(target, 'media');
+    const link = join(root, '.trawlarr-replace-link.mkv');
+    symlinkSync(target, link);
+    const old = new Date(NOW - 30 * DAY_MS);
+    lutimesSync(link, old, old);
+
+    await sweep([link]);
+
+    expect(existsSync(target)).toBe(true);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
+  it('reports a swap note that names a path outside the roots, and leaves it', async () => {
+    const dir = join(root, 'Film');
+    mkdirSync(dir);
+    const events: string[] = [];
+    const note = scratch(
+      dir,
+      '.trawlarr-swap-1.json',
+      DAY_MS,
+      JSON.stringify({
+        version: 1,
+        originalPath: '/etc/victim.mkv',
+        finalPath: '/etc/victim.mkv',
+        stagedPath: '/etc/.trawlarr-replace-x.mkv',
+        trashDir: '/etc',
+        trashNowMs: 1,
+        originalDev: 1,
+        originalIno: 1,
+      }),
+    );
+
+    const summary = await sweepWorkingFiles({
+      db,
+      libraryId: library.id,
+      files: [note],
+      roots: [root],
+      nowMs: NOW,
+      onEvent: (message) => events.push(message),
+    });
+
+    expect(summary.swapsRefused).toBe(1);
+    expect(existsSync(note)).toBe(true);
+    expect(events.join('\n')).toMatch(/not acted on \(refused\)/);
   });
 });

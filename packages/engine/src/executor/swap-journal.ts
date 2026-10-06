@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { link, lstat, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, normalize, sep } from 'node:path';
 import { WORKING_FILE_PREFIX } from '@trawlarr/core';
+import { canonicalPath } from './encode-target.js';
 
 /**
  * A note left beside the library file for the few milliseconds between
@@ -76,7 +77,11 @@ export const findTrashedOriginal = async (journal: SwapJournal): Promise<string 
   for (const name of names.filter((candidate) => pattern.test(candidate)).sort()) {
     const path = join(journal.trashDir, name);
     const stats = await lstat(path).catch(() => null);
-    if (stats !== null && stats.dev === journal.originalDev && stats.ino === journal.originalIno) {
+    if (
+      stats?.isFile() === true &&
+      stats.dev === journal.originalDev &&
+      stats.ino === journal.originalIno
+    ) {
       return path;
     }
   }
@@ -84,8 +89,14 @@ export const findTrashedOriginal = async (journal: SwapJournal): Promise<string 
 };
 
 export type SwapRecovery =
-  /** The note is unreadable or not ours; left alone. */
+  /** The note is unreadable, malformed or not ours; left alone, for a human. */
   | { outcome: 'invalid'; reason: string }
+  /**
+   * The note parsed but names something outside what this library owns, so
+   * nothing was touched. A directory anyone with share access can write to is
+   * not trusted to say where files should be moved.
+   */
+  | { outcome: 'refused'; reason: string }
   /** The swap never started, was undone, or finished: nothing to repair. */
   | { outcome: 'settled'; detail: string }
   /** The original was in trash with its path empty, and is back. */
@@ -99,25 +110,107 @@ const exists = async (path: string): Promise<boolean> =>
     () => false,
   )) as boolean;
 
-const parseJournal = (text: string): SwapJournal | null => {
+const MAX_JOURNAL_BYTES = 16 * 1024;
+
+const parseJournal = (text: string): SwapJournal | string => {
+  let value: Partial<SwapJournal>;
   try {
-    const value = JSON.parse(text) as Partial<SwapJournal>;
-    if (
-      value.version !== 1 ||
-      typeof value.originalPath !== 'string' ||
-      typeof value.finalPath !== 'string' ||
-      typeof value.stagedPath !== 'string' ||
-      typeof value.trashDir !== 'string' ||
-      typeof value.trashNowMs !== 'number' ||
-      typeof value.originalDev !== 'number' ||
-      typeof value.originalIno !== 'number'
-    ) {
-      return null;
-    }
-    return value as SwapJournal;
-  } catch {
-    return null;
+    value = JSON.parse(text) as Partial<SwapJournal>;
+  } catch (error) {
+    return `not valid JSON (${(error as Error).message})`;
   }
+  if (typeof value !== 'object' || value === null) return 'not a JSON object';
+  if (
+    value.version !== 1 ||
+    typeof value.originalPath !== 'string' ||
+    typeof value.finalPath !== 'string' ||
+    typeof value.stagedPath !== 'string' ||
+    typeof value.trashDir !== 'string' ||
+    !Number.isSafeInteger(value.trashNowMs) ||
+    typeof value.originalDev !== 'number' ||
+    typeof value.originalIno !== 'number'
+  ) {
+    return 'missing or mistyped fields';
+  }
+  return value as SwapJournal;
+};
+
+/** What a journal may name: the library's own roots, and its configured trash. */
+export interface SwapRecoveryScope {
+  /** The library roots every path in the note must lie inside. */
+  roots: readonly string[];
+  /** Trash directories outside the roots that the library is configured to use. */
+  trashDirs?: readonly string[];
+}
+
+const isInside = (parent: string, child: string): boolean => {
+  const base = canonicalPath(parent);
+  // The PARENT is canonicalised and the name appended: a path that does not exist yet
+  // (the original, mid-swap) cannot be realpath-ed, and falling back to a lexical
+  // resolve would let a symlinked parent directory walk straight out of the root.
+  const target = join(canonicalPath(dirname(child)), basename(child));
+  return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep);
+};
+
+/** Absolute, already normalized, no NUL, no `..` segment: spelled exactly as it is meant. */
+const cleanAbsolute = (path: string): boolean =>
+  isAbsolute(path) &&
+  !path.includes('\0') &&
+  normalize(path) === path &&
+  !path.split(sep).includes('..');
+
+/**
+ * Every path read back from a note is untrusted: the library directory can be
+ * written by anyone with access to the share, and the note drives a link and
+ * an unlink. Returns why it is refused, or null.
+ *
+ *  - every path is clean (see {@link cleanAbsolute}) and canonically inside a
+ *    library root, trash inside a root or a configured trash directory — the
+ *    canonical form follows symlinks, so a link planted inside a root that
+ *    points out of it does not pass;
+ *  - the note lives beside the file it is about, the original and the final
+ *    path share that directory, and the staged name is the replace step's own.
+ *    A note copied or planted elsewhere does not describe a swap that happened
+ *    here.
+ */
+const refusalFor = (
+  journal: SwapJournal,
+  journalPath: string,
+  scope: SwapRecoveryScope,
+): string | null => {
+  for (const [label, path] of [
+    ['originalPath', journal.originalPath],
+    ['finalPath', journal.finalPath],
+    ['stagedPath', journal.stagedPath],
+    ['trashDir', journal.trashDir],
+  ] as const) {
+    if (!cleanAbsolute(path)) return `${label} "${path}" is not a clean absolute path`;
+  }
+  const inRoots = (path: string): boolean => scope.roots.some((root) => isInside(root, path));
+  for (const [label, path] of [
+    ['originalPath', journal.originalPath],
+    ['finalPath', journal.finalPath],
+    ['stagedPath', journal.stagedPath],
+  ] as const) {
+    if (!inRoots(path)) return `${label} "${path}" is outside the library roots`;
+  }
+  if (
+    !inRoots(journal.trashDir) &&
+    !(scope.trashDirs ?? []).some((d) => isInside(d, journal.trashDir))
+  ) {
+    return `trashDir "${journal.trashDir}" is not inside the library roots or its configured trash`;
+  }
+  const dir = dirname(journal.finalPath);
+  if (dirname(journal.originalPath) !== dir || dirname(journal.stagedPath) !== dir) {
+    return 'the original, final and staged paths are not in one directory';
+  }
+  if (canonicalPath(dirname(journalPath)) !== canonicalPath(dir)) {
+    return `the note is not in "${dir}", the directory it describes`;
+  }
+  if (!basename(journal.stagedPath).startsWith(`${WORKING_FILE_PREFIX}replace-`)) {
+    return `stagedPath "${journal.stagedPath}" is not a replace-step temp name`;
+  }
+  return null;
 };
 
 /**
@@ -139,15 +232,28 @@ const parseJournal = (text: string): SwapJournal | null => {
  * The restore is exclusive (`link(2)` fails `EEXIST`), so a file that appeared
  * at the path in the meantime is never overwritten.
  */
-export const recoverInterruptedSwap = async (journalPath: string): Promise<SwapRecovery> => {
+export const recoverInterruptedSwap = async (
+  journalPath: string,
+  scope: SwapRecoveryScope,
+): Promise<SwapRecovery> => {
+  if (!isSwapJournalName(basename(journalPath))) {
+    return { outcome: 'invalid', reason: 'not named like a swap note' };
+  }
   let text: string;
   try {
+    const stats = await lstat(journalPath);
+    if (!stats.isFile() || stats.size > MAX_JOURNAL_BYTES) {
+      return { outcome: 'invalid', reason: 'not a small regular file' };
+    }
     text = await readFile(journalPath, 'utf8');
   } catch (error) {
     return { outcome: 'invalid', reason: `unreadable (${(error as Error).message})` };
   }
-  const journal = parseJournal(text);
-  if (journal === null) return { outcome: 'invalid', reason: 'not a swap journal' };
+  const parsed = parseJournal(text);
+  if (typeof parsed === 'string') return { outcome: 'invalid', reason: parsed };
+  const journal = parsed;
+  const refusal = refusalFor(journal, journalPath, scope);
+  if (refusal !== null) return { outcome: 'refused', reason: refusal };
 
   if ((await exists(journal.originalPath)) || (await exists(journal.finalPath))) {
     await removeSwapJournal(journalPath);

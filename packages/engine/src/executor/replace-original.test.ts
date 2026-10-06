@@ -1695,7 +1695,9 @@ describe('Replace Original File killed mid cross-device swap', () => {
     const stagedName = libraryFiles(space).find((name) => name.startsWith('.trawlarr-replace-'))!;
     expect(readFileSync(join(space.libraryDir, stagedName), 'utf8')).toBe(NEW_BODY);
 
-    const result = await recoverInterruptedSwap(join(space.libraryDir, journals[0]!));
+    const result = await recoverInterruptedSwap(join(space.libraryDir, journals[0]!), {
+      roots: [space.libraryDir],
+    });
 
     expect(result.outcome).toBe('restored');
     expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
@@ -1709,7 +1711,9 @@ describe('Replace Original File killed mid cross-device swap', () => {
     writeFileSync(space.originalPath, 'someone else put this here');
     const journal = libraryFiles(space).find(isSwapJournalName)!;
 
-    const result = await recoverInterruptedSwap(join(space.libraryDir, journal));
+    const result = await recoverInterruptedSwap(join(space.libraryDir, journal), {
+      roots: [space.libraryDir],
+    });
 
     expect(result.outcome).toBe('settled');
     expect(readFileSync(space.originalPath, 'utf8')).toBe('someone else put this here');
@@ -1724,7 +1728,9 @@ describe('Replace Original File killed mid cross-device swap', () => {
     expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
     const journal = libraryFiles(space).find(isSwapJournalName)!;
 
-    const result = await recoverInterruptedSwap(join(space.libraryDir, journal));
+    const result = await recoverInterruptedSwap(join(space.libraryDir, journal), {
+      roots: [space.libraryDir],
+    });
 
     expect(result.outcome).toBe('settled');
     expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);

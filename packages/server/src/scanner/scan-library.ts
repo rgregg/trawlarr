@@ -687,6 +687,8 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
         db,
         libraryId,
         files: workingFiles,
+        roots: library.roots,
+        trashDirs: library.trashDir === null ? [] : [library.trashDir],
         nowMs: nowMs(),
         onEvent: (message) => console.warn(`[scan] ${message}`),
       });
