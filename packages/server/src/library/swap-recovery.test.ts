@@ -275,9 +275,7 @@ describe('recoverInterruptedSwaps', () => {
 
   it('leaves a remote job that still holds its lease alone', async () => {
     const s = await stranded({ open: true });
-    s.db
-      .prepare(`UPDATE job SET lease_state = 'held' WHERE id = ?`)
-      .run(s.jobId);
+    s.db.prepare(`UPDATE job SET lease_state = 'held' WHERE id = ?`).run(s.jobId);
 
     const summary = await recover(s).done;
 
