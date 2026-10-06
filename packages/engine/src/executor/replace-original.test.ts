@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PluginDetails, PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
+import { isWorkingFileName } from '@trawlarr/core';
 import {
   createReplaceOriginalRunner,
   guardDurationChange,
@@ -715,6 +716,42 @@ describe('createReplaceOriginalRunner', () => {
     expect(seen.some((percent) => percent > 0 && percent < 100)).toBe(true);
     expect(seen.at(-1)).toBe(100);
     expect([...seen].sort((a, b) => a - b)).toEqual(seen);
+  });
+
+  it('stages a cross-device copy under a name the scanner refuses as media', async () => {
+    // The copy sits in the library directory, with the media's extension, for
+    // as long as a multi-GB copy to a NAS takes. The scanner tells it from
+    // media by name alone, so the name it is given is a contract: a scan that
+    // took it for a new file made the run fail and re-encode, and one left by
+    // a killed worker was tracked as a finished movie.
+    const space = workspace();
+    const copiedTo: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) {
+            throw Object.assign(new Error('EXDEV: cross-device link not permitted'), {
+              code: 'EXDEV',
+            });
+          }
+          await link(from, to);
+        },
+        copyFile: async (from, to) => {
+          copiedTo.push(to);
+          writeFileSync(to, readFileSync(from));
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(copiedTo).toHaveLength(1);
+    expect(dirname(copiedTo[0]!)).toBe(space.libraryDir);
+    expect(isWorkingFileName(basename(copiedTo[0]!))).toBe(true);
   });
 
   it('refuses the cross-device fallback when allowCrossDevice is false, and restores the original', async () => {
