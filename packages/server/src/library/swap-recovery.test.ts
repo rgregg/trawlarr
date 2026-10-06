@@ -200,14 +200,110 @@ describe('recoverInterruptedSwaps', () => {
     expect(existsSync(s.notePath)).toBe(false);
   });
 
-  it('does not restore beside a replacement that landed under another container', async () => {
+  it('never takes a sibling for the replacement: refuses, keeps the note, restores nothing', async () => {
     const s = await stranded();
-    writeFileSync(join(s.dir, 'Film.mp4'), 'the replacement');
+    // Could be the replacement under a new container, a different title, or a
+    // partial download: nothing recorded says which.
+    writeFileSync(join(s.dir, 'Film.mp4'), 'something with the same stem');
+
+    const { done, events } = recover(s);
+    const summary = await done;
+
+    expect(summary.refused).toBe(1);
+    expect(summary.settled).toBe(0);
+    expect(existsSync(s.notePath)).toBe(true);
+    expect(existsSync(s.original)).toBe(false);
+    expect(existsSync(s.trashed)).toBe(true);
+    expect(events.join('\n')).toMatch(/cannot be established/);
+  });
+
+  it('does not settle on a directory at the original path', async () => {
+    const s = await stranded();
+    mkdirSync(s.original);
 
     const summary = await recover(s).done;
 
-    expect(summary.settled).toBe(1);
+    expect(summary.refused).toBe(1);
+    expect(summary.settled).toBe(0);
+    expect(existsSync(s.notePath)).toBe(true);
+    expect(existsSync(s.trashed)).toBe(true);
+  });
+
+  it('does not settle on a symlink at the original path', async () => {
+    const s = await stranded();
+    symlinkSync(join(s.base, 'nowhere'), s.original);
+
+    const summary = await recover(s).done;
+
+    expect(summary.refused).toBe(1);
+    expect(existsSync(s.notePath)).toBe(true);
+  });
+
+  it('restores for a job that ended any way at all: failed, cancelled or reaped', async () => {
+    for (const state of ['failed', 'cancelled', 'succeeded'] as const) {
+      const s = await stranded();
+      createJobRepo(s.db).finish({ jobId: s.jobId, state, outcome: state, nowMs: NOW + 1 });
+
+      const summary = await recover(s).done;
+
+      expect(summary.restored).toBe(1);
+      expect(readFileSync(s.original, 'utf8')).toBe('the original');
+    }
+  });
+
+  it('leaves it alone when the file has since been claimed again by a live job', async () => {
+    const s = await stranded();
+    createJobRepo(s.db).start({ fileId: s.fileId, flowId: 'flow', flowHash: 'hash', nowMs: NOW });
+
+    const summary = await recover(s).done;
+
+    expect(summary.retained).toBe(1);
     expect(existsSync(s.original)).toBe(false);
+    expect(existsSync(s.trashed)).toBe(true);
+    expect(existsSync(s.notePath)).toBe(true);
+  });
+
+  it('leaves it alone when the row is claimed running, whatever its job rows say', async () => {
+    const s = await stranded();
+    s.db.prepare(`UPDATE media_file SET state = 'running' WHERE id = ?`).run(s.fileId);
+
+    const summary = await recover(s).done;
+
+    expect(summary.retained).toBe(1);
+    expect(existsSync(s.original)).toBe(false);
+  });
+
+  it('leaves a remote job that still holds its lease alone', async () => {
+    const s = await stranded({ open: true });
+    s.db
+      .prepare(`UPDATE job SET lease_state = 'held' WHERE id = ?`)
+      .run(s.jobId);
+
+    const summary = await recover(s).done;
+
+    expect(summary.retained).toBe(1);
+    expect(existsSync(s.original)).toBe(false);
+  });
+
+  it('clears the missing mark a scan left in the empty window, and keeps the row describing the original', async () => {
+    const s = await stranded();
+    createMediaFileRepo(s.db).markMissing({
+      fileId: s.fileId,
+      expectPath: s.original,
+      nowMs: NOW + 5,
+    });
+    const before = createMediaFileRepo(s.db).getById(s.fileId)!;
+
+    await recover(s).done;
+
+    const after = createMediaFileRepo(s.db).getById(s.fileId)!;
+    expect(after.missing_since_ms).toBeNull();
+    expect(after.inode_key).toBe(before.inode_key);
+    expect(after.content_key).toBe(before.content_key);
+    expect(after.path).toBe(s.original);
+    expect(`${String(statSync(s.original).dev)}:${String(statSync(s.original).ino)}`).toBe(
+      after.inode_key,
+    );
   });
 
   it('refuses, keeping the note, when the original is no longer in trash', async () => {

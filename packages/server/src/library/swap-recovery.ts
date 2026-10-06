@@ -134,7 +134,20 @@ export const recoverInterruptedSwaps = async (
       refuse('no such job in the database');
       continue;
     }
+    // `ended_at` is set by every way a job ends: finished, failed, cancelled,
+    // closed by the reaper (a dead local worker, or a node's lease running
+    // out). An open job, leased or not, may be mid-swap right now.
     if (job.endedAt === null) {
+      summary.retained += 1;
+      continue;
+    }
+    // An ended job is not enough on its own: the file may have been claimed
+    // AGAIN since, by a newer job whose worker is live. Restoring beneath it is
+    // two workers on one file.
+    if (
+      files.getById(job.fileId)?.state === 'running' ||
+      jobs.listForFile(job.fileId).some((other) => other.endedAt === null)
+    ) {
       summary.retained += 1;
       continue;
     }
@@ -159,18 +172,36 @@ export const recoverInterruptedSwaps = async (
         continue;
       }
 
-      // Occupied: the original, or a sibling that is plainly its replacement.
+      // Is anything at the original's path? Only a REGULAR FILE there means
+      // nothing is missing; a directory, symlink or anything else is not the
+      // original and not something to settle on.
+      const here = await lstat(join(dir, basename(originalPath))).catch(() => null);
+      if (here !== null) {
+        if (!here.isFile()) {
+          refuse(`"${originalPath}" is occupied by something that is not a regular file`);
+          continue;
+        }
+        await unlink(notePath).catch(() => {});
+        summary.settled += 1;
+        continue;
+      }
+      // A sibling with the same stem may be the replacement installed under a
+      // new container, or a different title, a partial download, a directory.
+      // Nothing recorded can tell which (a crash leaves no post-run path in the
+      // database), so it is never taken as the replacement: refuse and keep the
+      // note. The original stays in trash for its retention; a human decides.
       const stem = basename(originalPath, extname(originalPath));
       const siblings = (await readdir(dir)).filter(
         (entry) =>
-          entry === basename(originalPath) ||
-          (entry.startsWith(`${stem}.`) &&
-            !entry.slice(stem.length + 1).includes('.') &&
-            library.extensions.includes(extname(entry).slice(1).toLowerCase())),
+          entry.startsWith(`${stem}.`) &&
+          !entry.startsWith('.trawlarr-') &&
+          library.extensions.includes(extname(entry).slice(1).toLowerCase()),
       );
       if (siblings.length > 0) {
-        await unlink(notePath).catch(() => {});
-        summary.settled += 1;
+        refuse(
+          `"${originalPath}" is gone but "${siblings.join('", "')}" is beside it; whether that ` +
+            `is the replacement cannot be established, so nothing was restored or removed`,
+        );
         continue;
       }
 
@@ -264,6 +295,11 @@ export const recoverInterruptedSwaps = async (
         continue;
       }
       if (!renamed) await unlink(trashed.path).catch(() => {});
+      // The row never recorded the replacement (a crash leaves no post-run
+      // identity), so it still describes this original, and the restored file
+      // carries the inode its `inode_key` names. What a scan may have done in
+      // the empty window is the one thing to undo: mark it missing.
+      if (row.missing_since_ms !== null) files.clearMissing(row.id);
       await unlink(notePath).catch(() => {});
       summary.restored += 1;
       say(`Restored "${target}" from trash after an interrupted replacement.`);
