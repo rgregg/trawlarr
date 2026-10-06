@@ -126,7 +126,7 @@ export const sweepWorkingFiles = async (
   };
   if (input.files.length === 0) return summary;
 
-  const owned = ownedDirectories(input.db, input.libraryId);
+  const staleAfterMs = input.staleAfterMs ?? DEFAULT_WORKING_FILE_STALE_AFTER_MS;
   const say = (message: string): void => input.onEvent?.(message);
 
   /**
