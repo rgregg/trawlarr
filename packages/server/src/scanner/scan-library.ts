@@ -64,8 +64,6 @@ export interface ScanSummary {
   rootsUnavailable: number;
   /** Orphaned `.trawlarr-*` scratch files this scan removed (see `sweepWorkingFiles`). */
   workingFilesRemoved: number;
-  /** Interrupted replacements whose original this scan put back from trash. */
-  swapsRestored: number;
 }
 
 export interface ScanLibraryInput {
@@ -321,7 +319,6 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     restored: 0,
     rootsUnavailable: 0,
     workingFilesRemoved: 0,
-    swapsRestored: 0,
   };
 
   /**
@@ -688,12 +685,10 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
         libraryId,
         files: workingFiles,
         roots: library.roots,
-        trashDirs: library.trashDir === null ? [] : [library.trashDir],
         nowMs: nowMs(),
         onEvent: (message) => console.warn(`[scan] ${message}`),
       });
       summary.workingFilesRemoved = swept.removed;
-      summary.swapsRestored = swept.swapsRestored;
     } catch (error) {
       console.warn(`[scan] working-file sweep failed: ${String(error)}`);
     }

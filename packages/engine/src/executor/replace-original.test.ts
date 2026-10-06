@@ -20,12 +20,12 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PluginDetails, PluginInputArgs, ProbeData } from '@trawlarr/plugin-api';
 import { isWorkingFileName } from '@trawlarr/core';
-import { isSwapJournalName, recoverInterruptedSwap } from './swap-journal.js';
 import {
   createReplaceOriginalRunner,
   guardDurationChange,
   REPLACEMENT_DURATION_DRIFT_RATIO,
   REPLACEMENT_DURATION_DRIFT_SECONDS,
+  trashEntryPattern,
   type ReplaceRunnerInput,
 } from './replace-original.js';
 import type { LoadedPlugin } from '../host/loader.js';
@@ -1599,6 +1599,11 @@ describe('guardDurationChange', () => {
  */
 describe('Replace Original File killed mid cross-device swap', () => {
   const never = (): Promise<never> => new Promise<never>(() => {});
+  /** What the host's swap note has been told, as the daemon's recovery would find it. */
+  const note: { begun: { trashNowMs: number } | null; ended: boolean } = {
+    begun: null,
+    ended: false,
+  };
   const exdev = (): never => {
     throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
   };
@@ -1617,9 +1622,19 @@ describe('Replace Original File killed mid cross-device swap', () => {
       return never();
     };
     const stagedNames = (path: string): boolean => basename(path).startsWith('.trawlarr-replace-');
+    note.begun = null;
+    note.ended = false;
     const module = runnerFor({
       trashDir: space.trashDir,
       overrides: {
+        swapNote: {
+          begin: async (given) => {
+            note.begun = given;
+          },
+          end: async () => {
+            note.ended = true;
+          },
+        },
         linkFile: async (from, to) => {
           if (dirname(from) === space.stagingDir) return exdev();
           if (point === 'original-trashed' && stagedNames(from) && to === space.originalPath) {
@@ -1682,7 +1697,7 @@ describe('Replace Original File killed mid cross-device swap', () => {
     expect(readFileSync(space.newPath, 'utf8')).toBe(NEW_BODY);
   });
 
-  it('killed with the original in trash: the library path is empty, and recovery puts it back', async () => {
+  it('killed with the original in trash: the library path is empty, and the note is still open', async () => {
     const space = await killedAt('original-trashed');
 
     // The dangerous window, now two metadata operations wide: the library path
@@ -1690,51 +1705,59 @@ describe('Replace Original File killed mid cross-device swap', () => {
     expect(existsSync(space.originalPath)).toBe(false);
     const trashed = readdirSync(space.trashDir);
     expect(trashed).toHaveLength(1);
-    const journals = libraryFiles(space).filter(isSwapJournalName);
-    expect(journals).toHaveLength(1);
+    expect(trashed[0]).toBe(`movie.${String(CLOCK_MS)}.mkv`);
+    expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
     const stagedName = libraryFiles(space).find((name) => name.startsWith('.trawlarr-replace-'))!;
     expect(readFileSync(join(space.libraryDir, stagedName), 'utf8')).toBe(NEW_BODY);
-
-    const result = await recoverInterruptedSwap(join(space.libraryDir, journals[0]!), {
-      roots: [space.libraryDir],
-    });
-
-    expect(result.outcome).toBe('restored');
-    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
-    expect(readdirSync(space.trashDir)).toEqual([]);
-    expect(statSync(space.originalPath).nlink).toBe(1);
-    expect(libraryFiles(space).filter(isSwapJournalName)).toEqual([]);
+    // What a recovery needs, and that it was left open: recorded before the
+    // original moved, never ended. No file in the library names a path.
+    expect(note.begun).toEqual({ trashNowMs: CLOCK_MS });
+    expect(note.ended).toBe(false);
+    expect(libraryFiles(space).filter((name) => name.startsWith('.trawlarr-swap'))).toEqual([]);
+    // And the pattern recovery searches trash with finds exactly that entry.
+    expect(
+      trashEntryPattern({ originalName: 'movie.mkv', nowMs: CLOCK_MS }).test(trashed[0]!),
+    ).toBe(true);
   });
 
-  it('recovery never overwrites a file that appeared at the path since', async () => {
-    const space = await killedAt('original-trashed');
-    writeFileSync(space.originalPath, 'someone else put this here');
-    const journal = libraryFiles(space).find(isSwapJournalName)!;
-
-    const result = await recoverInterruptedSwap(join(space.libraryDir, journal), {
-      roots: [space.libraryDir],
-    });
-
-    expect(result.outcome).toBe('settled');
-    expect(readFileSync(space.originalPath, 'utf8')).toBe('someone else put this here');
-    expect(readdirSync(space.trashDir)).toHaveLength(1);
-  });
-
-  it('killed after the install: the replacement is in place and recovery changes nothing', async () => {
+  it('records the note before the original moves, and ends it after the install', async () => {
     const space = await killedAt('installed');
 
     expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
     const trashed = readdirSync(space.trashDir);
     expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
-    const journal = libraryFiles(space).find(isSwapJournalName)!;
+    // Killed after the install but before the run settled: still open, which a
+    // recovery resolves by seeing the library path occupied.
+    expect(note.begun).toEqual({ trashNowMs: CLOCK_MS });
+    expect(note.ended).toBe(false);
+  });
 
-    const result = await recoverInterruptedSwap(join(space.libraryDir, journal), {
-      roots: [space.libraryDir],
-    });
+  it('refuses the swap, moving nothing, when the note cannot be recorded', async () => {
+    const space = workspace();
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        swapNote: {
+          begin: async () => {
+            throw new Error('disk full');
+          },
+          end: async () => {},
+        },
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) return exdev();
+          await link(from, to);
+        },
+      },
+    })(replacePlugin())!;
 
-    expect(result.outcome).toBe('settled');
-    expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
-    expect(readdirSync(space.trashDir)).toEqual(trashed);
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(existsSync(space.trashDir)).toBe(false);
+    expect(libraryFiles(space)).toEqual(['movie.mkv']);
   });
 
   it('refuses a copy that came out short, with the original untouched', async () => {

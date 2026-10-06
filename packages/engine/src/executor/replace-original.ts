@@ -11,7 +11,6 @@ import { WORKING_FILE_PREFIX } from '@trawlarr/core';
 import type { LoadedPlugin } from '../host/loader.js';
 import { canonicalPath } from './encode-target.js';
 import { BYTES_PER_MEGABYTE } from '../host/file-object.js';
-import { journalPathFor, removeSwapJournal, writeSwapJournal } from './swap-journal.js';
 import { compareDurations, type DurationComparison } from './verify-output.js';
 import { describeSizeChange } from './size-change.js';
 
@@ -107,7 +106,36 @@ export interface ReplaceRunnerInput {
   onProgress?: (percent: number) => void;
   /** Seam for tests: how often the copy is measured. */
   copyProgressIntervalMs?: number;
+  /**
+   * Where the swap's progress is recorded for crash recovery, or absent when
+   * the host has nowhere trustworthy to put it (a node with no data
+   * directory). Provided by the HOST, never derived from anything in the
+   * library tree: whatever lives next to the media can be written by anyone
+   * with access to the share, so it must not be able to steer a recovery.
+   * The note carries no paths at all, only the one number a recovery cannot
+   * recompute (see `trashEntryPattern`); the host keys it by job id and the
+   * recovery derives every path from its own database.
+   */
+  swapNote?: SwapNote;
 }
+
+export interface SwapNote {
+  /** Recorded BEFORE the original moves to trash. Failing refuses the swap. */
+  begin: (note: { trashNowMs: number }) => Promise<void>;
+  /** Called once the outcome is settled (installed, or restored). Best effort. */
+  end: () => Promise<void>;
+}
+
+/**
+ * The names `moveToTrash` gives an original: `<stem>.<nowMs>[-n]<ext>`.
+ * Exported so a recovery finds the entry by the same rule that wrote it.
+ */
+export const trashEntryPattern = (input: { originalName: string; nowMs: number }): RegExp => {
+  const extension = extname(input.originalName);
+  const stem = basename(input.originalName, extension);
+  const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escape(stem)}\\.${String(input.nowMs)}(-\\d+)?${escape(extension)}$`);
+};
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -874,11 +902,9 @@ export const createReplaceOriginalRunner =
         // conservative call, and it can be relaxed later far more safely than
         // it could be retracted.
         let originalIsSymlink: boolean;
-        let originalIdentity: { dev: number; ino: number };
         try {
           const originalLstat = await lstat(originalPath);
           originalIsSymlink = originalLstat.isSymbolicLink();
-          originalIdentity = { dev: originalLstat.dev, ino: originalLstat.ino };
         } catch (error) {
           return refuse(
             `the original "${originalPath}" could not be examined (${messageOf(error)}).`,
@@ -939,7 +965,7 @@ export const createReplaceOriginalRunner =
         // kill during the copy leaves the original in place and a stray temp
         // for the orphan sweep; the original is trashed only once a verified
         // full-size copy exists, and the remaining window is two metadata
-        // operations, covered by the swap journal below.
+        // operations, covered by the swap note below.
         let staged: StagedReplacement | null = null;
         if (!alreadyInPlace) {
           try {
@@ -969,24 +995,14 @@ export const createReplaceOriginalRunner =
         // --- From here on, the filesystem changes. ---
         const trashDir = input.trashDirFor(originalPath);
         const trashNowMs = input.nowMs();
-        // Written before the original moves, removed once the outcome is
-        // settled; a worker that dies in between leaves it for the sweep to
-        // act on. Only a staged swap has the short window it is for.
-        let journalPath: string | null = null;
-        if (staged !== null) {
-          const candidate = journalPathFor(finalPath);
+        // Written before the original moves, ended once the outcome is
+        // settled; a worker that dies in between leaves it for the daemon's
+        // recovery. Only a staged swap has the short window it is for.
+        let noted = false;
+        if (staged !== null && input.swapNote !== undefined) {
           try {
-            await writeSwapJournal(candidate, {
-              version: 1,
-              originalPath,
-              finalPath,
-              stagedPath: staged.path,
-              trashDir,
-              trashNowMs,
-              originalDev: originalIdentity.dev,
-              originalIno: originalIdentity.ino,
-            });
-            journalPath = candidate;
+            await input.swapNote.begin({ trashNowMs });
+            noted = true;
           } catch (error) {
             await unlinkFile(staged.path).catch(() => {});
             return refuse(
@@ -997,6 +1013,9 @@ export const createReplaceOriginalRunner =
             );
           }
         }
+        const endNote = async (): Promise<void> => {
+          if (noted) await input.swapNote?.end().catch(() => {});
+        };
         let trashPath: string;
         try {
           await mkdir(trashDir, { recursive: true });
@@ -1019,7 +1038,7 @@ export const createReplaceOriginalRunner =
           // this file.
           // The original did not move, so neither the note nor the staged copy
           // has a purpose. (The staged copy is a duplicate, never the only one.)
-          if (journalPath !== null) await removeSwapJournal(journalPath);
+          await endNote();
           if (staged !== null) await unlinkFile(staged.path).catch(() => {});
           const stranded = await input
             .statFile(originalPath)
@@ -1108,9 +1127,7 @@ export const createReplaceOriginalRunner =
             say(`Replacement failed: ${messageOf(error)}`);
             // The note outlives a restore that failed: it is what lets the
             // sweep try again once whatever blocked it has cleared.
-            if ((await restoreOriginal()) && journalPath !== null) {
-              await removeSwapJournal(journalPath);
-            }
+            if (await restoreOriginal()) await endNote();
             return {
               outputNumber: 2,
               outputFileObj: { _id: originalPath },
@@ -1129,7 +1146,7 @@ export const createReplaceOriginalRunner =
             .statFile(finalPath)
             .then((stats) => stats.nlink > 1)
             .catch(() => false);
-          if (journalPath !== null) await removeSwapJournal(journalPath);
+          await endNote();
           if (leftLinked) {
             say(
               `"${finalPath}" now has more than one name, so it will be refused as ` +
@@ -1157,7 +1174,7 @@ export const createReplaceOriginalRunner =
 
         // The replacement is installed (or reported as landed above): the
         // note has done its job.
-        if (journalPath !== null) await removeSwapJournal(journalPath);
+        await endNote();
 
         await describeReplacement({
           args,

@@ -67,6 +67,7 @@ const fixturePayload = (
     ffmpegPath: 'ffmpeg',
     ffprobePath: 'ffprobe',
     logPath: '/data/logs/jobs/job-1.log',
+    swapNotePath: '/data/swaps/job-1.json',
     pluginPaths: {},
     pluginBundles: {},
     ...rest,
@@ -120,6 +121,8 @@ describe('payloadToNode', () => {
     expect(mapped.library.stagingDir).toBe('/mnt/nas/.stage');
     expect(mapped.library.trashDir).toBeNull();
     expect(mapped.logPath).toBeNull();
+    // A node has no recovery to read a server-side note.
+    expect(mapped.swapNotePath).toBeNull();
   });
 
   it("never sends the library's Radarr/Sonarr key to a node", () => {

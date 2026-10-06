@@ -18,4 +18,3 @@ export * from './executor/size-change.js';
 export * from './executor/vouchable.js';
 export * from './executor/command-encodes.js';
 export * from './executor/dry-run.js';
-export * from './executor/swap-journal.js';

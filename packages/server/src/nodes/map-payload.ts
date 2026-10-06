@@ -85,6 +85,7 @@ const mapPayload = (
     plex: payload.library.plex === null ? null : { ...payload.library.plex, token: '' },
   },
   logPath: null,
+  swapNotePath: null,
 });
 
 /**

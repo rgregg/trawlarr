@@ -43,6 +43,7 @@ import { probeFile } from '../probe/ffprobe.js';
 import { partialHashFile } from '../fs/partial-hash.js';
 import { createJobLogWriter } from '../job-log/job-log-writer.js';
 import type { JobPayload } from './job-payload.js';
+import { createSwapNote } from './swap-note.js';
 
 /**
  * Everything `runPayload` is allowed to reach the outside world through.
@@ -493,6 +494,8 @@ export const runPayload = async (input: {
           // and a flow's own verification read one clock.
           probeFile: (path) => probeFile({ ffprobePath: payload.ffprobePath, path }),
           crossDeviceError: crossDeviceErrorSeam,
+          swapNote:
+            payload.swapNotePath === null ? undefined : createSwapNote(payload.swapNotePath),
           nowMs: ports.nowMs,
           // Only the cross-device fallback reports this: a same-filesystem
           // replacement is a rename and has nothing to wait on, while a copy

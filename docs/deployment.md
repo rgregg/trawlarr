@@ -226,10 +226,12 @@ you a file. The new file is copied into the library directory as a hidden
 `.trawlarr-replace-*` temp and its size is checked against the source **before**
 the original is moved to trash; only then does the original move and the temp
 take its place. A worker killed during the copy leaves the original untouched.
-A swap note (`.trawlarr-swap-*.json`) covers the two metadata operations
-between "original in trash" and "replacement in place": if a worker dies
-there, the next library scan puts the original back from trash. The same scan
-removes `.trawlarr-replace-*` / `.trawlarr-reserve-*` leftovers once nothing
+A swap note in the daemon's own data directory (`/config/swaps/<job id>.json`, never
+beside the media) covers the two metadata operations between "original in trash"
+and "replacement in place": if a worker dies there, the daemon puts the original
+back from the library's trash directory at its next start or reaper pass. The
+note holds one number; every path comes from the database. A scan removes
+`.trawlarr-replace-*` / `.trawlarr-reserve-*` leftovers once nothing
 running could own them and they have sat unmodified for a day.
 
 ## 4. Environment variables

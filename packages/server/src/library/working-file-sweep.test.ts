@@ -3,10 +3,8 @@ import {
   lstatSync,
   lutimesSync,
   symlinkSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   statSync,
   utimesSync,
@@ -148,76 +146,6 @@ describe('sweepWorkingFiles', () => {
     expect(summary.examined).toBe(0);
     expect(existsSync(other)).toBe(true);
   });
-
-  it('restores an original from trash when a swap note shows the path was left empty', async () => {
-    const dir = join(root, 'Film');
-    const trashDir = join(dir, '.trawlarr', 'trash');
-    mkdirSync(trashDir, { recursive: true });
-    const original = join(dir, 'Film.mkv');
-    writeFileSync(original, 'the original');
-    const { dev, ino } = statSync(original);
-    // The original moved to trash, as the swap does, and the worker then died.
-    const trashed = join(trashDir, 'Film.1700000000000.mkv');
-    linkSync(original, trashed);
-    rmSync(original);
-    const note = scratch(
-      dir,
-      '.trawlarr-swap-1.json',
-      DAY_MS,
-      JSON.stringify({
-        version: 1,
-        originalPath: original,
-        finalPath: original,
-        stagedPath: join(dir, '.trawlarr-replace-x.mkv'),
-        trashDir,
-        trashNowMs: 1_700_000_000_000,
-        originalDev: dev,
-        originalIno: ino,
-      }),
-    );
-
-    const summary = await sweep([note]);
-
-    expect(summary.swapsRestored).toBe(1);
-    expect(readFileSync(original, 'utf8')).toBe('the original');
-    expect(existsSync(trashed)).toBe(false);
-    expect(existsSync(note)).toBe(false);
-  });
-
-  it('does not repair a swap whose directory a running job owns', async () => {
-    const dir = join(root, 'Busy');
-    const trashDir = join(dir, '.trawlarr', 'trash');
-    mkdirSync(trashDir, { recursive: true });
-    const original = join(dir, 'Busy.mkv');
-    const fileId = await trackWithJob(original, true);
-    expect(fileId).toBeTruthy();
-    const { dev, ino } = statSync(original);
-    const trashed = join(trashDir, 'Busy.1700000000000.mkv');
-    linkSync(original, trashed);
-    rmSync(original);
-    const note = scratch(
-      dir,
-      '.trawlarr-swap-1.json',
-      DAY_MS,
-      JSON.stringify({
-        version: 1,
-        originalPath: original,
-        finalPath: original,
-        stagedPath: join(dir, '.trawlarr-replace-x.mkv'),
-        trashDir,
-        trashNowMs: 1_700_000_000_000,
-        originalDev: dev,
-        originalIno: ino,
-      }),
-    );
-
-    await sweep([note]);
-
-    // The live job is mid-swap: restoring beneath it would be two workers.
-    expect(existsSync(original)).toBe(false);
-    expect(existsSync(trashed)).toBe(true);
-    expect(existsSync(note)).toBe(true);
-  });
 });
 
 describe('scanLibrary', () => {
@@ -297,39 +225,5 @@ describe('sweepWorkingFiles never acts outside what it owns', () => {
 
     expect(existsSync(target)).toBe(true);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
-  });
-
-  it('reports a swap note that names a path outside the roots, and leaves it', async () => {
-    const dir = join(root, 'Film');
-    mkdirSync(dir);
-    const events: string[] = [];
-    const note = scratch(
-      dir,
-      '.trawlarr-swap-1.json',
-      DAY_MS,
-      JSON.stringify({
-        version: 1,
-        originalPath: '/etc/victim.mkv',
-        finalPath: '/etc/victim.mkv',
-        stagedPath: '/etc/.trawlarr-replace-x.mkv',
-        trashDir: '/etc',
-        trashNowMs: 1,
-        originalDev: 1,
-        originalIno: 1,
-      }),
-    );
-
-    const summary = await sweepWorkingFiles({
-      db,
-      libraryId: library.id,
-      files: [note],
-      roots: [root],
-      nowMs: NOW,
-      onEvent: (message) => events.push(message),
-    });
-
-    expect(summary.swapsRefused).toBe(1);
-    expect(existsSync(note)).toBe(true);
-    expect(events.join('\n')).toMatch(/not acted on \(refused\)/);
   });
 });

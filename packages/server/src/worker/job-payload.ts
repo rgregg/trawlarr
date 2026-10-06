@@ -1,6 +1,7 @@
 import type { FileState, FlowDefinition, HardwareType, WorkerClass } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
 import type { Db } from '../db/connection.js';
+import { swapNotePath } from './swap-note.js';
 import { createMediaFileRepo, type ClaimedFile } from '../db/media-file-repo.js';
 import { createLibraryRepo, type LibraryRecord } from '../db/library-repo.js';
 import { createFlowRepo } from '../db/flow-repo.js';
@@ -60,6 +61,12 @@ export interface JobPayload {
    * row at all).
    */
   logPath: string | null;
+  /**
+   * Where this job's swap note goes (see `swap-note.ts`): under the daemon's
+   * data directory, never the library. Null on a node, which has no recovery
+   * to read it, and for a caller with no data directory.
+   */
+  swapNotePath: string | null;
   /**
    * Installed plugin id -> absolute path, for exactly the ids this flow names.
    *
@@ -173,6 +180,8 @@ export const buildJobPayload = (input: BuildJobPayloadInput): JobPayload => {
     hardwareType: input.hardwareType,
     logPath:
       input.dataDir == null ? null : jobLogPath({ dataDir: input.dataDir, jobId: input.jobId }),
+    swapNotePath:
+      input.dataDir == null ? null : swapNotePath({ dataDir: input.dataDir, jobId: input.jobId }),
     ffmpegPath: input.ffmpegPath,
     ffprobePath: input.ffprobePath,
     // Only the ids this flow actually names: resolution happens HERE, once,
