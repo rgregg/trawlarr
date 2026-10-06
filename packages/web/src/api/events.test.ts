@@ -122,4 +122,12 @@ describe('reduceLive', () => {
     const state = fold([{ type: 'nodes.changed', nodeId: 'node-1', online: true }]);
     expect(state.staleness.nodes).toBe(1);
   });
+
+  it('ignores a frame type it does not know, rather than returning undefined', () => {
+    // `file.replaced` is a real daemon frame the web union does not name.
+    const frame = { type: 'file.replaced', libraryId: 'lib-1', fileId: 'f', path: '/x' };
+    const state = fold([started]);
+
+    expect(reduceLive(state, frame as unknown as Parameters<typeof reduceLive>[1])).toBe(state);
+  });
 });
