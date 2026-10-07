@@ -100,6 +100,21 @@ describe('observeCurrentFile', () => {
     expect(logged.join('\n')).toMatch(/probed again/);
   });
 
+  it('says the modification time changed when the size did not', async () => {
+    const { payload } = staleRow();
+    const logged: string[] = [];
+
+    await observeCurrentFile({
+      payload,
+      log: (text) => logged.push(text),
+      stat: async () => ({ size: payload.sizeBytes, mtimeMs: NOW, ctimeMs: NOW }),
+      probe: async () => HEVC,
+    });
+
+    expect(logged.join('\n')).toMatch(/modified .* then, .* now/);
+    expect(logged.join('\n')).not.toMatch(/bytes then/);
+  });
+
   it('refuses to run on stale facts when the changed file cannot be probed', async () => {
     const { payload } = staleRow();
 

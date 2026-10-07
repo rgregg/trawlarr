@@ -57,9 +57,15 @@ export const observeCurrentFile = async (input: {
   }
   if (current.size === payload.sizeBytes && current.mtimeMs === payload.mtimeMs) return unchanged;
 
+  // A remux or tag fix can change mtime and leave the byte count identical;
+  // "2048 bytes then, 2048 now" would give an operator nothing to go on.
+  const what =
+    current.size !== payload.sizeBytes
+      ? `${String(payload.sizeBytes)} bytes then, ${String(current.size)} now`
+      : `modified ${new Date(payload.mtimeMs).toISOString()} then, ${new Date(current.mtimeMs).toISOString()} now`;
   input.log(
-    `"${payload.path}" has changed since it was last probed (${String(payload.sizeBytes)} bytes ` +
-      `then, ${String(current.size)} now), so it is being probed again before the flow runs.`,
+    `"${payload.path}" has changed since it was last probed (${what}), so it is being probed ` +
+      `again before the flow runs.`,
   );
   let probe: ProbeData;
   try {
