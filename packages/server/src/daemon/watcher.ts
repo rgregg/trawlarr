@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import { watch as chokidarWatch } from 'chokidar';
 import { isWorkingFileName } from '@trawlarr/core';
-import { pathContains } from '../fs/path-contains.js';
+import { createSubtreeMatcher } from '../fs/path-contains.js';
 
 export interface WatchInput {
   libraryId: string;
@@ -52,19 +52,22 @@ export interface WatchPort {
 export const createChokidarWatchPort = (): WatchPort => ({
   watch: (input) => {
     /**
-     * The watcher must ignore EXACTLY what the walk prunes, so this is
-     * `pathContains` against the caller's `reservedDirsForLibrary` list —
-     * the same segment-aware, symlink-canonicalising comparison
-     * `walkFiles` uses, not a second, weaker copy (a `startsWith`, a
-     * basename check, a glob). A watcher that ignored less than the walk
-     * would hand the coordinator events for staged transcodes and trashed
-     * files, and every scan those events triggered would be a scan the
-     * walk correctly refuses to find anything in — pure churn at best,
-     * and at worst a trigger storm on the one directory trawlarr writes
-     * to constantly.
+     * The watcher must ignore EXACTLY what the walk prunes, so this is the
+     * caller's `reservedDirsForLibrary` list under the same segment-aware,
+     * symlink-canonicalising comparison `walkFiles` uses, not a second,
+     * weaker copy (a `startsWith`, a basename check, a glob). A watcher that
+     * ignored less than the walk would hand the coordinator events for
+     * staged transcodes and trashed files, and every scan those events
+     * triggered would be a scan the walk correctly refuses to find anything
+     * in — pure churn at best, and at worst a trigger storm on the one
+     * directory trawlarr writes to constantly.
+     *
+     * Built once per watch rather than calling `pathContains` per event:
+     * chokidar asks this about every event, on the daemon's only thread, and
+     * `pathContains` stats the path it is asked about. See
+     * `createSubtreeMatcher` for the freeze that caused.
      */
-    const isIgnored = (path: string): boolean =>
-      input.ignored.some((reserved) => pathContains(reserved, path));
+    const isIgnored = createSubtreeMatcher({ roots: input.roots, subtrees: input.ignored });
 
     const watcher = chokidarWatch(input.roots, {
       // The initial add-storm would say nothing: a scan runs at startup
