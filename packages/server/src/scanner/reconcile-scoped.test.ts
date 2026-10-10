@@ -90,6 +90,49 @@ describe('listUnderPaths', () => {
   });
 });
 
+describe('listUnderPaths with unusual paths', () => {
+  const seed = async (folders: string[]): Promise<void> => {
+    for (const folder of folders) {
+      mkdirSync(join(root, folder), { recursive: true });
+      writeFileSync(join(root, folder, 'e1.mkv'), `content of ${folder}`);
+    }
+    await scanLibrary({
+      db,
+      libraryId: library.id,
+      ffprobePath: 'unused',
+      nowMs: () => 0,
+      probeFileImpl: async (input) => fixedProbe(input.path),
+    });
+  };
+
+  it('returns rows under a folder whose name contains a character outside the BMP', async () => {
+    await seed(['Show \u{1F3AC}']);
+    const rows = repo.listUnderPaths({
+      libraryId: library.id,
+      paths: [join(root, 'Show \u{1F3AC}')],
+    });
+    expect(rows.map((row) => row.path)).toEqual([join(root, 'Show \u{1F3AC}', 'e1.mkv')]);
+  });
+
+  it('treats % and _ in a path as themselves', async () => {
+    await seed(['100%_Show', '100XYShow']);
+    const rows = repo.listUnderPaths({ libraryId: library.id, paths: [join(root, '100%_Show')] });
+    expect(rows.map((row) => row.path)).toEqual([join(root, '100%_Show', 'e1.mkv')]);
+  });
+
+  it('accepts a scope path with a trailing slash', () => {
+    const rows = repo.listUnderPaths({ libraryId: library.id, paths: [`${join(root, 'Show')}/`] });
+    expect(rows.map((row) => row.path).sort()).toEqual([
+      join(root, 'Show', 'e1.mkv'),
+      join(root, 'Show', 'e2.mkv'),
+    ]);
+  });
+
+  it('returns nothing for an empty list of paths', () => {
+    expect(repo.listUnderPaths({ libraryId: library.id, paths: [] })).toEqual([]);
+  });
+});
+
 describe('reconcileMissing with a scope', () => {
   it('marks a deleted file missing when its path is in scope', async () => {
     unlinkSync(join(root, 'Show', 'e1.mkv'));
