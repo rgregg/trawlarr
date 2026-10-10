@@ -14,6 +14,25 @@ export class ScopeError extends Error {
   }
 }
 
+const lexicalPath = (path: string): string => resolve(path);
+
+/**
+ * The first library with a root that contains `path`, by string comparison
+ * alone. A request handler finds the library for a webhook with this: a
+ * canonical lookup would stat every root on the daemon's only thread.
+ */
+export const libraryContaining = (
+  libraries: readonly LibraryRecord[],
+  path: string,
+): LibraryRecord | undefined =>
+  libraries.find((candidate) =>
+    createSubtreeMatcher({
+      roots: candidate.roots,
+      subtrees: candidate.roots,
+      canonicalise: lexicalPath,
+    })(path),
+  );
+
 /**
  * The scope paths of one scan, normalised and checked against its library.
  *
@@ -32,12 +51,28 @@ export class ScopeError extends Error {
 export const validateScope = (input: {
   library: LibraryRecord;
   paths: readonly string[];
+  /**
+   * Compare path strings only, reading nothing from the filesystem.
+   *
+   * For a request handler: it runs on the daemon's only thread, and a
+   * synchronous realpath of a network directory per webhook is the stall
+   * removed from the watcher and the walk (PRs #68 and #69). The cost: a path
+   * spelled through a symlink alias of a root is not recognised here. The
+   * scan that follows re-validates canonically, so it stays the authority.
+   */
+  lexical?: boolean;
 }): string[] => {
   const { library } = input;
-  const inRoots = createSubtreeMatcher({ roots: library.roots, subtrees: library.roots });
+  const canonicalise = input.lexical === true ? lexicalPath : undefined;
+  const inRoots = createSubtreeMatcher({
+    roots: library.roots,
+    subtrees: library.roots,
+    ...(canonicalise === undefined ? {} : { canonicalise }),
+  });
   const inReserved = createSubtreeMatcher({
     roots: library.roots,
     subtrees: reservedDirsForLibrary(library),
+    ...(canonicalise === undefined ? {} : { canonicalise }),
   });
 
   const accepted = new Set<string>();

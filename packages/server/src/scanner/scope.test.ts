@@ -70,4 +70,23 @@ describe('validateScope', () => {
       validateScope({ library, paths: [join(root, '.trawlarr', 'trash', 'deleted.mkv')] }),
     ).toThrow(ScopeError);
   });
+
+  describe('lexically', () => {
+    it('accepts a path inside a root', () => {
+      const paths = [join(root, 'Film', 'film.mkv')];
+      expect(validateScope({ library, paths, lexical: true })).toEqual(paths);
+    });
+
+    it('refuses a path outside every root', () => {
+      expect(() =>
+        validateScope({ library, paths: [join(base, 'elsewhere', 'x.mkv')], lexical: true }),
+      ).toThrow(ScopeError);
+    });
+
+    it('refuses a path in a reserved directory', () => {
+      expect(() =>
+        validateScope({ library, paths: [join(root, '.trawlarr', 'trash')], lexical: true }),
+      ).toThrow(ScopeError);
+    });
+  });
 });

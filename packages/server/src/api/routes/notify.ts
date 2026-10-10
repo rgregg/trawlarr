@@ -1,8 +1,7 @@
 import { mapPath } from '@trawlarr/core';
 import { createLibraryRepo } from '../../db/library-repo.js';
-import { createSubtreeMatcher } from '../../fs/path-contains.js';
 import { readArrFolder } from '../../notify/arr-payload.js';
-import { ScopeError, validateScope } from '../../scanner/scope.js';
+import { libraryContaining, ScopeError, validateScope } from '../../scanner/scope.js';
 import { accepted, ApiError, type Route } from '../router.js';
 
 export const notifyRoutes: Route[] = [
@@ -30,9 +29,7 @@ export const notifyRoutes: Route[] = [
         map.length === 0 ? read.path : (mapPath(map, read.path, 'toServer') ?? read.path);
 
       const libraries = createLibraryRepo(ctx.db).list();
-      const library = libraries.find((candidate) =>
-        createSubtreeMatcher({ roots: candidate.roots, subtrees: candidate.roots })(mapped),
-      );
+      const library = libraryContaining(libraries, mapped);
       if (library === undefined) {
         throw new ApiError(
           422,
@@ -46,7 +43,7 @@ export const notifyRoutes: Route[] = [
 
       let paths: string[];
       try {
-        paths = validateScope({ library, paths: [mapped] });
+        paths = validateScope({ library, paths: [mapped], lexical: true });
       } catch (error) {
         if (error instanceof ScopeError) throw new ApiError(422, 'invalid-scope', error.message);
         throw error;

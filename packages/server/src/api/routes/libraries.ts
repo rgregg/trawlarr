@@ -423,7 +423,7 @@ export const libraryRoutes: Route[] = [
       }
       let paths: string[];
       try {
-        paths = validateScope({ library, paths: requested });
+        paths = validateScope({ library, paths: requested, lexical: true });
       } catch (error) {
         if (error instanceof ScopeError) throw new ApiError(400, 'invalid-scope', error.message);
         throw error;
