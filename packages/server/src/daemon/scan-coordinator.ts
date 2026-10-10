@@ -104,7 +104,10 @@ interface WatchEntry {
 interface LibraryScanState {
   /** A scan (and its at-most-one catch-up) is in flight for this library. */
   running: boolean;
-  /** What arrived while a scan was running: one catch-up, whatever the count. */
+  /**
+   * What arrived while a scan was running — explicit triggers, and watch
+   * bursts that finished settling: one catch-up, whatever the count.
+   */
   pending: PlannedScan | null;
   /** Armed settle timer, i.e. a burst of watch events still settling. */
   settle: unknown | null;
@@ -351,6 +354,9 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
       const burst = state.settling ?? { reason: 'watch', paths: null };
       state.settling = null;
       if (stopped) return;
+      // The tree has been quiet for the settle period, but a scan of this
+      // library is still running and a second may not start beside it: the
+      // burst becomes that scan's catch-up.
       if (state.running) {
         state.pending = planWith(state.pending, 'watch', scopeOf(burst));
         return;
@@ -363,18 +369,24 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
     if (stopped) return;
     const state = stateFor(libraryId);
 
-    // A trigger during a scan can never start a second one. It is folded
-    // into the one catch-up instead, and the running scan picks that up when
-    // it ends — including a watch trigger, which needs no separate settle
-    // timer here: the scan already in flight IS a delay at least as long as
-    // one, and the catch-up starts only once it finishes.
-    if (state.running) {
-      state.pending = planWith(state.pending, reason, paths);
+    // A watch event ALWAYS settles, whether or not a scan is running. It used
+    // to skip the timer during a scan and ride the catch-up, on the premise
+    // that the scan in flight was a delay at least as long as a settle period.
+    // That was true of a whole-library walk. A scoped scan lasts milliseconds,
+    // so a `change` event for a file still being copied was scanned and probed
+    // the moment any other scan of its library ended. The timer cannot start a
+    // second scan either: if one is running when it fires, `armSettle` folds
+    // the burst into that scan's catch-up.
+    if (reason === 'watch') {
+      armSettle(libraryId, paths);
       return;
     }
 
-    if (reason === 'watch') {
-      armSettle(libraryId, paths);
+    // Any other trigger during a scan can never start a second one. It is
+    // folded into the one catch-up instead, and the running scan picks that up
+    // when it ends.
+    if (state.running) {
+      state.pending = planWith(state.pending, reason, paths);
       return;
     }
 

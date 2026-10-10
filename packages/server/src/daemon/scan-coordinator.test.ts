@@ -254,6 +254,74 @@ describe('scan coordinator: debounce and settle', () => {
     expect(scans.map((scan) => scan.reason)).toEqual(['manual']);
     expect(timers.armed()).toBe(0);
   });
+
+  // A watch event that arrived during a scan used to skip the settle timer
+  // and ride the catch-up, on the premise that the scan in flight was a delay
+  // at least as long as one. True of a whole-library walk; a scoped scan ends
+  // in milliseconds, so a file still being copied was probed the moment any
+  // other scan of its library finished.
+  it('does not scan a path watched during a running scan when that scan ends', async () => {
+    const { coordinator, scans, timers, libraryIds, watched, release } = harness({
+      blocking: true,
+    });
+    coordinator.start();
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/Other']);
+    await Promise.resolve();
+
+    watched[0]!.onChange('/lib/Film/growing.mkv');
+    await release();
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/Other']]);
+
+    timers.advance(SETTLE_MS - 1);
+    expect(scans).toHaveLength(1);
+    timers.advance(1);
+    await coordinator.idle();
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/Other'], ['/lib/Film/growing.mkv']]);
+    expect(scans[1]!.reason).toBe('watch');
+  });
+
+  it('restarts the settle period for each further event that arrives during a running scan', async () => {
+    const { coordinator, scans, timers, libraryIds, watched, release } = harness({
+      blocking: true,
+    });
+    coordinator.start();
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/Other']);
+    await Promise.resolve();
+
+    watched[0]!.onChange('/lib/Film/growing.mkv');
+    timers.advance(SETTLE_MS - 1_000);
+    watched[0]!.onChange('/lib/Film/growing.mkv');
+    await release();
+    await coordinator.idle();
+    timers.advance(SETTLE_MS - 1_000);
+    expect(scans).toHaveLength(1);
+
+    timers.advance(1_000);
+    await coordinator.idle();
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/Other'], ['/lib/Film/growing.mkv']]);
+  });
+
+  // The other half: a burst that finishes settling while a scan is STILL
+  // running cannot start a second scan of the library, so it becomes that
+  // scan's catch-up.
+  it('folds a burst that settled during a running scan into its catch-up', async () => {
+    const { coordinator, scans, timers, libraryIds, watched, release } = harness({
+      blocking: true,
+    });
+    coordinator.start();
+    coordinator.request(libraryIds[0]!, 'manual');
+    await Promise.resolve();
+
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    timers.advance(SETTLE_MS);
+    expect(scans).toHaveLength(1);
+    await release();
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([null, ['/lib/Film/a.mkv']]);
+  });
 });
 
 describe('scan coordinator: one scan per library', () => {
@@ -261,14 +329,17 @@ describe('scan coordinator: one scan per library', () => {
     const { coordinator, scans, release, libraryIds } = harness({ blocking: true });
     coordinator.request(libraryIds[0]!, 'manual');
     await Promise.resolve();
-    coordinator.request(libraryIds[0]!, 'watch');
-    coordinator.request(libraryIds[0]!, 'watch');
+    // Explicit triggers, not watch events: a watch event during a scan settles
+    // first (see "debounce and settle") rather than joining the catch-up
+    // directly, and this test is about the catch-up.
+    coordinator.request(libraryIds[0]!, 'interval');
+    coordinator.request(libraryIds[0]!, 'manual');
     expect(scans).toHaveLength(1);
     expect(coordinator.scanning()).toEqual([libraryIds[0]]);
     await release();
     await coordinator.idle();
     expect(scans).toHaveLength(2); // exactly one catch-up, not two
-    expect(scans[1]!.reason).toBe('watch');
+    expect(scans[1]!.reason).toBe('manual');
     expect(coordinator.scanning()).toEqual([]);
   });
 
