@@ -745,6 +745,33 @@ network in the clear unless you put TLS in front of the server and point
 `TRAWLARR_SERVER` at `https://`. **Revoke** a node from its card to cut it off
 immediately.
 
+## Notifying trawlarr from Sonarr, Radarr and Lidarr
+
+Without this, a new import is found by the next periodic scan. With it, the
+application tells trawlarr which folder changed and only that folder is
+scanned. In each application:
+
+1. Settings → Connect → add **Webhook**.
+2. URL: `http://<trawlarr host>:8265/api/v1/notify/arr`, method `POST`.
+3. Under Advanced, Headers: `X-Api-Key` = the daemon's API key.
+4. Tick the triggers, and every delete trigger the application offers:
+   - Sonarr: On File Import, On Import Complete, On File Upgrade, On Rename,
+     On Series Delete, On Episode File Delete, On Episode File Delete For
+     Upgrade.
+   - Radarr: On File Import, On File Upgrade, On Rename, On Movie Delete,
+     On Movie File Delete, On Movie File Delete For Upgrade.
+   - Lidarr: On Release Import, On Upgrade, On Rename, On Track Retag, On
+     Artist Delete, On Album Delete.
+5. If the application sees the library at a different path than trawlarr
+   does, set Config → System → Notification paths (for example reported as
+   `/data`, path here `/library`). The check is lexical, so a path spelled
+   through a symlink alias of a library root is refused; spell the mapping the
+   way the library root is spelled.
+6. The application's Test button should succeed; it scans nothing.
+
+A notification missed while trawlarr is restarting is not retried; the hourly
+scan finds the file.
+
 ## 12. Licensing of the image
 
 Trawlarr's own code is **MIT** — see [`LICENSE`](../LICENSE).

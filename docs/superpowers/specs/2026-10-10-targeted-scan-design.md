@@ -82,6 +82,14 @@ Reserved-directory pruning is evaluated against the **library's roots**, not the
 path, so a folder reached through a symlink alias of a root is still recognised
 (`createSubtreeMatcher` is built from `library.roots`).
 
+The scoped walk does not rely on its caller having validated the paths. It has its own
+guards and skips:
+
+- any scope path outside the library's roots;
+- any path reached through a symlink below a root (the full walk never follows a directory
+  symlink, so a path that only exists through one is never library media);
+- any file inside a reserved directory.
+
 ### 2.2 What happens to each file
 
 Unchanged. Every yielded file goes through the existing loop body: `observeFile`, the
@@ -105,6 +113,8 @@ lies under one**, and then applies every existing condition unchanged:
 - `lstat` of the row's path fails with `ENOENT` specifically.
 
 Candidates are found by a path-prefix query on `media_file`, not by listing the library.
+The query compares the recorded path as a byte range, not with `LIKE` and not with a
+length-based prefix, so a path's characters (`%`, `_`, multi-byte text) cannot hide rows.
 
 Ordering is what makes renames and upgrades correct, and it is the full scan's ordering:
 present files are observed first, the missing pass runs last, and only after the scoped
@@ -114,7 +124,7 @@ walk ran to completion.
 |---|---|---|
 | New file | the file, or its folder | Row created and queued |
 | Rename, same inode | old and new path, or their folder | New path observed first; identity matches, so the row follows the file. Nothing is left at the old path to mark |
-| Upgrade: old file deleted, new file added | both, or their folder | New row for the new file; the old row is confirmed gone and marked missing |
+| Upgrade: old file deleted, new file added | both, or their folder | New row for the new file; the old row is confirmed gone and marked missing. If the filesystem hands the deleted file's inode to the new file, the identity rule (inode first) records one row that moved and changed, re-probed and re-queued, rather than a new row plus a missing one. A full scan gives the same outcome |
 | Deleted file or folder | the path | Rows at or under it are confirmed gone and marked missing |
 | Share unmounted | anything | Root not shown available: nothing is marked |
 
@@ -197,6 +207,11 @@ session).
 - `paths` present: each must be an absolute path, inside one of the library's roots, not
   inside a reserved directory. If any is not, the request is refused with `400` naming the
   first offending path, and nothing is queued.
+- The check is lexical: no filesystem read per request. A request handler runs on the
+  daemon's only thread, and a synchronous stat of a network directory per request is the
+  stall this project removed from the watcher and the walk. The scan that follows
+  re-validates canonically. The cost: a path spelled through a symlink alias of a library
+  root is refused here, so spell the path the way the root is spelled.
 - The response stays `202` and says which kind was queued: `"mode": "full" | "scoped"`.
 
 Paths here are trawlarr's own paths. No mapping is applied.
@@ -228,6 +243,10 @@ Handling, in order:
 5. The library whose root contains the translated path is found. None → `422`, with a
    message naming the path as received, the path after mapping, and the libraries' roots.
 6. `request(library.id, 'notify', [folder])`, and `202` with the library id and the path.
+
+The library lookup and the scope check in steps 5 and 6 are lexical, for the reason given
+in [§5.1](#51-paths-on-the-existing-scan-endpoint): a path spelled through a symlink alias
+of a library root is refused, so spell the mapping the way the root is spelled.
 
 Any other `eventType` that carries a folder is scanned. The list of events is the \*arrs'
 to grow; refusing unknown ones would turn an upgrade of Sonarr into a silent gap.
@@ -284,13 +303,24 @@ Nothing durable depends on a notification arriving.
 
 ---
 
-## 8. To verify during implementation
+## 8. Verified against the installed applications
 
-- That the installed Sonarr 4.0.20, Radarr 6.4.4 and Lidarr 3.1.0 expose the webhook's
-  custom headers field, which is how `X-Api-Key` is sent. If one does not, that
-  application falls back to a custom script calling [§5.1](#51-paths-on-the-existing-scan-endpoint).
-- Lidarr's folder field. `artist.path` is taken from its webhook's shape by analogy with
-  the other two and has not been read from its source.
+Read from the production Sonarr 4.0.20, Radarr 6.4.4 and Lidarr 3.1.0:
+
+- All three expose the webhook settings fields `url`, `method`, `username`, `password` and
+  `headers`, so `X-Api-Key` is sent as a custom header from each. No custom-script fallback
+  is needed.
+- Webhook triggers available:
+  - Sonarr: On File Import (Download), On Import Complete, On File Upgrade, On Rename,
+    On Series Delete, On Episode File Delete, On Episode File Delete For Upgrade.
+  - Radarr: On File Import (Download), On File Upgrade, On Rename, On Movie Delete,
+    On Movie File Delete, On Movie File Delete For Upgrade.
+  - Lidarr: On Release Import, On Upgrade, On Rename, On Track Retag, On Artist Delete,
+    On Album Delete.
+- The API resources for series, movie and artist all carry a `path` field.
+- Not observed: Lidarr's webhook payload field `artist.path`. It is inferred from Lidarr's
+  artist API resource and from the other two applications, not read from a delivered
+  webhook.
 
 ---
 
