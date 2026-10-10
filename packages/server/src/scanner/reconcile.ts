@@ -8,6 +8,14 @@ export interface ReconcileInput {
   mediaFileRepo: MediaFileRepo;
   /** Row ids this scan actually walked; those files are present by definition. */
   seenFileIds: ReadonlySet<string>;
+  /**
+   * Restrict the pass to rows at or under these paths. A scoped scan walked
+   * a handful of files, so "this scan did not see the row" says nothing
+   * about any row outside what it walked; without this a scoped scan would
+   * stat every row of the library, and a mistake in it could mark them.
+   * Absent for a full scan, whose completed walk speaks for the whole library.
+   */
+  scope?: readonly string[];
   nowMs: number;
   /**
    * Treat a root that exists but contains nothing at all as available.
@@ -117,15 +125,18 @@ export const reconcileMissing = async (input: ReconcileInput): Promise<Reconcile
   }
   if (availableRoots.length === 0) return summary;
 
-  const candidates: MediaFileRow[] = input.mediaFileRepo
-    .listByLibrary({ libraryId: input.library.id })
-    .filter(
-      (row) =>
-        row.missing_since_ms === null &&
-        row.state !== 'running' &&
-        !input.seenFileIds.has(row.id) &&
-        availableRoots.some((root) => pathContains(root, row.path)),
-    );
+  const considered: MediaFileRow[] =
+    input.scope === undefined
+      ? input.mediaFileRepo.listByLibrary({ libraryId: input.library.id })
+      : input.mediaFileRepo.listUnderPaths({ libraryId: input.library.id, paths: input.scope });
+
+  const candidates: MediaFileRow[] = considered.filter(
+    (row) =>
+      row.missing_since_ms === null &&
+      row.state !== 'running' &&
+      !input.seenFileIds.has(row.id) &&
+      availableRoots.some((root) => pathContains(root, row.path)),
+  );
 
   for (const row of candidates) {
     try {

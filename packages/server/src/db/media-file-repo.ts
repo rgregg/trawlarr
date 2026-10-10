@@ -250,6 +250,14 @@ export interface MediaFileRepo {
   updateAfterRun(input: UpdateAfterRunInput): void;
   listByLibrary(input: { libraryId: string; state?: FileState }): MediaFileRow[];
   /**
+   * Rows whose recorded path IS one of `paths` or lies under one — what a
+   * scoped scan is entitled to ask about, and nothing else.
+   *
+   * Compared by exact prefix plus a separator, never `LIKE`: a path is full
+   * of `%` and `_`, and `/lib/Show` must not match `/lib/Show 2/...`.
+   */
+  listUnderPaths(input: { libraryId: string; paths: readonly string[] }): MediaFileRow[];
+  /**
    * Filtered, paginated rows plus the TOTAL the filter matched.
    *
    * The only listing an API should ever expose: a real library is 100,000
@@ -831,6 +839,26 @@ export const createMediaFileRepo = (db: Db): MediaFileRepo => {
       return db
         .prepare(`SELECT * FROM media_file WHERE library_id = ? AND state = ?`)
         .all(input.libraryId, input.state) as MediaFileRow[];
+    },
+
+    listUnderPaths(input) {
+      const statement = db.prepare(
+        `SELECT * FROM media_file
+          WHERE library_id = ? AND (path = ? OR substr(path, 1, ?) = ?)`,
+      );
+      const rows = new Map<string, MediaFileRow>();
+      for (const path of input.paths) {
+        const prefix = path.endsWith('/') ? path : `${path}/`;
+        for (const row of statement.all(
+          input.libraryId,
+          path,
+          prefix.length,
+          prefix,
+        ) as MediaFileRow[]) {
+          rows.set(row.id, row);
+        }
+      }
+      return [...rows.values()];
     },
 
     query(input) {
