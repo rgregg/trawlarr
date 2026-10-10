@@ -173,6 +173,7 @@ const libraryRow = (dataDir: string): { enabled: number; paused_reason: string |
 interface FakeAgent {
   readonly cancelled: boolean;
   readonly payload: JobPayload | null;
+  cancel(): void;
 }
 
 const fakeAgents = (): { agents: FakeAgent[]; createAgent: CreateAgentFn } => {
@@ -862,5 +863,90 @@ describe('media server notification', () => {
 
     expect(agent.ran()).toBe(true);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('shutdown drain', () => {
+  it('claims nothing once a stop has begun, even while it waits on a scan', async () => {
+    const dataDir = newDataDir();
+    const seeded = seedLibrary(dataDir);
+    // A second queued file: what a freed slot would claim next.
+    const db = openDataDb(dataDir);
+    const second = createMediaFileRepo(db).upsertScanned({
+      libraryId: seeded.libraryId,
+      identity: { inodeKey: '2049:2000', contentKey: '4096:2:ee' },
+      path: join(seeded.root, 'second.mkv'),
+      nlink: 1,
+      sizeBytes: 4096,
+      mtimeMs: NOW,
+      ctimeMs: NOW,
+      container: 'mkv',
+      nowMs: NOW,
+    });
+    createMediaFileRepo(db).setProbe({ fileId: second, probe: PROBE, facts: FACTS });
+    createMediaFileRepo(db).setState({ fileId: second, state: 'queued' });
+    db.close();
+
+    // Stopping the scan side takes as long as the test says: the stand-in for
+    // a library walk that is still running when the signal arrives.
+    let releaseScans: () => void = () => {};
+    const scansHeld = new Promise<void>((resolve) => {
+      releaseScans = resolve;
+    });
+    const slowWatchPort: WatchPort = {
+      watch: (): WatchHandle => ({ close: async (): Promise<void> => await scansHeld }),
+    };
+    const { agents, createAgent } = fakeAgents();
+    const daemon = await start({
+      dataDir,
+      createAgent,
+      watchPort: slowWatchPort,
+      drainDeadlineMs: 5_000,
+    });
+    expect(agents).toHaveLength(1);
+
+    const stopping = daemon.stop();
+    // The running worker dies mid-shutdown, as one does when it is killed.
+    agents[0]!.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // It freed a slot and a queued file was waiting; neither may be claimed.
+    expect(agents).toHaveLength(1);
+    expect(rowFor(dataDir, second).state).toBe('queued');
+
+    releaseScans();
+    await stopping;
+    expect(agents).toHaveLength(1);
+  });
+
+  it('starts the drain deadline at the beginning of the stop, not after the scan wait', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir);
+    let releaseScans: () => void = () => {};
+    const scansHeld = new Promise<void>((resolve) => {
+      releaseScans = resolve;
+    });
+    const slowWatchPort: WatchPort = {
+      watch: (): WatchHandle => ({ close: async (): Promise<void> => await scansHeld }),
+    };
+    const { agents, createAgent } = fakeAgents();
+    const daemon = await start({
+      dataDir,
+      createAgent,
+      watchPort: slowWatchPort,
+      drainDeadlineMs: 50,
+    });
+    expect(agents).toHaveLength(1);
+
+    const stopping = daemon.stop();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The deadline passed while the scan wait was still pending, so the
+    // worker has already been cancelled: shutdown time is bounded by the
+    // deadline, not by the deadline plus however long a scan takes.
+    expect(agents[0]!.cancelled).toBe(true);
+
+    releaseScans();
+    await stopping;
   });
 });
