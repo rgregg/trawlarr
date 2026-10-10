@@ -6,6 +6,7 @@ import type { ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createLibraryRepo } from '../db/library-repo.js';
+import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createSettingsRepo } from '../db/settings-repo.js';
 import { scanLibrary } from '../scanner/scan-library.js';
 import { FAKE_PROBE_DOCUMENT } from '../../test/helpers/fake-ffprobe.js';
@@ -110,5 +111,40 @@ it('reads nothing synchronously to request and run a full scan', async () => {
   await coordinator.idle();
 
   expect(scopes).toEqual([undefined]);
+  expect(realpathCalls.count - before).toBe(0);
+});
+
+// The end of a scan as well as its start: deciding which unseen rows the
+// missing pass may consider used to cost two `realpathSync` per row.
+it('reads nothing synchronously to run a scoped scan that marks rows missing', async () => {
+  coordinator.request(libraryId, 'startup');
+  await coordinator.idle();
+  const deleted = [0, 1, 2].map((index) => join(root, `Film ${String(index)}`));
+  for (const folder of deleted) rmSync(folder, { recursive: true });
+  const before = realpathCalls.count;
+
+  coordinator.request(libraryId, 'notify', deleted);
+  await coordinator.idle();
+
+  const missing = createMediaFileRepo(db)
+    .listByLibrary({ libraryId })
+    .filter((row) => row.missing_since_ms !== null);
+  expect(missing).toHaveLength(6);
+  expect(realpathCalls.count - before).toBe(0);
+});
+
+it('reads nothing synchronously to run a full scan that marks rows missing', async () => {
+  coordinator.request(libraryId, 'startup');
+  await coordinator.idle();
+  rmSync(join(root, 'Film 0'), { recursive: true });
+  const before = realpathCalls.count;
+
+  coordinator.request(libraryId, 'manual');
+  await coordinator.idle();
+
+  const missing = createMediaFileRepo(db)
+    .listByLibrary({ libraryId })
+    .filter((row) => row.missing_since_ms !== null);
+  expect(missing).toHaveLength(2);
   expect(realpathCalls.count - before).toBe(0);
 });

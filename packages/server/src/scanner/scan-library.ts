@@ -718,6 +718,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     nowMs: nowMs(),
     allowEmptyRoots: input.allowEmptyRoots,
     scope: scope ?? undefined,
+    canonicalise,
   });
   summary.missing = reconciled.missing;
   summary.rootsUnavailable = reconciled.rootsUnavailable;
