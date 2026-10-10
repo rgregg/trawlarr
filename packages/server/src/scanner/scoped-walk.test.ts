@@ -64,6 +64,25 @@ describe('walkScope', () => {
     expect(await collect([scratch])).toEqual([]);
   });
 
+  it('never yields a file named directly inside a reserved directory', async () => {
+    expect(await collect([join(root, '.trawlarr', 'trash', 'deleted.mkv')])).toEqual([]);
+  });
+
+  it('never yields a file named directly inside a reserved directory reached through an alias', async () => {
+    const alias = join(base, 'alias');
+    symlinkSync(root, alias);
+    const found: string[] = [];
+    for await (const entry of walkScope({
+      scope: [join(alias, '.trawlarr', 'trash', 'deleted.mkv')],
+      libraryRoots: [alias],
+      extensions: ['mkv'],
+      exclude: [join(root, '.trawlarr')],
+    })) {
+      found.push(entry.path);
+    }
+    expect(found).toEqual([]);
+  });
+
   it('never yields a symlink named directly, as the full walk never does', async () => {
     const link = join(root, 'Film A', 'link.mkv');
     symlinkSync(join(root, 'Film B', 'b.mkv'), link);

@@ -2,6 +2,7 @@ import { lstat } from 'node:fs/promises';
 import type { Dirent, Stats } from 'node:fs';
 import { basename, extname } from 'node:path';
 import { isWorkingFileName } from '@trawlarr/core';
+import { createSubtreeMatcher } from '../fs/path-contains.js';
 import { walkFiles } from '../fs/walk.js';
 
 /**
@@ -31,6 +32,12 @@ export async function* walkScope(input: {
   const wanted = new Set(input.extensions.map((extension) => extension.toLowerCase()));
   if (wanted.size === 0) return;
   const yielded = new Set<string>();
+  // Built once for the whole scope, as `walkFiles` builds its own: a named
+  // file is judged against the same reserved directories a full walk prunes.
+  const isExcluded = createSubtreeMatcher({
+    roots: input.libraryRoots,
+    subtrees: input.exclude,
+  });
 
   for (const target of input.scope) {
     let stats: Stats;
@@ -58,6 +65,11 @@ export async function* walkScope(input: {
     // `lstat`, so a symlink is not a file here — as it is not to `walkFiles`,
     // which asks the directory entry and never follows one.
     if (!stats.isFile()) continue;
+    // A file must not become library media by being reported when it would
+    // not have by being found: a trashed or half-staged file named by a
+    // notification would otherwise be re-admitted, though the full walk never
+    // reaches it.
+    if (isExcluded(target)) continue;
     if (isWorkingFileName(basename(target))) continue;
     if (!wanted.has(extname(target).slice(1).toLowerCase())) continue;
     if (yielded.has(target)) continue;
