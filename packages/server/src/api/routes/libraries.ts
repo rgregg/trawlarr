@@ -9,6 +9,7 @@ import {
 } from '../../db/library-repo.js';
 import { createMediaFileRepo } from '../../db/media-file-repo.js';
 import type { PlexConfig } from '../../library/plex-notify.js';
+import { ScopeError, validateScope } from '../../scanner/scope.js';
 import { explainPause } from '../../library/pause-explanation.js';
 import {
   accepted,
@@ -393,20 +394,47 @@ export const libraryRoutes: Route[] = [
   {
     method: 'POST',
     path: '/libraries/:id/scan',
-    handler: ({ params, ctx }) => {
+    handler: ({ params, body, ctx }) => {
       const library = requireLibrary(ctx, params.id!);
-      ctx.scans.request(library.id, 'manual');
+      const requested = optionalStringArray(body, 'paths');
+
       // 202, not 200: a scan of a real library takes minutes, and holding an
       // HTTP connection open for it times out every proxy in the path. The
       // scan's progress arrives on the websocket; its result is in the
       // library's stats afterwards.
+      const note =
+        `The scan was queued, not performed. Watch "scan.progress"/"scan.finished" on the ` +
+        `websocket, or poll GET /api/v1/libraries/${library.id}/stats.`;
+
+      if (requested === undefined) {
+        ctx.scans.request(library.id, 'manual');
+        return accepted({ accepted: true, libraryId: library.id, mode: 'full' as const, note });
+      }
+
+      // An empty list is refused rather than read as "everything": a caller
+      // that built its list from nothing would otherwise trigger the full
+      // walk it was written to avoid.
+      if (requested.length === 0) {
+        throw new ApiError(
+          400,
+          'invalid-scope',
+          `"paths" is empty. Omit it to scan the whole library, or name at least one path.`,
+        );
+      }
+      let paths: string[];
+      try {
+        paths = validateScope({ library, paths: requested });
+      } catch (error) {
+        if (error instanceof ScopeError) throw new ApiError(400, 'invalid-scope', error.message);
+        throw error;
+      }
+      ctx.scans.request(library.id, 'notify', paths);
       return accepted({
         accepted: true,
         libraryId: library.id,
-        note:
-          `The scan was queued, not performed: a full walk takes minutes on a real library. ` +
-          `Watch "scan.progress"/"scan.finished" on the websocket, or poll ` +
-          `GET /api/v1/libraries/${library.id}/stats.`,
+        mode: 'scoped' as const,
+        paths,
+        note,
       });
     },
   },

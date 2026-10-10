@@ -149,18 +149,18 @@ const fakeSupervisor = (running: string[] = []): FakeSupervisor => {
 };
 
 interface FakeScans extends ScanCoordinator {
-  requests: { libraryId: string; reason: ScanReason }[];
+  requests: { libraryId: string; reason: ScanReason; paths?: readonly string[] }[];
   /** How many times the API asked the coordinator to re-derive its watches. */
   syncs: number;
 }
 
 const fakeScans = (): FakeScans => {
-  const requests: { libraryId: string; reason: ScanReason }[] = [];
+  const requests: { libraryId: string; reason: ScanReason; paths?: readonly string[] }[] = [];
   const fake = {
     requests,
     syncs: 0,
-    request: (libraryId: string, reason: ScanReason) => {
-      requests.push({ libraryId, reason });
+    request: (libraryId: string, reason: ScanReason, paths?: readonly string[]) => {
+      requests.push(paths === undefined ? { libraryId, reason } : { libraryId, reason, paths });
     },
     syncWatchers: () => {
       fake.syncs += 1;
@@ -583,6 +583,70 @@ describe('libraries', () => {
     expect(response.status).toBe(204);
     expect(createLibraryRepo(db).getById(library.id)).toBeNull();
     expect(createMediaFileRepo(db).getById(fileId)).toBeNull();
+  });
+});
+
+describe('scan endpoint paths', () => {
+  let id: string;
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'trawlarr-api-scope-'));
+    id = createLibraryRepo(db).create({
+      name: `lib-${randomUUID().slice(0, 8)}`,
+      roots: [root],
+      flowId: null,
+      nowMs: NOW,
+    }).id;
+  });
+
+  it('queues a full scan when no paths are sent, exactly as before', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`);
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('full');
+    expect(scans.requests).toEqual([{ libraryId: id, reason: 'manual' }]);
+  });
+
+  it('queues a scoped scan for the paths sent', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [join(root, 'Film'), join(root, 'Film', 'film.mkv')],
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('scoped');
+    expect(scans.requests).toEqual([
+      {
+        libraryId: id,
+        reason: 'notify',
+        paths: [join(root, 'Film'), join(root, 'Film', 'film.mkv')],
+      },
+    ]);
+  });
+
+  it('refuses a path outside the library, naming it, and queues nothing', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [join(root, 'Film'), '/somewhere/else.mkv'],
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-scope');
+    expect(result.body.error.message).toContain('/somewhere/else.mkv');
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses "paths" that is not a list of strings', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, { paths: 'not-a-list' });
+
+    expect(result.status).toBe(400);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('treats an empty list of paths as nothing to scan, not as a full scan', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, { paths: [] });
+
+    expect(result.status).toBe(400);
+    expect(scans.requests).toEqual([]);
   });
 });
 
