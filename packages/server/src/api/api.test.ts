@@ -650,6 +650,117 @@ describe('scan endpoint paths', () => {
   });
 });
 
+describe('POST /notify/arr', () => {
+  let id: string;
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'trawlarr-api-notify-'));
+    id = createLibraryRepo(db).create({
+      name: `lib-${randomUUID().slice(0, 8)}`,
+      roots: [root],
+      flowId: null,
+      nowMs: NOW,
+    }).id;
+  });
+
+  it('scans the mapped folder in the library that contains it', async () => {
+    settings.setScan({ notifyPathMap: [{ serverPath: root, nodePath: '/data/movies' }] });
+
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      movie: { folderPath: '/data/movies/Film (2001)' },
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body).toMatchObject({ libraryId: id, path: join(root, 'Film (2001)') });
+    expect(scans.requests).toEqual([
+      { libraryId: id, reason: 'notify', paths: [join(root, 'Film (2001)')] },
+    ]);
+  });
+
+  it('takes the path as received when no mapping is configured', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      series: { path: join(root, 'Show') },
+    });
+
+    expect(result.status).toBe(202);
+    expect(scans.requests).toEqual([
+      { libraryId: id, reason: 'notify', paths: [join(root, 'Show')] },
+    ]);
+  });
+
+  it('answers the Test event with success and scans nothing', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Test',
+      series: { path: 'C:\\testpath' },
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body.ignored).toBe(true);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a folder that maps to no library, saying what it tried', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      movie: { folderPath: '/data/movies/Film' },
+    });
+
+    expect(result.status).toBe(422);
+    expect(result.body.error.code).toBe('no-library-for-path');
+    expect(result.body.error.message).toContain('/data/movies/Film');
+    expect(result.body.error.message).toContain(root);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a body that is not an object', async () => {
+    const result = await api('POST', '/notify/arr', ['not', 'an', 'object']);
+
+    expect(result.status).toBe(400);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a folder inside a reserved directory', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      movie: { folderPath: join(root, '.trawlarr', 'trash') },
+    });
+
+    expect(result.status).toBe(422);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('needs the API key, like every other endpoint', async () => {
+    const result = await api('POST', '/notify/arr', { eventType: 'Test' }, { apiKey: null });
+
+    expect(result.status).toBe(401);
+  });
+});
+
+describe('scan.notifyPathMap', () => {
+  it('is empty by default and round-trips through the settings endpoint', async () => {
+    expect((await api('GET', '/system/settings')).body.scan.notifyPathMap).toEqual([]);
+
+    const saved = await api('PATCH', '/system/settings', {
+      scan: { notifyPathMap: [{ serverPath: '/library', nodePath: '/data' }] },
+    });
+
+    expect(saved.status).toBe(200);
+    expect(saved.body.scan.notifyPathMap).toEqual([{ serverPath: '/library', nodePath: '/data' }]);
+  });
+
+  it('refuses a mapping that is not absolute, as a named setting error', async () => {
+    const result = await api('PATCH', '/system/settings', {
+      scan: { notifyPathMap: [{ serverPath: 'library', nodePath: '/data' }] },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-setting');
+  });
+});
+
 describe('a paused library says why, in terms of what it costs', () => {
   it('surfaces the flow-invalid reason and its consequence on the library listing', async () => {
     const flow = createFlowRepo(db).create({
