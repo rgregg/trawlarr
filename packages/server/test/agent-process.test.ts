@@ -236,6 +236,7 @@ const payloadFor = (flow: FlowDefinition): JobPayload => ({
   ffmpegPath: 'ffmpeg',
   ffprobePath: 'ffprobe',
   logPath: null,
+  swapNotePath: null,
   // Only first-party plugins here: nothing installed to resolve.
   pluginPaths: {},
   pluginBundles: {},

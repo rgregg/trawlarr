@@ -11,6 +11,7 @@ import { createNodeRepo } from '../db/node-repo.js';
 import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
 import { applyEnvSettings, type EnvApplication } from '../config/env-settings.js';
 import { createPlexNotifier, type PlexNotifier } from '../library/plex-notify.js';
+import { recoverInterruptedSwaps } from '../library/swap-recovery.js';
 import { sweepLibraryTrash } from '../library/trash-sweep.js';
 import { sweepLibraryStaging } from '../library/staging-sweep.js';
 import { sweepJobLogs } from '../job-log/job-log-store.js';
@@ -544,6 +545,21 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
 
   const libraryRepo = createLibraryRepo(db);
 
+  /** Restore originals stranded in trash by a worker that died mid-swap; see `recoverInterruptedSwaps`. */
+  const recoverSwaps = async (): Promise<void> => {
+    try {
+      await recoverInterruptedSwaps({
+        db,
+        dataDir,
+        onEvent: (message) => {
+          console.warn(`[daemon] ${message}`);
+        },
+      });
+    } catch (error) {
+      onError(error, { phase: 'swap recovery' });
+    }
+  };
+
   /**
    * One pass of the staging sweep over every library.
    *
@@ -607,8 +623,9 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     await runtimeChecker.runOnce();
   });
 
-  every(REAP_INTERVAL_MS, 'stall reaper', () => {
+  every(REAP_INTERVAL_MS, 'stall reaper', async () => {
     reapStalled({ db, nowMs: nowMs() });
+    await recoverSwaps();
   });
 
   every(TRASH_PURGE_INTERVAL_MS, 'trash purge', async () => {
@@ -651,6 +668,11 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   } catch (error) {
     onError(error, { phase: 'stall reaper' });
   }
+  // AFTER the reaper, which is what closes a dead worker's job row, and BEFORE
+  // the first claim: a file whose original is sitting in trash must be put back
+  // before anything tries to run it. Reads the daemon's own swap notes, which
+  // are few (one per crash inside a window of two metadata operations).
+  await recoverSwaps();
 
   /**
    * The staging sweep gets a startup pass too, and for the same reason the

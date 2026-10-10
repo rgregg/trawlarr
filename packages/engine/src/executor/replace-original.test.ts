@@ -4,6 +4,7 @@ import {
   existsSync,
   linkSync,
   lstatSync,
+  rmSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -25,6 +26,7 @@ import {
   guardDurationChange,
   REPLACEMENT_DURATION_DRIFT_RATIO,
   REPLACEMENT_DURATION_DRIFT_SECONDS,
+  trashEntryPattern,
   type ReplaceRunnerInput,
 } from './replace-original.js';
 import type { LoadedPlugin } from '../host/loader.js';
@@ -784,9 +786,9 @@ describe('createReplaceOriginalRunner', () => {
 
     expect(out.outputNumber).toBe(2);
     expect(out.outputFileObj._id).toBe(space.originalPath);
-    // The original was already in trash by then: it must come back.
+    // Refused before the original moves: it never went to trash at all.
     expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
-    expect(readdirSync(space.trashDir)).toEqual([]);
+    expect(existsSync(space.trashDir)).toBe(false);
     expect(existsSync(space.newPath)).toBe(true);
     expect(logged.join('\n')).toMatch(/atomic rename/i);
   });
@@ -1588,3 +1590,466 @@ describe('guardDurationChange', () => {
     expect(verdict.abstained).toBe(true);
   });
 });
+
+/**
+ * A worker killed at each step boundary of a CROSS-DEVICE replacement (the
+ * library on NFS, staging on a local disk: every replacement on the owner's
+ * deployment). A kill is modelled as the step never returning — the promise is
+ * simply abandoned, so none of the runner's own error handling gets to run,
+ * which is what SIGKILL does. Assertions are on file bytes.
+ */
+describe('Replace Original File killed mid cross-device swap', () => {
+  const never = (): Promise<never> => new Promise<never>(() => {});
+  /** What the host's swap note has been told, as the daemon's recovery would find it. */
+  const note: { begun: { trashNowMs: number } | null; ended: boolean } = {
+    begun: null,
+    ended: false,
+  };
+  const exdev = (): never => {
+    throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+  };
+
+  /** Runs the node until `seam` reports the kill point, then abandons it. */
+  const killedAt = async (
+    point: 'copy-partial' | 'copy-done' | 'original-trashed' | 'installed',
+  ): Promise<Workspace> => {
+    const space = workspace();
+    let reached: () => void = () => {};
+    const killed = new Promise<void>((resolveIt) => {
+      reached = resolveIt;
+    });
+    const die = (): Promise<never> => {
+      reached();
+      return never();
+    };
+    const stagedNames = (path: string): boolean => basename(path).startsWith('.trawlarr-replace-');
+    note.begun = null;
+    note.ended = false;
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        swapNote: {
+          begin: async (given) => {
+            note.begun = given;
+          },
+          end: async () => {
+            note.ended = true;
+          },
+        },
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) return exdev();
+          if (point === 'original-trashed' && stagedNames(from) && to === space.originalPath) {
+            return die();
+          }
+          await link(from, to);
+        },
+        copyFile: async (from, to) => {
+          const body = readFileSync(from);
+          if (point === 'copy-partial') {
+            writeFileSync(to, body.subarray(0, Math.floor(body.length / 2)));
+            return die();
+          }
+          writeFileSync(to, body);
+        },
+        statFile: async (path) => {
+          const stats = await realStat(path);
+          // The size check on the finished copy is the last step before the
+          // original is touched.
+          if (point === 'copy-done' && stagedNames(path)) return die();
+          return stats;
+        },
+        unlinkFile: async (path) => {
+          if (point === 'installed' && path === space.newPath) return die();
+          await unlink(path);
+        },
+      },
+    })(replacePlugin())!;
+    void module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+    await killed;
+    return space;
+  };
+
+  const libraryFiles = (space: Workspace): string[] =>
+    readdirSync(space.libraryDir)
+      .filter((name) => name !== '.trawlarr')
+      .sort();
+
+  it('killed with the copy half written: the original is untouched and never trashed', async () => {
+    const space = await killedAt('copy-partial');
+
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(existsSync(space.trashDir)).toBe(false);
+    // Only a scratch temp (named so the scanner refuses it) is left, short of
+    // the full size: this is what the orphan sweep removes.
+    const extra = libraryFiles(space).filter((name) => name !== 'movie.mkv');
+    expect(extra).toHaveLength(1);
+    expect(isWorkingFileName(extra[0]!)).toBe(true);
+    expect(statSync(join(space.libraryDir, extra[0]!)).size).toBeLessThan(NEW_BODY.length);
+    expect(readFileSync(space.newPath, 'utf8')).toBe(NEW_BODY);
+  });
+
+  it('killed with the copy finished but unchecked: the original is still in place', async () => {
+    const space = await killedAt('copy-done');
+
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(existsSync(space.trashDir)).toBe(false);
+    expect(readFileSync(space.newPath, 'utf8')).toBe(NEW_BODY);
+  });
+
+  it('killed with the original in trash: the library path is empty, and the note is still open', async () => {
+    const space = await killedAt('original-trashed');
+
+    // The dangerous window, now two metadata operations wide: the library path
+    // is empty, the original is in trash, and the complete new copy is staged.
+    expect(existsSync(space.originalPath)).toBe(false);
+    const trashed = readdirSync(space.trashDir);
+    expect(trashed).toHaveLength(1);
+    expect(trashed[0]).toBe(`movie.${String(CLOCK_MS)}.mkv`);
+    expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
+    const stagedName = libraryFiles(space).find((name) => name.startsWith('.trawlarr-replace-'))!;
+    expect(readFileSync(join(space.libraryDir, stagedName), 'utf8')).toBe(NEW_BODY);
+    // What a recovery needs, and that it was left open: recorded before the
+    // original moved, never ended. No file in the library names a path.
+    expect(note.begun).toEqual({ trashNowMs: CLOCK_MS });
+    expect(note.ended).toBe(false);
+    expect(libraryFiles(space).filter((name) => name.startsWith('.trawlarr-swap'))).toEqual([]);
+    // And the pattern recovery searches trash with finds exactly that entry.
+    expect(
+      trashEntryPattern({ originalName: 'movie.mkv', nowMs: CLOCK_MS }).test(trashed[0]!),
+    ).toBe(true);
+  });
+
+  it('records the note before the original moves, and ends it after the install', async () => {
+    const space = await killedAt('installed');
+
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
+    const trashed = readdirSync(space.trashDir);
+    expect(readFileSync(join(space.trashDir, trashed[0]!), 'utf8')).toBe(ORIGINAL_BODY);
+    // Killed after the install but before the run settled: still open, which a
+    // recovery resolves by seeing the library path occupied.
+    expect(note.begun).toEqual({ trashNowMs: CLOCK_MS });
+    expect(note.ended).toBe(false);
+  });
+
+  it('refuses the swap, moving nothing, when the note cannot be recorded', async () => {
+    const space = workspace();
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        swapNote: {
+          begin: async () => {
+            throw new Error('disk full');
+          },
+          end: async () => {},
+        },
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) return exdev();
+          await link(from, to);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(existsSync(space.trashDir)).toBe(false);
+    expect(libraryFiles(space)).toEqual(['movie.mkv']);
+  });
+
+  it('refuses a copy that came out short, with the original untouched', async () => {
+    const space = workspace();
+    const logged: string[] = [];
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) return exdev();
+          await link(from, to);
+        },
+        // A copy that reports success but wrote fewer bytes than the source.
+        copyFile: async (from, to) => {
+          writeFileSync(to, readFileSync(from).subarray(0, 1000));
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({
+        newPath: space.newPath,
+        originalPath: space.originalPath,
+        jobLog: (text) => logged.push(text),
+      }),
+    );
+
+    expect(out.outputNumber).toBe(2);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+    expect(existsSync(space.trashDir)).toBe(false);
+    expect(libraryFiles(space)).toEqual(['movie.mkv']);
+    expect(logged.join('\n')).toMatch(/1000 bytes/);
+  });
+
+  it('leaves no journal or temp behind on a clean cross-device swap', async () => {
+    const space = workspace();
+    const module = runnerFor({
+      trashDir: space.trashDir,
+      overrides: {
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir) return exdev();
+          await link(from, to);
+        },
+      },
+    })(replacePlugin())!;
+
+    const out = await module.plugin(
+      argsFor({ newPath: space.newPath, originalPath: space.originalPath, jobLog: () => {} }),
+    );
+
+    expect(out.outputNumber).toBe(1);
+    expect(libraryFiles(space)).toEqual(['movie.mkv']);
+    expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
+  });
+});
+
+/**
+ * Every refusal the node makes is decided BEFORE anything moves, and the
+ * copy-first order must not have moved any of them behind a destructive step.
+ * Each guard is run on both ways in: the same-filesystem path (the staging
+ * `link` succeeds) and the cross-device path (it fails `EXDEV` and the bytes
+ * are copied). A guard skipped on either leaves the original in trash or a
+ * temp in the library, and these assertions say so.
+ */
+describe.each([{ mode: 'same-filesystem' as const }, { mode: 'cross-device' as const }])(
+  'Replace Original File guards, $mode',
+  ({ mode }) => {
+    const seams = (space: Workspace): Partial<ReplaceRunnerInput> => ({
+      linkFile: async (from, to) => {
+        if (mode === 'cross-device' && dirname(from) === space.stagingDir) {
+          throw Object.assign(new Error('EXDEV: cross-device link not permitted'), {
+            code: 'EXDEV',
+          });
+        }
+        await link(from, to);
+      },
+    });
+
+    /** Nothing moved: original intact, never trashed, no temp, new file still staged. */
+    const expectUntouched = (space: Workspace, originalBody = ORIGINAL_BODY): void => {
+      expect(readFileSync(space.originalPath, 'utf8')).toBe(originalBody);
+      expect(existsSync(space.trashDir)).toBe(false);
+      expect(readdirSync(space.libraryDir).filter((name) => name.startsWith('.trawlarr-'))).toEqual(
+        [],
+      );
+      expect(existsSync(space.newPath)).toBe(true);
+    };
+
+    const run = async (
+      space: Workspace,
+      overrides: Partial<ReplaceRunnerInput> = {},
+      inputs?: Record<string, unknown>,
+    ) => {
+      const logged: string[] = [];
+      const out = await runnerFor({
+        trashDir: space.trashDir,
+        overrides: { ...seams(space), ...overrides },
+      })(replacePlugin())!.plugin(
+        argsFor({
+          newPath: space.newPath,
+          originalPath: space.originalPath,
+          jobLog: (text) => logged.push(text),
+          inputs,
+        }),
+      );
+      return { out, log: logged.join('\n') };
+    };
+
+    it('refuses an empty replacement', async () => {
+      const space = workspace();
+      writeFileSync(space.newPath, '');
+
+      const { out, log } = await run(space);
+
+      expect(out.outputNumber).toBe(2);
+      expect(log).toMatch(/empty/);
+      expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+      expect(existsSync(space.trashDir)).toBe(false);
+      expect(readdirSync(space.libraryDir).filter((n) => n.startsWith('.trawlarr-'))).toEqual([]);
+    });
+
+    it('refuses a replacement that is not there', async () => {
+      const space = workspace();
+      rmSync(space.newPath);
+
+      const { out } = await run(space);
+
+      expect(out.outputNumber).toBe(2);
+      expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+      expect(existsSync(space.trashDir)).toBe(false);
+    });
+
+    it('refuses a replacement that lost its running time', async () => {
+      const space = workspace();
+
+      const { out, log } = await run(space, {
+        probeFile: async (path) => timed(path === space.newPath ? 60 : 2700),
+      });
+
+      expect(out.outputNumber).toBe(2);
+      expect(log).toMatch(/Replacement refused/);
+      expectUntouched(space);
+    });
+
+    it('refuses a replacement whose running time cannot be checked', async () => {
+      const space = workspace();
+
+      const { out } = await run(space, {
+        probeFile: async (path) => {
+          if (path === space.newPath) throw new Error('ffprobe failed');
+          return timed(2700);
+        },
+      });
+
+      expect(out.outputNumber).toBe(2);
+      expectUntouched(space);
+    });
+
+    it('refuses a hardlinked original unless the library allows it', async () => {
+      const space = workspace();
+      linkSync(space.originalPath, join(space.root, 'other-name.mkv'));
+
+      const { out, log } = await run(space);
+
+      expect(out.outputNumber).toBe(2);
+      expect(log).toMatch(/hardlinked/);
+      expectUntouched(space);
+    });
+
+    it('proceeds on a hardlinked original when the library allows it', async () => {
+      const space = workspace();
+      linkSync(space.originalPath, join(space.root, 'other-name.mkv'));
+
+      const { out } = await run(space, { allowHardlinked: true });
+
+      expect(out.outputNumber).toBe(1);
+      expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
+      // The other name keeps the old content: replaced, not written through.
+      expect(readFileSync(join(space.root, 'other-name.mkv'), 'utf8')).toBe(ORIGINAL_BODY);
+    });
+
+    it('refuses a symlinked original', async () => {
+      const space = workspace();
+      const real = join(space.root, 'real.mkv');
+      renameSync(space.originalPath, real);
+      symlinkSync(real, space.originalPath);
+
+      const { out } = await run(space);
+
+      expect(out.outputNumber).toBe(2);
+      expect(lstatSync(space.originalPath).isSymbolicLink()).toBe(true);
+      expect(readFileSync(real, 'utf8')).toBe(ORIGINAL_BODY);
+      expect(existsSync(space.trashDir)).toBe(false);
+      expect(readdirSync(space.libraryDir).filter((n) => n.startsWith('.trawlarr-'))).toEqual([]);
+    });
+
+    it('refuses a destination that already exists and is not the original', async () => {
+      const space = workspace({ newExtension: 'mp4' });
+      writeFileSync(join(space.libraryDir, 'movie.mp4'), 'someone else already lives here');
+
+      const { out } = await run(space);
+
+      expect(out.outputNumber).toBe(2);
+      expect(readFileSync(join(space.libraryDir, 'movie.mp4'), 'utf8')).toBe(
+        'someone else already lives here',
+      );
+      expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+      expect(existsSync(space.trashDir)).toBe(false);
+      expect(readdirSync(space.libraryDir).filter((n) => n.startsWith('.trawlarr-'))).toEqual([]);
+    });
+
+    it('keeps the destination reservation: a live one stops the install, and the original comes back', async () => {
+      const space = workspace({ newExtension: 'mp4' });
+      // A live reservation from another worker, on a filesystem without hardlinks
+      // for the final move (the claim is then the only lock there is).
+      const reservation = join(space.libraryDir, '.trawlarr-reserve-movie.mp4');
+      writeFileSync(reservation, '');
+      const finalPath = join(space.libraryDir, 'movie.mp4');
+
+      const { out } = await run(space, {
+        linkFile: async (from, to) => {
+          if (dirname(from) === space.stagingDir && mode === 'cross-device') {
+            throw Object.assign(new Error('EXDEV'), { code: 'EXDEV' });
+          }
+          if (to === finalPath || basename(to).startsWith('.trawlarr-replace-')) {
+            if (to === finalPath) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+          }
+          await link(from, to);
+        },
+      });
+
+      expect(out.outputNumber).toBe(2);
+      expect(existsSync(finalPath)).toBe(false);
+      // The original is back and nothing of the swap is left behind but the
+      // other worker's own reservation, which stays untouched.
+      expect(readFileSync(space.originalPath, 'utf8')).toBe(ORIGINAL_BODY);
+      expect(existsSync(reservation)).toBe(true);
+      expect(
+        readdirSync(space.libraryDir).filter(
+          (n) => n.startsWith('.trawlarr-') && n !== '.trawlarr-reserve-movie.mp4',
+        ),
+      ).toEqual([]);
+      expect(readdirSync(space.trashDir)).toEqual([]);
+      expect(existsSync(space.newPath)).toBe(true);
+    });
+
+    it.runIf(mode === 'cross-device')(
+      'refuses the cross-device copy when allowCrossDevice is false, before anything moves',
+      async () => {
+        const space = workspace();
+
+        const { out, log } = await run(
+          space,
+          {},
+          { trashRetentionDays: '14', allowCrossDevice: 'false' },
+        );
+
+        expect(out.outputNumber).toBe(2);
+        expect(log).toMatch(/atomic rename/i);
+        expectUntouched(space);
+      },
+    );
+
+    it.runIf(mode === 'same-filesystem')(
+      'does not need allowCrossDevice when the rename is atomic',
+      async () => {
+        const space = workspace();
+
+        const { out } = await run(
+          space,
+          {},
+          { trashRetentionDays: '14', allowCrossDevice: 'false' },
+        );
+
+        expect(out.outputNumber).toBe(1);
+        expect(readFileSync(space.originalPath, 'utf8')).toBe(NEW_BODY);
+      },
+    );
+
+    it('refuses to install a copy that came out short, and cleans its temp', async () => {
+      const space = workspace();
+      if (mode === 'same-filesystem') return; // nothing is copied on this path
+
+      const { out } = await run(space, {
+        copyFile: async (from, to) => {
+          writeFileSync(to, readFileSync(from).subarray(0, 10));
+        },
+      });
+
+      expect(out.outputNumber).toBe(2);
+      expectUntouched(space);
+    });
+  },
+);

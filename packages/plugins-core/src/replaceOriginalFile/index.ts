@@ -39,9 +39,10 @@ export const details = (): PluginDetails => ({
       tooltip:
         'If the staging area is on a different filesystem than the library, an atomic ' +
         'rename is not possible. When allowed, the engine falls back to copying the new ' +
-        'file to a temporary location on the destination filesystem and finishing with an ' +
-        'atomic rename, so an interrupted copy can never leave a truncated file where the ' +
-        'original used to be; this is reported in the step trace. When disallowed, ' +
+        'file to a temporary location on the destination filesystem, checking its size, ' +
+        'and only then moving the original to trash and finishing with an atomic rename, ' +
+        'so an interrupted copy can never leave a truncated file where the original used ' +
+        'to be; this is reported in the step trace. When disallowed, ' +
         'cross-device replacement fails this node instead.',
       inputUI: { type: 'switch' },
     },
