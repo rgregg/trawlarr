@@ -93,7 +93,14 @@ it('adds a file the watcher reported without walking the rest of the library', a
   const added = join(root, 'Film 3', 'film (extended).mkv');
   writeFileSync(added, 'the extended cut');
   watched[0]!.onChange(added);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // idle() does not see a burst that is still settling (an armed settle timer is
+  // neither running nor pending), so wait for the scan this test expects rather
+  // than for a duration.
+  const deadline = Date.now() + 5_000;
+  while (scopes.length === 0) {
+    if (Date.now() > deadline) throw new Error('the watcher-reported file was never scanned');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   await coordinator.idle();
 
   expect(scopes).toEqual([[added]]);

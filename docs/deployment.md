@@ -753,7 +753,7 @@ scanned. In each application:
 
 1. Settings → Connect → add **Webhook**.
 2. URL: `http://<trawlarr host>:8265/api/v1/notify/arr`, method `POST`.
-3. Under Advanced, Headers: `X-Api-Key` = the daemon's API key.
+3. Under Advanced, Headers: `X-Api-Key` = the daemon's API key (printed on the first run; see §1 and §13 for where to read it afterwards).
 4. Tick the triggers, and every delete trigger the application offers:
    - Sonarr: On File Import, On Import Complete, On File Upgrade, On Rename,
      On Series Delete, On Episode File Delete, On Episode File Delete For
@@ -769,8 +769,8 @@ scanned. In each application:
    way the library root is spelled.
 6. The application's Test button should succeed; it scans nothing.
 
-A notification missed while trawlarr is restarting is not retried; the hourly
-scan finds the file.
+A notification missed while trawlarr is restarting is not retried; the periodic
+scan (hourly by default) finds the file.
 
 ## 12. Licensing of the image
 
