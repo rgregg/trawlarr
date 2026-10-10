@@ -193,7 +193,10 @@ export const recoverInterruptedSwaps = async (
       const stem = basename(originalPath, extname(originalPath));
       const siblings = (await readdir(dir)).filter(
         (entry) =>
-          entry.startsWith(`${stem}.`) &&
+          // The WHOLE stem, not a prefix of it: `Film.Trailer.mkv` beside
+          // `Film.mkv` is a companion, and taking it for a candidate refused
+          // the restore in every folder that keeps a trailer or a sample.
+          basename(entry, extname(entry)) === stem &&
           !entry.startsWith('.trawlarr-') &&
           library.extensions.includes(extname(entry).slice(1).toLowerCase()),
       );

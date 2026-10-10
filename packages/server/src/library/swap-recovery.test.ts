@@ -217,6 +217,23 @@ describe('recoverInterruptedSwaps', () => {
     expect(events.join('\n')).toMatch(/cannot be established/);
   });
 
+  // A trailer, sample or extra beside the film shares its name as a prefix but
+  // is a different file under a different stem. Counting those as "a sibling
+  // with the same stem" refused the restore in exactly the folders that keep
+  // them, which is most film folders.
+  it('restores beside a companion whose name merely starts with the stem', async () => {
+    const s = await stranded();
+    writeFileSync(join(s.dir, 'Film.Trailer.mkv'), 'a trailer');
+    writeFileSync(join(s.dir, 'Film.sample.mp4'), 'a sample');
+
+    const summary = await recover(s).done;
+
+    expect(summary.restored).toBe(1);
+    expect(summary.refused).toBe(0);
+    expect(readFileSync(s.original, 'utf8')).toBe('the original');
+    expect(existsSync(s.notePath)).toBe(false);
+  });
+
   it('does not settle on a directory at the original path', async () => {
     const s = await stranded();
     mkdirSync(s.original);
