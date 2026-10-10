@@ -925,6 +925,126 @@ describe('scan coordinator: scoped scans', () => {
     expect(scans.map((call) => call.scope)).toEqual([null]);
   });
 
+  // A scoped scan that throws has examined none of its paths, and nothing
+  // else would: the paths lived only in the plan that just failed, so without
+  // this the file an *arr reported waits for the next interval scan — or for
+  // ever, with the interval off.
+  it('follows a scoped scan that failed with one full scan, and releases the lock', async () => {
+    const { coordinator, scans, errors, libraryIds } = harness({ failFirst: 1 });
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/A']);
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/A'], null]);
+    expect(errors.map((entry) => entry.context)).toEqual([
+      { libraryId: libraryIds[0], phase: 'scan' },
+    ]);
+    expect(coordinator.scanning()).toEqual([]);
+  });
+
+  // Retrying a failed FULL scan the same way would loop for as long as
+  // whatever broke it stays broken. The interval is its retry.
+  it('does not retry a full scan that failed, including the one that followed a failed scoped scan', async () => {
+    const { coordinator, scans, errors, libraryIds } = harness({ failFirst: 100 });
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'manual');
+    await coordinator.idle();
+    expect(scans.map((call) => call.scope)).toEqual([null]);
+
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/A']);
+    await coordinator.idle();
+    expect(scans.map((call) => call.scope)).toEqual([null, ['/lib/A'], null]);
+    expect(errors).toHaveLength(3);
+    expect(coordinator.scanning()).toEqual([]);
+  });
+
+  it('folds the full scan owed for a failed scoped scan into what was already pending', async () => {
+    let asked = false;
+    const { coordinator, scans, libraryIds } = harness({
+      failFirst: 1,
+      duringScan: (input) => {
+        if (asked) return;
+        asked = true;
+        coordinator.request(input.libraryId, 'notify', ['/lib/B']);
+      },
+    });
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/A']);
+    await coordinator.idle();
+
+    // One catch-up, and it is full: it covers /lib/A and /lib/B both.
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/A'], null]);
+  });
+
+  it('still scans the paths that were pending when a full scan failed', async () => {
+    let asked = false;
+    const { coordinator, scans, errors, libraryIds } = harness({
+      failFirst: 1,
+      duringScan: (input) => {
+        if (asked) return;
+        asked = true;
+        coordinator.request(input.libraryId, 'notify', ['/lib/B']);
+      },
+    });
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'manual');
+    await coordinator.idle();
+
+    expect(errors).toHaveLength(1);
+    expect(scans.map((call) => call.scope)).toEqual([null, ['/lib/B']]);
+  });
+
+  it('runs no scan for a burst that was still settling when the coordinator stopped', async () => {
+    const { coordinator, scans, timers, watched } = harness({ rescanIntervalMs: 0 });
+    coordinator.start();
+
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    expect(timers.armed()).toBe(1);
+    await coordinator.stop();
+
+    expect(timers.armed()).toBe(0);
+    timers.advance(SETTLE_MS * 2);
+    expect(scans).toEqual([]);
+  });
+
+  it('runs no scan for a burst that was settling beside a running scan when the coordinator stopped', async () => {
+    const { coordinator, scans, timers, libraryIds, watched, release } = harness({
+      blocking: true,
+      rescanIntervalMs: 0,
+    });
+    coordinator.start();
+    coordinator.request(libraryIds[0]!, 'manual');
+    await Promise.resolve();
+
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    const stopping = coordinator.stop();
+    expect(timers.armed()).toBe(0);
+    await release();
+    await stopping;
+    timers.advance(SETTLE_MS * 2);
+
+    expect(scans.map((call) => call.scope)).toEqual([null]);
+  });
+
+  it('turns more than the limit of paths reported during a running scan into one full catch-up', async () => {
+    const { coordinator, scans, libraryIds, release } = harness({ blocking: true });
+    coordinator.start();
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/First']);
+    await Promise.resolve();
+
+    for (let index = 0; index <= SCOPED_PATH_LIMIT; index += 1) {
+      coordinator.request(libraryIds[0]!, 'notify', [`/lib/Show/e${String(index)}.mkv`]);
+    }
+    await release();
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/First'], null]);
+  });
+
   it('keeps the interval scan full', () => {
     const { coordinator, scans, timers } = harness();
     coordinator.start();

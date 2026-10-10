@@ -280,10 +280,11 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
    *
    * The failure handling is the whole point of the loop's `try`. A scan
    * that throws must (a) be REPORTED — a silent catch here is a library
-   * that stops converging with nothing anywhere saying so — and (b) leave
+   * that stops converging with nothing anywhere saying so — (b) leave
    * `running` false, so the next trigger is not permanently swallowed by a
-   * lock nobody will ever release. The `finally` is what guarantees (b)
-   * even for a failure mode this code has not thought of.
+   * lock nobody will ever release, and (c) not take the paths it was scoped
+   * to down with it. The `finally` is what guarantees (b) even for a failure
+   * mode this code has not thought of.
    */
   const runScan = (libraryId: string, plan: PlannedScan): void => {
     const state = stateFor(libraryId);
@@ -297,6 +298,21 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
             await executeScan(libraryId, current);
           } catch (error) {
             onError(error, { libraryId, phase: 'scan' });
+            // A scoped scan that threw examined none of its paths, and they
+            // existed nowhere but in the plan that just failed: dropped here,
+            // the file a notification named would wait for the next interval
+            // scan, or for ever with the interval off. So it is owed ONE full
+            // scan, folded into whatever else is pending. A failed FULL scan is
+            // deliberately not retried this way — its retry would be another
+            // full scan, which would loop for as long as whatever broke it
+            // stays broken; the interval is its retry.
+            if (current.paths !== null && !stopped) {
+              state.pending = planWith(
+                state.pending,
+                state.pending?.reason ?? current.reason,
+                undefined,
+              );
+            }
           }
           // Read-and-clear: however many triggers landed during the scan,
           // they produce exactly one more pass (their paths merged).
