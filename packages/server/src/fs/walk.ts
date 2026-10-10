@@ -2,7 +2,7 @@ import { opendir, stat } from 'node:fs/promises';
 import type { Dirent, Stats } from 'node:fs';
 import { extname, join } from 'node:path';
 import { isWorkingFileName } from '@trawlarr/core';
-import { pathContains } from './path-contains.js';
+import { createSubtreeMatcher } from './path-contains.js';
 
 /**
  * Yield every file under `roots` whose extension matches, with its stat.
@@ -14,8 +14,9 @@ import { pathContains } from './path-contains.js';
  *
  * `exclude` prunes whole subtrees — staging and trash directories, most
  * notably — rather than filtering matched files one by one: a directory
- * whose resolved path is contained in `exclude` (per {@link pathContains},
- * the same segment-aware comparison used everywhere else in this codebase)
+ * whose resolved path is contained in `exclude` (per
+ * {@link createSubtreeMatcher}, the segment-aware, alias-aware comparison of
+ * `pathContains` without its per-path filesystem reads)
  * is never opened, so nothing beneath it is ever visited or yielded. This
  * matters beyond performance: a half-written staged transcode must never
  * be probed mid-write, and a trashed file must never be re-admitted as
@@ -52,9 +53,16 @@ export async function* walkFiles(input: {
   if (wanted.size === 0) return;
 
   const openDir = input.openDir ?? opendir;
-  const excludes = input.exclude ?? [];
-  const isExcluded = (path: string): boolean =>
-    excludes.some((excluded) => pathContains(excluded, path));
+  // Built once, not `pathContains` per directory: that canonicalises the
+  // directory it is asked about, a synchronous stat of every segment, on the
+  // daemon's only thread. On a network library each one can queue behind a
+  // replacement's writes, so a scan overlapping a copy froze the API once per
+  // folder. Sound here because the walk never follows a directory symlink —
+  // see `createSubtreeMatcher`.
+  const isExcluded = createSubtreeMatcher({
+    roots: input.roots,
+    subtrees: input.exclude ?? [],
+  });
 
   const pending = [...input.roots];
   while (pending.length > 0) {
