@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapFromRows, rowsFromMap } from './notification-paths-model.js';
+import { canEdit, mapFromRows, rowsFromMap } from './notification-paths-model.js';
 
 describe('notification paths model', () => {
   it('shows the sender path first and trawlarr path second', () => {
@@ -35,5 +35,17 @@ describe('notification paths model', () => {
     expect(mapFromRows([{ key: 'a', theirs: ' /data ', ours: ' /library ' }])).toEqual([
       { serverPath: '/library', nodePath: '/data' },
     ]);
+  });
+
+  it('cannot be edited until the saved mapping has loaded', () => {
+    expect(canEdit(null)).toBe(false);
+  });
+
+  it('can be edited when the saved mapping is empty', () => {
+    expect(canEdit([])).toBe(true);
+  });
+
+  it('can be edited once rows have loaded', () => {
+    expect(canEdit([{ key: 'a', theirs: '/data', ours: '/library' }])).toBe(true);
   });
 });

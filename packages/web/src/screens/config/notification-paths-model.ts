@@ -27,3 +27,11 @@ export const mapFromRows = (
   rows
     .map((row) => ({ serverPath: row.ours.trim(), nodePath: row.theirs.trim() }))
     .filter((entry) => entry.serverPath !== '' || entry.nodePath !== '');
+
+/**
+ * A map that has not been read cannot be edited: saving would replace what
+ * the server holds with only what was typed. `null` is "not loaded yet" (or
+ * the load failed); an empty list is a loaded, empty map and is editable.
+ */
+export const canEdit = (rows: NotificationPathRow[] | null): rows is NotificationPathRow[] =>
+  rows !== null;

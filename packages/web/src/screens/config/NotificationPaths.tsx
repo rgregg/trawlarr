@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { ApiClient } from '../../api/client.js';
 import { describeFailure } from './library-form-model.js';
-import { mapFromRows, rowsFromMap, type NotificationPathRow } from './notification-paths-model.js';
+import {
+  canEdit,
+  mapFromRows,
+  rowsFromMap,
+  type NotificationPathRow,
+} from './notification-paths-model.js';
 
 interface ScanSettingsResponse {
   scan: { notifyPathMap: { serverPath: string; nodePath: string }[] };
@@ -35,7 +40,7 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
   }, [client]);
 
   const save = async (): Promise<void> => {
-    if (rows === null) return;
+    if (!canEdit(rows)) return;
     setSaving(true);
     setFailure(null);
     try {
@@ -61,8 +66,8 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
   return (
     <div className="config-section">
       <h3>Notification paths</h3>
-      {rows !== null && (
-        <table>
+      {canEdit(rows) && (
+        <table className="node-path-table">
           <thead>
             <tr>
               <th>Reported as</th>
@@ -111,13 +116,16 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
       <div className="row-actions">
         <button
           type="button"
+          disabled={!canEdit(rows)}
           onClick={() => {
-            setRows((current) => [...(current ?? []), { key: newRowKey(), theirs: '', ours: '' }]);
+            setRows((current) =>
+              canEdit(current) ? [...current, { key: newRowKey(), theirs: '', ours: '' }] : current,
+            );
           }}
         >
           Add row
         </button>
-        <button type="button" disabled={saving || rows === null} onClick={() => void save()}>
+        <button type="button" disabled={saving || !canEdit(rows)} onClick={() => void save()}>
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
