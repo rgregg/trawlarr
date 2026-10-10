@@ -18,7 +18,11 @@ import { flowDefinitionHash, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createEventBus, type TrawlarrEvent } from '../daemon/events.js';
-import type { ScanCoordinator, ScanReason } from '../daemon/scan-coordinator.js';
+import {
+  SCOPED_PATH_LIMIT,
+  type ScanCoordinator,
+  type ScanReason,
+} from '../daemon/scan-coordinator.js';
 import type { Supervisor, SupervisorStatus } from '../daemon/supervisor.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
@@ -610,7 +614,7 @@ describe('scan endpoint paths', () => {
 
   it('queues a scoped scan for the paths sent', async () => {
     const result = await api('POST', `/libraries/${id}/scan`, {
-      paths: [join(root, 'Film'), join(root, 'Film', 'film.mkv')],
+      paths: [join(root, 'Film'), join(root, 'Other Film', 'film.mkv')],
     });
 
     expect(result.status).toBe(202);
@@ -619,9 +623,63 @@ describe('scan endpoint paths', () => {
       {
         libraryId: id,
         reason: 'notify',
-        paths: [join(root, 'Film'), join(root, 'Film', 'film.mkv')],
+        paths: [join(root, 'Film'), join(root, 'Other Film', 'film.mkv')],
       },
     ]);
+  });
+
+  it('queues only the folder when a path inside it is sent as well', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [join(root, 'Film', 'film.mkv'), join(root, 'Film')],
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.paths).toEqual([join(root, 'Film')]);
+    expect(scans.requests).toEqual([
+      { libraryId: id, reason: 'notify', paths: [join(root, 'Film')] },
+    ]);
+  });
+
+  // Past the limit the coordinator runs a full scan instead, so answering
+  // `mode: "scoped"` would describe a scan that is not the one queued.
+  it('refuses more paths than one scoped scan takes, and queues nothing', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: Array.from({ length: SCOPED_PATH_LIMIT + 1 }, (_, index) =>
+        join(root, `Film ${String(index)}`),
+      ),
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-scope');
+    expect(result.body.error.message).toContain('Omit "paths"');
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('accepts exactly as many paths as one scoped scan takes', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: Array.from({ length: SCOPED_PATH_LIMIT }, (_, index) =>
+        join(root, `Film ${String(index)}`),
+      ),
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('scoped');
+  });
+
+  // A body with no `paths` field means a full scan, and an array or a string
+  // has no fields at all: read that way, a caller that posted its list bare
+  // would start the whole-library walk it was written to avoid.
+  it.each([
+    ['an array', ['/library/Film']],
+    ['a string', '/library/Film'],
+    ['a number', 7],
+    ['null', null],
+  ])('refuses a body that is %s rather than an object, and queues nothing', async (_, body) => {
+    const result = await api('POST', `/libraries/${id}/scan`, body);
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-body');
+    expect(scans.requests).toEqual([]);
   });
 
   it('refuses a path outside the library, naming it, and queues nothing', async () => {

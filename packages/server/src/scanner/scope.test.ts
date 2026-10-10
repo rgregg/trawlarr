@@ -28,8 +28,44 @@ afterEach(() => {
 
 describe('validateScope', () => {
   it('accepts a file and a folder inside a root, and the root itself', () => {
-    const paths = [join(root, 'Film', 'film.mkv'), join(root, 'Film'), root];
+    const paths = [join(root, 'Film', 'film.mkv'), join(root, 'Show'), root];
+    for (const path of paths) {
+      expect(validateScope({ library, paths: [path] })).toEqual([path]);
+    }
+    expect(validateScope({ library, paths: paths.slice(0, 2) })).toEqual(paths.slice(0, 2));
+  });
+
+  // A watcher burst for a new folder names the folder, its subfolders and the
+  // files in them. Each folder named is walked to the bottom, so keeping the
+  // ones beneath it walks the same subtree once per level.
+  it('drops a path that lies under another path of the same scope, whichever came first', () => {
+    const show = join(root, 'Show');
+    const film = join(root, 'Film', 'film.mkv');
+    expect(
+      validateScope({
+        library,
+        paths: [join(show, 'Season 1', 'e1.mkv'), show, film, join(show, 'Season 1')],
+      }),
+    ).toEqual([show, film]);
+  });
+
+  it('keeps only the root when the root is named with paths inside it', () => {
+    expect(
+      validateScope({ library, paths: [join(root, 'Film'), root, join(root, 'Show', 'e1.mkv')] }),
+    ).toEqual([root]);
+  });
+
+  it('does not take a sibling that shares a name prefix for a path underneath', () => {
+    const paths = [join(root, 'Show'), join(root, 'Show 2'), join(root, 'Show.mkv')];
     expect(validateScope({ library, paths })).toEqual(paths);
+  });
+
+  // The refusals are about each path as named, so a covered path is still
+  // checked before it is dropped.
+  it('still refuses a reserved path that another scope path covers', () => {
+    expect(() =>
+      validateScope({ library, paths: [root, join(root, '.trawlarr', 'trash', 'deleted.mkv')] }),
+    ).toThrow(ScopeError);
   });
 
   it('accepts a path that does not exist: a deletion is reported by what is gone', () => {

@@ -1,4 +1,4 @@
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import type { LibraryRecord } from '../db/library-repo.js';
 import { createSubtreeMatcher } from '../fs/path-contains.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
@@ -47,6 +47,15 @@ export const libraryContaining = (
  *
  * All-or-nothing: the first unacceptable path throws, naming it. Quietly
  * dropping one would have the caller believe it had been scanned.
+ *
+ * The one thing that IS dropped is a path lying under another path of the same
+ * scope, and only after it has passed every check above. It is still scanned:
+ * the path that covers it is walked to the bottom, and the missing pass
+ * considers every row at or under a scope path. A watcher burst for a new
+ * folder names the folder, each subfolder and each file, and kept as given
+ * that walked the same subtree once per level. Compared as spelled, like the
+ * duplicate check — two spellings of one folder are both kept, which costs a
+ * second walk and nothing else.
  */
 export const validateScope = (input: {
   library: LibraryRecord;
@@ -110,5 +119,17 @@ export const validateScope = (input: {
     }
     accepted.add(normalised);
   }
-  return [...accepted];
+
+  // By each path's own ancestors rather than by comparing every pair: a
+  // request may name thousands of paths, and this runs in a request handler.
+  const isCovered = (path: string): boolean => {
+    let current = path;
+    for (;;) {
+      const parent = dirname(current);
+      if (parent === current) return false;
+      if (accepted.has(parent)) return true;
+      current = parent;
+    }
+  };
+  return [...accepted].filter((path) => !isCovered(path));
 };

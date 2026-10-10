@@ -151,6 +151,20 @@ describe('scanLibrary with a scope', () => {
     expect(missing()).toEqual([join(root, 'Film A', 'a.mkv')]);
   });
 
+  // A scope path lying under another is dropped before the scan (see
+  // `validateScope`); the folder that covers it has to speak for it in the
+  // missing pass too, or a deletion reported alongside its folder is lost.
+  it('marks a deleted file missing when it was named alongside the folder that contains it', async () => {
+    const gone = join(root, 'Film A', 'a.mkv');
+    unlinkSync(gone);
+
+    const summary = await scan([gone, join(root, 'Film A')]);
+
+    expect(summary.scopedPaths).toBe(1);
+    expect(summary.missing).toBe(1);
+    expect(missing()).toEqual([gone]);
+  });
+
   // Review Focus 4. A root that cannot be read is what an unmounted share
   // looks like, and a delete notification for a folder under it must not be
   // taken at its word.

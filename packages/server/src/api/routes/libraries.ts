@@ -1,4 +1,5 @@
 import { checkLibraryHealth, PAUSE_PREFIX_FLOW } from '../../daemon/library-health.js';
+import { SCOPED_PATH_LIMIT } from '../../daemon/scan-coordinator.js';
 import {
   createLibraryRepo,
   OverlappingRootsError,
@@ -396,6 +397,22 @@ export const libraryRoutes: Route[] = [
     path: '/libraries/:id/scan',
     handler: ({ params, body, ctx }) => {
       const library = requireLibrary(ctx, params.id!);
+      // No body at all is a full scan. A body that is not an object is refused
+      // rather than read as one with no `paths`: an array or a string has no
+      // fields, so a caller that posted its list bare would otherwise queue the
+      // whole-library walk it was written to avoid.
+      if (
+        body !== undefined &&
+        (typeof body !== 'object' || body === null || Array.isArray(body))
+      ) {
+        throw new ApiError(
+          400,
+          'invalid-body',
+          `The body must be a JSON object such as {"paths": ["/library/Some Film"]}, got ` +
+            `${Array.isArray(body) ? 'an array' : body === null ? 'null' : `a ${typeof body}`}. ` +
+            `Send no body at all to scan the whole library.`,
+        );
+      }
       const requested = optionalStringArray(body, 'paths');
 
       // 202, not 200: a scan of a real library takes minutes, and holding an
@@ -427,6 +444,18 @@ export const libraryRoutes: Route[] = [
       } catch (error) {
         if (error instanceof ScopeError) throw new ApiError(400, 'invalid-scope', error.message);
         throw error;
+      }
+      // Past the limit the coordinator replaces the paths with a full scan, so
+      // accepting them would answer `mode: "scoped"` for a scan that is not.
+      // Counted after validation, which is what the coordinator is handed: a
+      // path covered by another in the same request does not count twice.
+      if (paths.length > SCOPED_PATH_LIMIT) {
+        throw new ApiError(
+          400,
+          'invalid-scope',
+          `"paths" names ${String(paths.length)} separate paths, and a scoped scan takes at most ` +
+            `${String(SCOPED_PATH_LIMIT)}. Omit "paths" to scan the whole library.`,
+        );
       }
       ctx.scans.request(library.id, 'notify', paths);
       return accepted({
