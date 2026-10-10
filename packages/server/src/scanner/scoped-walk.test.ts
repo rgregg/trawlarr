@@ -112,7 +112,7 @@ describe('walkScope', () => {
     expect(await collect([link])).toEqual([]);
   });
 
-  // Review Focus 2: a watcher burst reports a new folder AND the file in it.
+  // A watcher burst reports a new folder AND the file in it.
   it('yields a file once when it is named and its folder is too', async () => {
     expect(await collect([join(root, 'Film A', 'a.mkv'), join(root, 'Film A')])).toEqual([
       join(root, 'Film A', 'a.mkv'),

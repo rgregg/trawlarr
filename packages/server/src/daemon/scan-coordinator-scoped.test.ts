@@ -95,8 +95,10 @@ it('adds a file the watcher reported without walking the rest of the library', a
   watched[0]!.onChange(added);
   // idle() does not see a burst that is still settling (an armed settle timer is
   // neither running nor pending), so wait for the scan this test expects rather
-  // than for a duration.
-  const deadline = Date.now() + 5_000;
+  // than for a duration. The deadline is inside vitest's 5 s test timeout, so
+  // a scan that never comes fails with this message and not with a bare
+  // "test timed out".
+  const deadline = Date.now() + 3_000;
   while (scopes.length === 0) {
     if (Date.now() > deadline) throw new Error('the watcher-reported file was never scanned');
     await new Promise((resolve) => setTimeout(resolve, 5));

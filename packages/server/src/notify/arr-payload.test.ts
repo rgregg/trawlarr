@@ -63,7 +63,6 @@ describe('readArrFolder', () => {
     expect(readArrFolder({ eventType: 'Health', message: 'indexer down' }).kind).toBe('ignore');
   });
 
-  // Review Focus 5.
   it.each([null, undefined, 'a string', 42, ['a', 'list']])(
     'reports a body that is not an object as invalid: %j',
     (body) => {

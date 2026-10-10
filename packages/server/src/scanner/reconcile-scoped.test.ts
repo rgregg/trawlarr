@@ -75,7 +75,6 @@ describe('listUnderPaths', () => {
     ]);
   });
 
-  // Review Focus 3.
   it('does not return a sibling folder whose name starts with the scope folder name', () => {
     const rows = repo.listUnderPaths({ libraryId: library.id, paths: [join(root, 'Show')] });
     expect(rows.some((row) => row.path.startsWith(join(root, 'Show 2')))).toBe(false);

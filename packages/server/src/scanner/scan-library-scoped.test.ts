@@ -1,20 +1,24 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   renameSync,
   rmSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { newLedgerRecord } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
+import { DEFAULT_WORKING_FILE_STALE_AFTER_MS } from '../library/working-file-sweep.js';
 import { FAKE_PROBE_DOCUMENT } from '../../test/helpers/fake-ffprobe.js';
 import { scanLibrary, type ScanSummary } from './scan-library.js';
 import { ScopeError } from './scope.js';
@@ -24,6 +28,9 @@ const fixedProbe = (path: string): ProbeData =>
     ...FAKE_PROBE_DOCUMENT,
     format: { ...FAKE_PROBE_DOCUMENT.format, filename: path },
   }) as ProbeData;
+
+/** What the scans read as the time. Only the working-file sweep compares it with a file's. */
+let clockMs: number;
 
 let base: string;
 let root: string;
@@ -36,7 +43,7 @@ const scan = (scope?: string[]): Promise<ScanSummary> =>
     db,
     libraryId,
     ffprobePath: 'unused',
-    nowMs: () => 1_000,
+    nowMs: () => clockMs,
     scope,
     probeFileImpl: async (input) => {
       probed.push(input.path);
@@ -68,10 +75,11 @@ beforeEach(async () => {
   libraryId = createLibraryRepo(db).create({
     name: 'Movies',
     roots: [root],
-    extensions: ['mkv'],
+    extensions: ['mkv', 'mp4'],
     nowMs: 0,
   }).id;
   probed = [];
+  clockMs = 1_000;
   await scan();
   probed = [];
 });
@@ -165,7 +173,7 @@ describe('scanLibrary with a scope', () => {
     expect(missing()).toEqual([gone]);
   });
 
-  // Review Focus 4. A root that cannot be read is what an unmounted share
+  // A root that cannot be read is what an unmounted share
   // looks like, and a delete notification for a folder under it must not be
   // taken at its word.
   it('marks nothing missing when the root cannot be shown to be present', async () => {
@@ -179,13 +187,89 @@ describe('scanLibrary with a scope', () => {
     expect(missing()).toEqual([]);
   });
 
-  it('does not sweep orphaned working files', async () => {
+  // The orphan is aged past the sweep's threshold on purpose. A fresh one is
+  // spared by ANY scan, so a test using it passes whether or not a scoped scan
+  // sweeps; this one is a file the full scan below really does remove.
+  it('does not sweep orphaned working files, which a full scan does', async () => {
     const orphan = join(root, 'Film A', '.trawlarr-replace-0000.mkv');
     writeFileSync(orphan, 'left by a dead worker');
+    clockMs = Date.now();
+    const old = new Date(clockMs - 2 * DEFAULT_WORKING_FILE_STALE_AFTER_MS);
+    utimesSync(orphan, old, old);
 
-    const summary = await scan([join(root, 'Film A')]);
+    const scoped = await scan([join(root, 'Film A')]);
 
-    expect(summary.workingFilesRemoved).toBe(0);
+    expect(scoped.workingFilesRemoved).toBe(0);
+    expect(existsSync(orphan)).toBe(true);
+
+    const full = await scan();
+
+    expect(full.workingFilesRemoved).toBe(1);
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  describe('beside a running job', () => {
+    const original = (): string => join(root, 'Film A', 'a.mkv');
+    const markRunning = (): MediaFileRow => {
+      const repo = createMediaFileRepo(db);
+      const row = rows().find((candidate) => candidate.path === original())!;
+      repo.setLedger({
+        fileId: row.id,
+        record: { ...(repo.getLedger(row.id) ?? newLedgerRecord()), state: 'running' },
+      });
+      return repo.getById(row.id)!;
+    };
+
+    // `Replace Original File` lands its output beside the original under the
+    // original's stem, and the run records it a moment later. A scoped scan is
+    // far likelier than a full one to arrive inside that moment — the watcher
+    // reports the very file the run just wrote — and a row opened for it then
+    // is the ghost row that gets the file transcoded a second time.
+    it('leaves a running row and its replacement output alone', async () => {
+      const running = markRunning();
+      const output = join(root, 'Film A', 'a.mp4');
+      writeFileSync(output, 'the replacement, landed but not yet recorded');
+
+      const summary = await scan([join(root, 'Film A')]);
+
+      expect(summary.inFlight).toBe(1);
+      expect(summary.added).toBe(0);
+      expect(probed).not.toContain(output);
+      expect(
+        rows()
+          .map((row) => row.path)
+          .sort(),
+      ).toEqual([join(root, 'Film A', 'a.mkv'), join(root, 'Film B', 'b.mkv')]);
+      const after = createMediaFileRepo(db).getById(running.id)!;
+      expect(after.state).toBe('running');
+      expect(after.path).toBe(running.path);
+      expect(after.content_key).toBe(running.content_key);
+    });
+
+    it('leaves the output alone when it is named directly rather than through its folder', async () => {
+      markRunning();
+      const output = join(root, 'Film A', 'a.mp4');
+      writeFileSync(output, 'the replacement, landed but not yet recorded');
+
+      const summary = await scan([output]);
+
+      expect(summary.inFlight).toBe(1);
+      expect(summary.added).toBe(0);
+      expect(rows()).toHaveLength(2);
+    });
+
+    // A replacement legitimately empties the original's path mid-run, and the
+    // watcher reports exactly that unlink.
+    it('does not mark a running row missing when its file is gone', async () => {
+      const running = markRunning();
+      unlinkSync(original());
+
+      const summary = await scan([original(), join(root, 'Film A')]);
+
+      expect(summary.missing).toBe(0);
+      expect(missing()).toEqual([]);
+      expect(createMediaFileRepo(db).getById(running.id)!.state).toBe('running');
+    });
   });
 
   it('refuses a scope outside the library, and scans nothing', async () => {

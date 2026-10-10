@@ -73,7 +73,6 @@ describe('validateScope', () => {
     expect(validateScope({ library, paths: [gone] })).toEqual([gone]);
   });
 
-  // Review Focus 1.
   it('normalises a trailing slash and collapses duplicates', () => {
     expect(
       validateScope({ library, paths: [`${join(root, 'Film')}/`, join(root, 'Film')] }),
