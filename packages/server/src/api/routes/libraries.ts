@@ -413,6 +413,20 @@ export const libraryRoutes: Route[] = [
             `Send no body at all to scan the whole library.`,
         );
       }
+      // Past the limit the coordinator replaces the paths with a full scan, so
+      // accepting them would answer `mode: "scoped"` for a scan that is not.
+      // Checked on the count alone and BEFORE anything looks at an entry — the
+      // type check just below included: the list comes from outside, and an
+      // oversized one must cost nothing per path.
+      const listed = (body as { paths?: unknown } | undefined)?.paths;
+      if (Array.isArray(listed) && listed.length > SCOPED_PATH_LIMIT) {
+        throw new ApiError(
+          400,
+          'invalid-scope',
+          `"paths" names ${String(listed.length)} paths, and a scoped scan takes at most ` +
+            `${String(SCOPED_PATH_LIMIT)}. Omit "paths" to scan the whole library.`,
+        );
+      }
       const requested = optionalStringArray(body, 'paths');
 
       // 202, not 200: a scan of a real library takes minutes, and holding an
@@ -444,18 +458,6 @@ export const libraryRoutes: Route[] = [
       } catch (error) {
         if (error instanceof ScopeError) throw new ApiError(400, 'invalid-scope', error.message);
         throw error;
-      }
-      // Past the limit the coordinator replaces the paths with a full scan, so
-      // accepting them would answer `mode: "scoped"` for a scan that is not.
-      // Counted after validation, which is what the coordinator is handed: a
-      // path covered by another in the same request does not count twice.
-      if (paths.length > SCOPED_PATH_LIMIT) {
-        throw new ApiError(
-          400,
-          'invalid-scope',
-          `"paths" names ${String(paths.length)} separate paths, and a scoped scan takes at most ` +
-            `${String(SCOPED_PATH_LIMIT)}. Omit "paths" to scan the whole library.`,
-        );
       }
       ctx.scans.request(library.id, 'notify', paths);
       return accepted({

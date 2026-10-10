@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 import type { LibraryRecord } from '../db/library-repo.js';
 import { createSubtreeMatcher } from '../fs/path-contains.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
@@ -120,16 +120,36 @@ export const validateScope = (input: {
     accepted.add(normalised);
   }
 
-  // By each path's own ancestors rather than by comparing every pair: a
-  // request may name thousands of paths, and this runs in a request handler.
-  const isCovered = (path: string): boolean => {
-    let current = path;
-    for (;;) {
-      const parent = dirname(current);
-      if (parent === current) return false;
-      if (accepted.has(parent)) return true;
-      current = parent;
+  // Sorted, then ONE pass comparing each path with the last one kept — never
+  // every pair. This function is a boundary for input from outside: the API
+  // and the coordinator bound a scope at `SCOPED_PATH_LIMIT`, but `scanLibrary`
+  // passes on whatever it was given, and a quadratic step here would be a
+  // stall on the daemon's only thread chosen by whoever wrote the list.
+  //
+  // Ordered by path SEGMENT, not by string: as strings "/lib/Show 2" sorts
+  // between "/lib/Show" and "/lib/Show/e1.mkv" (a space sorts before a slash),
+  // and a pass that looks only at the last path kept would then lose sight of
+  // "/lib/Show". By segment, everything under a path follows it directly.
+  const bySegment = [...accepted]
+    .map((path) => ({ path, segments: path.split(sep) }))
+    .sort((a, b) => {
+      const shared = Math.min(a.segments.length, b.segments.length);
+      for (let index = 0; index < shared; index += 1) {
+        const left = a.segments[index]!;
+        const right = b.segments[index]!;
+        if (left !== right) return left < right ? -1 : 1;
+      }
+      return a.segments.length - b.segments.length;
+    });
+  const covering = new Set<string>();
+  let lastKept: string | null = null;
+  for (const { path } of bySegment) {
+    if (lastKept !== null && path.startsWith(lastKept.endsWith(sep) ? lastKept : lastKept + sep)) {
+      continue;
     }
-  };
-  return [...accepted].filter((path) => !isCovered(path));
+    covering.add(path);
+    lastKept = path;
+  }
+  // In the order the caller gave them, not the sort's.
+  return [...accepted].filter((path) => covering.has(path));
 };

@@ -655,6 +655,24 @@ describe('scan endpoint paths', () => {
     expect(scans.requests).toEqual([]);
   });
 
+  // The count is checked before any path is: an oversized list is refused for
+  // its size alone and never reaches the per-path work. Its first entry here
+  // would be refused as outside the library if it were looked at.
+  it('refuses an oversized list without validating any path in it', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [
+        '/somewhere/else.mkv',
+        ...Array.from({ length: SCOPED_PATH_LIMIT }, () => join(root, 'Film')),
+      ],
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-scope');
+    expect(result.body.error.message).toContain('Omit "paths"');
+    expect(result.body.error.message).not.toContain('/somewhere/else.mkv');
+    expect(scans.requests).toEqual([]);
+  });
+
   it('accepts exactly as many paths as one scoped scan takes', async () => {
     const result = await api('POST', `/libraries/${id}/scan`, {
       paths: Array.from({ length: SCOPED_PATH_LIMIT }, (_, index) =>

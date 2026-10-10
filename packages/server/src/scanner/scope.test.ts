@@ -60,6 +60,19 @@ describe('validateScope', () => {
     expect(validateScope({ library, paths })).toEqual(paths);
   });
 
+  // A plain string sort puts "Show 2" BETWEEN "Show" and "Show/e1.mkv" (a
+  // space sorts before a slash), so a pass that compares each path only with
+  // the last one kept must order by path segment or it loses sight of "Show".
+  it('drops a covered path even when a sibling sorts between it and its folder', () => {
+    const show = join(root, 'Show');
+    expect(
+      validateScope({
+        library,
+        paths: [join(show, 'e1.mkv'), join(root, 'Show 2'), show, join(root, 'Show!', 'x.mkv')],
+      }),
+    ).toEqual([join(root, 'Show 2'), show, join(root, 'Show!', 'x.mkv')]);
+  });
+
   // The refusals are about each path as named, so a covered path is still
   // checked before it is dropped.
   it('still refuses a reserved path that another scope path covers', () => {
