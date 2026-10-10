@@ -48,3 +48,61 @@ export const pathContains = (parent: string, child: string): boolean => {
     resolvedChild.startsWith(resolvedParent.endsWith(sep) ? resolvedParent : resolvedParent + sep)
   );
 };
+
+/**
+ * `pathContains(subtree, path)` for any of `subtrees`, for a caller that asks
+ * about many paths under the same `roots` and cannot afford a filesystem call
+ * per question.
+ *
+ * `pathContains` canonicalises both of its arguments every time, which is a
+ * synchronous `lstat` of every segment of the path. The watcher asked it about
+ * every event, and a replacement copying onto an NFS library produces a stream
+ * of events for the file being written — each stat of which waits behind the
+ * write. That ran on the daemon's only thread: the API and the event socket
+ * froze for up to 29 seconds at a time, for as long as the copy lasted.
+ *
+ * So everything that needs the filesystem is read ONCE, here, and the returned
+ * predicate is string comparison only. What `realpathSync` was buying per path
+ * is recovered from the roots: a path handed to the predicate is spelled the
+ * way its root was (it comes from a walk or a watch of that root, neither of
+ * which follows a directory symlink below it), so swapping the root's spelling
+ * for the root's canonical form canonicalises the path. A subtree is matched
+ * under both its given spelling and its canonical one, because one that does
+ * not exist yet has no canonical form to read.
+ */
+export const createSubtreeMatcher = (input: {
+  roots: readonly string[];
+  subtrees: readonly string[];
+  /** Seam: a test counts the filesystem reads. */
+  canonicalise?: (path: string) => string;
+}): ((path: string) => boolean) => {
+  const canonicalise = input.canonicalise ?? canonicalPath;
+  const isUnder = (parent: string, child: string): boolean =>
+    child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+
+  const subtrees = new Set<string>();
+  for (const subtree of input.subtrees) {
+    subtrees.add(resolve(subtree));
+    subtrees.add(canonicalise(subtree));
+  }
+  const aliasedRoots = input.roots
+    .map((root) => ({ spelled: resolve(root), canonical: canonicalise(root) }))
+    .filter((root) => root.spelled !== root.canonical);
+
+  const inSubtree = (path: string): boolean => {
+    for (const subtree of subtrees) {
+      if (isUnder(subtree, path)) return true;
+    }
+    return false;
+  };
+
+  return (path) => {
+    const resolved = resolve(path);
+    if (inSubtree(resolved)) return true;
+    return aliasedRoots.some(
+      (root) =>
+        isUnder(root.spelled, resolved) &&
+        inSubtree(root.canonical + resolved.slice(root.spelled.length)),
+    );
+  };
+};

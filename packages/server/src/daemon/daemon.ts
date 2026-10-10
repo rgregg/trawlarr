@@ -770,29 +770,45 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       // gone is worse than not telling it, because nothing is left to report
       // the failure.
       plexNotifier.stop();
-      await scans.stop();
 
+      // STOP CLAIMING BEFORE WAITING ON ANYTHING. `scans.stop()` waits for a
+      // scan already in flight, and on a large network library that is
+      // minutes. Until the supervisor is told to drain, every job that
+      // finishes (or dies) during that wait refills its slot from the queue,
+      // so a daemon that had been asked to stop kept starting new transcodes
+      // (two claims, each right after a worker ended, in the 2026-10-03
+      // restart). `drain()` sets the flag synchronously, so the very next
+      // completion claims nothing.
+      const drained = supervisor.drain({ includeRemote: false });
+
+      // The deadline is measured from the START of the shutdown, and it runs
+      // beside the scan wait rather than after it. Started after
+      // `scans.stop()`, the worst case was scan time PLUS the drain deadline,
+      // which is longer than the container's stop_grace_period (5m, the same
+      // as the default deadline), so Docker gave up with "failed to exit within
+      // 5m0s of signal 15" and SIGKILLed whatever was left.
       let deadlineHandle: unknown = null;
       const deadline = new Promise<'deadline'>((resolveDeadline) => {
         deadlineHandle = setTimer(() => {
           resolveDeadline('deadline');
         }, input.drainDeadlineMs ?? DEFAULT_DRAIN_DEADLINE_MS);
       });
+      const scansStopped = scans.stop();
       // LOCAL runs only, in both the drain and the cancel. A remote job
       // survives a daemon restart by design: its node keeps encoding, and the
       // next start adopts the job with its lease in grace. Waiting on one
       // would hold shutdown for the rest of an encode, and cancelling one
       // would be durable — every restart would cancel every remote job.
-      const outcome = await Promise.race([
-        supervisor.drain({ includeRemote: false }).then((): 'drained' => 'drained'),
-        deadline,
-      ]);
+      const outcome = await Promise.race([drained.then((): 'drained' => 'drained'), deadline]);
       if (deadlineHandle !== null) clearTimer(deadlineHandle);
       if (outcome === 'deadline') {
         // Past the bound: cancel, which goes through the process group and
         // therefore reaches an ffmpeg the worker spawned for itself.
         await supervisor.stop();
       }
+      // A scan in flight is not interrupted (an interrupted walk leaves rows
+      // upserted but unreconciled), but nothing below may run under it.
+      await scansStopped;
 
       // Node sockets close with the rest of the daemon; their leases are
       // not touched on the way out (the hub is closing, so a socket close

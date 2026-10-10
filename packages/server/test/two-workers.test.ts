@@ -505,6 +505,10 @@ describe('a worker killed mid-job', () => {
     const fileIds = [0, 1].map((index) => {
       const path = join(root, `movie${String(index)}.mkv`);
       writeFileSync(path, `not really a movie ${String(index)}`, 'utf8');
+      // The row must describe the file that is on disk: a run now probes again
+      // when size or mtime differ from the row, and this fixture's flow never
+      // reaches a real ffprobe.
+      const onDisk = statSync(path);
       const fileId = mediaFileRepo.upsertScanned({
         libraryId: library.id,
         identity: {
@@ -513,16 +517,16 @@ describe('a worker killed mid-job', () => {
         },
         path,
         nlink: 1,
-        sizeBytes: 4096,
-        mtimeMs: Date.now(),
-        ctimeMs: Date.now(),
+        sizeBytes: onDisk.size,
+        mtimeMs: onDisk.mtimeMs,
+        ctimeMs: onDisk.ctimeMs,
         container: 'mkv',
         nowMs: Date.now(),
       });
       mediaFileRepo.setProbe({
         fileId,
         probe: PROBE,
-        facts: extractFacts({ probe: PROBE, container: 'mkv', sizeBytes: 4096 }),
+        facts: extractFacts({ probe: PROBE, container: 'mkv', sizeBytes: onDisk.size }),
       });
       mediaFileRepo.setState({ fileId, state: 'queued' });
       return fileId;
