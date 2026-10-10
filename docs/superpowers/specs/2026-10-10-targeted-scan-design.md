@@ -1,7 +1,7 @@
 # Targeted Scans — Design Spec
 
 **Date:** 2026-10-10
-**Status:** Design agreed in conversation, awaiting review of this document
+**Status:** Implemented on the `spec/targeted-scan` branch
 **Extends:** [the design spec](2026-08-10-trawlarr-design.md) §3.3 (scanning) and the scan
 coordinator's rules in `packages/server/src/daemon/scan-coordinator.ts`.
 
@@ -126,6 +126,7 @@ walk ran to completion.
 | Rename, same inode | old and new path, or their folder | New path observed first; identity matches, so the row follows the file. Nothing is left at the old path to mark |
 | Upgrade: old file deleted, new file added | both, or their folder | New row for the new file; the old row is confirmed gone and marked missing. If the filesystem hands the deleted file's inode to the new file, the identity rule (inode first) records one row that moved and changed, re-probed and re-queued, rather than a new row plus a missing one. A full scan gives the same outcome |
 | Deleted file or folder | the path | Rows at or under it are confirmed gone and marked missing |
+| File moved, only the old path reported | the old path | The row is marked missing although the file exists at its new path. It stays marked until a scan observes the new path; the row then follows the file by identity and the mark is cleared. A full scan would never have marked it, because it observes the new path before its missing pass. "Forget missing" used inside that window discards the history of a file that still exists |
 | Share unmounted | anything | Root not shown available: nothing is marked |
 
 ### 2.4 What a scoped scan skips
@@ -164,11 +165,18 @@ The coordinator's existing rules hold, extended as follows.
    `scan.settleMs` timer and every further event resets it, as today; the difference is
    that the events' paths are kept. A `'notify'` request is not debounced: an \*arr sends
    its webhook after the import is finished, and a burst of them is already collapsed by
-   rule 2.
+   rule 2. A watcher event settles **whether or not a scan is running**. A scan in flight
+   is not a substitute for the settle period: a scoped one ends in milliseconds, and a
+   file still being written would be probed the moment it did. A burst that finishes
+   settling while a scan is still running joins that scan's catch-up (rule 2).
 5. **Overflow becomes a full scan.** More than `SCOPED_PATH_LIMIT = 200` distinct pending
    paths for one library is treated as a full request. A constant, not a setting.
 6. **The interval and startup scans are always full.** Unchanged, and still re-armed
    unconditionally.
+7. **A failed scoped scan is followed by one full scan.** Its paths existed only in the
+   plan that failed, so they would otherwise be lost until the next interval scan. The
+   full scan is folded into whatever else is pending. A failed full scan is not retried
+   this way; that would loop for as long as whatever broke it stays broken.
 
 ---
 
@@ -207,11 +215,21 @@ session).
 - `paths` present: each must be an absolute path, inside one of the library's roots, not
   inside a reserved directory. If any is not, the request is refused with `400` naming the
   first offending path, and nothing is queued.
-- The check is lexical: no filesystem read per request. A request handler runs on the
+- More than `SCOPED_PATH_LIMIT` paths is refused with `400`, saying to omit `paths` to
+  scan the whole library. The coordinator would run such a request as a full scan, so the
+  response could not truthfully say `"scoped"`. The count is checked before any path is
+  looked at, so an oversized list costs nothing per path.
+- A body that is present but is not a JSON object (an array, a string, a number) is
+  refused with `400`. Read as "no `paths`" it would queue the full walk the caller was
+  avoiding.
+- The check is lexical: the handler reads nothing from the filesystem. It runs on the
   daemon's only thread, and a synchronous stat of a network directory per request is the
-  stall this project removed from the watcher and the walk. The scan that follows
-  re-validates canonically. The cost: a path spelled through a symlink alias of a library
-  root is refused here, so spell the path the way the root is spelled.
+  stall this project removed from the watcher and the walk. The same holds for the start
+  of the scan the request triggers, which runs on the handler's stack: the scan reads the
+  real paths of the library's roots and reserved directories once, without blocking,
+  before it validates or walks anything, and re-validates the scope canonically from
+  those. The cost of the lexical check: a path spelled through a symlink alias of a
+  library root is refused here, so spell the path the way the root is spelled.
 - The response stays `202` and says which kind was queued: `"mode": "full" | "scoped"`.
 
 Paths here are trawlarr's own paths. No mapping is applied.
@@ -264,8 +282,8 @@ same `validatePathMap`. In each pair `nodePath` is the prefix as the \*arr repor
 `serverPath` is the prefix as trawlarr sees it: the \*arr stands where a node does.
 Default: empty, meaning paths are taken as received.
 
-In the web UI it is one row under Config, using the path-map editor the Nodes tab already
-has. Label: "Notification paths".
+In the web UI it is its own section under Config, labelled "Notification paths". It
+shares the table styling of the Nodes tab's path map; it is not that editor.
 
 ---
 
@@ -277,10 +295,20 @@ has. Label: "Notification paths".
 | Watcher misses an event | The interval scan finds the file |
 | Path outside every root, or under a reserved directory | Refused; never walked |
 | Scope path vanishes between request and scan | Treated as not existing ([§2.1](#21-what-a-scoped-scan-walks)) |
-| Scoped scan throws | Reported through the coordinator's `onError`, as a full scan is; the lock is released |
+| Scoped scan throws | Reported through the coordinator's `onError`, as a full scan is; the lock is released; one full scan follows ([§3](#3-the-coordinator), rule 7) |
 | Daemon stopping | Pending paths are abandoned with the other catch-ups; the startup scan is full |
 
 Nothing durable depends on a notification arriving.
+
+Two limits:
+
+- **A library on a case-insensitive mount (CIFS, casefold ext4) is unsupported for scoped
+  scans.** The containment guard compares a path's real path with the path as spelled,
+  and `realpath` on Linux does not correct case. A differently-cased spelling of a
+  reserved directory is therefore not recognised as reserved.
+- **With `scan.rescanIntervalMs` set to 0 there is no backstop.** A lost notification or
+  a missed watcher event is then never made up for; the rows of this table that end in
+  "the interval scan finds the file" do not apply.
 
 ---
 

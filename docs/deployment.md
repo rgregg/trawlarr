@@ -745,33 +745,6 @@ network in the clear unless you put TLS in front of the server and point
 `TRAWLARR_SERVER` at `https://`. **Revoke** a node from its card to cut it off
 immediately.
 
-## Notifying trawlarr from Sonarr, Radarr and Lidarr
-
-Without this, a new import is found by the next periodic scan. With it, the
-application tells trawlarr which folder changed and only that folder is
-scanned. In each application:
-
-1. Settings → Connect → add **Webhook**.
-2. URL: `http://<trawlarr host>:8265/api/v1/notify/arr`, method `POST`.
-3. Under Advanced, Headers: `X-Api-Key` = the daemon's API key (printed on the first run; see §1 and §13 for where to read it afterwards).
-4. Tick the triggers, and every delete trigger the application offers:
-   - Sonarr: On File Import, On Import Complete, On File Upgrade, On Rename,
-     On Series Delete, On Episode File Delete, On Episode File Delete For
-     Upgrade.
-   - Radarr: On File Import, On File Upgrade, On Rename, On Movie Delete,
-     On Movie File Delete, On Movie File Delete For Upgrade.
-   - Lidarr: On Release Import, On Upgrade, On Rename, On Track Retag, On
-     Artist Delete, On Album Delete.
-5. If the application sees the library at a different path than trawlarr
-   does, set Config → System → Notification paths (for example reported as
-   `/data`, path here `/library`). The check is lexical, so a path spelled
-   through a symlink alias of a library root is refused; spell the mapping the
-   way the library root is spelled.
-6. The application's Test button should succeed; it scans nothing.
-
-A notification missed while trawlarr is restarting is not retried; the periodic
-scan (hourly by default) finds the file.
-
 ## 12. Licensing of the image
 
 Trawlarr's own code is **MIT** — see [`LICENSE`](../LICENSE).
@@ -814,3 +787,38 @@ configuration at all.
 | A node's card says a library is unreachable            | The node cannot `stat` that root at the path its map gives, or the library's `stagingDir`/`trashDir` has no path-map entry. Check the node's library mount and its path map. See §11. |
 | A node is online and reachable but never runs anything | The node is paused, or has no transcode workers. See §11.                                                                    |
 | `docker logs` no longer shows the API key             | By design; it is printed only on the run that minted it. Read it from `GET /api/v1/system/settings`, or set it explicitly.    |
+
+## 14. Notifying trawlarr from Sonarr, Radarr and Lidarr
+
+Without this, a new import is found by the next periodic scan. With it, the
+application tells trawlarr which folder changed and only that folder is
+scanned. In each application:
+
+1. Settings → Connect → add **Webhook**.
+2. URL: `http://<trawlarr host>:8265/api/v1/notify/arr`, method `POST`.
+3. Under Advanced, Headers: `X-Api-Key` = the daemon's API key. It is printed
+   only on the first run; §13 says how to read it afterwards.
+4. Tick the triggers, and every delete trigger the application offers:
+   - Sonarr: On File Import, On Import Complete, On File Upgrade, On Rename,
+     On Series Delete, On Episode File Delete, On Episode File Delete For
+     Upgrade.
+   - Radarr: On File Import, On File Upgrade, On Rename, On Movie Delete,
+     On Movie File Delete, On Movie File Delete For Upgrade.
+   - Lidarr: On Release Import, On Upgrade, On Rename, On Track Retag, On
+     Artist Delete, On Album Delete.
+5. If the application sees the library at a different path than trawlarr
+   does, set Config → System → Notification paths (for example reported as
+   `/data`, path here `/library`). The check is lexical, so a path spelled
+   through a symlink alias of a library root is refused; spell the mapping the
+   way the library root is spelled.
+6. The application's Test button should succeed; it scans nothing.
+
+A notification missed while trawlarr is restarting is not retried; the periodic
+scan (hourly by default) finds the file.
+
+Point only the applications whose root folders are trawlarr libraries at this
+URL. A notification for a folder that is in no trawlarr library is answered
+`422`, and the application shows the connection as failing.
+
+A file the application imported as a **hardlink** is scanned like any other
+and then skipped by default, as it would be by a full scan. See §9.
