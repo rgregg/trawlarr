@@ -15,6 +15,7 @@ import {
   type ScanCoordinatorErrorContext,
   type ScanFn,
   type ScanReason,
+  SCOPED_PATH_LIMIT,
 } from './scan-coordinator.js';
 import type { WatchInput, WatchPort } from './watcher.js';
 
@@ -91,6 +92,8 @@ const createFakeTimers = (): FakeTimers => {
 interface ScanCall {
   libraryId: string;
   reason: ScanReason;
+  /** `null` for a scan of the whole library. */
+  scope: string[] | null;
 }
 
 interface HarnessOptions {
@@ -152,7 +155,11 @@ const harness = (options: HarnessOptions = {}): Harness => {
   let failuresLeft = options.failFirst ?? 0;
 
   const scanFn: ScanFn = async (input) => {
-    scans.push({ libraryId: input.libraryId, reason: input.reason });
+    scans.push({
+      libraryId: input.libraryId,
+      reason: input.reason,
+      scope: input.scope === undefined ? null : [...input.scope].sort(),
+    });
     options.duringScan?.(input);
     if (failuresLeft > 0) {
       failuresLeft -= 1;
@@ -217,7 +224,7 @@ describe('scan coordinator: debounce and settle', () => {
     for (let i = 0; i < 10; i += 1) coordinator.request(libraryIds[0]!, 'watch');
     expect(scans).toHaveLength(0);
     timers.advance(SETTLE_MS);
-    expect(scans).toEqual([{ libraryId: libraryIds[0], reason: 'watch' }]);
+    expect(scans).toEqual([{ libraryId: libraryIds[0], reason: 'watch', scope: null }]);
   });
 
   it('resets the settle timer on each further event, so a long copy is scanned once at the end', () => {
@@ -301,7 +308,7 @@ describe('scan coordinator: the periodic rescan', () => {
     timers.advance(RESCAN_MS - 1);
     expect(scans).toHaveLength(0);
     timers.advance(1);
-    expect(scans).toEqual([{ libraryId: libraryIds[0], reason: 'interval' }]);
+    expect(scans).toEqual([{ libraryId: libraryIds[0], reason: 'interval', scope: null }]);
   });
 
   it('keeps rescanning every library after a scan fails: the timer outlives the failure', async () => {
@@ -415,7 +422,9 @@ describe('scan coordinator: watchers', () => {
     const forA = watched.find((entry) => entry.libraryId === libraryIds[0]);
     forA?.onChange(join('/anything', 'new.mkv'));
     timers.advance(SETTLE_MS);
-    expect(scans).toEqual([{ libraryId: libraryIds[0], reason: 'watch' }]);
+    expect(scans).toEqual([
+      { libraryId: libraryIds[0], reason: 'watch', scope: [join('/anything', 'new.mkv')] },
+    ]);
   });
 
   it('starts no watcher at all when watching is disabled', () => {
@@ -735,5 +744,122 @@ describe('scan coordinator: against the real scanner', () => {
     await real.coordinator.idle();
     expect(real.summaries.at(-1)).toMatchObject({ probed: 1 });
     expect(real.probedPaths()).toEqual([path, path]);
+  });
+});
+
+describe('scan coordinator: scoped scans', () => {
+  it('scans only the paths a watch burst named, once the tree settles', () => {
+    const { coordinator, scans, timers, watched } = harness();
+    coordinator.start();
+
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    watched[0]!.onChange('/lib/Film/b.mkv');
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    expect(scans).toEqual([]);
+    timers.advance(SETTLE_MS);
+
+    expect(scans).toHaveLength(1);
+    expect(scans[0]).toMatchObject({
+      reason: 'watch',
+      scope: ['/lib/Film/a.mkv', '/lib/Film/b.mkv'],
+    });
+  });
+
+  it('runs a notified scan at once, with no settle delay', () => {
+    const { coordinator, scans, libraryIds } = harness();
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/Film']);
+
+    expect(scans).toEqual([{ libraryId: libraryIds[0], reason: 'notify', scope: ['/lib/Film'] }]);
+  });
+
+  it('collects paths reported during a scan into one catch-up scan', async () => {
+    const { coordinator, scans, libraryIds, release } = harness({ blocking: true });
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/A']);
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/B']);
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/C']);
+    await release();
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/A'], ['/lib/B', '/lib/C']]);
+  });
+
+  it('lets a full request during a scan supersede the paths collected so far', async () => {
+    const { coordinator, scans, libraryIds, release } = harness({ blocking: true });
+    coordinator.start();
+
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/A']);
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/B']);
+    coordinator.request(libraryIds[0]!, 'manual');
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/C']);
+    await release();
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/A'], null]);
+  });
+
+  // A season pack, or a library moved wholesale: past the limit a list of
+  // paths is no cheaper than the walk, and unbounded it is a memory leak.
+  it('turns more than the limit of pending paths into one full scan', () => {
+    const { coordinator, scans, timers, watched } = harness();
+    coordinator.start();
+
+    for (let index = 0; index <= SCOPED_PATH_LIMIT; index += 1) {
+      watched[0]!.onChange(`/lib/Show/e${String(index)}.mkv`);
+    }
+    timers.advance(SETTLE_MS);
+
+    expect(scans).toHaveLength(1);
+    expect(scans[0]!.scope).toBeNull();
+  });
+
+  it('keeps exactly the limit of paths scoped', () => {
+    const { coordinator, scans, timers, watched } = harness();
+    coordinator.start();
+
+    for (let index = 0; index < SCOPED_PATH_LIMIT; index += 1) {
+      watched[0]!.onChange(`/lib/Show/e${String(index)}.mkv`);
+    }
+    timers.advance(SETTLE_MS);
+
+    expect(scans[0]!.scope).toHaveLength(SCOPED_PATH_LIMIT);
+  });
+
+  it('does not let a notified scan discard a watch burst that is still settling', async () => {
+    const { coordinator, scans, timers, libraryIds, watched } = harness();
+    coordinator.start();
+
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    coordinator.request(libraryIds[0]!, 'notify', ['/lib/Other']);
+    await coordinator.idle();
+    timers.advance(SETTLE_MS);
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([['/lib/Other'], ['/lib/Film/a.mkv']]);
+  });
+
+  it('still lets a full manual scan supersede a settling watch burst', async () => {
+    const { coordinator, scans, timers, libraryIds, watched } = harness();
+    coordinator.start();
+
+    watched[0]!.onChange('/lib/Film/a.mkv');
+    coordinator.request(libraryIds[0]!, 'manual');
+    await coordinator.idle();
+    timers.advance(SETTLE_MS);
+    await coordinator.idle();
+
+    expect(scans.map((call) => call.scope)).toEqual([null]);
+  });
+
+  it('keeps the interval scan full', () => {
+    const { coordinator, scans, timers } = harness();
+    coordinator.start();
+
+    timers.advance(RESCAN_MS);
+
+    expect(scans[0]).toMatchObject({ reason: 'interval', scope: null });
   });
 });
