@@ -11,6 +11,7 @@ import {
   type PartialHashParts,
 } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
+import { canonicalisePathsOnce } from '../fs/path-contains.js';
 import { walkFiles } from '../fs/walk.js';
 import { reconcileMissing } from './reconcile.js';
 import { walkScope } from './scoped-walk.js';
@@ -314,9 +315,23 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   const library = createLibraryRepo(db).getById(libraryId);
   if (library === null) throw new Error(`Unknown library: ${libraryId}`);
 
+  // Everything below that asks "is this path under a root, or under a
+  // reserved directory" asks a matcher built from these, and building one
+  // canonicalises them. Read here, once and WITHOUT blocking, before any other
+  // filesystem work — not left to each matcher's synchronous default, because
+  // up to this line a scan is still running on the stack of whoever requested
+  // it. For a webhook that is the request handler on the daemon's only thread,
+  // and the scope check and the walk's first step used to `realpathSync` the
+  // library's directories there: on an NFS library during a copy, seconds each
+  // with the API frozen. The `await` is also what takes the rest of the scan
+  // off that stack. A full scan goes through it too, so there is one path.
+  const reservedDirs = reservedDirsForLibrary(library);
+  const canonicalise = await canonicalisePathsOnce([...library.roots, ...reservedDirs]);
+
   // Checked before anything is walked or written, and all-or-nothing: see
   // `validateScope`. `null` is a scan of the whole library.
-  const scope = input.scope === undefined ? null : validateScope({ library, paths: input.scope });
+  const scope =
+    input.scope === undefined ? null : validateScope({ library, paths: input.scope, canonicalise });
 
   const flow = library.flowId === null ? null : createFlowRepo(db).getById(library.flowId);
   // A library with no flow attached cannot compute a signature: skip
@@ -525,14 +540,16 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
       ? walkFiles({
           roots: library.roots,
           extensions: library.extensions,
-          exclude: reservedDirsForLibrary(library),
+          exclude: reservedDirs,
+          canonicalise,
           onWorkingFile: (path) => workingFiles.push(path),
         })
       : walkScope({
           scope,
           libraryRoots: library.roots,
           extensions: library.extensions,
-          exclude: reservedDirsForLibrary(library),
+          exclude: reservedDirs,
+          canonicalise,
         });
   for await (const entry of files) {
     summary.seen += 1;

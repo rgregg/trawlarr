@@ -61,9 +61,19 @@ export const validateScope = (input: {
    * scan that follows re-validates canonically, so it stays the authority.
    */
   lexical?: boolean;
+  /**
+   * How the library's roots and reserved directories are canonicalised, for a
+   * caller that read them ahead of time (`canonicalisePathsOnce`): the scan,
+   * which validates on the stack of whoever requested it and must not read the
+   * filesystem synchronously there either. Unlike `lexical` this loses
+   * nothing — an aliased root is still recognised. `lexical` wins if both are
+   * given. With neither, each root and reserved directory is read
+   * synchronously, once.
+   */
+  canonicalise?: (path: string) => string;
 }): string[] => {
   const { library } = input;
-  const canonicalise = input.lexical === true ? lexicalPath : undefined;
+  const canonicalise = input.lexical === true ? lexicalPath : input.canonicalise;
   const inRoots = createSubtreeMatcher({
     roots: library.roots,
     subtrees: library.roots,

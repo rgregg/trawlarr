@@ -54,6 +54,13 @@ export async function* walkFiles(input: {
    * (on a network mount that is the whole cost).
    */
   onWorkingFile?: (path: string) => void;
+  /**
+   * How the exclude matcher canonicalises `roots` and `exclude`; see
+   * `canonicalisePathsOnce`. Defaults to a synchronous read of each, once per
+   * walk — which a scan cannot afford, because the walk's first step runs on
+   * the stack of whoever requested the scan.
+   */
+  canonicalise?: (path: string) => string;
   /** Seam: a test drives a directory that fails mid-iteration. */
   openDir?: (path: string) => Promise<AsyncIterable<Dirent>>;
 }): AsyncGenerator<{ path: string; stat: Stats }> {
@@ -66,10 +73,13 @@ export async function* walkFiles(input: {
   // daemon's only thread. On a network library each one can queue behind a
   // replacement's writes, so a scan overlapping a copy froze the API once per
   // folder. Sound here because the walk never follows a directory symlink —
-  // see `createSubtreeMatcher`.
+  // see `createSubtreeMatcher`. Building it still canonicalises each root and
+  // excluded directory once, synchronously, unless the caller read those ahead
+  // of time and passes `canonicalise`.
   const isExcluded = createSubtreeMatcher({
     roots: input.pruneRoots ?? input.roots,
     subtrees: input.exclude ?? [],
+    ...(input.canonicalise === undefined ? {} : { canonicalise: input.canonicalise }),
   });
 
   const pending = [...input.roots];

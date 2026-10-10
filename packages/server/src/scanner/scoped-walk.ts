@@ -51,6 +51,13 @@ export async function* walkScope(input: {
   libraryRoots: readonly string[];
   extensions: readonly string[];
   exclude: readonly string[];
+  /**
+   * How the exclude matchers canonicalise `libraryRoots` and `exclude` — this
+   * walk's own and the one `walkFiles` builds per folder; see
+   * `canonicalisePathsOnce`. Defaults to a synchronous read of each, repeated
+   * for every folder in the scope.
+   */
+  canonicalise?: (path: string) => string;
   /** Seam, passed to `walkFiles`: a test counts the directories opened. */
   openDir?: (path: string) => Promise<AsyncIterable<Dirent>>;
 }): AsyncGenerator<{ path: string; stat: Stats }> {
@@ -62,6 +69,7 @@ export async function* walkScope(input: {
   const isExcluded = createSubtreeMatcher({
     roots: input.libraryRoots,
     subtrees: input.exclude,
+    ...(input.canonicalise === undefined ? {} : { canonicalise: input.canonicalise }),
   });
 
   // Each root as it is spelled and as it really is. A root that cannot be
@@ -98,6 +106,7 @@ export async function* walkScope(input: {
         pruneRoots: input.libraryRoots,
         extensions: input.extensions,
         exclude: input.exclude,
+        canonicalise: input.canonicalise,
         openDir: input.openDir,
       })) {
         if (yielded.has(entry.path)) continue;
