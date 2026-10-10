@@ -83,6 +83,29 @@ describe('walkScope', () => {
     expect(found).toEqual([]);
   });
 
+  it('never yields a file reached through a directory symlink inside the library', async () => {
+    const outside = join(base, 'outside');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'x.mkv'), 'x');
+    symlinkSync(outside, join(root, 'link'));
+    expect(await collect([join(root, 'link', 'x.mkv')])).toEqual([]);
+  });
+
+  it('never walks a folder reached through a directory symlink inside the library', async () => {
+    const outside = join(base, 'outside');
+    mkdirSync(join(outside, 'sub'), { recursive: true });
+    writeFileSync(join(outside, 'sub', 'y.mkv'), 'y');
+    symlinkSync(outside, join(root, 'link'));
+    expect(await collect([join(root, 'link', 'sub')])).toEqual([]);
+  });
+
+  it('yields nothing for a path outside every library root', async () => {
+    const outside = join(base, 'outside');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'x.mkv'), 'x');
+    expect(await collect([join(outside, 'x.mkv')])).toEqual([]);
+  });
+
   it('never yields a symlink named directly, as the full walk never does', async () => {
     const link = join(root, 'Film A', 'link.mkv');
     symlinkSync(join(root, 'Film B', 'b.mkv'), link);
