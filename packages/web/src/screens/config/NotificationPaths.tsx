@@ -55,6 +55,9 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
     }
   };
 
+  // Every control below is disabled while `saving`: the save's answer replaces
+  // the rows wholesale, so a row added, removed or typed into while it was
+  // outstanding would vanish the moment it arrived.
   const edit = (key: string, patch: Partial<NotificationPathRow>): void => {
     setRows((current) =>
       current === null
@@ -82,6 +85,7 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
                   <input
                     aria-label="Reported as"
                     value={row.theirs}
+                    disabled={saving}
                     onChange={(event) => {
                       edit(row.key, { theirs: event.target.value });
                     }}
@@ -91,6 +95,7 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
                   <input
                     aria-label="Path here"
                     value={row.ours}
+                    disabled={saving}
                     onChange={(event) => {
                       edit(row.key, { ours: event.target.value });
                     }}
@@ -99,6 +104,7 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
                 <td>
                   <button
                     type="button"
+                    disabled={saving}
                     onClick={() => {
                       setRows((current) =>
                         current === null ? current : current.filter((r) => r.key !== row.key),
@@ -116,7 +122,7 @@ export const NotificationPathsSection = (props: { client: ApiClient }): JSX.Elem
       <div className="row-actions">
         <button
           type="button"
-          disabled={!canEdit(rows)}
+          disabled={saving || !canEdit(rows)}
           onClick={() => {
             setRows((current) =>
               canEdit(current) ? [...current, { key: newRowKey(), theirs: '', ours: '' }] : current,
