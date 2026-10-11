@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 
 /**
@@ -23,6 +24,44 @@ export const canonicalPath = (path: string): string => {
   } catch {
     return resolve(path);
   }
+};
+
+/**
+ * {@link canonicalPath} for each of `paths`, read ONCE and without blocking,
+ * returned as a synchronous lookup: the `canonicalise` a
+ * {@link createSubtreeMatcher} is built with.
+ *
+ * A matcher built with the default `canonicalPath` reads the filesystem
+ * synchronously when it is BUILT — once per root and per subtree. That is
+ * cheap next to a read per path, and it was still a stall: a scan builds its
+ * matchers on the stack of whoever requested it, which for a webhook is the
+ * request handler on the daemon's only thread. Six `realpathSync` calls ran
+ * there for one notified folder, sixteen for five, and a synchronous stat of
+ * a directory on an NFS library during a copy has been measured at 3.9 s —
+ * the freeze removed from the watcher and the walk, arriving by another door.
+ *
+ * So a scan awaits this once, for its library's roots and reserved
+ * directories, and hands the result to every matcher it builds. The answers
+ * are `canonicalPath`'s own: the real path, or a plain `resolve` for a path
+ * that does not exist yet. A path that was not in `paths` is `resolve`d and
+ * nothing more — it is never read, because reading it is what this exists to
+ * avoid; a caller must list everything its matchers will ask about.
+ */
+export const canonicalisePathsOnce = async (
+  paths: readonly string[],
+): Promise<(path: string) => string> => {
+  const known = new Map<string, string>();
+  for (const path of paths) {
+    let canonical: string;
+    try {
+      canonical = await realpath(path);
+    } catch {
+      canonical = resolve(path);
+    }
+    known.set(path, canonical);
+    known.set(resolve(path), canonical);
+  }
+  return (path) => known.get(path) ?? known.get(resolve(path)) ?? resolve(path);
 };
 
 /**
@@ -73,7 +112,12 @@ export const pathContains = (parent: string, child: string): boolean => {
 export const createSubtreeMatcher = (input: {
   roots: readonly string[];
   subtrees: readonly string[];
-  /** Seam: a test counts the filesystem reads. */
+  /**
+   * How a root or subtree is canonicalised. Defaults to `canonicalPath`, a
+   * synchronous read per root and per subtree. A scan passes the lookup from
+   * {@link canonicalisePathsOnce} so that building the matcher reads nothing;
+   * a request handler passes a plain `resolve`.
+   */
   canonicalise?: (path: string) => string;
 }): ((path: string) => boolean) => {
   const canonicalise = input.canonicalise ?? canonicalPath;

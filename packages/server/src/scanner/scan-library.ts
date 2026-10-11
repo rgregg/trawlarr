@@ -11,8 +11,11 @@ import {
   type PartialHashParts,
 } from '@trawlarr/core';
 import type { ProbeData } from '@trawlarr/plugin-api';
+import { canonicalisePathsOnce } from '../fs/path-contains.js';
 import { walkFiles } from '../fs/walk.js';
 import { reconcileMissing } from './reconcile.js';
+import { walkScope } from './scoped-walk.js';
+import { validateScope } from './scope.js';
 import { reservedDirsForLibrary } from '../library/paths.js';
 import { sweepWorkingFiles } from '../library/working-file-sweep.js';
 import { partialHashFile, identityFromStat } from '../fs/partial-hash.js';
@@ -64,11 +67,25 @@ export interface ScanSummary {
   rootsUnavailable: number;
   /** Orphaned `.trawlarr-*` scratch files this scan removed (see `sweepWorkingFiles`). */
   workingFilesRemoved: number;
+  /**
+   * How many paths this scan was scoped to, or `null` for a scan of the whole
+   * library. A scoped scan's other counters describe only what it walked.
+   */
+  scopedPaths: number | null;
 }
 
 export interface ScanLibraryInput {
   db: Db;
   libraryId: string;
+  /**
+   * Absolute paths inside this library's roots, files or folders: scan only
+   * these. Absent means the whole library.
+   *
+   * Everything a scan does PER FILE is identical either way. What a scope
+   * changes is which files the loop is handed, which rows the missing pass
+   * may consider, and that the working-file sweep is left to full scans.
+   */
+  scope?: readonly string[];
   ffprobePath: string;
   nowMs: () => number;
   onProgress?: (seen: number) => void;
@@ -298,6 +315,24 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   const library = createLibraryRepo(db).getById(libraryId);
   if (library === null) throw new Error(`Unknown library: ${libraryId}`);
 
+  // Everything below that asks "is this path under a root, or under a
+  // reserved directory" asks a matcher built from these, and building one
+  // canonicalises them. Read here, once and WITHOUT blocking, before any other
+  // filesystem work — not left to each matcher's synchronous default, because
+  // up to this line a scan is still running on the stack of whoever requested
+  // it. For a webhook that is the request handler on the daemon's only thread,
+  // and the scope check and the walk's first step used to `realpathSync` the
+  // library's directories there: on an NFS library during a copy, seconds each
+  // with the API frozen. The `await` is also what takes the rest of the scan
+  // off that stack. A full scan goes through it too, so there is one path.
+  const reservedDirs = reservedDirsForLibrary(library);
+  const canonicalise = await canonicalisePathsOnce([...library.roots, ...reservedDirs]);
+
+  // Checked before anything is walked or written, and all-or-nothing: see
+  // `validateScope`. `null` is a scan of the whole library.
+  const scope =
+    input.scope === undefined ? null : validateScope({ library, paths: input.scope, canonicalise });
+
   const flow = library.flowId === null ? null : createFlowRepo(db).getById(library.flowId);
   // A library with no flow attached cannot compute a signature: skip
   // queueing entirely rather than invent or default one.
@@ -319,6 +354,7 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     restored: 0,
     rootsUnavailable: 0,
     workingFilesRemoved: 0,
+    scopedPaths: scope === null ? null : scope.length,
   };
 
   /**
@@ -499,12 +535,23 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   // ffprobe while holding sqlite's write lock would block every other writer
   // for the length of an external process.
   const workingFiles: string[] = [];
-  for await (const entry of walkFiles({
-    roots: library.roots,
-    extensions: library.extensions,
-    exclude: reservedDirsForLibrary(library),
-    onWorkingFile: (path) => workingFiles.push(path),
-  })) {
+  const files =
+    scope === null
+      ? walkFiles({
+          roots: library.roots,
+          extensions: library.extensions,
+          exclude: reservedDirs,
+          canonicalise,
+          onWorkingFile: (path) => workingFiles.push(path),
+        })
+      : walkScope({
+          scope,
+          libraryRoots: library.roots,
+          extensions: library.extensions,
+          exclude: reservedDirs,
+          canonicalise,
+        });
+  for await (const entry of files) {
     summary.seen += 1;
     onProgress?.(summary.seen);
 
@@ -670,6 +717,8 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
     seenFileIds,
     nowMs: nowMs(),
     allowEmptyRoots: input.allowEmptyRoots,
+    scope: scope ?? undefined,
+    canonicalise,
   });
   summary.missing = reconciled.missing;
   summary.rootsUnavailable = reconciled.rootsUnavailable;
@@ -677,8 +726,10 @@ export const scanLibrary = async (input: ScanLibraryInput): Promise<ScanSummary>
   // Only reached by a walk that ran to completion, and only for roots that
   // could be shown to be present: an unmounted share walks as empty and
   // contributes no candidates. A failure here costs one pass of tidying, never
-  // the scan that already succeeded.
-  if (reconciled.rootsUnavailable === 0) {
+  // the scan that already succeeded. Full scans only: a scoped scan collected no
+  // working files to judge, and the sweep is hourly tidying, not something a
+  // single imported file needs done.
+  if (scope === null && reconciled.rootsUnavailable === 0) {
     try {
       const swept = await sweepWorkingFiles({
         db,

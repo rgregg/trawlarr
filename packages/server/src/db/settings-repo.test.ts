@@ -27,6 +27,7 @@ describe('settings repo', () => {
       settleMs: 30_000,
       scanOnStart: true,
       probeConcurrency: 4,
+      notifyPathMap: [],
     });
     expect(repo.getHardware()).toEqual({ available: ['cpu'], caps: {} });
   });

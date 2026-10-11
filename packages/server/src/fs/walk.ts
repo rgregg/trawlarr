@@ -41,11 +41,26 @@ export async function* walkFiles(input: {
   extensions: readonly string[];
   exclude?: readonly string[];
   /**
+   * The roots `exclude` is judged against, when the walk starts BELOW them.
+   * A scoped scan walks one folder of a library; its reserved directories are
+   * still configured relative to the library's roots, and a root reached
+   * through a symlink alias is only recognised from the root's own spelling.
+   * Defaults to `roots`.
+   */
+  pruneRoots?: readonly string[];
+  /**
    * Told about each scratch file the walk skips, so a caller that wants to
    * clean up after dead workers does not have to walk the library a second time
    * (on a network mount that is the whole cost).
    */
   onWorkingFile?: (path: string) => void;
+  /**
+   * How the exclude matcher canonicalises `roots` and `exclude`; see
+   * `canonicalisePathsOnce`. Defaults to a synchronous read of each, once per
+   * walk — which a scan cannot afford, because the walk's first step runs on
+   * the stack of whoever requested the scan.
+   */
+  canonicalise?: (path: string) => string;
   /** Seam: a test drives a directory that fails mid-iteration. */
   openDir?: (path: string) => Promise<AsyncIterable<Dirent>>;
 }): AsyncGenerator<{ path: string; stat: Stats }> {
@@ -58,10 +73,13 @@ export async function* walkFiles(input: {
   // daemon's only thread. On a network library each one can queue behind a
   // replacement's writes, so a scan overlapping a copy froze the API once per
   // folder. Sound here because the walk never follows a directory symlink —
-  // see `createSubtreeMatcher`.
+  // see `createSubtreeMatcher`. Building it still canonicalises each root and
+  // excluded directory once, synchronously, unless the caller read those ahead
+  // of time and passes `canonicalise`.
   const isExcluded = createSubtreeMatcher({
-    roots: input.roots,
+    roots: input.pruneRoots ?? input.roots,
     subtrees: input.exclude ?? [],
+    ...(input.canonicalise === undefined ? {} : { canonicalise: input.canonicalise }),
   });
 
   const pending = [...input.roots];

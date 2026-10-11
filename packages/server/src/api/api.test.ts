@@ -18,7 +18,11 @@ import { flowDefinitionHash, type FlowDefinition } from '@trawlarr/core';
 import { openDatabase, type Db } from '../db/connection.js';
 import { migrate } from '../db/migrate.js';
 import { createEventBus, type TrawlarrEvent } from '../daemon/events.js';
-import type { ScanCoordinator, ScanReason } from '../daemon/scan-coordinator.js';
+import {
+  SCOPED_PATH_LIMIT,
+  type ScanCoordinator,
+  type ScanReason,
+} from '../daemon/scan-coordinator.js';
 import type { Supervisor, SupervisorStatus } from '../daemon/supervisor.js';
 import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
@@ -149,18 +153,18 @@ const fakeSupervisor = (running: string[] = []): FakeSupervisor => {
 };
 
 interface FakeScans extends ScanCoordinator {
-  requests: { libraryId: string; reason: ScanReason }[];
+  requests: { libraryId: string; reason: ScanReason; paths?: readonly string[] }[];
   /** How many times the API asked the coordinator to re-derive its watches. */
   syncs: number;
 }
 
 const fakeScans = (): FakeScans => {
-  const requests: { libraryId: string; reason: ScanReason }[] = [];
+  const requests: { libraryId: string; reason: ScanReason; paths?: readonly string[] }[] = [];
   const fake = {
     requests,
     syncs: 0,
-    request: (libraryId: string, reason: ScanReason) => {
-      requests.push({ libraryId, reason });
+    request: (libraryId: string, reason: ScanReason, paths?: readonly string[]) => {
+      requests.push(paths === undefined ? { libraryId, reason } : { libraryId, reason, paths });
     },
     syncWatchers: () => {
       fake.syncs += 1;
@@ -583,6 +587,253 @@ describe('libraries', () => {
     expect(response.status).toBe(204);
     expect(createLibraryRepo(db).getById(library.id)).toBeNull();
     expect(createMediaFileRepo(db).getById(fileId)).toBeNull();
+  });
+});
+
+describe('scan endpoint paths', () => {
+  let id: string;
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'trawlarr-api-scope-'));
+    id = createLibraryRepo(db).create({
+      name: `lib-${randomUUID().slice(0, 8)}`,
+      roots: [root],
+      flowId: null,
+      nowMs: NOW,
+    }).id;
+  });
+
+  it('queues a full scan when no paths are sent, exactly as before', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`);
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('full');
+    expect(scans.requests).toEqual([{ libraryId: id, reason: 'manual' }]);
+  });
+
+  it('queues a scoped scan for the paths sent', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [join(root, 'Film'), join(root, 'Other Film', 'film.mkv')],
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('scoped');
+    expect(scans.requests).toEqual([
+      {
+        libraryId: id,
+        reason: 'notify',
+        paths: [join(root, 'Film'), join(root, 'Other Film', 'film.mkv')],
+      },
+    ]);
+  });
+
+  it('queues only the folder when a path inside it is sent as well', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [join(root, 'Film', 'film.mkv'), join(root, 'Film')],
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.paths).toEqual([join(root, 'Film')]);
+    expect(scans.requests).toEqual([
+      { libraryId: id, reason: 'notify', paths: [join(root, 'Film')] },
+    ]);
+  });
+
+  // Past the limit the coordinator runs a full scan instead, so answering
+  // `mode: "scoped"` would describe a scan that is not the one queued.
+  it('refuses more paths than one scoped scan takes, and queues nothing', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: Array.from({ length: SCOPED_PATH_LIMIT + 1 }, (_, index) =>
+        join(root, `Film ${String(index)}`),
+      ),
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-scope');
+    expect(result.body.error.message).toContain('Omit "paths"');
+    expect(scans.requests).toEqual([]);
+  });
+
+  // The count is checked before any path is: an oversized list is refused for
+  // its size alone and never reaches the per-path work. Its first entry here
+  // would be refused as outside the library if it were looked at.
+  it('refuses an oversized list without validating any path in it', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [
+        '/somewhere/else.mkv',
+        ...Array.from({ length: SCOPED_PATH_LIMIT }, () => join(root, 'Film')),
+      ],
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-scope');
+    expect(result.body.error.message).toContain('Omit "paths"');
+    expect(result.body.error.message).not.toContain('/somewhere/else.mkv');
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('accepts exactly as many paths as one scoped scan takes', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: Array.from({ length: SCOPED_PATH_LIMIT }, (_, index) =>
+        join(root, `Film ${String(index)}`),
+      ),
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('scoped');
+  });
+
+  // A body with no `paths` field means a full scan, and an array or a string
+  // has no fields at all: read that way, a caller that posted its list bare
+  // would start the whole-library walk it was written to avoid.
+  it.each([
+    ['an array', ['/library/Film']],
+    ['a string', '/library/Film'],
+    ['a number', 7],
+    ['null', null],
+  ])('refuses a body that is %s rather than an object, and queues nothing', async (_, body) => {
+    const result = await api('POST', `/libraries/${id}/scan`, body);
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-body');
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a path outside the library, naming it, and queues nothing', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, {
+      paths: [join(root, 'Film'), '/somewhere/else.mkv'],
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-scope');
+    expect(result.body.error.message).toContain('/somewhere/else.mkv');
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses "paths" that is not a list of strings', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, { paths: 'not-a-list' });
+
+    expect(result.status).toBe(400);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('treats an empty list of paths as nothing to scan, not as a full scan', async () => {
+    const result = await api('POST', `/libraries/${id}/scan`, { paths: [] });
+
+    expect(result.status).toBe(400);
+    expect(scans.requests).toEqual([]);
+  });
+});
+
+describe('POST /notify/arr', () => {
+  let id: string;
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'trawlarr-api-notify-'));
+    id = createLibraryRepo(db).create({
+      name: `lib-${randomUUID().slice(0, 8)}`,
+      roots: [root],
+      flowId: null,
+      nowMs: NOW,
+    }).id;
+  });
+
+  it('scans the mapped folder in the library that contains it', async () => {
+    settings.setScan({ notifyPathMap: [{ serverPath: root, nodePath: '/data/movies' }] });
+
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      movie: { folderPath: '/data/movies/Film (2001)' },
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body).toMatchObject({ libraryId: id, path: join(root, 'Film (2001)') });
+    expect(scans.requests).toEqual([
+      { libraryId: id, reason: 'notify', paths: [join(root, 'Film (2001)')] },
+    ]);
+  });
+
+  it('takes the path as received when no mapping is configured', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      series: { path: join(root, 'Show') },
+    });
+
+    expect(result.status).toBe(202);
+    expect(scans.requests).toEqual([
+      { libraryId: id, reason: 'notify', paths: [join(root, 'Show')] },
+    ]);
+  });
+
+  it('answers the Test event with success and scans nothing', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Test',
+      series: { path: 'C:\\testpath' },
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body.ignored).toBe(true);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a folder that maps to no library, saying what it tried', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      movie: { folderPath: '/data/movies/Film' },
+    });
+
+    expect(result.status).toBe(422);
+    expect(result.body.error.code).toBe('no-library-for-path');
+    expect(result.body.error.message).toContain('/data/movies/Film');
+    expect(result.body.error.message).toContain(root);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a body that is not an object', async () => {
+    const result = await api('POST', '/notify/arr', ['not', 'an', 'object']);
+
+    expect(result.status).toBe(400);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('refuses a folder inside a reserved directory', async () => {
+    const result = await api('POST', '/notify/arr', {
+      eventType: 'Download',
+      movie: { folderPath: join(root, '.trawlarr', 'trash') },
+    });
+
+    expect(result.status).toBe(422);
+    expect(scans.requests).toEqual([]);
+  });
+
+  it('needs the API key, like every other endpoint', async () => {
+    const result = await api('POST', '/notify/arr', { eventType: 'Test' }, { apiKey: null });
+
+    expect(result.status).toBe(401);
+  });
+});
+
+describe('scan.notifyPathMap', () => {
+  it('is empty by default and round-trips through the settings endpoint', async () => {
+    expect((await api('GET', '/system/settings')).body.scan.notifyPathMap).toEqual([]);
+
+    const saved = await api('PATCH', '/system/settings', {
+      scan: { notifyPathMap: [{ serverPath: '/library', nodePath: '/data' }] },
+    });
+
+    expect(saved.status).toBe(200);
+    expect(saved.body.scan.notifyPathMap).toEqual([{ serverPath: '/library', nodePath: '/data' }]);
+  });
+
+  it('refuses a mapping that is not absolute, as a named setting error', async () => {
+    const result = await api('PATCH', '/system/settings', {
+      scan: { notifyPathMap: [{ serverPath: 'library', nodePath: '/data' }] },
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error.code).toBe('invalid-setting');
   });
 });
 

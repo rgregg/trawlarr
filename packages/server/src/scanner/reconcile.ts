@@ -1,13 +1,22 @@
-import { lstat, opendir } from 'node:fs/promises';
+import { lstat, opendir, realpath } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
 import type { LibraryRecord } from '../db/library-repo.js';
 import type { MediaFileRepo, MediaFileRow } from '../db/media-file-repo.js';
-import { pathContains } from '../fs/path-contains.js';
+import { canonicalisePathsOnce } from '../fs/path-contains.js';
 
 export interface ReconcileInput {
   library: LibraryRecord;
   mediaFileRepo: MediaFileRepo;
   /** Row ids this scan actually walked; those files are present by definition. */
   seenFileIds: ReadonlySet<string>;
+  /**
+   * Restrict the pass to rows at or under these paths. A scoped scan walked
+   * a handful of files, so "this scan did not see the row" says nothing
+   * about any row outside what it walked; without this a scoped scan would
+   * stat every row of the library, and a mistake in it could mark them.
+   * Absent for a full scan, whose completed walk speaks for the whole library.
+   */
+  scope?: readonly string[];
   nowMs: number;
   /**
    * Treat a root that exists but contains nothing at all as available.
@@ -20,6 +29,12 @@ export interface ReconcileInput {
    * explicitly with this flag.
    */
   allowEmptyRoots?: boolean;
+  /**
+   * The library's roots, already canonicalised (`canonicalisePathsOnce`): the
+   * scan read them at its start and passes the lookup on. Absent, the pass
+   * reads the available roots itself, without blocking.
+   */
+  canonicalise?: (path: string) => string;
   /** Seam for tests; defaults to `node:fs/promises` `lstat`. */
   statPath?: (path: string) => Promise<unknown>;
 }
@@ -72,6 +87,23 @@ const rootIsAvailable = async (root: string, allowEmptyRoots: boolean): Promise<
 };
 
 /**
+ * `canonicalPath(path)` without the synchronous read: the real path, or a
+ * plain `resolve` when there is none to read — which, for a row whose file is
+ * gone, is the usual case and exactly what the pass is looking for.
+ */
+const canonicalRowPath = async (path: string): Promise<string> => {
+  try {
+    return await realpath(path);
+  } catch {
+    return resolve(path);
+  }
+};
+
+/** `pathContains`'s comparison, of two paths that are ALREADY canonical. */
+const isAtOrUnder = (parent: string, child: string): boolean =>
+  child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+
+/**
  * Reconcile the library's rows against the filesystem: find the ones whose
  * file is gone and mark them missing.
  *
@@ -117,15 +149,38 @@ export const reconcileMissing = async (input: ReconcileInput): Promise<Reconcile
   }
   if (availableRoots.length === 0) return summary;
 
-  const candidates: MediaFileRow[] = input.mediaFileRepo
-    .listByLibrary({ libraryId: input.library.id })
-    .filter(
-      (row) =>
-        row.missing_since_ms === null &&
-        row.state !== 'running' &&
-        !input.seenFileIds.has(row.id) &&
-        availableRoots.some((root) => pathContains(root, row.path)),
-    );
+  const considered: MediaFileRow[] =
+    input.scope === undefined
+      ? input.mediaFileRepo.listByLibrary({ libraryId: input.library.id })
+      : input.mediaFileRepo.listUnderPaths({ libraryId: input.library.id, paths: input.scope });
+
+  // "Is this row under an available root" is `pathContains(root, row.path)`,
+  // spelled out so that nothing in it blocks. `pathContains` canonicalises both
+  // of its arguments with `realpathSync`, and this asked it of every unseen row
+  // in one synchronous `filter`: two synchronous reads per row on the daemon's
+  // only thread, for every file of a deleted season — on a network library,
+  // seconds each behind a copy, with the API frozen throughout.
+  //
+  // THE ANSWER IS DELIBERATELY THE SAME ONE, row for row, including where it
+  // is surprising. A root is canonicalised to where it really is; a row whose
+  // file is gone has no real path and stays as it is spelled; so under a root
+  // spelled through a symlink alias a deleted file compares as outside its
+  // root and is never considered. `createSubtreeMatcher` would consider it,
+  // which is why it is not used here: that would be a change to what gets
+  // marked missing, and it is not this code's to make in passing.
+  const canonicalise = input.canonicalise ?? (await canonicalisePathsOnce(availableRoots));
+  const canonicalRoots = availableRoots.map((root) => canonicalise(root));
+
+  // The cheap conditions first, so a path is read only for a row that could
+  // still be a candidate; a scan that saw every row reads none.
+  const candidates: MediaFileRow[] = [];
+  for (const row of considered) {
+    if (row.missing_since_ms !== null || row.state === 'running' || input.seenFileIds.has(row.id)) {
+      continue;
+    }
+    const canonicalRow = await canonicalRowPath(row.path);
+    if (canonicalRoots.some((root) => isAtOrUnder(root, canonicalRow))) candidates.push(row);
+  }
 
   for (const row of candidates) {
     try {
