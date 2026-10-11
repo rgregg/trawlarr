@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createSubtreeMatcher } from './path-contains.js';
+import { canonicalisePathsOnce, canonicalPath, createSubtreeMatcher } from './path-contains.js';
 
 let base: string;
 
@@ -85,5 +85,53 @@ describe('createSubtreeMatcher', () => {
     });
 
     expect(matches(join(root, '.trawlarr', 'staging', 'part.mkv'))).toBe(true);
+  });
+});
+
+describe('canonicalisePathsOnce', () => {
+  it('answers as canonicalPath does for every path it was given', async () => {
+    const real = join(base, 'mnt', 'media');
+    mkdirSync(real, { recursive: true });
+    const alias = join(base, 'media');
+    symlinkSync(real, alias);
+    const absent = join(alias, '.trawlarr');
+
+    const canonicalise = await canonicalisePathsOnce([alias, real, absent]);
+
+    expect(canonicalise(alias)).toBe(realpathSync(real));
+    for (const path of [alias, real, absent]) {
+      expect(canonicalise(path)).toBe(canonicalPath(path));
+    }
+  });
+
+  // Reading a path it was not told about is the synchronous read it exists to
+  // remove, so such a path is only normalised.
+  it('only resolves a path it was not given', async () => {
+    const real = join(base, 'mnt');
+    mkdirSync(real);
+    const alias = join(base, 'media');
+    symlinkSync(real, alias);
+
+    const canonicalise = await canonicalisePathsOnce([real]);
+
+    expect(canonicalise(alias)).toBe(alias);
+    expect(canonicalise(join(base, 'a', '..', 'b'))).toBe(join(base, 'b'));
+  });
+
+  it('builds a matcher that sees through an aliased root, as the default does', async () => {
+    const real = join(base, 'mnt', 'media');
+    const staging = join(real, 'staging');
+    mkdirSync(staging, { recursive: true });
+    const alias = join(base, 'media');
+    symlinkSync(real, alias);
+
+    const matches = createSubtreeMatcher({
+      roots: [alias],
+      subtrees: [staging],
+      canonicalise: await canonicalisePathsOnce([alias, staging]),
+    });
+
+    expect(matches(join(alias, 'staging', 'part.mkv'))).toBe(true);
+    expect(matches(join(alias, 'movies', 'real.mkv'))).toBe(false);
   });
 });

@@ -146,6 +146,13 @@ number the whole project exists to report. State (including which files are
 queued, held, or done) lives in `<data-dir>/trawlarr.db`, an ordinary sqlite
 file (`--data-dir` defaults to `./trawlarr-data`).
 
+The daemon does not always walk the whole library to find a change. A
+filesystem-watch event, or a notification from Sonarr, Radarr or Lidarr,
+scans only the files or folders it names. Startup, the periodic rescan and
+"Scan" in the UI scan the whole library, and the periodic rescan is what finds
+anything nobody reported. See [`docs/deployment.md`](docs/deployment.md) for
+pointing the \*arrs at trawlarr.
+
 Two states are terminal by design: `failed` (the retry budget is spent) and
 `not_converging` (the flow keeps changing the file without settling). Neither
 the scanner nor the queue will touch them again, so they need a human:

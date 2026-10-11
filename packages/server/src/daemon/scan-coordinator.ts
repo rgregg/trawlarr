@@ -7,7 +7,22 @@ import type { EventBus } from './events.js';
 import { createChokidarWatchPort, type WatchHandle, type WatchPort } from './watcher.js';
 
 /** Why a scan was asked for. Carried only for diagnostics and tests. */
-export type ScanReason = 'manual' | 'watch' | 'interval' | 'startup';
+export type ScanReason = 'manual' | 'watch' | 'interval' | 'startup' | 'notify';
+
+/**
+ * How many distinct pending paths one library may collect before they are
+ * replaced by a single full scan. Past this a list of paths is no cheaper
+ * than the walk it was avoiding — a season pack, a library moved wholesale —
+ * and with no bound at all it is memory that grows with every event until
+ * the scan in flight ends.
+ */
+export const SCOPED_PATH_LIMIT = 200;
+
+/** One scan to run: of the whole library (`paths` null), or of these paths. */
+interface PlannedScan {
+  reason: ScanReason;
+  paths: Set<string> | null;
+}
 
 /**
  * The scanner, as the coordinator calls it.
@@ -28,8 +43,12 @@ export interface ScanCoordinatorErrorContext {
 }
 
 export interface ScanCoordinator {
-  /** Scan now if this library is not already scanning; otherwise mark it dirty and scan when the current one ends. */
-  request(libraryId: string, reason: ScanReason): void;
+  /**
+   * Scan now if this library is not already scanning; otherwise remember the
+   * request and scan when the current one ends. With `paths`, only those
+   * files and folders are scanned; without, the whole library.
+   */
+  request(libraryId: string, reason: ScanReason, paths?: readonly string[]): void;
   /** Resolves when no scan is running and no library is dirty. Tests only. */
   idle(): Promise<void>;
   /**
@@ -85,11 +104,39 @@ interface WatchEntry {
 interface LibraryScanState {
   /** A scan (and its at-most-one catch-up) is in flight for this library. */
   running: boolean;
-  /** A trigger that arrived while a scan was running: one catch-up, whatever its count. */
-  pending: ScanReason | null;
+  /**
+   * What arrived while a scan was running — explicit triggers, and watch
+   * bursts that finished settling: one catch-up, whatever the count.
+   */
+  pending: PlannedScan | null;
   /** Armed settle timer, i.e. a burst of watch events still settling. */
   settle: unknown | null;
+  /** What that burst has named so far. */
+  settling: PlannedScan | null;
 }
+
+/**
+ * Fold one more request into what is already planned.
+ *
+ * FULL ABSORBS SCOPED, in either order: a scan of the whole library covers
+ * every path anyone named, so once one is planned the paths are dropped
+ * rather than scanned twice. The reason kept is the latest, as it always was.
+ */
+const planWith = (
+  current: PlannedScan | null,
+  reason: ScanReason,
+  paths: readonly string[] | undefined,
+): PlannedScan => {
+  if (paths === undefined || (current !== null && current.paths === null)) {
+    return { reason, paths: null };
+  }
+  const merged = new Set(current?.paths ?? []);
+  for (const path of paths) merged.add(path);
+  return { reason, paths: merged.size > SCOPED_PATH_LIMIT ? null : merged };
+};
+
+const scopeOf = (plan: PlannedScan): string[] | undefined =>
+  plan.paths === null ? undefined : [...plan.paths];
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -106,16 +153,21 @@ const messageOf = (error: unknown): string =>
  * signature recomputation and reconciliation are one algorithm, and a
  * second copy of it that only ever runs on the newest, least-tested path is
  * the copy that will be wrong. A watch event is a HINT that something moved;
- * the walk is what decides what that means.
+ * the walk is what decides what that means. Since scans became scoped, the
+ * hint may narrow WHERE the walk looks (the paths ride along on `request`),
+ * but every per-file rule is still the scanner's, applied to those paths
+ * exactly as it would be during a full walk.
  *
  * Four rules, each of which is a bug if dropped:
  *
  *  1. ONE SCAN PER LIBRARY AT A TIME. Copying a season folder produces
  *     hundreds of events; without the lock that is hundreds of concurrent
  *     walks of the same tree, each probing the same files and racing the
- *     others' upserts. A trigger arriving during a scan sets a flag and
- *     produces exactly one catch-up scan afterwards — one, not one per
- *     event, because the flag is a boolean and not a queue.
+ *     others' upserts. A trigger arriving during a scan is folded into a
+ *     single pending plan and produces exactly one catch-up scan afterwards
+ *     — one, not one per event, because the plan is merged and not queued.
+ *     Paths accumulate in that plan (a full request absorbs them all, and
+ *     so does exceeding `SCOPED_PATH_LIMIT`).
  *
  *  2. WATCH EVENTS SETTLE. A watch trigger arms a timer for
  *     `scan.settleMs` and every further watch event for that library
@@ -168,7 +220,12 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
   const stateFor = (libraryId: string): LibraryScanState => {
     const existing = states.get(libraryId);
     if (existing !== undefined) return existing;
-    const created: LibraryScanState = { running: false, pending: null, settle: null };
+    const created: LibraryScanState = {
+      running: false,
+      pending: null,
+      settle: null,
+      settling: null,
+    };
     states.set(libraryId, created);
     return created;
   };
@@ -183,13 +240,14 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
     for (const waiter of waiters) waiter();
   };
 
-  const executeScan = async (libraryId: string, reason: ScanReason): Promise<void> => {
+  const executeScan = async (libraryId: string, plan: PlannedScan): Promise<void> => {
     let lastProgressMs: number | null = null;
 
     const summary = await scanFn({
       db,
       libraryId,
-      reason,
+      reason: plan.reason,
+      scope: scopeOf(plan),
       ffprobePath: settings.getBinaries().ffprobe,
       // Read per scan, not once at construction: an operator who raises the
       // dial while a library is still being walked wants the NEXT scan to
@@ -222,26 +280,42 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
    *
    * The failure handling is the whole point of the loop's `try`. A scan
    * that throws must (a) be REPORTED — a silent catch here is a library
-   * that stops converging with nothing anywhere saying so — and (b) leave
+   * that stops converging with nothing anywhere saying so — (b) leave
    * `running` false, so the next trigger is not permanently swallowed by a
-   * lock nobody will ever release. The `finally` is what guarantees (b)
-   * even for a failure mode this code has not thought of.
+   * lock nobody will ever release, and (c) not take the paths it was scoped
+   * to down with it. The `finally` is what guarantees (b) even for a failure
+   * mode this code has not thought of.
    */
-  const runScan = (libraryId: string, reason: ScanReason): void => {
+  const runScan = (libraryId: string, plan: PlannedScan): void => {
     const state = stateFor(libraryId);
     state.running = true;
 
     const promise = (async () => {
       try {
-        let current: ScanReason | null = reason;
+        let current: PlannedScan | null = plan;
         while (current !== null) {
           try {
             await executeScan(libraryId, current);
           } catch (error) {
             onError(error, { libraryId, phase: 'scan' });
+            // A scoped scan that threw examined none of its paths, and they
+            // existed nowhere but in the plan that just failed: dropped here,
+            // the file a notification named would wait for the next interval
+            // scan, or for ever with the interval off. So it is owed ONE full
+            // scan, folded into whatever else is pending. A failed FULL scan is
+            // deliberately not retried this way — its retry would be another
+            // full scan, which would loop for as long as whatever broke it
+            // stays broken; the interval is its retry.
+            if (current.paths !== null && !stopped) {
+              state.pending = planWith(
+                state.pending,
+                state.pending?.reason ?? current.reason,
+                undefined,
+              );
+            }
           }
           // Read-and-clear: however many triggers landed during the scan,
-          // they produce exactly one more pass.
+          // they produce exactly one more pass (their paths merged).
           current = stopped ? null : state.pending;
           state.pending = null;
         }
@@ -284,49 +358,68 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
    * changed size/mtime, so the next scan corrects it. The design never
    * depends on a probe being right about a file that was moving.
    */
-  const armSettle = (libraryId: string): void => {
+  const armSettle = (libraryId: string, paths: readonly string[] | undefined): void => {
     const state = stateFor(libraryId);
+    // Every event of the burst adds its path; the timer reset below is what
+    // makes the burst one scan, and this is what makes that scan about the
+    // right files.
+    state.settling = planWith(state.settling, 'watch', paths);
     if (state.settle !== null) clearTimer(state.settle);
     state.settle = setTimer(() => {
       state.settle = null;
+      const burst = state.settling ?? { reason: 'watch', paths: null };
+      state.settling = null;
       if (stopped) return;
+      // The tree has been quiet for the settle period, but a scan of this
+      // library is still running and a second may not start beside it: the
+      // burst becomes that scan's catch-up.
       if (state.running) {
-        state.pending = 'watch';
+        state.pending = planWith(state.pending, 'watch', scopeOf(burst));
         return;
       }
-      runScan(libraryId, 'watch');
+      runScan(libraryId, burst);
     }, settings.getScan().settleMs);
   };
 
-  const request = (libraryId: string, reason: ScanReason): void => {
+  const request = (libraryId: string, reason: ScanReason, paths?: readonly string[]): void => {
     if (stopped) return;
     const state = stateFor(libraryId);
 
-    // A trigger during a scan can never start a second one. It marks the
-    // library dirty instead, and the running scan picks it up when it ends
-    // — including a watch trigger, which needs no separate settle timer
-    // here: the scan already in flight IS a delay at least as long as one,
-    // and the catch-up starts only once it finishes.
-    if (state.running) {
-      state.pending = reason;
-      return;
-    }
-
+    // A watch event ALWAYS settles, whether or not a scan is running. It used
+    // to skip the timer during a scan and ride the catch-up, on the premise
+    // that the scan in flight was a delay at least as long as a settle period.
+    // That was true of a whole-library walk. A scoped scan lasts milliseconds,
+    // so a `change` event for a file still being copied was scanned and probed
+    // the moment any other scan of its library ended. The timer cannot start a
+    // second scan either: if one is running when it fires, `armSettle` folds
+    // the burst into that scan's catch-up.
     if (reason === 'watch') {
-      armSettle(libraryId);
+      armSettle(libraryId, paths);
       return;
     }
 
-    // An explicit trigger — a human, startup, the interval — is not
-    // debounced: it is not evidence that anything is being written, and
-    // making an operator wait 30 seconds for "scan now" would be a bug of
-    // its own. It does supersede a settling burst, since the scan it is
-    // about to run covers everything that burst would have.
-    if (state.settle !== null) {
+    // Any other trigger during a scan can never start a second one. It is
+    // folded into the one catch-up instead, and the running scan picks that up
+    // when it ends.
+    if (state.running) {
+      state.pending = planWith(state.pending, reason, paths);
+      return;
+    }
+
+    // An explicit trigger — a human, startup, the interval, a notification —
+    // is not debounced: it is not evidence that anything is being written
+    // (an *arr sends its webhook after the import is finished), and making an
+    // operator wait 30 seconds for "scan now" would be a bug of its own.
+    //
+    // A FULL one supersedes a settling burst, since the scan it is about to
+    // run covers everything that burst would have. A SCOPED one does not: it
+    // covers only its own paths, so the burst keeps settling and runs after.
+    if (paths === undefined && state.settle !== null) {
       clearTimer(state.settle);
       state.settle = null;
+      state.settling = null;
     }
-    runScan(libraryId, reason);
+    runScan(libraryId, planWith(null, reason, paths));
   };
 
   /**
@@ -429,8 +522,10 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
             // a different set than the walk would either miss real media
             // or fire on trawlarr's own staging and trash writes.
             ignored: reservedDirsForLibrary(library),
-            onChange: () => {
-              request(library.id, 'watch');
+            // The path is a hint of WHERE something changed, never a record
+            // of what: it narrows the scan, and the scan establishes facts.
+            onChange: (path) => {
+              request(library.id, 'watch', [path]);
             },
             onError: (error) => {
               onError(error, { libraryId: library.id, phase: 'watch' });
@@ -477,6 +572,7 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
       for (const state of states.values()) {
         if (state.settle !== null) clearTimer(state.settle);
         state.settle = null;
+        state.settling = null;
         // Catch-ups are abandoned, scans in flight are not: a walk killed
         // halfway leaves rows upserted but unreconciled, and the next scan
         // has to redo it.

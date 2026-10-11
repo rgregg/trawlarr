@@ -2,9 +2,12 @@ import { randomBytes } from 'node:crypto';
 import {
   DEFAULT_SCHEDULE,
   HARDWARE_TYPES,
+  PathMapError,
   ScheduleConfigError,
+  validatePathMap,
   validateSchedule,
   type HardwareType,
+  type PathMapping,
   type ScheduleConfig,
 } from '@trawlarr/core';
 import { DEFAULT_PROBE_CONCURRENCY } from '../scanner/scan-library.js';
@@ -36,6 +39,14 @@ export interface ScanSettings {
    * rather than the CPU count.
    */
   probeConcurrency: number;
+  /**
+   * How a path reported by another application translates to a path here,
+   * for notifications (`POST /notify/arr`). In each pair `nodePath` is the
+   * prefix as the sender reports it and `serverPath` the prefix as trawlarr
+   * sees it: the sender stands where a remote node does. Empty means paths
+   * are taken as received.
+   */
+  notifyPathMap: PathMapping[];
 }
 
 export interface HardwareSettings {
@@ -144,6 +155,7 @@ const DEFAULT_SCAN: ScanSettings = {
   settleMs: 30_000,
   scanOnStart: true,
   probeConcurrency: DEFAULT_PROBE_CONCURRENCY,
+  notifyPathMap: [],
 };
 const DEFAULT_HARDWARE: HardwareSettings = { available: ['cpu'], caps: {} };
 const DEFAULT_AUTH: Omit<AuthSettings, 'sessionSecret'> = {
@@ -225,6 +237,7 @@ const validateScan = (value: {
   settleMs: unknown;
   scanOnStart: unknown;
   probeConcurrency: unknown;
+  notifyPathMap: unknown;
 }): ScanSettings => ({
   watchEnabled: requireBoolean(value.watchEnabled, 'scan.watchEnabled'),
   rescanIntervalMs: requireWholeNumber(
@@ -240,6 +253,18 @@ const validateScan = (value: {
   // and no more throughput, and an operator who types 10000 wants a
   // named error rather than ten thousand processes.
   probeConcurrency: requireWholeNumber(value.probeConcurrency, 'scan.probeConcurrency', 1, 64),
+  notifyPathMap: ((): PathMapping[] => {
+    try {
+      return validatePathMap(value.notifyPathMap);
+    } catch (error) {
+      // The API turns a SettingValidationError into a 400 naming the field;
+      // anything else would surface as a 500 for what is a typing mistake.
+      if (error instanceof PathMapError) {
+        throw new SettingValidationError(`scan.notifyPathMap: ${error.message}`);
+      }
+      throw error;
+    }
+  })(),
 });
 
 const validateAuth = (value: {
@@ -408,6 +433,7 @@ export const createSettingsRepo = (input: {
       scanOnStart: readField(SETTING_KEYS.scan, 'scanOnStart') ?? DEFAULT_SCAN.scanOnStart,
       probeConcurrency:
         readField(SETTING_KEYS.scan, 'probeConcurrency') ?? DEFAULT_SCAN.probeConcurrency,
+      notifyPathMap: readField(SETTING_KEYS.scan, 'notifyPathMap') ?? DEFAULT_SCAN.notifyPathMap,
     });
 
   const setScan = (patch: Partial<ScanSettings>): void => {
@@ -417,6 +443,7 @@ export const createSettingsRepo = (input: {
     writeField(SETTING_KEYS.scan, 'settleMs', next.settleMs);
     writeField(SETTING_KEYS.scan, 'scanOnStart', next.scanOnStart);
     writeField(SETTING_KEYS.scan, 'probeConcurrency', next.probeConcurrency);
+    writeField(SETTING_KEYS.scan, 'notifyPathMap', next.notifyPathMap);
   };
 
   const getHardware = (): HardwareSettings =>

@@ -26,6 +26,7 @@ import { buildLabel } from './build-label.js';
 import { Libraries } from './Libraries.js';
 import { Flows } from '../flows/Flows.js';
 import { describeFailure } from './library-form-model.js';
+import { NotificationPathsSection } from './NotificationPaths.js';
 
 const TABS: Array<{ tab: ConfigTab; label: string }> = [
   { tab: 'workers', label: 'Workers' },
@@ -1420,6 +1421,7 @@ const SystemTab = (props: { client: ApiClient }): JSX.Element => (
     <TrashSection client={props.client} />
     <HardwareSection client={props.client} />
     <MetadataSection client={props.client} />
+    <NotificationPathsSection client={props.client} />
     <AuthSection client={props.client} />
   </section>
 );

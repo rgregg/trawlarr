@@ -24,6 +24,7 @@ import { runtimeRoutes } from './routes/runtime.js';
 import { flowRoutes } from './routes/flows.js';
 import { jobRoutes } from './routes/jobs.js';
 import { libraryRoutes } from './routes/libraries.js';
+import { notifyRoutes } from './routes/notify.js';
 import { ensureLocalNode, nodeRoutes } from './routes/nodes.js';
 import { pluginRoutes } from './routes/plugins.js';
 import { systemRoutes } from './routes/system.js';
@@ -46,6 +47,7 @@ export const ALL_ROUTES: Route[] = [
   ...systemRoutes,
   ...authRoutes,
   ...libraryRoutes,
+  ...notifyRoutes,
   ...fileRoutes,
   ...runtimeRoutes,
   ...flowRoutes,
