@@ -1043,4 +1043,62 @@ describe('alerts', () => {
     expect(Date.now() - startedAt).toBeLessThan(3_000);
     expect(warn.mock.calls.some((c) => String(c[0]).includes('dropped at shutdown'))).toBe(true);
   });
+
+  /** Pause the seeded library with a reason `checkAllLibraries` leaves alone, bypassing the bus. */
+  const prePause = (dataDir: string, reason: string): void => {
+    const db = openDataDb(dataDir);
+    db.prepare(`UPDATE library SET enabled = 0, paused_reason = ?`).run(reason);
+    db.close();
+  };
+
+  it('alerts, once the startup delay passes and the tick runs, for a library already paused at boot', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir);
+    prePause(dataDir, 'disk check: root unmounted');
+    const hook = await receiver();
+    configureAlerts(dataDir, hook.url);
+
+    await start({ dataDir, alerts: { startupDelayMs: 300, tickMs: 50 } });
+
+    // No bus event announces this pause, so only the `initial` provider can have raised it,
+    // and only the tick's reraise can have released it from the startup delay.
+    expect(hook.bodies).toHaveLength(0);
+    await until(() => hook.bodies.some((b) => b.event === 'library.paused'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(hook.bodies.filter((b) => b.event === 'library.paused')).toHaveLength(1);
+  });
+
+  it('does not alert for a library the operator paused before boot', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir);
+    prePause(dataDir, 'operator: maintenance');
+    const hook = await receiver();
+    configureAlerts(dataDir, hook.url);
+
+    await start({ dataDir, alerts: { startupDelayMs: 0, tickMs: 50 } });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    expect(hook.bodies).toHaveLength(0);
+  });
+
+  it('aborts a test send still in flight when it shuts down, instead of waiting out the receiver', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const hook = await receiver(true);
+    configureAlerts(dataDir, hook.url);
+    const daemon = await start({ dataDir, drainDeadlineMs: 400 });
+    const record = (await readDaemonRecord({ dataDir }))!;
+    const pending = fetch(`http://127.0.0.1:${String(daemon.port)}/api/v1/alerts/hook/test`, {
+      method: 'POST',
+      headers: { 'x-api-key': record.apiKey },
+    }).catch(() => null);
+    await until(() => hook.bodies.length > 0);
+
+    const startedAt = Date.now();
+    await daemon.stop();
+    await pending;
+
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+  });
 });

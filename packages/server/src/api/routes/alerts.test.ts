@@ -189,6 +189,58 @@ describe('PUT /alerts', () => {
     expect(stored.events['file.failed']).toBe(false);
   });
 
+  it('refuses a masked header when the url changed, so the stored secret cannot be sent elsewhere', async () => {
+    seed();
+    const got = (await api('GET', '/alerts')).body;
+    got.destinations[0].url = 'https://attacker.example/x';
+
+    const res = await api('PUT', '/alerts', { body: got });
+
+    expect(res.status).toBe(400);
+    expect(res.text).not.toContain(TOKEN);
+    const stored = settings.getAlerts().destinations[0]!;
+    expect(stored.url).toBe(`${receiverUrl}/hook/${TOKEN}?k=1`);
+    expect(stored.headers[0]!.value).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it('accepts a new url with a freshly typed header value', async () => {
+    seed();
+    const got = (await api('GET', '/alerts')).body;
+    got.destinations[0].url = 'https://other.example/x';
+    got.destinations[0].headers = [{ name: 'Authorization', value: 'Bearer typed' }];
+
+    expect((await api('PUT', '/alerts', { body: got })).status).toBe(200);
+    expect(settings.getAlerts().destinations[0]!.headers[0]!.value).toBe('Bearer typed');
+  });
+
+  it('round-trips same-named headers masked, each keeping its own value', async () => {
+    settings.setAlerts({
+      publicBaseUrl: '',
+      destinations: [
+        {
+          ...newDestination('ha', `${receiverUrl}/h`),
+          headers: [
+            { name: 'X', value: 'first' },
+            { name: 'X', value: 'second' },
+          ],
+        },
+      ],
+    });
+    const got = (await api('GET', '/alerts')).body;
+    expect(got.destinations[0].headers).toHaveLength(2);
+
+    expect((await api('PUT', '/alerts', { body: got })).status).toBe(200);
+    expect(settings.getAlerts().destinations[0]!.headers.map((h) => h.value)).toEqual([
+      'first',
+      'second',
+    ]);
+
+    got.destinations[0].headers.push({ name: 'X', value: MASK });
+    const res = await api('PUT', '/alerts', { body: got });
+    expect(res.status).toBe(400);
+    expect(settings.getAlerts().destinations[0]!.headers).toHaveLength(2);
+  });
+
   it('replaces a value that is not the mask', async () => {
     seed();
     const got = (await api('GET', '/alerts')).body;

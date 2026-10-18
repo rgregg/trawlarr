@@ -72,6 +72,12 @@ const reenter = (what: string, name: string): ApiError =>
  * (and, for a header, the same header name). Honouring it anywhere else would either save the
  * literal mask as a secret, which then fails every delivery with no clue why, or let a rename
  * silently adopt another destination's secret.
+ *
+ * A masked HEADER is kept only while the url is also kept. Otherwise a caller could point a
+ * destination at their own host, leave `Authorization` masked, and have "send test" deliver the
+ * stored bearer token to that host: the secret read back through a request. The same reasoning
+ * is why the deliverer refuses redirects. Duplicate header names are paired by occurrence, so
+ * each keeps its own stored value.
  */
 const merge = (body: unknown, stored: AlertSettings): unknown => {
   if (!isRecord(body)) return body;
@@ -82,15 +88,23 @@ const merge = (body: unknown, stored: AlertSettings): unknown => {
     const name = typeof raw.name === 'string' ? raw.name : '';
     const old: AlertDestination | undefined = byName.get(name);
     let url = raw.url;
+    let urlKept = false;
     if (typeof url === 'string' && url.includes(MASK)) {
       if (old === undefined || url !== maskUrl(old.url)) throw reenter('The url', name);
       url = old.url;
+      urlKept = true;
     }
     let headers = raw.headers;
     if (Array.isArray(headers)) {
+      const seen = new Map<unknown, number>();
       headers = headers.map((h: unknown): unknown => {
-        if (!isRecord(h) || h.value !== MASK) return h;
-        const kept = old?.headers.find((x) => x.name === h.name);
+        if (!isRecord(h)) return h;
+        const occurrence = seen.get(h.name) ?? 0;
+        seen.set(h.name, occurrence + 1);
+        if (h.value !== MASK) return h;
+        const kept = urlKept
+          ? old?.headers.filter((x) => x.name === h.name)[occurrence]
+          : undefined;
         if (kept === undefined) {
           throw reenter(`The value of header "${typeof h.name === 'string' ? h.name : ''}"`, name);
         }

@@ -914,6 +914,10 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       daemonAlerts.unsubscribe();
       const alertBudgetMs = Math.max(0, drainDeadlineMs - (performance.now() - stopStartedAt));
       const { dropped } = await alertService.stop(alertBudgetMs);
+      // `stop` only drains the queue; "send test" goes through `sendNow`, which stays live
+      // until the deliverer itself is stopped. Left open, a test request landing before the
+      // server closes would start a fetch of up to 10 s that this deadline no longer covers.
+      alertDeliverer.stop();
       if (dropped > 0) {
         console.warn(
           `[daemon] alerts: ${String(dropped)} undelivered alert(s) dropped at shutdown.`,
