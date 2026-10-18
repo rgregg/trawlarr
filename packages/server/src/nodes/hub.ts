@@ -1075,16 +1075,28 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
             jobId: leased.jobId,
             lease: { state: 'expired', expiresAtMs: leased.lease.expiresAtMs },
           });
-          stallOpenJob({
+          const outcome =
+            `The stored payload for this remote job is corrupt, so it could not be adopted after ` +
+            `a restart (${error instanceof Error ? error.message : String(error)}); the file was ` +
+            `released and the attempt stalled.`;
+          const state = stallOpenJob({
             db,
             jobId: leased.jobId,
             fileId: leased.fileId,
-            outcome:
-              `The stored payload for this remote job is corrupt, so it could not be adopted after ` +
-              `a restart (${error instanceof Error ? error.message : String(error)}); the file was ` +
-              `released and the attempt stalled.`,
+            outcome,
             nowMs: now,
           });
+          // Nothing else will announce this ending (no handle is built for it), and a file
+          // whose last retry this spent is `failed`: the alert subscriber must hear it.
+          if (state !== null) {
+            bus.emit({
+              type: 'job.finished',
+              jobId: leased.jobId,
+              fileId: leased.fileId,
+              state,
+              outcome,
+            });
+          }
           continue;
         }
         const next = leaseOnDaemonStart(leased.lease, now, graceMs);

@@ -370,6 +370,29 @@ describe('scan coordinator: one scan per library', () => {
     await coordinator.idle();
     expect(scans).toHaveLength(2);
   });
+
+  it('emits scan.aborted for a scan that threw, and never for one that finished', async () => {
+    const { coordinator, events, libraryIds } = harness({ failFirst: 1 });
+    coordinator.request(libraryIds[0]!, 'manual');
+    await coordinator.idle();
+    expect(events.filter((event) => event.type === 'scan.aborted')).toEqual([
+      { type: 'scan.aborted', libraryId: libraryIds[0], message: 'ffprobe vanished' },
+    ]);
+    expect(events.some((event) => event.type === 'scan.finished')).toBe(false);
+
+    coordinator.request(libraryIds[0]!, 'manual');
+    await coordinator.idle();
+    expect(events.filter((event) => event.type === 'scan.aborted')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'scan.finished')).toBe(true);
+  });
+
+  it('does not emit scan.aborted for an unmounted root: that stays a scan.finished', async () => {
+    const { coordinator, events, libraryIds } = harness({ summary: { rootsUnavailable: 1 } });
+    coordinator.request(libraryIds[0]!, 'manual');
+    await coordinator.idle();
+    expect(events.some((event) => event.type === 'scan.aborted')).toBe(false);
+    expect(events.some((event) => event.type === 'scan.finished')).toBe(true);
+  });
 });
 
 describe('scan coordinator: the periodic rescan', () => {
@@ -622,7 +645,7 @@ describe('scan coordinator: events', () => {
     const { coordinator, events, libraryIds } = harness({ failFirst: 1 });
     coordinator.request(libraryIds[0]!, 'manual');
     await coordinator.idle();
-    expect(events).toHaveLength(0);
+    expect(events.filter((event) => event.type === 'scan.finished')).toHaveLength(0);
   });
 });
 

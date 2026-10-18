@@ -298,6 +298,11 @@ export const createScanCoordinator = (input: CreateScanCoordinatorInput): ScanCo
             await executeScan(libraryId, current);
           } catch (error) {
             onError(error, { libraryId, phase: 'scan' });
+            bus.emit({
+              type: 'scan.aborted',
+              libraryId,
+              message: error instanceof Error ? error.message : String(error),
+            });
             // A scoped scan that threw examined none of its paths, and they
             // existed nowhere but in the plan that just failed: dropped here,
             // the file a notification named would wait for the next interval

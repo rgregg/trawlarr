@@ -19,7 +19,7 @@ import { createBundleStore } from '../nodes/bundles.js';
 import { createNodeHub, type NodeHub } from '../nodes/hub.js';
 import { createNodeHttpHandler } from '../nodes/node-http.js';
 import { createRuntimeChecker } from './runtime-checker.js';
-import { reapStalled, stallUnsentRemoteJobs } from '../worker/reap-stalled.js';
+import { reapStalled, stallUnsentRemoteJobs, type JobSettled } from '../worker/reap-stalled.js';
 import { buildCommitFrom } from './build-info.js';
 import { describeFailure } from './describe-failure.js';
 import { createEventBus } from './events.js';
@@ -285,6 +285,12 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   const wantedPort = input.port ?? daemonSettings.port;
 
   const bus = createEventBus();
+  // A reaper or startup stall closes a job the supervisor never saw finish; announce it the same
+  // way, or a file that just spent its last retry becomes `failed` with no `job.finished` (and
+  // so no alert).
+  const announceSettled = (settled: JobSettled): void => {
+    bus.emit({ type: 'job.finished', ...settled });
+  };
   // The two refer to each other only through closures, called long after
   // both exist: the supervisor asks the hub which nodes are online at each
   // tick, and the hub asks for a tick when a node comes online.
@@ -404,6 +410,15 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     );
   }
 
+  if (hardwareFindings.length > 0) {
+    bus.emit({
+      type: 'hardware.check_failed',
+      findings: hardwareFindings.map(
+        (finding) => `${finding.hardwareType} (${finding.expectedEncoder})`,
+      ),
+    });
+  }
+
   const ctx = createApiContext({
     db,
     settings,
@@ -506,7 +521,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   // lease, so adoption never sees it and nothing would end it for a day.
   // After the lock for the same reason adoption is: a refused second daemon
   // must not stall the running daemon's claims mid-prepare.
-  stallUnsentRemoteJobs({ db, nowMs: nowMs() });
+  stallUnsentRemoteJobs({ db, nowMs: nowMs(), onSettled: announceSettled });
   for (const job of hub.adoptLeasedJobs((payload) => supervisor.agentInputFor(payload))) {
     supervisor.adopt(job);
   }
@@ -624,7 +639,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   });
 
   every(REAP_INTERVAL_MS, 'stall reaper', async () => {
-    reapStalled({ db, nowMs: nowMs() });
+    reapStalled({ db, nowMs: nowMs(), onSettled: announceSettled });
     await recoverSwaps();
   });
 
@@ -664,7 +679,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   // daemon (workers are detached, so a SIGKILLed daemon leaves them running)
   // still has a live pid and is left completely alone.
   try {
-    reapStalled({ db, nowMs: nowMs() });
+    reapStalled({ db, nowMs: nowMs(), onSettled: announceSettled });
   } catch (error) {
     onError(error, { phase: 'stall reaper' });
   }

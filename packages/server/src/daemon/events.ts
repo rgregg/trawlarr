@@ -72,6 +72,14 @@ export type TrawlarrEvent =
       skipped: number;
     }
   | { type: 'plugin.sync.failed'; sourceId: string; runId: number; code: string; message: string }
+  /**
+   * A scan stopped on a thrown failure. NOT emitted for `rootsUnavailable`, which is a normal
+   * `scan.finished` that refused to reconcile; both for one outage would send two alerts.
+   * `message` is the error's own text and may name paths: it goes through alert redaction.
+   */
+  | { type: 'scan.aborted'; libraryId: string; message: string }
+  /** The startup hardware preflight found declared hardware ffmpeg cannot encode with. */
+  | { type: 'hardware.check_failed'; findings: string[] }
   | { type: 'library.paused'; libraryId: string; reason: string }
   | { type: 'library.resumed'; libraryId: string }
   | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number }

@@ -846,6 +846,15 @@ describe('createNodeHub', () => {
     expect(leaseOf(bad.jobId).state).toBe('expired');
     expect(files.getById(bad.fileId)?.state).toBe('held');
     expect(files.getById(bad.fileId)?.attempt_count).toBe(1);
+    // The ending is announced, or a file this stall pushed to `failed` would never be alerted.
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'job.finished',
+        jobId: bad.jobId,
+        fileId: bad.fileId,
+        state: 'held',
+      }),
+    );
   });
 
   it('appends a late result for a job already released, without touching the ledger, and acks it', async () => {
