@@ -276,6 +276,20 @@ export const createRemoteAgentHandle = (input: RemoteAgentInput): RemoteAgentHan
       case 'commit-request':
         answerCommit(message);
         return;
+      case 'alert-request':
+        try {
+          // The same two sinks a node's `log` message reaches: live stream and the server's job log.
+          input.onAlert?.(
+            { destination: message.destination, message: message.message },
+            (text) => {
+              input.onLog(text);
+              input.appendLog(text);
+            },
+          );
+        } catch {
+          // Fire and forget: nothing here may disturb the job.
+        }
+        return;
       case 'done': {
         let report: JobReport;
         try {

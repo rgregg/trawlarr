@@ -9,6 +9,7 @@ import type { FlowDryRunCoordinator } from '../flow/dry-run-runs.js';
 import type { EnvApplication } from '../config/env-settings.js';
 import type { HardwareFinding } from '../daemon/hardware-preflight.js';
 import type { NodeHub } from '../nodes/hub.js';
+import type { DeliveryResult } from '../alerts/deliver.js';
 
 /**
  * Everything a route handler is allowed to reach.
@@ -71,6 +72,16 @@ export interface ApiContext {
    * request the same way every other repo here is.
    */
   nodes: NodeHub;
+  /**
+   * What the alert routes need from the running alert machinery. A seam rather than the service
+   * itself: the routes read and write destinations through `settings`, and only a test send and
+   * the last delivery outcome live in the deliverer. `createApiContext` defaults this to one that
+   * sends nothing.
+   */
+  alerts: {
+    sendTest(name: string): Promise<DeliveryResult>;
+    lastResult(name: string): DeliveryResult | undefined;
+  };
 }
 
 export interface RouteInput {

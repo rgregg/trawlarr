@@ -56,6 +56,14 @@ const sendAndExit = (message: AgentToDaemon, code: number): void => {
   process.send(message, leave);
 };
 
+/**
+ * Ask the daemon to send an alert. Returns at once: there is no reply to wait
+ * on, and a flow must never stall on, or learn the result of, a notification.
+ */
+const sendAlert = (destination: string, message: string): void => {
+  send({ type: 'alert-request', destination, message });
+};
+
 const messageOf = (error: unknown): string =>
   error instanceof Error ? (error.stack ?? error.message) : String(error);
 
@@ -158,6 +166,7 @@ const runJobPayload = (payload: JobPayload): void => {
       nowMs: () => Date.now(),
       signal: controller.signal,
       commitGate,
+      sendAlert,
     },
   }).then(
     (report) => {

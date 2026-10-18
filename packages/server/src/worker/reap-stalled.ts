@@ -1,5 +1,5 @@
 import { hostname } from 'node:os';
-import { applyStall, newLedgerRecord } from '@trawlarr/core';
+import { applyStall, newLedgerRecord, type FileState } from '@trawlarr/core';
 import type { Db } from '../db/connection.js';
 import { createJobRepo, type JobRow } from '../db/job-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
@@ -62,6 +62,20 @@ export interface ReapStalledInput {
   libraryIds?: string[];
   /** Report what would be reclaimed, change nothing. */
   dryRun?: boolean;
+  /**
+   * Called once per file this call really settled (never under `dryRun`). The daemon turns it
+   * into `job.finished`: a reclaimed attempt that spends the last retry ends `failed`, and
+   * without this the alert subscriber would never hear about the file (spec 3.1).
+   */
+  onSettled?: (settled: JobSettled) => void;
+}
+
+/** A job the reaper (or a startup stall) closed, in the shape of `job.finished`. */
+export interface JobSettled {
+  jobId: string;
+  fileId: string;
+  state: FileState;
+  outcome: string;
 }
 
 export interface ReapedFile {
@@ -261,6 +275,7 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
       nowMs: input.nowMs,
     });
 
+    const settledBox: { value: JobSettled | null } = { value: null };
     if (input.dryRun !== true) {
       db.transaction(() => {
         // Re-read under the write: a worker can have finished (or a human
@@ -277,21 +292,34 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
         // as in-flight to anything that looks at job history. An already
         // finished job is left alone: its own outcome is the true one.
         const latestNow = jobRepo.listForFile(row.id)[0];
+        const outcome = workerProvablyGone(latestNow)
+          ? `Reclaimed by the stall reaper: the worker running this job (pid ` +
+            `${String(latestNow?.workerPid)} on ${String(latestNow?.workerHost)}) no longer ` +
+            `exists, so it cannot still be working on this file.`
+          : `Reclaimed by the stall reaper: no sign of life for ` +
+            `${String(Math.round((input.nowMs - lastActivityMs) / HOUR_MS))} hour(s), so the ` +
+            `worker running this job is presumed dead.`;
         if (latestNow !== undefined && latestNow.endedAt === null) {
-          jobRepo.finish({
-            jobId: latestNow.id,
-            state: 'failed',
-            outcome: workerProvablyGone(latestNow)
-              ? `Reclaimed by the stall reaper: the worker running this job (pid ` +
-                `${String(latestNow.workerPid)} on ${String(latestNow.workerHost)}) no longer ` +
-                `exists, so it cannot still be working on this file.`
-              : `Reclaimed by the stall reaper: no sign of life for ` +
-                `${String(Math.round((input.nowMs - lastActivityMs) / HOUR_MS))} hour(s), so the ` +
-                `worker running this job is presumed dead.`,
-            nowMs: input.nowMs,
-          });
+          jobRepo.finish({ jobId: latestNow.id, state: 'failed', outcome, nowMs: input.nowMs });
         }
+        // Reported for EVERY row the ledger was just stalled, including one with no open job
+        // (claimed but never started, or an early-stall row already closed): the file's state
+        // changed either way, and a file that just spent its last retry is `failed`.
+        settledBox.value = {
+          jobId: latestNow?.id ?? '',
+          fileId: row.id,
+          state: stalled.state,
+          outcome,
+        };
       })();
+    }
+    // After the transaction, and guarded: a listener must not unwind the reaper mid-sweep.
+    if (settledBox.value !== null && input.onSettled !== undefined) {
+      try {
+        input.onSettled(settledBox.value);
+      } catch {
+        // The row is already written; a notification is not worth the rest of the sweep.
+      }
     }
 
     summary.reclaimed += 1;
@@ -320,7 +348,11 @@ export const reapStalled = (input: ReapStalledInput): ReapSummary => {
  * running daemon's claims, which are exactly this shape while `prepare`
  * awaits) and before adoption and the first tick.
  */
-export const stallUnsentRemoteJobs = (input: { db: Db; nowMs: number }): number => {
+export const stallUnsentRemoteJobs = (input: {
+  db: Db;
+  nowMs: number;
+  onSettled?: (settled: JobSettled) => void;
+}): number => {
   const { db } = input;
   const rows = db
     .prepare(
@@ -330,15 +362,23 @@ export const stallUnsentRemoteJobs = (input: { db: Db; nowMs: number }): number 
     .all(LOCAL_NODE_ID) as { id: string; file_id: string }[];
 
   for (const row of rows) {
-    stallOpenJob({
+    const outcome =
+      `The daemon stopped while preparing this job, so it was never sent to its node; ` +
+      `the attempt was stalled when the daemon started again.`;
+    const state = stallOpenJob({
       db,
       jobId: row.id,
       fileId: row.file_id,
-      outcome:
-        `The daemon stopped while preparing this job, so it was never sent to its node; ` +
-        `the attempt was stalled when the daemon started again.`,
+      outcome,
       nowMs: input.nowMs,
     });
+    if (state !== null) {
+      try {
+        input.onSettled?.({ jobId: row.id, fileId: row.file_id, state, outcome });
+      } catch {
+        // Notification only; the row is written.
+      }
+    }
   }
   return rows.length;
 };
@@ -355,13 +395,18 @@ export const stallOpenJob = (input: {
   fileId: string;
   outcome: string;
   nowMs: number;
-}): void => {
+}): FileState | null => {
   const { db } = input;
   const mediaFileRepo = createMediaFileRepo(db);
   const jobRepo = createJobRepo(db);
-  db.transaction(() => {
+  // The file's new state, but ONLY when this stall really wrote the ledger. Null when the guard
+  // skipped it (file not running, or another job holds the claim): announcing the file's
+  // current state then would repeat a `failed` already announced, or call a file another job is
+  // running `running`.
+  return db.transaction((): FileState | null => {
     const file = mediaFileRepo.getById(input.fileId);
     const latest = jobRepo.listForFile(input.fileId)[0];
+    let stalledState: FileState | null = null;
     if (file !== null && file.state === 'running' && latest?.id === input.jobId) {
       mediaFileRepo.setLedger({
         fileId: file.id,
@@ -371,6 +416,7 @@ export const stallOpenJob = (input: {
         }),
         lastRunId: input.jobId,
       });
+      stalledState = mediaFileRepo.getById(input.fileId)?.state ?? null;
     }
     jobRepo.finish({
       jobId: input.jobId,
@@ -378,5 +424,6 @@ export const stallOpenJob = (input: {
       outcome: input.outcome,
       nowMs: input.nowMs,
     });
+    return stalledState;
   })();
 };

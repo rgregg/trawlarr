@@ -31,6 +31,9 @@ export const FIRST_PARTY_INERT = new Set([
   'trawlarr:setContainer',
   'trawlarr:onError',
   'trawlarr:holdForReview',
+  // In a dry run the engine's `sendAlert` only logs "would send alert", so this node has no
+  // side effect; unlisted, a dry run would stop at it as `unknown`.
+  'trawlarr:sendWebhook',
 ]);
 
 /** First-party nodes whose effects the engine performs, so it can withhold them. */

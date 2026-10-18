@@ -10,6 +10,7 @@ import { publishDryRunSummary, type DryRunRun, type NodeLabels } from './dry-run
 import { nodeLabels, type EditorPlugin, type ValidationProblem } from './flow-canvas-model.js';
 import { hasUnsavedLayout, layoutStoreFor, saveFlowLayout } from './flow-layout-model.js';
 import type { FlowFieldCatalogue } from './plugin-input-model.js';
+import { PublishWarnings } from './PublishWarnings.js';
 import {
   editorBuffers,
   hasDefinitionChanges,
@@ -254,6 +255,7 @@ const Editor = (
       ? 'Recovered unsaved changes from this tab. Save draft to keep them on the daemon.'
       : null,
   );
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [preview, setPreview] = useState<ReturnType<typeof summarizePublish> | null>(null);
   const [note, setNote] = useState('');
   const [canvasKey, setCanvasKey] = useState(0);
@@ -302,6 +304,7 @@ const Editor = (
     setDefinition(next);
     setPreview(null);
     setMessage(null);
+    setWarnings([]);
   };
 
   const report = (error: unknown): void => {
@@ -318,6 +321,7 @@ const Editor = (
       // Only the name: the definition being edited is this tab's business,
       // and a rename must not reach in and replace an unsaved graph.
       setFlow((current) => ({ ...current, name: next.name }));
+      setWarnings([]);
       setMessage(`Renamed to “${next.name}”. The flow definition is unchanged.`);
     } catch (error) {
       report(error);
@@ -335,6 +339,9 @@ const Editor = (
     setSaved(definition);
     editorBuffers.delete(id);
     setValidation({ key, result });
+    // Warnings describe the publish just made; once the editor moves on they would be read as
+    // describing the draft beneath them.
+    setWarnings([]);
     setMessage(
       result.ok
         ? 'Draft saved. The published flow is unchanged.'
@@ -386,8 +393,14 @@ const Editor = (
   const publish = async (): Promise<void> => {
     setBusy(true);
     setFailure(null);
+    setWarnings([]);
     try {
-      const next = await client.put<EditorFlow>(`/flows/${id}`, { definition, baseHash, note });
+      const next = await client.put<EditorFlow & { warnings?: string[] }>(`/flows/${id}`, {
+        definition,
+        baseHash,
+        note,
+      });
+      setWarnings(next.warnings ?? []);
       setFlow(next);
       setDefinition(next.definition);
       setSaved(next.definition);
@@ -441,6 +454,7 @@ const Editor = (
       setLiveHash(next.definitionHash);
       setPreview(null);
       setCanvasKey((value) => value + 1);
+      setWarnings([]);
       setMessage('Draft discarded. Showing the current published flow.');
     } catch (error) {
       report(error);
@@ -531,6 +545,7 @@ const Editor = (
             {message}
           </p>
         )}
+        <PublishWarnings warnings={warnings} />
         {stale && (
           <p role="alert" className="failure">
             This draft is based on an older published version. Publishing is blocked to avoid

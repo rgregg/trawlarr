@@ -19,3 +19,4 @@ export * from './path-map.js';
 export * from './lease.js';
 export * from './runtime-check.js';
 export * from './working-file.js';
+export * from './alerts.js';

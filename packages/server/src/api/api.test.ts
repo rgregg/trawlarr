@@ -28,7 +28,7 @@ import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
-import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
+import { createSettingsRepo, newDestination, type SettingsRepo } from '../db/settings-repo.js';
 import { createPluginRepo } from '../plugins/plugin-repo.js';
 import {
   createPluginSyncCoordinator,
@@ -1530,6 +1530,92 @@ describe('flows', () => {
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe('flow-invalid');
     expect(createFlowRepo(db).list()).toHaveLength(0);
+  });
+
+  it('publishes a flow naming an unknown alert destination, with a warning and no pause', async () => {
+    const created = await api('POST', '/flows', { name: 'warn', definition: VALID_FLOW });
+    const library = seedLibrary({ flowId: created.body.id });
+    const definition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'hook',
+          pluginId: 'trawlarr:sendWebhook',
+          pluginVersion: '1.0.0',
+          inputs: { destination: 'ha' },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', toNodeId: 'hook', outputNumber: 1 }],
+    };
+    const res = await api('PUT', `/flows/${created.body.id}`, { definition });
+    expect(res.status).toBe(200);
+    expect(res.body.warnings).toEqual([
+      'Send Webhook "Send Webhook" names an unknown destination "ha"',
+    ]);
+    expect(createLibraryRepo(db).getById(library.id)!.pausedReason).toBeNull();
+    const plain = await api('PUT', `/flows/${created.body.id}`, { definition: VALID_FLOW });
+    expect(plain.body.warnings).toBeUndefined();
+  });
+
+  describe('destination warnings on every publish door', () => {
+    const hookDef = (destination: string) => ({
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'hook',
+          pluginId: 'trawlarr:sendWebhook',
+          pluginVersion: '1.0.0',
+          inputs: { destination },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', toNodeId: 'hook', outputNumber: 1 }],
+    });
+    const UNKNOWN = ['Send Webhook "Send Webhook" names an unknown destination "ha"'];
+
+    it('warns on POST /flows and on restoring a version naming an unknown destination', async () => {
+      const posted = await api('POST', '/flows', { name: 'p', definition: hookDef('ha') });
+      expect(posted.status).toBe(201);
+      expect(posted.body.warnings).toEqual(UNKNOWN);
+
+      const flow = await api('POST', '/flows', { name: 'r', definition: hookDef('ha') });
+      await api('PUT', `/flows/${flow.body.id}`, { definition: VALID_FLOW });
+      const versions = await api('GET', `/flows/${flow.body.id}/versions`);
+      const original = versions.body.items.find(
+        (v: ResponseBody) => v.definitionHash === flow.body.definitionHash,
+      );
+      const restored = await api(
+        'POST',
+        `/flows/${flow.body.id}/versions/${original.id}/restore`,
+        {},
+      );
+      expect(restored.status).toBe(200);
+      expect(restored.body.warnings).toEqual(UNKNOWN);
+    });
+
+    it('words a disabled destination differently and warns nothing for enabled ones', async () => {
+      const dest = (enabled: boolean) => ({
+        ...newDestination('ha', 'http://127.0.0.1:9/x'),
+        enabled,
+      });
+      settings.setAlerts({ publicBaseUrl: '', destinations: [dest(false)] });
+      const off = await api('POST', '/flows', { name: 'off', definition: hookDef('ha') });
+      expect(off.body.warnings).toEqual([
+        'Send Webhook "Send Webhook" names a disabled destination "ha"',
+      ]);
+      settings.setAlerts({ publicBaseUrl: '', destinations: [dest(true)] });
+      const post = await api('POST', '/flows', { name: 'on', definition: hookDef('ha') });
+      expect(post.body.warnings).toBeUndefined();
+      const put = await api('PUT', `/flows/${post.body.id}`, { definition: hookDef('ha') });
+      expect(put.body.warnings).toBeUndefined();
+      const versions = await api('GET', `/flows/${post.body.id}/versions`);
+      const restored = await api(
+        'POST',
+        `/flows/${post.body.id}/versions/${versions.body.items[0].id}/restore`,
+        {},
+      );
+      expect(restored.status).toBe(200);
+      expect(restored.body.warnings).toBeUndefined();
+    });
   });
 
   it('creates, reads and updates a flow, changing its hash', async () => {
@@ -3326,6 +3412,21 @@ describe('node management', () => {
     expect(response.status).toBe(200);
     expect(response.body.revokedAt).toBe(NOW);
     expect(nodeHub.disconnectCalls).toEqual([{ nodeId: node.node.id, reason: 'revoked' }]);
+  });
+
+  // Revoking or deleting is the operator's own act: alerts and the hub's refusal reporting hear
+  // it from this event, or the disconnect it causes stands as an outage alerting hourly.
+  it('announces node.removed on revoke and delete, and not on a refused delete', async () => {
+    const revoked = await createNode();
+    await api('POST', `/nodes/${revoked.node.id}/revoke`);
+    const deleted = await createNode();
+    await api('DELETE', `/nodes/${deleted.node.id}`);
+    expect(events.filter((e) => e.type === 'node.removed')).toEqual([
+      { type: 'node.removed', nodeId: revoked.node.id },
+      { type: 'node.removed', nodeId: deleted.node.id },
+    ]);
+    expect((await api('DELETE', '/nodes/local')).status).toBe(400);
+    expect(events.filter((e) => e.type === 'node.removed')).toHaveLength(2);
   });
 
   it('deletes a node with 204, and 409s while it has an unended job', async () => {

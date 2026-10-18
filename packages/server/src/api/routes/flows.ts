@@ -6,6 +6,7 @@ import {
 } from '@trawlarr/core';
 import { FLOW_FIELD_DOCS, FLOW_FIELD_NAMESPACES } from '@trawlarr/plugins-core';
 import { checkAllLibraries } from '../../daemon/library-health.js';
+import { findDestinationReferences } from '../../alerts/flow-references.js';
 import { createFlowRepo, FlowChangedError, type FlowRecord } from '../../db/flow-repo.js';
 import { createFlowVersionRepo, type FlowVersionRecord } from '../../db/flow-version-repo.js';
 import { createLibraryRepo } from '../../db/library-repo.js';
@@ -42,6 +43,39 @@ const toFlowResource = (flow: FlowRecord) => ({
   createdAt: flow.createdAt,
   updatedAt: flow.updatedAt,
 });
+
+/**
+ * Advice, never a verdict: a Send Webhook naming a destination that does not exist (or is
+ * switched off) still publishes, because the node skips itself at run time and an alert must
+ * never make a flow invalid or pause a library. Unreadable settings simply yield no warnings.
+ */
+const destinationWarnings = (ctx: ApiContext, flow: FlowRecord): string[] => {
+  let enabled: Set<string>;
+  let known: Set<string>;
+  try {
+    const destinations = ctx.settings.getAlerts().destinations;
+    known = new Set(destinations.map((d) => d.name));
+    enabled = new Set(destinations.filter((d) => d.enabled).map((d) => d.name));
+  } catch {
+    return [];
+  }
+  const warnings: string[] = [];
+  for (const ref of findDestinationReferences(flow.definition)) {
+    const label = flow.layout[ref.nodeId]?.name ?? 'Send Webhook';
+    if (!known.has(ref.destination)) {
+      warnings.push(`Send Webhook "${label}" names an unknown destination "${ref.destination}"`);
+    } else if (!enabled.has(ref.destination)) {
+      warnings.push(`Send Webhook "${label}" names a disabled destination "${ref.destination}"`);
+    }
+  }
+  return warnings;
+};
+
+/** The flow resource plus advisory `warnings`, present only when there are any. */
+const publishedResource = (ctx: ApiContext, flow: FlowRecord) => {
+  const warnings = destinationWarnings(ctx, flow);
+  return warnings.length === 0 ? toFlowResource(flow) : { ...toFlowResource(flow), warnings };
+};
 
 const requireFlow = (ctx: ApiContext, id: string): FlowRecord => {
   const flow = createFlowRepo(ctx.db).getById(id);
@@ -223,7 +257,7 @@ export const flowRoutes: Route[] = [
           definition,
           nowMs: ctx.nowMs(),
         });
-        return created(toFlowResource(flow));
+        return created(publishedResource(ctx, flow));
       } catch (error) {
         return asFlowValidationError(error);
       }
@@ -391,7 +425,7 @@ export const flowRoutes: Route[] = [
       } catch (error) {
         return asFlowValidationError(error);
       }
-      return toFlowResource(updated);
+      return publishedResource(ctx, updated);
     },
   },
 
@@ -487,7 +521,7 @@ export const flowRoutes: Route[] = [
       } catch (error) {
         return asFlowValidationError(error);
       }
-      return toFlowResource(updated);
+      return publishedResource(ctx, updated);
     },
   },
 

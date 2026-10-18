@@ -245,6 +245,9 @@ export const systemRoutes: Route[] = [
               ? undefined
               : libraries.map((library) => library.id),
           dryRun: optionalBoolean(body, 'dryRun'),
+          onSettled: (settled) => {
+            ctx.bus.emit({ type: 'job.finished', ...settled });
+          },
         });
       } catch (error) {
         if (error instanceof StaleThresholdTooShortError) {

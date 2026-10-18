@@ -384,6 +384,8 @@ export const libraryRoutes: Route[] = [
     handler: ({ params, ctx }) => {
       requireLibrary(ctx, params.id!);
       createLibraryRepo(ctx.db).remove(params.id!);
+      // Alerts for it would otherwise repeat for a library nothing can ever recover.
+      ctx.bus.emit({ type: 'library.removed', libraryId: params.id! });
       // Its watch outlives the row otherwise, and every event it delivers
       // asks for a scan of a library id `scanLibrary` refuses by name.
       ctx.scans.syncWatchers();

@@ -7,6 +7,7 @@ import { migrate } from '../db/migrate.js';
 import { createMediaFileRepo, type MediaFileRepo } from '../db/media-file-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import {
+  stallOpenJob,
   DEFAULT_STALE_AFTER_MS,
   MIN_STALE_AFTER_MS,
   StaleThresholdTooShortError,
@@ -202,6 +203,45 @@ describe('reapStalled', () => {
     reapStalled({ db, nowMs: NOW });
 
     expect(repo.getLedger(fileId)).toMatchObject({ state: 'failed', attemptCount: 3 });
+  });
+
+  it('announces a reclaimed file with the state it ended in, failed once the budget is spent', () => {
+    const fileId = runningFile({ claimedAtMs: NOW - 40 * HOUR_MS });
+    const jobId = runningJob({ fileId, startedAtMs: NOW - 40 * HOUR_MS, heartbeatAtMs: null });
+    db.prepare(`UPDATE media_file SET attempt_count = 2 WHERE id = ?`).run(fileId);
+    const orphan = runningFile({ claimedAtMs: NOW - 40 * HOUR_MS });
+    db.prepare(`UPDATE media_file SET attempt_count = 2 WHERE id = ?`).run(orphan);
+    const live = runningFile({ claimedAtMs: NOW - 60_000 });
+
+    const settled: { jobId: string; fileId: string; state: string; outcome: string }[] = [];
+    reapStalled({ db, nowMs: NOW, onSettled: (entry) => settled.push(entry) });
+
+    expect(settled).toHaveLength(2);
+    expect(settled).toContainEqual(
+      expect.objectContaining({ jobId, fileId, state: 'failed', outcome: expect.any(String) }),
+    );
+    // A row with no job at all is still a state change worth announcing.
+    expect(settled).toContainEqual(expect.objectContaining({ jobId: '', fileId: orphan }));
+    expect(settled.some((entry) => entry.fileId === live)).toBe(false);
+  });
+
+  it('announces nothing under dryRun, and a throwing listener does not stop the sweep', () => {
+    const a = runningFile({ claimedAtMs: NOW - 40 * HOUR_MS });
+    const b = runningFile({ claimedAtMs: NOW - 40 * HOUR_MS });
+    const calls: string[] = [];
+    reapStalled({ db, nowMs: NOW, dryRun: true, onSettled: (entry) => calls.push(entry.fileId) });
+    expect(calls).toEqual([]);
+
+    reapStalled({
+      db,
+      nowMs: NOW,
+      onSettled: (entry) => {
+        calls.push(entry.fileId);
+        throw new Error('listener bug');
+      },
+    });
+    expect(calls.sort()).toEqual([a, b].sort());
+    expect(repo.getById(b)?.state).toBe('held');
   });
 
   it('changes nothing under dryRun, but still reports what it would take', () => {
@@ -430,7 +470,11 @@ describe('stallUnsentRemoteJobs', () => {
       nodeId: 'local',
     });
 
-    expect(stallUnsentRemoteJobs({ db, nowMs: NOW })).toBe(1);
+    const settled: { fileId: string; state: string }[] = [];
+    expect(
+      stallUnsentRemoteJobs({ db, nowMs: NOW, onSettled: (entry) => settled.push(entry) }),
+    ).toBe(1);
+    expect(settled).toEqual([expect.objectContaining({ fileId: unsentFile, state: 'held' })]);
 
     expect(repo.getById(unsentFile)?.state).toBe('held');
     expect(repo.getById(unsentFile)?.attempt_count).toBe(1);
@@ -439,5 +483,22 @@ describe('stallUnsentRemoteJobs', () => {
     expect(jobRow(sent).ended_at).toBeNull();
     expect(jobRow(local).ended_at).toBeNull();
     expect(repo.getById(localFile)?.state).toBe('running');
+  });
+});
+
+describe('stallOpenJob', () => {
+  it('returns the new state only when it really stalled the file, null when the guard skipped it', () => {
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    db.prepare(`UPDATE media_file SET attempt_count = 2 WHERE id = ?`).run(fileId);
+    const older = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: null });
+    const newer = runningJob({ fileId, startedAtMs: NOW - 30_000, heartbeatAtMs: null });
+
+    // An older job is not the latest: the newer job holds the claim.
+    expect(stallOpenJob({ db, jobId: older, fileId, outcome: 'x', nowMs: NOW })).toBeNull();
+    expect(repo.getById(fileId)?.state).toBe('running');
+    expect(stallOpenJob({ db, jobId: newer, fileId, outcome: 'x', nowMs: NOW })).toBe('failed');
+    // The file is no longer running: a second stall must not re-announce `failed`.
+    const again = runningJob({ fileId, startedAtMs: NOW, heartbeatAtMs: null });
+    expect(stallOpenJob({ db, jobId: again, fileId, outcome: 'x', nowMs: NOW })).toBeNull();
   });
 });

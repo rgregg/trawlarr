@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { FlowDefinition, FlowNode } from '@trawlarr/core';
 import type { PluginDetails, PluginInputArgs, PluginModule } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
@@ -146,10 +146,13 @@ const base = { initialPath: '/in.mkv', startNodeId: 'a', buildArgs, outputPathFo
 const discovering = { initialPath: '/in.mkv', buildArgs, outputPathFor };
 
 describe('classifySideEffects', () => {
-  it.each(['trawlarr:writeToLog', 'trawlarr:failFile'])('can run %s during a dry run', (id) => {
-    const entry = FIRST_PARTY_PLUGINS[id]!;
-    expect(classifySideEffects(loaded(id, entry.module, entry.module.details()))).toBe('inert');
-  });
+  it.each(['trawlarr:writeToLog', 'trawlarr:failFile', 'trawlarr:sendWebhook'])(
+    'can run %s during a dry run',
+    (id) => {
+      const entry = FIRST_PARTY_PLUGINS[id]!;
+      expect(classifySideEffects(loaded(id, entry.module, entry.module.details()))).toBe('inert');
+    },
+  );
 
   it('knows first-party filters are inert', () => {
     expect(classifySideEffects(loaded('trawlarr:checkVideoCodec', pass))).toBe('inert');
@@ -498,5 +501,78 @@ describe('runDryFlow', () => {
     expect(result.complete).toBe(false);
     expect(result.failed).toBe(false);
     expect(result.stoppedAtNodeId).toBe('b');
+  });
+});
+
+describe('runDryFlow — sendAlert', () => {
+  it('never reaches the real port and says what it would have sent', async () => {
+    const real = vi.fn();
+    const logs: string[] = [];
+    const alerting: PluginModule = {
+      details: () => details(),
+      plugin: (args) => {
+        args.sendAlert!('ha', 'hi');
+        return {
+          outputNumber: 1,
+          outputFileObj: { _id: args.inputFileObj._id },
+          variables: args.variables,
+        };
+      },
+    };
+    const result = await runDryFlow({
+      ...discovering,
+      startNodeId: 'start',
+      flow: flow(
+        [node('start', 'trawlarr:start'), node('log', 'trawlarr:writeToLog')],
+        [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'log' }],
+      ),
+      loadPlugin: (n) =>
+        n.pluginId === 'trawlarr:writeToLog'
+          ? loaded('trawlarr:writeToLog', alerting)
+          : loaded('trawlarr:start', pass),
+      buildArgs: (invocation) =>
+        ({
+          ...buildArgs(invocation),
+          sendAlert: real,
+          jobLog: (text: string) => logs.push(text),
+        }) as unknown as PluginInputArgs,
+    });
+    expect(result.failed).toBe(false);
+    expect(real).not.toHaveBeenCalled();
+    expect(logs).toContain('would send alert to "ha"');
+    // The step's RECORDED log is what the dry-run result and flow editor show;
+    // runFlow wraps jobLog on the args it passes the plugin, so a line written
+    // to any other jobLog reaches the raw sink but never this.
+    expect(result.steps.find((step) => step.nodeId === 'log')!.logExcerpt).toBe(
+      'would send alert to "ha"',
+    );
+  });
+});
+
+describe('runDryFlow — Send Webhook node', () => {
+  it('passes through the real node and logs what it would have sent', async () => {
+    const real = vi.fn();
+    const logs: string[] = [];
+    const nodes = [node('start', 'trawlarr:start'), node('hook', 'trawlarr:sendWebhook')];
+    nodes[1]!.inputs = { destination: 'ha', message: 'hello' };
+    const result = await runDryFlow({
+      ...discovering,
+      flow: flow(nodes, [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'hook' }]),
+      loadPlugin: (n) => {
+        const entry = FIRST_PARTY_PLUGINS[n.pluginId]!;
+        return loaded(entry.id, entry.module, entry.module.details());
+      },
+      buildArgs: (invocation) =>
+        ({
+          ...buildArgs(invocation),
+          inputs: invocation.node.inputs,
+          sendAlert: real,
+          jobLog: (text: string) => logs.push(text),
+        }) as unknown as PluginInputArgs,
+    });
+    expect(result.failed).toBe(false);
+    expect(result.stoppedAtNodeId).toBeNull();
+    expect(real).not.toHaveBeenCalled();
+    expect(logs).toContain('would send alert to "ha"');
   });
 });

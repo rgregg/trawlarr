@@ -38,6 +38,22 @@ const config: NodeConfigFrame = {
 };
 
 describe('parseNodeFrame', () => {
+  it('accepts an enveloped alert-request and drops its smuggled fields', () => {
+    expect(
+      parseNodeFrame(
+        JSON.stringify({
+          type: 'agent',
+          jobId: 'j',
+          message: { type: 'alert-request', destination: 'ha', message: 'hi', path: '/x' },
+        }),
+      ),
+    ).toEqual({
+      type: 'agent',
+      jobId: 'j',
+      message: { type: 'alert-request', destination: 'ha', message: 'hi' },
+    });
+  });
+
   it('parses a valid hello frame', () => {
     expect(parseNodeFrame(JSON.stringify(hello))).toEqual(hello);
   });

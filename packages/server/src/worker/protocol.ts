@@ -63,6 +63,17 @@ export type AgentToDaemon =
       nowMs?: number;
     }
   | { type: 'commit-request'; id: number; kind: 'replace' | 'plugin'; pluginId: string }
+  /**
+   * A flow node asks the daemon to send an alert to a named destination.
+   *
+   * FIRE AND FORGET: no `id`, no reply. The daemon alone holds a destination's
+   * URL and headers, so a node can only name one; and it deliberately carries
+   * NO library, path or job id, because the daemon fills those from the job's
+   * own rows (a plugin that could set them could attribute an alert to any
+   * file). Additive: `PROTOCOL_VERSION` is not bumped, an older daemon drops
+   * the unrecognised message and the alert is lost, never the flow (spec 11.6).
+   */
+  | { type: 'alert-request'; destination: string; message: string }
   | { type: 'done'; report: JobReport }
   | { type: 'failed'; error: string; superseded?: boolean };
 
@@ -84,6 +95,11 @@ export type AgentToDaemon =
  * gate.
  */
 export const PROTOCOL_VERSION = 2;
+
+/** The longest destination name accepted; longer is rejected, never truncated to a different name. */
+export const MAX_ALERT_DESTINATION_CHARS = 200;
+/** The longest alert message accepted; longer is truncated, since a plugin can write anything here. */
+export const MAX_ALERT_MESSAGE_CHARS = 4000;
 
 /** Environment variable carrying `PROTOCOL_VERSION` to a forked agent. */
 export const PROTOCOL_VERSION_ENV = 'TRAWLARR_PROTOCOL_VERSION';
@@ -166,6 +182,21 @@ export const parseAgentMessage = (raw: unknown): AgentToDaemon | null => {
       return typeof raw['id'] === 'number' && typeof raw['pluginId'] === 'string'
         ? { type: 'commit-request', id: raw['id'], kind, pluginId: raw['pluginId'] }
         : null;
+    }
+    case 'alert-request': {
+      const destination = raw['destination'];
+      const message = raw['message'];
+      // Only these two fields are read: anything else a plugin attaches
+      // (library, path, jobId) is dropped here, so it can never be trusted
+      // downstream. A destination is rejected, not truncated, when too long:
+      // a clipped name could match a different destination.
+      if (typeof destination !== 'string' || typeof message !== 'string') return null;
+      if (destination.length > MAX_ALERT_DESTINATION_CHARS) return null;
+      return {
+        type: 'alert-request',
+        destination,
+        message: message.slice(0, MAX_ALERT_MESSAGE_CHARS),
+      };
     }
     default:
       return null;

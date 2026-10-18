@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import {
+  ALERT_EVENT_TYPES,
   DEFAULT_SCHEDULE,
   HARDWARE_TYPES,
   PathMapError,
   ScheduleConfigError,
   validatePathMap,
   validateSchedule,
+  type AlertEventType,
   type HardwareType,
   type PathMapping,
   type ScheduleConfig,
@@ -99,6 +101,47 @@ export interface MetadataSettings {
   tmdbApiKey: string;
 }
 
+/**
+ * One place alerts are POSTed. `url` and every header `value` are secrets
+ * (a webhook URL usually embeds its token); this layer stores and returns them
+ * in full, and masking is the API layer's job.
+ */
+export interface AlertDestination {
+  name: string;
+  url: string;
+  headers: Array<{ name: string; value: string }>;
+  events: Record<AlertEventType, boolean>;
+  enabled: boolean;
+}
+
+export interface AlertSettings {
+  /** Base for links in alert bodies; empty means no links. */
+  publicBaseUrl: string;
+  destinations: AlertDestination[];
+}
+
+/** A destination with every event on and delivery enabled. */
+export const newDestination = (name: string, url: string): AlertDestination => ({
+  name,
+  url,
+  headers: [],
+  events: Object.fromEntries(ALERT_EVENT_TYPES.map((event) => [event, true])) as Record<
+    AlertEventType,
+    boolean
+  >,
+  enabled: true,
+});
+
+/**
+ * Everything that must never appear in a log line or an API response: each
+ * destination URL and each non-empty header value. Nothing else is secret.
+ */
+export const knownSecrets = (settings: AlertSettings): string[] =>
+  settings.destinations.flatMap((destination) => [
+    destination.url,
+    ...destination.headers.map((header) => header.value).filter((value) => value !== ''),
+  ]);
+
 export interface SettingsRepo {
   getDaemon(): DaemonSettings;
   setDaemon(patch: Partial<DaemonSettings>): void;
@@ -116,6 +159,8 @@ export interface SettingsRepo {
   setNodes(value: NodesSettings): void;
   getMetadata(): MetadataSettings;
   setMetadata(patch: Partial<MetadataSettings>): void;
+  getAlerts(): AlertSettings;
+  setAlerts(next: AlertSettings): void;
   isSet(key: string): boolean;
 }
 
@@ -142,6 +187,7 @@ const SETTING_KEYS = {
   auth: 'auth',
   nodes: 'nodes',
   metadata: 'metadata',
+  alerts: 'alerts',
 } as const;
 
 /** Five minutes: see `NodesSettings`. */
@@ -190,6 +236,113 @@ const requireBoolean = (value: unknown, label: string): boolean => {
     throw new SettingValidationError(`${label} must be a boolean, got ${JSON.stringify(value)}.`);
   }
   return value;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const requireHttpUrl = (value: unknown, label: string, allowEmpty: boolean): string => {
+  const text = requireString(value, label);
+  if (allowEmpty && text === '') return text;
+  let protocol: string;
+  try {
+    protocol = new URL(text).protocol;
+  } catch {
+    // Deliberately does not echo the value: a destination URL is a secret.
+    throw new SettingValidationError(`${label} must be an http(s) URL.`);
+  }
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    throw new SettingValidationError(`${label} must be an http(s) URL.`);
+  }
+  return text;
+};
+
+const ALERT_EVENT_SET: ReadonlySet<string> = new Set(ALERT_EVENT_TYPES);
+
+const HEADER_NAME_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/**
+ * `fillMissingEvents` is for reads only: a destination saved before a release
+ * added an event type has no key for it, and failing to load would stop the
+ * daemon. Missing means on, as in `newDestination`. Writes stay strict.
+ */
+const validateAlerts = (
+  value: { publicBaseUrl: unknown; destinations: unknown },
+  options: { fillMissingEvents?: boolean; forWrite?: boolean } = {},
+): AlertSettings => {
+  const publicBaseUrl = requireHttpUrl(value.publicBaseUrl, 'alerts.publicBaseUrl', true);
+  if (!Array.isArray(value.destinations)) {
+    throw new SettingValidationError('alerts.destinations must be an array.');
+  }
+  const seen = new Set<string>();
+  const destinations = value.destinations.map((raw: unknown, index): AlertDestination => {
+    const at = `alerts.destinations[${index}]`;
+    if (!isRecord(raw)) throw new SettingValidationError(`${at} must be an object.`);
+    const name = requireString(raw.name, `${at}.name`);
+    if (name.trim() === '') throw new SettingValidationError(`${at}.name must not be empty.`);
+    // The Send Webhook node and the flow-reference check both trim the name, so " ops" could
+    // be saved and never reached. Checked on write only: a stored row like it must not make
+    // every destination unreadable. The name is not echoed, to keep this message free of text
+    // the caller typed into a secret-bearing form.
+    if (options.forWrite === true && name.trim() !== name) {
+      throw new SettingValidationError(
+        `${at}.name must not start or end with a space or other whitespace.`,
+      );
+    }
+    // Names key delivery state and the UI's rows; two the same would merge them.
+    if (seen.has(name)) {
+      throw new SettingValidationError(`${at}.name "${name}" is used by another destination.`);
+    }
+    seen.add(name);
+    if (!Array.isArray(raw.headers)) {
+      throw new SettingValidationError(`${at}.headers must be an array.`);
+    }
+    const headers = raw.headers.map((header: unknown, h) => {
+      if (!isRecord(header)) {
+        throw new SettingValidationError(`${at}.headers[${h}] must be an object.`);
+      }
+      const headerName = requireString(header.name, `${at}.headers[${h}].name`);
+      if (headerName.trim() === '') {
+        throw new SettingValidationError(`${at}.headers[${h}].name must not be empty.`);
+      }
+      // A name or value that is not a legal header would break or inject into
+      // the outbound request. Messages never echo the value: it is a secret.
+      if (!HEADER_NAME_TOKEN.test(headerName)) {
+        throw new SettingValidationError(
+          `${at}.headers[${h}].name must be a valid HTTP header name (letters, digits and !#$%&'*+.^_\`|~-).`,
+        );
+      }
+      const headerValue = requireString(header.value, `${at}.headers[${h}].value`);
+      if (/[\r\n\0]/.test(headerValue)) {
+        throw new SettingValidationError(
+          `${at}.headers[${h}].value must not contain line breaks or NUL characters.`,
+        );
+      }
+      return { name: headerName, value: headerValue };
+    });
+    if (!isRecord(raw.events)) throw new SettingValidationError(`${at}.events must be an object.`);
+    for (const key of Object.keys(raw.events)) {
+      if (!ALERT_EVENT_SET.has(key)) {
+        throw new SettingValidationError(`${at}.events has unknown event "${key}".`);
+      }
+    }
+    const events = {} as Record<AlertEventType, boolean>;
+    for (const event of ALERT_EVENT_TYPES) {
+      const flag = raw.events[event];
+      events[event] =
+        flag === undefined && options.fillMissingEvents === true
+          ? true
+          : requireBoolean(flag, `${at}.events.${event}`);
+    }
+    return {
+      name,
+      url: requireHttpUrl(raw.url, `${at}.url`, false),
+      headers,
+      events,
+      enabled: requireBoolean(raw.enabled, `${at}.enabled`),
+    };
+  });
+  return { publicBaseUrl, destinations };
 };
 
 const HARDWARE_TYPE_SET: ReadonlySet<string> = new Set(HARDWARE_TYPES);
@@ -552,7 +705,26 @@ export const createSettingsRepo = (input: {
     );
   };
 
+  const getAlerts = (): AlertSettings =>
+    validateAlerts(
+      {
+        publicBaseUrl: readField(SETTING_KEYS.alerts, 'publicBaseUrl') ?? '',
+        destinations: readField(SETTING_KEYS.alerts, 'destinations') ?? [],
+      },
+      { fillMissingEvents: true },
+    );
+
+  // One transaction: a base url saved without the destinations saved beside it would pair a
+  // new link with the old destinations (or the reverse) after a failed write.
+  const setAlerts = db.transaction((next: AlertSettings): void => {
+    const valid = validateAlerts(next, { forWrite: true });
+    writeField(SETTING_KEYS.alerts, 'publicBaseUrl', valid.publicBaseUrl);
+    writeField(SETTING_KEYS.alerts, 'destinations', valid.destinations);
+  });
+
   return {
+    getAlerts,
+    setAlerts,
     getMetadata,
     setMetadata,
     getDaemon,

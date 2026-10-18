@@ -280,6 +280,22 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   let closing = false;
 
+  /**
+   * Nodes an operator deleted while this daemon runs. A deleted row is indistinguishable from a
+   * forged id, so without this a deleted node still retrying was reported as an unknown node
+   * refused, hourly, until restart. Capped: ids are only ever added by an operator action.
+   */
+  const MAX_REMOVED_IDS = 1_000;
+  const removedNodeIds = new Set<string>();
+  const unsubscribeRemoved = bus.subscribe((event) => {
+    if (event.type !== 'node.removed') return;
+    removedNodeIds.add(event.nodeId);
+    if (removedNodeIds.size > MAX_REMOVED_IDS) {
+      const oldest = removedNodeIds.values().next();
+      if (!oldest.done) removedNodeIds.delete(oldest.value);
+    }
+  });
+
   const nodeName = (nodeId: string): string => nodes.getById(nodeId)?.name ?? nodeId;
 
   const sendFrame = (conn: Connection, frame: ServerFrame): boolean => {
@@ -653,6 +669,12 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
         retryAfterMs: PROTOCOL_REFUSAL_RETRY_MS,
       });
       conn.ws.close(NODE_CLOSE_PROTOCOL, 'protocol version mismatch');
+      bus.emit({
+        type: 'node.refused',
+        nodeId: conn.nodeId,
+        reason: 'protocol version mismatch',
+        authenticated: true,
+      });
       return;
     }
 
@@ -943,6 +965,21 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       // it can report rather than a socket that opens and drops.
       if (!ok || nodeId === undefined) {
         denyUpgrade(socket, 401, 'unauthorized', NODE_UNAUTHORIZED_MESSAGE);
+        // Not for a node that is connected right now: an unauthenticated probe naming a healthy
+        // node's id must not raise an outage for it. Nor for one the operator revoked or deleted:
+        // such a node keeps retrying every 30 s, and reporting that alerted hourly until restart
+        // for something the operator did on purpose.
+        const row = nodeId === undefined ? null : nodes.getById(nodeId);
+        const removedByOperator =
+          nodeId !== undefined && (row?.revokedAt != null || removedNodeIds.has(nodeId));
+        if ((nodeId === undefined || !connections.has(nodeId)) && !removedByOperator) {
+          bus.emit({
+            type: 'node.refused',
+            nodeId: nodeId !== undefined && row !== null ? nodeId : null,
+            reason: 'credentials were refused',
+            authenticated: false,
+          });
+        }
         return;
       }
       wss.handleUpgrade(req, socket, head, (ws) => {
@@ -1075,16 +1112,28 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
             jobId: leased.jobId,
             lease: { state: 'expired', expiresAtMs: leased.lease.expiresAtMs },
           });
-          stallOpenJob({
+          const outcome =
+            `The stored payload for this remote job is corrupt, so it could not be adopted after ` +
+            `a restart (${error instanceof Error ? error.message : String(error)}); the file was ` +
+            `released and the attempt stalled.`;
+          const state = stallOpenJob({
             db,
             jobId: leased.jobId,
             fileId: leased.fileId,
-            outcome:
-              `The stored payload for this remote job is corrupt, so it could not be adopted after ` +
-              `a restart (${error instanceof Error ? error.message : String(error)}); the file was ` +
-              `released and the attempt stalled.`,
+            outcome,
             nowMs: now,
           });
+          // Nothing else will announce this ending (no handle is built for it), and a file
+          // whose last retry this spent is `failed`: the alert subscriber must hear it.
+          if (state !== null) {
+            bus.emit({
+              type: 'job.finished',
+              jobId: leased.jobId,
+              fileId: leased.fileId,
+              state,
+              outcome,
+            });
+          }
           continue;
         }
         const next = leaseOnDaemonStart(leased.lease, now, graceMs);
@@ -1136,6 +1185,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
 
     close: async () => {
       closing = true;
+      unsubscribeRemoved();
       if (pingTimer !== null) clearInterval(pingTimer);
       pingTimer = null;
       if (server !== null) {

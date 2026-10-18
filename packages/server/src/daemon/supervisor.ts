@@ -29,6 +29,13 @@ import { AgentFailure, createAgentHandle, type AgentHandle } from '../worker/age
 import { buildJobPayload, type JobPayload } from '../worker/job-payload.js';
 import type { JobReport } from '../worker/run-payload.js';
 import type { EventBus } from './events.js';
+import {
+  createJobAlertRelay,
+  type AlertRequest,
+  type JobLogSink,
+  type RelayedAlert,
+} from '../worker/alert-relay.js';
+import type { FlowMessageStatus } from '../alerts/alert-service.js';
 
 /**
  * Everything a worker process needs wired to the daemon, handed to the agent
@@ -49,6 +56,12 @@ export interface AgentFactoryInput {
   onHeartbeat: (nowMs: number) => void;
   onProgress: (progress: { percent: number | null; stage: string }) => void;
   onLog: (text: string) => void;
+  /**
+   * A flow node asked for an alert. The second argument is the calling
+   * handle's own job-log sink, so a refusal lands wherever that handle's log
+   * lines do. Optional so a hand-built input in a test need not supply it.
+   */
+  onAlert?: (request: AlertRequest, log: JobLogSink) => void;
   nowMs: () => number;
 }
 
@@ -120,6 +133,11 @@ export interface CreateSupervisorInput {
    * passes the daemon's real data directory.
    */
   dataDir?: string;
+  /**
+   * Sends a flow node's alert. Read at call time: the alert service is built
+   * after the supervisor, and absent in tests that never alert.
+   */
+  raiseFlowMessage?: (request: RelayedAlert) => FlowMessageStatus;
   /** Seam for tests: substitute the worker process. Production never sets it. */
   createAgent?: CreateAgentFn;
   /** Remote nodes currently online. Absent in tests that only exercise the local node. */
@@ -322,6 +340,7 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
         onHeartbeat: factoryInput.onHeartbeat,
         onProgress: factoryInput.onProgress,
         onLog: factoryInput.onLog,
+        ...(factoryInput.onAlert === undefined ? {} : { onAlert: factoryInput.onAlert }),
         nowMs: factoryInput.nowMs,
       }));
 
@@ -609,11 +628,50 @@ export const createSupervisor = (input: CreateSupervisorInput): Supervisor => {
     return input.createRemoteAgent;
   };
 
+  /**
+   * The alert relay for one job, which must never throw. `agentInputFor` also runs at daemon
+   * startup for every leased remote job, on a payload read back from its row; reading
+   * `payload.library.name` unguarded there made `startDaemon` throw on a payload without a
+   * library, and a daemon that cannot adopt its remote jobs cannot start at all. A missing
+   * name is looked up by `libraryId`, and anything still unknown is left off the alert.
+   */
+  const relayFor = (payload: JobPayload): ((request: AlertRequest, log: JobLogSink) => void) => {
+    const optional = payload as Partial<JobPayload>;
+    try {
+      let libraryName: string | undefined = optional.library?.name;
+      if (libraryName === undefined && typeof optional.libraryId === 'string') {
+        libraryName = createLibraryRepo(db).getById(optional.libraryId)?.name;
+      }
+      return createJobAlertRelay({
+        job: {
+          ...(typeof optional.jobId === 'string' ? { jobId: optional.jobId } : {}),
+          ...(typeof optional.path === 'string' ? { path: optional.path } : {}),
+          ...(libraryName === undefined ? {} : { libraryName }),
+        },
+        raise: (request) =>
+          input.raiseFlowMessage === undefined ? 'error' : input.raiseFlowMessage(request),
+      });
+    } catch {
+      // Losing this job's alerts is the whole cost; its run and the daemon's start go on.
+      return (request, log) => {
+        try {
+          log(
+            `Alert not sent: destination ${JSON.stringify(request.destination)} could not be queued`,
+          );
+        } catch {
+          // A broken sink must not fail the run either.
+        }
+      };
+    }
+  };
+
   /** The sinks for one job, under a fresh worker id. */
   const agentInputFor = (payload: JobPayload): AgentFactoryInput => {
     nextWorkerNumber += 1;
+    const relayAlert = relayFor(payload);
     return {
       id: `worker-${String(nextWorkerNumber)}`,
+      onAlert: relayAlert,
       documents: createPluginDocumentRepo(db),
       onStep: (step) => {
         jobRepo.recordStep({

@@ -474,4 +474,39 @@ describe('createRemoteAgentHandle', () => {
     handle.receive({ type: 'commit-request', id: 2, kind: 'replace', pluginId: 'x' });
     expect(sent.at(-1)).toMatchObject({ message: { type: 'commit-result', granted: false } });
   });
+
+  it('routes an alert-request to onAlert with a sink that writes both the live and server job logs, and replies to nothing', async () => {
+    const alerts: unknown[] = [];
+    const live: string[] = [];
+    const appended: string[] = [];
+    const { handle, sent } = harness({
+      onLog: (text) => live.push(text),
+      appendLog: (text) => appended.push(text),
+      onAlert: (request, log) => {
+        alerts.push(request);
+        log('Alert not sent: destination "ha" is unknown');
+      },
+    });
+    const run = handle.run(payloadFixture());
+    await flush();
+    const before = sent.length;
+    handle.receive({ type: 'alert-request', destination: 'ha', message: 'hi' });
+    expect(alerts).toEqual([{ destination: 'ha', message: 'hi' }]);
+    expect(live).toEqual(['Alert not sent: destination "ha" is unknown']);
+    expect(appended).toEqual(live);
+    expect(sent).toHaveLength(before);
+
+    // A throwing onAlert never reaches the job.
+    const throwing = harness({
+      onAlert: () => {
+        throw new Error('boom');
+      },
+    });
+    void throwing.handle.run(payloadFixture());
+    await flush();
+    expect(() => {
+      throwing.handle.receive({ type: 'alert-request', destination: 'ha', message: 'hi' });
+    }).not.toThrow();
+    void run;
+  });
 });

@@ -72,15 +72,37 @@ export type TrawlarrEvent =
       skipped: number;
     }
   | { type: 'plugin.sync.failed'; sourceId: string; runId: number; code: string; message: string }
+  /**
+   * A scan stopped on a thrown failure. NOT emitted for `rootsUnavailable`, which is a normal
+   * `scan.finished` that refused to reconcile; both for one outage would send two alerts.
+   * `message` is the error's own text and may name paths: it goes through alert redaction.
+   */
+  | { type: 'scan.aborted'; libraryId: string; message: string }
+  /** The startup hardware preflight found declared hardware ffmpeg cannot encode with. */
+  | { type: 'hardware.check_failed'; findings: string[] }
   | { type: 'library.paused'; libraryId: string; reason: string }
   | { type: 'library.resumed'; libraryId: string }
+  | { type: 'library.removed'; libraryId: string }
   | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number }
   /**
    * A remote node connected (after a successful handshake), disconnected, or
    * reported which libraries it can reach. The node's row is the record;
    * this only tells a UI to re-fetch `GET /nodes`.
    */
-  | { type: 'nodes.changed'; nodeId: string; online: boolean };
+  | { type: 'nodes.changed'; nodeId: string; online: boolean }
+  /**
+   * A node's connection was refused (bad credentials, protocol mismatch). `nodeId` is null unless
+   * it names a node this server knows: the id on an unauthenticated upgrade is attacker-chosen
+   * and must not mint alert scopes. `authenticated` is true when the node proved its secret
+   * first (protocol mismatch), so the id cannot be spoofed.
+   */
+  | { type: 'node.refused'; nodeId: string | null; reason: string; authenticated: boolean }
+  /**
+   * An operator revoked or deleted a node. Its disconnect is an `online: false` that no
+   * `online: true` will ever follow, and it may keep retrying with credentials that no longer
+   * work; neither is an outage, so alerts and the hub's refusal reporting drop it on this.
+   */
+  | { type: 'node.removed'; nodeId: string };
 
 export interface EventBus {
   emit(event: TrawlarrEvent): void;

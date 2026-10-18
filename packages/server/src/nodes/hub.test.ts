@@ -80,6 +80,8 @@ let pluginRoot: string;
 let clients: WebSocket[];
 let extraHubs: NodeHub[];
 let hubErrors: string[];
+/** The bus of the hub `makeHub` built last, so a test can emit what the API would. */
+let hubBus: ReturnType<typeof createEventBus>;
 
 const makeHub = (
   over: {
@@ -90,6 +92,7 @@ const makeHub = (
 ): NodeHub => {
   const bus = createEventBus();
   bus.subscribe((event) => events.push(event));
+  hubBus = bus;
   return createNodeHub({
     db,
     nodes,
@@ -310,7 +313,9 @@ const connectNode = async (
   });
 
 /** Online node with one running job the hub has sent it. */
-const startRemoteJob = async (over: { logPath?: string } = {}) => {
+const startRemoteJob = async (
+  over: { logPath?: string; onAlert?: AgentFactoryInput['onAlert'] } = {},
+) => {
   const client = await connectNode();
   await client.hello();
   const claimed = claimJob();
@@ -318,6 +323,7 @@ const startRemoteJob = async (over: { logPath?: string } = {}) => {
   const sinks: Sinks = { steps: [], logs: [], heartbeats: [] };
   const agent = hub.createAgent({
     ...factoryInput(sinks),
+    ...(over.onAlert === undefined ? {} : { onAlert: over.onAlert }),
     // What the supervisor's sink does with a heartbeat.
     onHeartbeat: (at) => {
       sinks.heartbeats.push(at);
@@ -357,6 +363,74 @@ describe('createNodeHub', () => {
       connectNode({ 'x-trawlarr-node': creds.nodeId, authorization: 'Bearer not-the-secret' }),
     ).rejects.toThrow(/401/);
     expect(hub.isOnline(creds.nodeId)).toBe(false);
+  });
+
+  it('emits node.refused for a bad-secret upgrade, never for a node that is connected, and never with a forged id', async () => {
+    const wrong = { 'x-trawlarr-node': creds.nodeId, authorization: 'Bearer not-the-secret' };
+    await expect(connectNode(wrong)).rejects.toThrow(/401/);
+    await expect(
+      connectNode({ 'x-trawlarr-node': 'forged-id', authorization: 'Bearer x' }),
+    ).rejects.toThrow(/401/);
+    await expect(connectNode({})).rejects.toThrow(/401/);
+    const refusals = () => events.filter((e) => e.type === 'node.refused');
+    expect(refusals()).toEqual([
+      {
+        type: 'node.refused',
+        nodeId: creds.nodeId,
+        reason: 'credentials were refused',
+        authenticated: false,
+      },
+      {
+        type: 'node.refused',
+        nodeId: null,
+        reason: 'credentials were refused',
+        authenticated: false,
+      },
+      {
+        type: 'node.refused',
+        nodeId: null,
+        reason: 'credentials were refused',
+        authenticated: false,
+      },
+    ]);
+
+    const good = await connectNode();
+    await good.hello();
+    await expect(connectNode(wrong)).rejects.toThrow(/401/);
+    expect(refusals()).toHaveLength(3);
+  });
+
+  // A revoked or deleted node that keeps retrying is the operator's own doing; reporting its
+  // 401s made a revoke alert at once and then hourly until restart.
+  it('emits no node.refused for a revoked node, or a deleted one, that keeps retrying', async () => {
+    const refusals = () => events.filter((e) => e.type === 'node.refused');
+    const as = { 'x-trawlarr-node': creds.nodeId, authorization: `Bearer ${creds.secret}` };
+    nodes.revoke(creds.nodeId, now);
+    await expect(connectNode(as)).rejects.toThrow(/401/);
+    await expect(connectNode(as)).rejects.toThrow(/401/);
+    expect(refusals()).toEqual([]);
+
+    nodes.remove(creds.nodeId);
+    hubBus.emit({ type: 'node.removed', nodeId: creds.nodeId });
+    await expect(connectNode(as)).rejects.toThrow(/401/);
+    expect(refusals()).toEqual([]);
+    // Any other unknown id is still reported.
+    await expect(
+      connectNode({ 'x-trawlarr-node': 'forged-id', authorization: 'Bearer x' }),
+    ).rejects.toThrow(/401/);
+    expect(refusals()).toHaveLength(1);
+  });
+
+  it('emits node.refused for a protocol mismatch', async () => {
+    const client = await connectNode();
+    await client.hello([], { protocolVersion: 99 });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'node.refused',
+        nodeId: creds.nodeId,
+        authenticated: true,
+      }),
+    );
   });
 
   it('refuses a mismatched protocol version naming both, then closes 4002', async () => {
@@ -561,6 +635,22 @@ describe('createNodeHub', () => {
     expect(leaseOf(payload.jobId)).toEqual({ state: 'connected', expiresAtMs: null });
     const leased = jobs.listLeased().find((row) => row.jobId === payload.jobId)!;
     expect((JSON.parse(leased.payloadJson) as JobPayload).path).toBe(payload.path);
+  });
+
+  // The remote half of Send Webhook: a node's enveloped alert-request must reach the
+  // supervisor's relay through the hub's handle, as a local fork's does through its own.
+  it("routes a node's alert-request frame to the factory's onAlert", async () => {
+    const alerts: unknown[] = [];
+    const { client, payload } = await startRemoteJob({
+      onAlert: (request) => alerts.push(request),
+    });
+    client.send({
+      type: 'agent',
+      jobId: payload.jobId,
+      message: { type: 'alert-request', destination: 'ha', message: 'hi', path: '/smuggled' },
+    });
+    await waitFor(() => alerts.length > 0, 'the alert');
+    expect(alerts).toEqual([{ destination: 'ha', message: 'hi' }]);
   });
 
   it('appends log frames and a backfill to the server job log', async () => {
@@ -846,6 +936,37 @@ describe('createNodeHub', () => {
     expect(leaseOf(bad.jobId).state).toBe('expired');
     expect(files.getById(bad.fileId)?.state).toBe('held');
     expect(files.getById(bad.fileId)?.attempt_count).toBe(1);
+    // The ending is announced, or a file this stall pushed to `failed` would never be alerted.
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'job.finished',
+        jobId: bad.jobId,
+        fileId: bad.fileId,
+        state: 'held',
+      }),
+    );
+  });
+
+  it('announces a corrupt-payload stall as failed when it spent the last retry, and nothing when the guard skips it', async () => {
+    const { payload: bad } = await startRemoteJob();
+    db.prepare(`UPDATE media_file SET attempt_count = 2 WHERE id = ?`).run(bad.fileId);
+    db.prepare(`UPDATE job SET payload_json = '{not json' WHERE id = ?`).run(bad.jobId);
+    const restarted = makeHub();
+    extraHubs.push(restarted);
+    restarted.adoptLeasedJobs(() => factoryInput({ steps: [], logs: [], heartbeats: [] }));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'job.finished', jobId: bad.jobId, state: 'failed' }),
+    );
+
+    // The file has left `running`: a second corrupt job on it must not re-announce.
+    const { payload: second } = await startRemoteJob();
+    db.prepare(`UPDATE media_file SET state = 'failed' WHERE id = ?`).run(second.fileId);
+    db.prepare(`UPDATE job SET payload_json = '{not json' WHERE id = ?`).run(second.jobId);
+    events.length = 0;
+    const again = makeHub();
+    extraHubs.push(again);
+    again.adoptLeasedJobs(() => factoryInput({ steps: [], logs: [], heartbeats: [] }));
+    expect(events.filter((e) => e.type === 'job.finished' && e.jobId === second.jobId)).toEqual([]);
   });
 
   it('appends a late result for a job already released, without touching the ledger, and acks it', async () => {
