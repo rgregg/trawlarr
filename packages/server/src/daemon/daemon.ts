@@ -419,15 +419,22 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   const alertService = createAlertService({
     settings,
     deliverer: alertDeliverer,
-    // Read fresh on each call: a Plex token or the key can change while the daemon runs, and a
-    // stale list would let the new value through into a webhook body.
-    extraSecrets: () => [
-      settings.getDaemon().apiKey,
-      ...alertLibraries.list().flatMap((library) => {
-        const token = library.plex?.token;
-        return token === undefined || token === '' ? [] : [token];
-      }),
-    ],
+    // Read fresh on each call: any of these can change while the daemon runs, and a stale list
+    // would let the new value through into a webhook body. Every credential the daemon stores
+    // belongs here (spec 11.7): a reason is free text, and a plugin or a failing request can
+    // quote any of them into it. Empty values are dropped by the service.
+    extraSecrets: () => {
+      const auth = settings.getAuth();
+      return [
+        settings.getDaemon().apiKey,
+        auth.oidcClientSecret,
+        auth.sessionSecret,
+        settings.getMetadata().tmdbApiKey,
+        ...alertLibraries
+          .list()
+          .flatMap((library) => [library.plex?.token ?? '', library.runtime.apiKey]),
+      ].filter((secret) => secret !== '');
+    },
     nowMs,
     log: (line) => {
       console.warn(`[daemon] ${line}`);

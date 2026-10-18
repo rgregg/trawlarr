@@ -1093,6 +1093,38 @@ describe('alerts', () => {
     expect(hook.bodies.filter((b) => b.event === 'library.paused')).toHaveLength(1);
   });
 
+  it('redacts the OIDC client secret, the session secret, the TMDB key and every runtime-source key', async () => {
+    const dataDir = newDataDir();
+    const { libraryId } = seedLibrary(dataDir);
+    const db = openDataDb(dataDir);
+    const repo = createSettingsRepo({ db });
+    repo.setAuth({ oidcClientSecret: 'oidc-secret-1111' });
+    repo.setMetadata({ tmdbApiKey: 'tmdb-key-2222' });
+    const sessionSecret = repo.getAuth().sessionSecret;
+    createLibraryRepo(db).update({
+      id: libraryId,
+      runtime: {
+        kind: 'radarr',
+        url: 'http://radarr.lan',
+        apiKey: 'radarr-key-3333',
+        percent: 5,
+        minutes: 3,
+      },
+    });
+    db.close();
+    const secrets = ['oidc-secret-1111', sessionSecret, 'tmdb-key-2222', 'radarr-key-3333'];
+    prePause(dataDir, `disk check: leaked ${secrets.join(' ')}`);
+    const hook = await receiver();
+    configureAlerts(dataDir, hook.url);
+
+    await start({ dataDir, alerts: { startupDelayMs: 0, tickMs: 50 } });
+    await until(() => hook.bodies.some((b) => b.event === 'library.paused'));
+
+    const text = JSON.stringify(hook.bodies);
+    for (const secret of secrets) expect(text).not.toContain(secret);
+    expect(text).toContain('[redacted]');
+  });
+
   it('does not alert for a library the operator paused before boot', async () => {
     const dataDir = newDataDir();
     seedLibrary(dataDir);
