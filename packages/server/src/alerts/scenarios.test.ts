@@ -99,6 +99,26 @@ describe('alert scenarios', () => {
     for (const body of w.sent) expect(JSON.stringify(body)).not.toMatch(UUID);
   });
 
+  // root_missing takes over from an aborted scan without a recovery; the aborted group must
+  // still be cleared, or the next abort inside the hour was counted instead of sent.
+  it('B: an abort after roots went missing and came back is sent at once', () => {
+    const w = world();
+    w.emit({ type: 'scan.aborted', libraryId: LIBRARY_ID, message: 'ffprobe vanished' });
+    w.runFor(5 * MIN);
+    w.emit(scan(1));
+    w.runFor(5 * MIN);
+    w.emit(scan(0));
+    w.runFor(5 * MIN);
+    w.emit({ type: 'scan.aborted', libraryId: LIBRARY_ID, message: 'ffprobe vanished' });
+
+    expect(w.sent.map((b) => b.event)).toEqual([
+      'scan.aborted',
+      'library.root_missing',
+      'library.root_missing.recovered',
+      'scan.aborted',
+    ]);
+  });
+
   it('C: a revoked node is silent from the revoke on, offline or refused', () => {
     const w = world();
     // Offline long enough to have alerted before the operator acts.

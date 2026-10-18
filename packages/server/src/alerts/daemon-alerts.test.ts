@@ -31,6 +31,7 @@ const setup = (
         raised.push(input);
         options.raise?.(input);
       },
+      clear: () => {},
     },
     describe: {
       library: (id) => (id === 'gone' ? undefined : `Lib ${id}`),
@@ -237,7 +238,7 @@ describe('daemon alerts: startup and robustness', () => {
     const raised: AlertInput[] = [];
     const stop = subscribeDaemonAlerts({
       bus,
-      service: { raise: (i) => raised.push(i) },
+      service: { raise: (i) => raised.push(i), clear: () => {} },
       describe: { library: () => undefined, node: () => undefined, file: () => undefined },
       nowMs: () => 0,
       startupDelayMs: 0,

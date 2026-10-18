@@ -40,6 +40,12 @@ export interface AlertService {
     jobId?: string;
   }): FlowMessageStatus;
   sendTest(name: string): Promise<DeliveryResult>;
+  /**
+   * Forget an outage without announcing anything: for one that ended in a way no `.recovered`
+   * should claim. Without it the coalescer kept the group, and the next occurrence within the
+   * hour was counted rather than sent.
+   */
+  clear(event: RecoverableEventType, scope: string): void;
   tick(): void;
   stop(deadlineMs: number): Promise<{ dropped: number }>;
 }
@@ -322,6 +328,15 @@ export const createAlertService = (opts: {
       } catch (error) {
         logOnce('could not send test alert', error);
         return fail('failed');
+      }
+    },
+
+    clear(event, scope) {
+      try {
+        coalescer.clear(event, scope);
+        contextOf.delete(`${event}|${scope}`);
+      } catch (error) {
+        logOnce('could not clear alert', error);
       }
     },
 

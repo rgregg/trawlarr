@@ -18,7 +18,7 @@ const refusedScope = (nodeId: string): string => `${REFUSED_SCOPE_PREFIX}${nodeI
 
 export interface DaemonAlertsOptions {
   bus: EventBus;
-  service: Pick<AlertService, 'raise'>;
+  service: Pick<AlertService, 'raise' | 'clear'>;
   /** Each may return undefined for a deleted library/node/file; the id is used instead. */
   describe: {
     library(id: string): string | undefined;
@@ -155,6 +155,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       // claim of health for a scan that just found its roots gone: the aborted outage is
       // dropped without a recovery, and root_missing below is the news.
       standing.delete(keyOf('scan.aborted', event.libraryId));
+      service.clear('scan.aborted', event.libraryId);
       // Reported here and only here: `scan.aborted` is for a scan that threw, and one outage
       // must not send both.
       begin({
