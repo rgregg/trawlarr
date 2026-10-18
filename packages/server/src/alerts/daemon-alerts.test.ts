@@ -115,6 +115,20 @@ describe('daemon alerts: root missing and aborted scans', () => {
     t.emit({ type: 'scan.finished', libraryId: 'l1', summary: summaryOf(0) });
     expect(t.names()).toEqual(['scan.aborted', 'scan.aborted.recovered']);
   });
+
+  // "Scans are completing again" was sent for a scan that had just found every root gone.
+  it('claims no scan recovery when the next scan finds roots unreachable; root_missing takes over', () => {
+    const t = setup();
+    t.emit({ type: 'scan.aborted', libraryId: 'l1', message: 'ffprobe vanished' });
+    t.emit({ type: 'scan.finished', libraryId: 'l1', summary: summaryOf(2) });
+    expect(t.names()).toEqual(['scan.aborted', 'library.root_missing']);
+    t.emit({ type: 'scan.finished', libraryId: 'l1', summary: summaryOf(0) });
+    expect(t.names()).toEqual([
+      'scan.aborted',
+      'library.root_missing',
+      'library.root_missing.recovered',
+    ]);
+  });
 });
 
 describe('daemon alerts: pauses', () => {

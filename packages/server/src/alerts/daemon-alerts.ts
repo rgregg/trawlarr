@@ -150,9 +150,11 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
 
   const onScanFinished = (event: Extract<TrawlarrEvent, { type: 'scan.finished' }>): void => {
     const name = libraryName(event.libraryId);
-    // A scan that finished is the library's next scan: whatever stopped the last one is over.
-    recover('scan.aborted', event.libraryId, `Scans of ${name} are completing again.`);
     if (event.summary.rootsUnavailable > 0) {
+      // Whatever stopped the last scan is over, but "scans are completing again" would be a
+      // claim of health for a scan that just found its roots gone: the aborted outage is
+      // dropped without a recovery, and root_missing below is the news.
+      standing.delete(keyOf('scan.aborted', event.libraryId));
       // Reported here and only here: `scan.aborted` is for a scan that threw, and one outage
       // must not send both.
       begin({
@@ -163,6 +165,9 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         ...libraryLabel(event.libraryId),
       });
     } else {
+      // A scan that finished cleanly is the library's next scan: whatever stopped the last one
+      // is over.
+      recover('scan.aborted', event.libraryId, `Scans of ${name} are completing again.`);
       recover('library.root_missing', event.libraryId, `${name}: its roots are reachable again.`);
     }
   };
