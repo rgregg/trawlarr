@@ -23,6 +23,7 @@ const setup = (
 ) => {
   let now = 10 * MIN;
   const raised: AlertInput[] = [];
+  const cleared: string[] = [];
   const bus = createEventBus();
   const alerts = createDaemonAlerts({
     bus,
@@ -31,7 +32,9 @@ const setup = (
         raised.push(input);
         options.raise?.(input);
       },
-      clear: () => {},
+      clear: (event, scope) => {
+        cleared.push(`${event}|${scope}`);
+      },
     },
     describe: {
       library: (id) => (id === 'gone' ? undefined : `Lib ${id}`),
@@ -49,6 +52,7 @@ const setup = (
     bus,
     emit,
     raised,
+    cleared,
     names: () => raised.map((r) => r.event),
     advance: (ms: number) => {
       now += ms;
@@ -457,6 +461,16 @@ describe('daemon alerts: revoked and deleted nodes', () => {
       t.alerts.reraise();
     }
     expect(t.names()).toEqual(['node.offline']);
+  });
+
+  it('a removal clears the coalescer group for both scopes, so no stale still-down follows', () => {
+    const t = setup({ nodeOfflineGraceMs: 5 * MIN });
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    t.emit({ type: 'node.removed', nodeId: 'n1' });
+    expect(t.cleared).toContain('node.offline|n1');
+    expect(
+      t.cleared.filter((c) => c.startsWith('node.offline|') && c !== 'node.offline|n1'),
+    ).toHaveLength(1);
   });
 
   it('a revoke inside the grace never alerts at all', () => {

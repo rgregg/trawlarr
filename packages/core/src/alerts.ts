@@ -81,6 +81,8 @@ interface Group {
   noticeAtMs: number;
   /** Causes already announced; a repeat of one is counted, not re-sent. */
   causes: Set<string>;
+  /** Announced causes that recurred this window; becomes `causes` when a flood rolls over. */
+  seen: Set<string>;
   /** Individually sent causes this window; reset at each rollover so the cap is per window. */
   sentThisWindow: number;
   overflowCauses: Set<string>;
@@ -120,6 +122,7 @@ export function createCoalescer(opts: {
           phase: 'window',
           noticeAtMs: nowMs,
           causes: new Set([cause]),
+          seen: new Set([cause]),
           sentThisWindow: 1,
           overflowCauses: new Set(),
           pending: 0,
@@ -136,6 +139,7 @@ export function createCoalescer(opts: {
         // window. Ten distinct causes go out individually; the rest are only counted.
         if (g.sentThisWindow < opts.maxCausesPerWindow) {
           g.causes.add(cause);
+          g.seen.add(cause);
           g.sentThisWindow++;
           return { send: true };
         }
@@ -148,6 +152,7 @@ export function createCoalescer(opts: {
         return { send: false };
       }
       g.pending++;
+      if (g.causes.has(cause)) g.seen.add(cause);
       if (
         example !== undefined &&
         g.examples.length < MAX_EXAMPLES &&
@@ -185,6 +190,10 @@ export function createCoalescer(opts: {
             // and send at once, beside this summary — a sustained flood sent two messages
             // every window for as long as it lasted.
             g.windowEndMs = nowMs + opts.windowMs;
+            // Keep only causes seen this window: carrying every cause ever announced grew
+            // without bound for as long as a flood of ever-new causes lasted.
+            g.causes = g.seen;
+            g.seen = new Set();
           } else {
             // A whole window with nothing in it: the flood is over, and the next one is news.
             groups.delete(key);

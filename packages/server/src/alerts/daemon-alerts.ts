@@ -198,6 +198,10 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     // The operator's own act: no `.recovered`, just forget the outage.
     standing.delete(keyOf('node.offline', nodeId));
     standing.delete(keyOf('node.offline', refusedScope(nodeId)));
+    // The coalescer group too: left alone, a revoke 15-60 min into an outage still sent one
+    // "still offline" message when the hourly repeat came due.
+    service.clear('node.offline', nodeId);
+    service.clear('node.offline', refusedScope(nodeId));
     refusals.delete(nodeId);
     removedNodes.add(nodeId);
     if (removedNodes.size > MAX_REMOVED_NODES) {

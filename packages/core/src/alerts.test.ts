@@ -216,4 +216,25 @@ describe('sustained flood of one non-outage cause', () => {
         .send,
     ).toBe(true);
   });
+
+  it('forgets causes that did not recur in the last window when a flood rolls over', () => {
+    const c = createCoalescer(opts);
+    // Ten distinct causes announced in window one, then only 'boom-0' keeps recurring.
+    for (let i = 0; i < 10; i++) {
+      c.offer({ event: 'file.failed', scope: 'l', cause: `boom-${i}`, nowMs: i });
+    }
+    c.offer({ event: 'file.failed', scope: 'l', cause: 'boom-0', nowMs: MIN });
+    expect(c.due(opts.windowMs)).toHaveLength(1);
+    c.offer({ event: 'file.failed', scope: 'l', cause: 'boom-0', nowMs: opts.windowMs + 1 });
+    expect(c.due(2 * opts.windowMs)).toHaveLength(1);
+    // 'boom-5' was not seen for a whole window, so it is news again; 'boom-0' is not.
+    expect(
+      c.offer({ event: 'file.failed', scope: 'l', cause: 'boom-5', nowMs: 2 * opts.windowMs + 1 })
+        .send,
+    ).toBe(true);
+    expect(
+      c.offer({ event: 'file.failed', scope: 'l', cause: 'boom-0', nowMs: 2 * opts.windowMs + 2 })
+        .send,
+    ).toBe(false);
+  });
 });
