@@ -82,6 +82,7 @@ export type TrawlarrEvent =
   | { type: 'hardware.check_failed'; findings: string[] }
   | { type: 'library.paused'; libraryId: string; reason: string }
   | { type: 'library.resumed'; libraryId: string }
+  | { type: 'library.removed'; libraryId: string }
   | { type: 'workers.changed'; target: Record<WorkerClass, number>; active: number }
   /**
    * A remote node connected (after a successful handshake), disconnected, or

@@ -500,3 +500,34 @@ describe('daemon alerts: revoked and deleted nodes', () => {
     expect(t.raised).toHaveLength(1);
   });
 });
+
+describe('daemon alerts: deleted libraries and operator pauses', () => {
+  it('deleting a library forgets its standing outages, with no recovery and no repeats', () => {
+    const t = setup({ startupDelayMs: 0 });
+    t.emit({ type: 'library.paused', libraryId: 'l1', reason: 'flow-invalid: x' });
+    t.emit({ type: 'scan.aborted', libraryId: 'l1', message: 'boom' } as TrawlarrEvent);
+    expect(t.raised).toHaveLength(2);
+    t.emit({ type: 'library.removed', libraryId: 'l1' });
+    for (let i = 0; i < 180; i++) {
+      t.advance(MIN);
+      t.alerts.reraise();
+    }
+    expect(t.raised).toHaveLength(2);
+    expect(t.cleared).toEqual(
+      expect.arrayContaining(['library.paused|l1', 'library.root_missing|l1', 'scan.aborted|l1']),
+    );
+  });
+
+  it('an operator pause replaces an automatic one: no repeats, no false recovery on resume', () => {
+    const t = setup({ startupDelayMs: 0 });
+    t.emit({ type: 'library.paused', libraryId: 'l1', reason: 'flow-invalid: x' });
+    t.emit({ type: 'library.paused', libraryId: 'l1', reason: 'operator: maintenance' });
+    for (let i = 0; i < 180; i++) {
+      t.advance(MIN);
+      t.alerts.reraise();
+    }
+    t.emit({ type: 'library.resumed', libraryId: 'l1' });
+    expect(t.names()).toEqual(['library.paused']);
+    expect(t.cleared).toContain('library.paused|l1');
+  });
+});

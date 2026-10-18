@@ -173,9 +173,21 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     }
   };
 
+  /** Forget an outage without a `.recovered`: the standing entry and the coalescer's group. */
+  const forget = (event: RecoverableEventType, scope: string): void => {
+    standing.delete(keyOf(event, scope));
+    service.clear(event, scope);
+  };
+
   const beginPaused = (libraryId: string, reason: string): void => {
-    // An operator's own pause is not news to the operator.
-    if (reason.startsWith(PAUSE_PREFIX_OPERATOR)) return;
+    if (reason.startsWith(PAUSE_PREFIX_OPERATOR)) {
+      // An operator's own pause is not news to the operator, and it takes the pause over: the
+      // automatic one stayed standing, so fixing the flow (which an operator-owned pause never
+      // lifts) left it repeating hourly, and a resume announced a recovery of a pause the
+      // operator had replaced.
+      forget('library.paused', libraryId);
+      return;
+    }
     begin({
       event: 'library.paused',
       scope: libraryId,
@@ -286,6 +298,12 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         return;
       case 'library.paused':
         beginPaused(event.libraryId, event.reason);
+        return;
+      case 'library.removed':
+        // Nothing can recover a deleted library's outages, so they would repeat until restart.
+        forget('library.paused', event.libraryId);
+        forget('library.root_missing', event.libraryId);
+        forget('scan.aborted', event.libraryId);
         return;
       case 'library.resumed':
         // From any source, an operator's resume included: the library is running again either way.
