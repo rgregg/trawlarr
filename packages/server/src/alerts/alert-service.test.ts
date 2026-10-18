@@ -5,6 +5,12 @@ import type { Deliverer, DeliveryResult, DeliveryTarget } from './deliver.js';
 
 type Body = Record<string, unknown>;
 
+// Scopes are ids in production; every follow-up test uses id-shaped ones so a summary that
+// prints its scope is caught.
+const LIB_ID = '3f2b8c1e-9d4a-4e2b-a7c6-0b1d2e3f4a5b';
+const NODE_ID = '7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d';
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
 const harness = (initial: Partial<AlertSettings> = {}) => {
   let settings: AlertSettings = {
     publicBaseUrl: '',
@@ -277,10 +283,16 @@ describe('AlertService', () => {
   it('redacts the follow-up summary', () => {
     const h = harness();
     for (let i = 0; i < 2; i++)
-      h.service.raise({ event: 'file.failed', scope: 'api-key-123', summary: 's', reason: 'r' });
+      h.service.raise({
+        event: 'file.failed',
+        scope: LIB_ID,
+        label: 'api-key-123',
+        summary: 's',
+        reason: 'r',
+      });
     h.advance(16 * 60_000);
     h.service.tick();
-    expect(h.sent[1]!.body.summary).toBe('[redacted]: 1 more file.failed');
+    expect(h.sent[1]!.body.summary).toBe('[redacted]: 1 more file failed');
   });
 
   it('puts the library on a follow-up when known and omits it for node events', () => {
@@ -353,5 +365,95 @@ describe('AlertService', () => {
     h.service.raiseFlowMessage({ destination: 'hook', message: 'm' });
     h.service.tick();
     expect(h.sent).toHaveLength(0);
+  });
+
+  describe('follow-up summaries name the library or node in plain words', () => {
+    /** Raise the same outage every minute for `minutes`, ticking as the daemon does. */
+    const standingFor = (
+      h: ReturnType<typeof harness>,
+      input: Parameters<ReturnType<typeof harness>['service']['raise']>[0],
+      minutes: number,
+    ): string[] => {
+      for (let m = 0; m <= minutes; m++) {
+        h.service.raise(input);
+        h.service.tick();
+        h.advance(60_000);
+      }
+      return h.sent.map((s) => String(s.body.summary));
+    };
+
+    it.each([
+      ['library.root_missing', LIB_ID, 'Movies', 'Movies: roots still unreachable'],
+      ['scan.aborted', LIB_ID, 'Movies', 'Movies: scans still aborting'],
+      ['library.paused', LIB_ID, 'Movies', 'Movies: library still paused'],
+      ['node.offline', NODE_ID, 'gpu-box', 'gpu-box: node still offline'],
+      ['node.offline', `refused:${NODE_ID}`, 'gpu-box', 'gpu-box: node still refused'],
+      ['hardware.check_failed', 'hardware', undefined, 'Hardware check still failing'],
+    ] as const)(
+      '%s on %s says so without the id, the code or the tick count',
+      (event, scope, label, want) => {
+        const h = harness();
+        const summaries = standingFor(
+          h,
+          { event, scope, summary: 'first', ...(label === undefined ? {} : { label }) },
+          2 * 60,
+        );
+        // First at once, then two hourly still-downs; each re-offer is the same condition.
+        expect(summaries).toEqual(['first', want, want]);
+        for (const text of summaries) {
+          expect(text).not.toMatch(UUID);
+          expect(text).not.toContain(event);
+        }
+      },
+    );
+
+    it('a grouped file follow-up keeps its count, with the name and plain words', () => {
+      const h = harness();
+      for (let i = 0; i < 4; i++) {
+        h.service.raise({
+          event: 'file.failed',
+          scope: LIB_ID,
+          label: 'Movies',
+          library: 'Movies',
+          summary: `f${i} failed`,
+          reason: 'same',
+        });
+        h.service.raise({
+          event: 'file.not_converging',
+          scope: LIB_ID,
+          label: 'Movies',
+          summary: `f${i} loops`,
+          reason: 'same',
+        });
+      }
+      for (let i = 0; i < 11; i++) {
+        h.service.raise({
+          event: 'file.failed',
+          scope: LIB_ID,
+          label: 'Movies',
+          summary: 'x',
+          // Letters, not digits: normalizeCause strips digits, which would make these one cause.
+          reason: `cause ${String.fromCharCode(97 + i)}`,
+        });
+      }
+      h.advance(16 * 60_000);
+      h.service.tick();
+      const follow = h.sent.filter((s) => 'count' in s.body).map((s) => s.body.summary);
+      expect(follow).toEqual([
+        'Movies: 5 more files failed (2 other causes)',
+        'Movies: 3 more files not converging',
+      ]);
+    });
+
+    it('never falls back to the scope when no label was given', () => {
+      const h = harness();
+      standingFor(h, { event: 'node.offline', scope: NODE_ID, summary: 'first' }, 61);
+      h.service.raise({ event: 'file.failed', scope: LIB_ID, summary: 'a', reason: 'r' });
+      h.service.raise({ event: 'file.failed', scope: LIB_ID, summary: 'b', reason: 'r' });
+      h.advance(16 * 60_000);
+      h.service.tick();
+      const follow = h.sent.filter((s) => 'count' in s.body).map((s) => String(s.body.summary));
+      expect(follow).toEqual(['A node: node still offline', 'A library: 1 more file failed']);
+    });
   });
 });

@@ -396,3 +396,33 @@ describe('daemon alerts: refused nodes', () => {
     expect(t.raised).toHaveLength(1);
   });
 });
+
+describe('daemon alerts: display labels', () => {
+  // Follow-ups are written from the label, so it must be the NAME and never the id.
+  it('labels every raise with the library or node name', () => {
+    const t = setup({ nodeOfflineGraceMs: 0 });
+    t.emit(finished('failed'));
+    t.emit({ type: 'scan.finished', libraryId: 'l2', summary: summaryOf(1) });
+    t.emit({ type: 'scan.aborted', libraryId: 'l3', message: 'threw' });
+    t.emit({ type: 'library.paused', libraryId: 'l4', reason: 'flow invalid' });
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    t.emit({ type: 'node.refused', nodeId: 'n2', reason: 'mismatch', authenticated: true });
+    t.emit({ type: 'node.refused', nodeId: null, reason: 'bad', authenticated: false });
+    expect(t.raised.map((r) => [r.event, r.label])).toEqual([
+      ['file.failed', 'Lib l1'],
+      ['library.root_missing', 'Lib l2'],
+      ['scan.aborted', 'Lib l3'],
+      ['library.paused', 'Lib l4'],
+      ['node.offline', 'Node n1'],
+      ['node.offline', 'Node n2'],
+      ['node.offline', 'Unknown node'],
+    ]);
+  });
+
+  it('gives no label, rather than the id, for a library or node that is gone', () => {
+    const t = setup({ nodeOfflineGraceMs: 0 });
+    t.emit({ type: 'scan.aborted', libraryId: 'gone', message: 'threw' });
+    t.emit({ type: 'nodes.changed', nodeId: 'gone', online: false });
+    expect(t.raised.map((r) => r.label)).toEqual([undefined, undefined]);
+  });
+});

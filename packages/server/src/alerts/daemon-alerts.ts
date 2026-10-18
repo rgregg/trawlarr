@@ -1,7 +1,7 @@
 import type { RecoverableEventType } from '@trawlarr/core';
 import { PAUSE_PREFIX_OPERATOR } from '../daemon/library-health.js';
 import type { EventBus, TrawlarrEvent } from '../daemon/events.js';
-import type { AlertInput, AlertService } from './alert-service.js';
+import { REFUSED_SCOPE_PREFIX, type AlertInput, type AlertService } from './alert-service.js';
 
 /** A crash-looping container must not alert on every start: boot-time conditions wait this long. */
 export const DEFAULT_STARTUP_DELAY_MS = 2 * 60_000;
@@ -14,7 +14,7 @@ const UNKNOWN_REFUSAL_SCOPE = 'refused:unknown';
 /** A known node is only reported refused after this many refusals inside the window. */
 const REFUSALS_TO_ALERT = 3;
 const REFUSAL_WINDOW_MS = 10 * 60_000;
-const refusedScope = (nodeId: string): string => `refused:${nodeId}`;
+const refusedScope = (nodeId: string): string => `${REFUSED_SCOPE_PREFIX}${nodeId}`;
 
 export interface DaemonAlertsOptions {
   bus: EventBus;
@@ -79,6 +79,15 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
   const keyOf = (event: string, scope: string): string => `${event}|${scope}`;
   const libraryName = (id: string): string => describe.library(id) ?? id;
   const nodeName = (id: string): string => describe.node(id) ?? id;
+  // The follow-up's display name: the name or nothing, never the id the two above fall back to.
+  const libraryLabel = (id: string): { label?: string } => {
+    const name = describe.library(id);
+    return name === undefined ? {} : { label: name };
+  };
+  const nodeLabel = (id: string): { label?: string } => {
+    const name = describe.node(id);
+    return name === undefined ? {} : { label: name };
+  };
 
   const offer = (entry: Standing): void => {
     entry.raised = true;
@@ -132,7 +141,9 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       summary: failed ? `${path} failed: ${reason}` : `${path} is not converging: ${reason}`,
       reason,
       path,
-      ...(file === undefined ? {} : { library: libraryName(file.libraryId) }),
+      ...(file === undefined
+        ? {}
+        : { library: libraryName(file.libraryId), ...libraryLabel(file.libraryId) }),
       ...(event.jobId === '' ? {} : { jobId: event.jobId }),
     });
   };
@@ -149,6 +160,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         scope: event.libraryId,
         summary: `${name}: ${String(event.summary.rootsUnavailable)} root(s) cannot be reached, so nothing was reconciled.`,
         library: name,
+        ...libraryLabel(event.libraryId),
       });
     } else {
       recover('library.root_missing', event.libraryId, `${name}: its roots are reachable again.`);
@@ -164,6 +176,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       summary: `${libraryName(libraryId)} was paused: ${reason}`,
       reason,
       library: libraryName(libraryId),
+      ...libraryLabel(libraryId),
     });
   };
 
@@ -172,6 +185,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       {
         event: 'node.offline',
         scope: nodeId,
+        ...nodeLabel(nodeId),
         summary: `Node ${nodeName(nodeId)} has been offline for over ${String(Math.round(nodeOfflineGraceMs / 60_000))} minute(s).`,
       },
       nodeOfflineGraceMs,
@@ -189,6 +203,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       service.raise({
         event: 'node.offline',
         scope: UNKNOWN_REFUSAL_SCOPE,
+        label: 'Unknown node',
         summary: `An unknown node was refused: ${reason}`,
         reason,
       });
@@ -213,6 +228,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     begin({
       event: 'node.offline',
       scope: refusedScope(nodeId),
+      ...nodeLabel(nodeId),
       summary: `Node ${nodeName(nodeId)} was refused: ${reason}`,
       reason,
     });
@@ -233,6 +249,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
           summary: `A scan of ${libraryName(event.libraryId)} stopped: ${event.message}`,
           reason: event.message,
           library: libraryName(event.libraryId),
+          ...libraryLabel(event.libraryId),
         });
         return;
       case 'library.paused':

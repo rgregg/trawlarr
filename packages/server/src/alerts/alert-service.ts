@@ -14,6 +14,12 @@ import type { Deliverer, DeliveryResult, DeliveryTarget } from './deliver.js';
 export interface AlertInput {
   event: AlertEventType | `${RecoverableEventType}.recovered`;
   scope: string;
+  /**
+   * What the scope is called (a library or node NAME). Follow-ups are written from this, never
+   * from `scope`: in production a scope is an id, and a summary pushed to a phone read
+   * "3f2b…: library.root_missing still ongoing, 60 more".
+   */
+  label?: string;
   summary: string;
   library?: string;
   path?: string;
@@ -48,6 +54,22 @@ const isAlertEvent = (event: string): event is AlertEventType =>
 
 const RECOVERED_SUFFIX = '.recovered';
 
+/** The scope prefix daemon-alerts gives a refused node, apart from its offline scope. */
+export const REFUSED_SCOPE_PREFIX = 'refused:';
+
+/** Each outage in plain words: as it stands, and as it still stands an hour later. */
+const OUTAGE_WORDS: Record<RecoverableEventType, { now: string; still: string }> = {
+  'library.root_missing': { now: 'roots unreachable', still: 'roots still unreachable' },
+  'node.offline': { now: 'node offline', still: 'node still offline' },
+  'scan.aborted': { now: 'scans aborted', still: 'scans still aborting' },
+  'library.paused': { now: 'library paused', still: 'library still paused' },
+  'hardware.check_failed': { now: 'hardware check failed', still: 'hardware check still failing' },
+};
+const REFUSED_WORDS = { now: 'node refused', still: 'node still refused' };
+
+const plural = (n: number, one: string, many: string): string =>
+  `${String(n)} ${n === 1 ? one : many}`;
+
 /**
  * The one path every alert takes: coalesce, redact, filter by destination, hand to the
  * deliverer. Nothing here may throw into a caller, because callers are the job path and
@@ -66,10 +88,10 @@ export const createAlertService = (opts: {
     repeatMs: REPEAT_MS,
   });
   let stopped = false;
-  // event|scope -> library of the offer, so a follow-up can say which library it is about.
-  // The coalescer forgets groups on its own, so the map is capped instead of tracked.
-  const MAX_LIBRARY_KEYS = 1_000;
-  const libraryOf = new Map<string, string>();
+  // event|scope -> the library and display name of the offer, so a follow-up can say what it is
+  // about. The coalescer forgets groups on its own, so the map is capped instead of tracked.
+  const MAX_CONTEXT_KEYS = 1_000;
+  const contextOf = new Map<string, { library?: string; label?: string }>();
   const loggedErrors = new Set<string>();
 
   // Never log the error's message: settings validation puts JSON.stringify(value) in it
@@ -165,23 +187,46 @@ export const createAlertService = (opts: {
     summary,
   });
 
-  const followUpSummary = (f: FollowUp): string => {
-    const more = f.count > 0 ? `${f.count} more ${f.event}` : `${f.event}`;
+  /**
+   * The follow-up's one line, from the name and the event's plain words. No scope (an id) and no
+   * event code; and a still-down drops its count, which is mostly the daemon's minute-by-minute
+   * re-offers of the same condition rather than anything that happened.
+   */
+  const followUpSummary = (f: FollowUp, label: string | undefined): string => {
     const other =
-      f.otherCauses > 0 ? ` (${f.otherCauses} other cause${f.otherCauses === 1 ? '' : 's'})` : '';
-    return f.kind === 'still-down'
-      ? `${f.scope}: ${f.event} still ongoing, ${f.count} more${other}`
-      : `${f.scope}: ${more}${other}`;
+      f.otherCauses > 0 ? ` (${plural(f.otherCauses, 'other cause', 'other causes')})` : '';
+    if (f.event === 'file.failed' || f.event === 'file.not_converging') {
+      const what =
+        f.event === 'file.failed'
+          ? f.count === 1
+            ? 'file failed'
+            : 'files failed'
+          : f.count === 1
+            ? 'file not converging'
+            : 'files not converging';
+      return `${label ?? 'A library'}: ${String(f.count)} more ${what}${other}`;
+    }
+    const base = baseEventOf(f.event);
+    if (base === undefined || base === 'file.failed' || base === 'file.not_converging') {
+      return `${label ?? 'Trawlarr'}: ${String(f.count)} more${other}`;
+    }
+    const words = f.scope.startsWith(REFUSED_SCOPE_PREFIX) ? REFUSED_WORDS : OUTAGE_WORDS[base];
+    const phrase = f.kind === 'still-down' ? words.still : words.now;
+    if (base === 'hardware.check_failed') {
+      return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)}${other}`;
+    }
+    const fallback = base === 'node.offline' ? 'A node' : 'A library';
+    return `${label ?? fallback}: ${phrase}${other}`;
   };
 
   const sendFollowUp = (settings: AlertSettings, f: FollowUp): void => {
     const to = recipients(settings, f.event);
     if (to.length === 0) return;
     const redact = redactor(settings);
-    const body = baseBody(f.event, redact(followUpSummary(f)));
+    const context = contextOf.get(`${f.event}|${f.scope}`);
+    const body = baseBody(f.event, redact(followUpSummary(f, context?.label)));
     body.count = f.count;
-    const library = libraryOf.get(`${f.event}|${f.scope}`);
-    if (library !== undefined) body.library = library;
+    if (context?.library !== undefined) body.library = context.library;
     if (f.examples.length > 0) body.examples = f.examples.map(redact);
     if (f.otherCauses > 0) body.otherCauses = f.otherCauses;
     dispatch(settings, to, body);
@@ -200,16 +245,19 @@ export const createAlertService = (opts: {
           const base = baseEventOf(input.event);
           if (base !== undefined) {
             coalescer.clear(base, input.scope);
-            libraryOf.delete(`${base}|${input.scope}`);
+            contextOf.delete(`${base}|${input.scope}`);
           }
         } else {
-          if (input.library !== undefined) {
+          if (input.library !== undefined || input.label !== undefined) {
             const key = `${input.event}|${input.scope}`;
-            libraryOf.delete(key);
-            libraryOf.set(key, input.library);
-            if (libraryOf.size > MAX_LIBRARY_KEYS) {
-              const oldest = libraryOf.keys().next();
-              if (!oldest.done) libraryOf.delete(oldest.value);
+            contextOf.delete(key);
+            contextOf.set(key, {
+              ...(input.library === undefined ? {} : { library: input.library }),
+              ...(input.label === undefined ? {} : { label: input.label }),
+            });
+            if (contextOf.size > MAX_CONTEXT_KEYS) {
+              const oldest = contextOf.keys().next();
+              if (!oldest.done) contextOf.delete(oldest.value);
             }
           }
           const { send } = coalescer.offer({
