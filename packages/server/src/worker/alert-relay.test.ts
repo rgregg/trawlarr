@@ -26,6 +26,20 @@ describe('createJobAlertRelay', () => {
     expect(lines).toEqual([]);
   });
 
+  it('leaves off whatever the job does not know, rather than sending undefined', () => {
+    const raised: unknown[] = [];
+    const relay = createJobAlertRelay({
+      job: { jobId: 'job-1' },
+      raise: (request) => {
+        raised.push(request);
+        return 'queued';
+      },
+    });
+    relay({ destination: 'ha', message: 'hi' }, () => {});
+    expect(raised).toEqual([{ destination: 'ha', message: 'hi', jobId: 'job-1' }]);
+    expect(Object.keys(raised[0] as object)).not.toContain('library');
+  });
+
   it('ignores library, path and jobId smuggled onto the request', () => {
     const { relay, raised, log } = setup();
     relay(

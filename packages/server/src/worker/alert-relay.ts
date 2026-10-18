@@ -27,15 +27,21 @@ export const MAX_ALERTS_PER_JOB = 100;
  * secrets must not reach a log a node or user can read). Nothing here throws
  * into the handle that called it.
  */
+export interface RelayedAlert {
+  destination: string;
+  message: string;
+  library?: string;
+  path?: string;
+  jobId?: string;
+}
+
+/**
+ * Each job field is optional: a payload adopted from a stored row at startup is not guaranteed
+ * whole, and a field it lacks is left off the alert rather than failing the job or the start.
+ */
 export const createJobAlertRelay = (input: {
-  job: { jobId: string; path: string; libraryName: string };
-  raise: (request: {
-    destination: string;
-    message: string;
-    library: string;
-    path: string;
-    jobId: string;
-  }) => FlowMessageStatus;
+  job: { jobId?: string; path?: string; libraryName?: string };
+  raise: (request: RelayedAlert) => FlowMessageStatus;
 }): ((request: AlertRequest, log: JobLogSink) => void) => {
   let count = 0;
   return (request, log) => {
@@ -46,12 +52,13 @@ export const createJobAlertRelay = (input: {
         if (count === MAX_ALERTS_PER_JOB + 1) log('Alert limit reached for this job');
         return;
       }
+      const { jobId, path, libraryName } = input.job;
       const status = input.raise({
         destination: request.destination,
         message: request.message,
-        library: input.job.libraryName,
-        path: input.job.path,
-        jobId: input.job.jobId,
+        ...(libraryName === undefined ? {} : { library: libraryName }),
+        ...(path === undefined ? {} : { path }),
+        ...(jobId === undefined ? {} : { jobId }),
       });
       const name = JSON.stringify(request.destination);
       if (status === 'unknown') log(`Alert not sent: destination ${name} is unknown`);

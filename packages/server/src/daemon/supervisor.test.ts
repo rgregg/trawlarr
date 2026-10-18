@@ -447,6 +447,36 @@ describe('the supervisor', () => {
     ]);
   });
 
+  // A payload read back from a leased row at startup is not guaranteed to be whole, and
+  // `agentInputFor` reading `payload.library.name` unguarded made startDaemon throw: a daemon
+  // that cannot adopt its remote jobs cannot start at all.
+  it('builds agent input for a stored payload with no library, looking the name up by id', () => {
+    const { supervisor, raised, libraryId, db } = harness({
+      queued: 0,
+      target: { transcode: 0, health: 0 },
+    });
+    const name = (
+      db.prepare('SELECT name FROM library WHERE id = ?').get(libraryId) as { name: string }
+    ).name;
+    const partial = { jobId: 'j1', fileId: 'f1', libraryId, path: '/media/x.mkv' };
+
+    const input = supervisor.agentInputFor(partial as unknown as JobPayload);
+    input.onAlert?.({ destination: 'ha', message: 'hi' }, () => {});
+
+    expect(raised).toEqual([
+      { destination: 'ha', message: 'hi', library: name, path: '/media/x.mkv', jobId: 'j1' },
+    ]);
+  });
+
+  it('never throws for a payload missing library, library id, path or job id; the alert omits what is unknown', () => {
+    const { supervisor, raised } = harness({ queued: 0, target: { transcode: 0, health: 0 } });
+
+    const input = supervisor.agentInputFor({} as unknown as JobPayload);
+    input.onAlert?.({ destination: 'ha', message: 'hi' }, () => {});
+
+    expect(raised).toEqual([{ destination: 'ha', message: 'hi' }]);
+  });
+
   it('starts as many workers as the schedule allows and no more', async () => {
     const { supervisor, agents, db } = harness({
       queued: 5,
