@@ -47,6 +47,10 @@ const sleep = (ms: number, signal: AbortSignal): Promise<void> =>
 /**
  * Sends alerts without ever being on the path of a job, a scan or a shutdown.
  *
+ * One queue and one pump per destination name: a receiver that never answers
+ * costs its own alerts ~a minute per message, and must not bury the message that
+ * matters to a healthy destination (spec 1.3).
+ *
  * Three rules keep a dead receiver from hurting the daemon: every attempt has
  * a timeout (a receiver that accepts and never answers would otherwise hold a
  * socket and the queue forever), the queue is bounded and sheds the OLDEST
@@ -67,36 +71,46 @@ export const createDeliverer = (opts: {
   const maxQueue = opts.maxQueue ?? DEFAULT_MAX_QUEUE;
   const nowMs = opts.nowMs ?? ((): number => Date.now());
 
-  const queue: Array<{ target: DeliveryTarget; body: unknown }> = [];
+  interface Lane {
+    queue: Array<{ target: DeliveryTarget; body: unknown }>;
+    pumping: Promise<void> | null;
+    inFlight: boolean;
+  }
+  const lanes = new Map<string, Lane>();
+  const sends = new Set<Promise<DeliveryResult>>();
   const results = new Map<string, DeliveryResult>();
   let epoch = new AbortController();
   let stopped = false;
-  let pumping: Promise<void> | null = null;
-  let inFlight = false;
   let dropped = 0;
 
   // `error.message` from fetch can embed the request URL (and undici puts the
   // host in its cause), and a URL is where a webhook's secret lives. So the
   // message is never read: only the error's class survives into a log line.
-  const classify = (error: unknown, timedOut: boolean): Failure => {
+  const classify = (error: unknown, timedOut: boolean, signal: AbortSignal): Failure => {
     if (timedOut) return { status: null, error: 'timeout', retry: true };
-    if (epoch.signal.aborted) return { status: null, error: 'aborted', retry: false };
+    if (signal.aborted) return { status: null, error: 'aborted', retry: false };
     const name = error instanceof Error ? error.name : 'Error';
     return { status: null, error: `network error (${name})`, retry: true };
   };
 
+  // The signal is captured once per delivery and passed down. `drain` swaps
+  // `epoch` for a fresh controller, so reading `epoch` again later would add a
+  // listener to one controller and remove it from another, leaving an attempt
+  // that outlives the swap unaborted by a later `stop()`.
   const attempt = async (
+    signal: AbortSignal,
     target: DeliveryTarget,
     body: unknown,
   ): Promise<{ ok: true; status: number } | ({ ok: false } & Failure)> => {
+    if (signal.aborted) return { ok: false, status: null, error: 'aborted', retry: false };
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, timeoutMs);
-    const onEpochAbort = (): void => controller.abort();
-    epoch.signal.addEventListener('abort', onEpochAbort);
+    const onAbort = (): void => controller.abort();
+    signal.addEventListener('abort', onAbort);
     try {
       const response = await fetch(target.url, {
         method: 'POST',
@@ -115,34 +129,35 @@ export const createDeliverer = (opts: {
       if (response.status >= 200 && response.status < 300)
         return { ok: true, status: response.status };
       const retry = response.status >= 500 || response.status === 408 || response.status === 429;
-      const label = response.status >= 300 && response.status < 400 ? 'redirect refused' : 'HTTP';
+      const redirect = response.status >= 300 && response.status < 400;
       return {
         ok: false,
         status: response.status,
-        error: label === 'HTTP' ? `HTTP ${response.status}` : `${label} (HTTP ${response.status})`,
+        error: redirect ? `redirect refused (HTTP ${response.status})` : `HTTP ${response.status}`,
         retry,
       };
     } catch (error) {
-      return { ok: false, ...classify(error, timedOut) };
+      return { ok: false, ...classify(error, timedOut, signal) };
     } finally {
       clearTimeout(timer);
-      epoch.signal.removeEventListener('abort', onEpochAbort);
+      signal.removeEventListener('abort', onAbort);
     }
   };
 
   const deliver = async (target: DeliveryTarget, body: unknown): Promise<DeliveryResult> => {
+    const signal = epoch.signal;
     let last: Failure = { status: null, error: 'aborted', retry: false };
     for (let i = 0; i <= retries; i++) {
-      const outcome = await attempt(target, body);
+      const outcome = await attempt(signal, target, body);
       if (outcome.ok) {
         const result = { ok: true, status: outcome.status, error: null, atMs: nowMs() };
         results.set(target.name, result);
         return result;
       }
       last = outcome;
-      if (!outcome.retry || i === retries || epoch.signal.aborted) break;
-      await sleep(backoff[Math.min(i, backoff.length - 1)] ?? 0, epoch.signal);
-      if (epoch.signal.aborted) {
+      if (!outcome.retry || i === retries || signal.aborted) break;
+      await sleep(backoff[Math.min(i, backoff.length - 1)] ?? 0, signal);
+      if (signal.aborted) {
         last = { status: null, error: 'aborted', retry: false };
         break;
       }
@@ -156,63 +171,92 @@ export const createDeliverer = (opts: {
     return result;
   };
 
-  const pump = async (): Promise<void> => {
+  const pump = async (lane: Lane): Promise<void> => {
     while (!stopped) {
-      const next = queue.shift();
+      const next = lane.queue.shift();
       if (next === undefined) break;
-      inFlight = true;
+      lane.inFlight = true;
       try {
         await deliver(next.target, next.body);
       } catch {
         // deliver reports through its result; a throw here must not strand the queue.
       } finally {
-        inFlight = false;
+        lane.inFlight = false;
       }
     }
   };
 
-  const startPump = (): void => {
-    if (pumping !== null || stopped) return;
+  const startPump = (name: string, lane: Lane): void => {
+    if (lane.pumping !== null || stopped) return;
     // Deferred so a burst of enqueues is trimmed to maxQueue before the first
     // request leaves, and so enqueue itself never does work.
-    pumping = Promise.resolve().then(async () => {
+    lane.pumping = Promise.resolve().then(async () => {
       try {
-        await pump();
+        await pump(lane);
       } finally {
-        pumping = null;
-        if (queue.length > 0) startPump();
+        lane.pumping = null;
+        if (lane.queue.length > 0) startPump(name, lane);
+        else if (lanes.get(name) === lane) lanes.delete(name);
       }
     });
+  };
+
+  const track = (promise: Promise<DeliveryResult>): Promise<DeliveryResult> => {
+    sends.add(promise);
+    const forget = (): void => {
+      sends.delete(promise);
+    };
+    promise.then(forget, forget);
+    return promise;
   };
 
   return {
     enqueue: (target, body) => {
       if (stopped) return;
-      queue.push({ target, body });
-      while (queue.length > maxQueue) {
-        queue.shift();
+      let lane = lanes.get(target.name);
+      if (lane === undefined) {
+        lane = { queue: [], pumping: null, inFlight: false };
+        lanes.set(target.name, lane);
+      }
+      lane.queue.push({ target, body });
+      // The cap is per destination: one dead receiver filling its own queue
+      // must not evict a healthy destination's alerts as "oldest".
+      while (lane.queue.length > maxQueue) {
+        lane.queue.shift();
         dropped += 1;
       }
-      startPump();
+      startPump(target.name, lane);
     },
     sendNow: (target, body) =>
       stopped
         ? Promise.resolve({ ok: false, status: null, error: 'aborted', atMs: nowMs() })
-        : deliver(target, body),
+        : track(deliver(target, body)),
     drain: async (deadlineMs) => {
-      if (pumping !== null) {
+      const pending: Array<Promise<unknown>> = [
+        ...[...lanes.values()].flatMap((lane) => (lane.pumping === null ? [] : [lane.pumping])),
+        ...sends,
+      ];
+      if (pending.length > 0) {
         let timer: NodeJS.Timeout | undefined;
         const expired = new Promise<'late'>((resolve) => {
           timer = setTimeout(() => resolve('late'), deadlineMs);
         });
-        const outcome = await Promise.race([pumping.then(() => 'done' as const), expired]);
+        const outcome = await Promise.race([
+          Promise.all(pending).then(() => 'done' as const),
+          expired,
+        ]);
         clearTimeout(timer);
         if (outcome === 'late') {
-          dropped += queue.length + (inFlight ? 1 : 0);
-          queue.length = 0;
-          epoch.abort();
-          await pumping;
+          for (const lane of lanes.values()) {
+            dropped += lane.queue.length + (lane.inFlight ? 1 : 0);
+            lane.queue.length = 0;
+          }
+          // Swap first: anything starting while the aborted work settles must
+          // attach to a live signal that a later stop() can still abort.
+          const aborted = epoch;
           epoch = new AbortController();
+          aborted.abort();
+          await Promise.all(pending);
         }
       }
       const count = dropped;
@@ -222,7 +266,7 @@ export const createDeliverer = (opts: {
     lastResult: (name) => results.get(name),
     stop: () => {
       stopped = true;
-      queue.length = 0;
+      for (const lane of lanes.values()) lane.queue.length = 0;
       epoch.abort();
     },
   };

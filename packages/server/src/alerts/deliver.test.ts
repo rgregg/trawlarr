@@ -192,4 +192,73 @@ describe('createDeliverer', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(seen).toHaveLength(0);
   });
+
+  it('delivers a healthy destination promptly while another hangs', async () => {
+    const hung = await receiver(hang);
+    const ok = await receiver((_req, res) => res.writeHead(200).end());
+    const d = make({ log: () => undefined });
+    d.enqueue({ name: 'A', url: hung.origin, headers: [] }, {});
+    await until(() => hung.seen.length >= 1);
+    const start = performance.now();
+    d.enqueue({ name: 'B', url: ok.origin, headers: [] }, {});
+    await until(() => ok.seen.length >= 1, 500);
+    expect(performance.now() - start).toBeLessThan(500);
+    expect(d.lastResult('A')).toBeUndefined();
+  });
+
+  it('keeps the queue cap per destination', async () => {
+    const hung = await receiver(hang);
+    const ok = await receiver((_req, res) => res.writeHead(200).end());
+    const d = make({ maxQueue: 2, log: () => undefined });
+    d.enqueue({ name: 'B', url: ok.origin, headers: [] }, { n: 'b1' });
+    d.enqueue({ name: 'B', url: ok.origin, headers: [] }, { n: 'b2' });
+    for (let i = 0; i < 6; i++) d.enqueue({ name: 'A', url: hung.origin, headers: [] }, { i });
+    await until(() => ok.seen.length >= 2);
+    expect(ok.seen.map((s) => JSON.parse(s.body))).toEqual([{ n: 'b1' }, { n: 'b2' }]);
+    const { dropped } = await d.drain(50);
+    // 4 evicted from A, then A's remaining queue and in-flight request.
+    expect(dropped).toBeGreaterThanOrEqual(4);
+  });
+
+  it('bounds drain across two hung destinations and sums their drops', async () => {
+    const one = await receiver(hang);
+    const two = await receiver(hang);
+    const d = make({ log: () => undefined });
+    for (let i = 0; i < 2; i++) {
+      d.enqueue({ name: 'A', url: one.origin, headers: [] }, {});
+      d.enqueue({ name: 'B', url: two.origin, headers: [] }, {});
+    }
+    await until(() => one.seen.length >= 1 && two.seen.length >= 1);
+    const start = performance.now();
+    const { dropped } = await d.drain(100);
+    expect(performance.now() - start).toBeLessThan(250);
+    expect(dropped).toBe(4);
+  });
+
+  it('aborts an in-flight sendNow when drain hits its deadline', async () => {
+    const hung = await receiver(hang);
+    const d = make({ log: () => undefined });
+    const sent = d.sendNow({ name: 'T', url: hung.origin, headers: [] }, {});
+    await until(() => hung.seen.length >= 1);
+    const start = performance.now();
+    await d.drain(50);
+    const result = await sent;
+    expect(performance.now() - start).toBeLessThan(250);
+    expect(result).toMatchObject({ ok: false, error: 'aborted' });
+  });
+
+  it('lets stop abort a sendNow that starts right after a drain', async () => {
+    const hung = await receiver(hang);
+    const d = make({ log: () => undefined });
+    d.enqueue({ name: 'A', url: hung.origin, headers: [] }, {});
+    await until(() => hung.seen.length >= 1);
+    await d.drain(30);
+    const sent = d.sendNow({ name: 'T', url: hung.origin, headers: [] }, {});
+    await until(() => hung.seen.length >= 2);
+    const start = performance.now();
+    d.stop();
+    const result = await sent;
+    expect(performance.now() - start).toBeLessThan(250);
+    expect(result.error).toBe('aborted');
+  });
 });
