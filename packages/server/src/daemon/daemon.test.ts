@@ -1125,6 +1125,37 @@ describe('alerts', () => {
     expect(text).toContain('[redacted]');
   });
 
+  // The supervisor reaches the alert service only through the daemon's `raiseFlowMessage`
+  // closure; without it every Send Webhook request answered 'error' and nothing was sent.
+  it("delivers a running job's Send Webhook request to the receiver through the daemon's wiring", async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir);
+    const hook = await receiver();
+    configureAlerts(dataDir, hook.url);
+    const inputs: Array<Parameters<CreateAgentFn>[0]> = [];
+    const { createAgent } = fakeAgents();
+    await start({
+      dataDir,
+      createAgent: (factoryInput) => {
+        inputs.push(factoryInput);
+        return createAgent(factoryInput);
+      },
+    });
+    await until(() => inputs.length > 0);
+    const logged: string[] = [];
+
+    inputs[0]!.onAlert?.({ destination: 'hook', message: 'hello from a flow' }, (line) =>
+      logged.push(line),
+    );
+
+    await until(() => hook.bodies.some((b) => b.event === 'flow.message'), 2_000);
+    expect(hook.bodies.find((b) => b.event === 'flow.message')).toMatchObject({
+      summary: 'hello from a flow',
+      library: 'Movies',
+    });
+    expect(logged).toEqual([]);
+  });
+
   it('does not alert for a library the operator paused before boot', async () => {
     const dataDir = newDataDir();
     seedLibrary(dataDir);

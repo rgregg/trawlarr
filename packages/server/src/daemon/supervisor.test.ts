@@ -425,6 +425,28 @@ describe('the supervisor', () => {
     ]);
   });
 
+  it("raises a REMOTE node's alert through the same relay, with the job's own context", async () => {
+    const { supervisor, agents, raised, addNode, libraryId } = harness({
+      queued: 1,
+      target: { transcode: 0, health: 0 },
+    });
+    addNode({ nodeId: 'node-x', target: 1, reachable: [libraryId] });
+    await supervisor.tick();
+    const agent = agents.running()[0]!;
+    expect(agent.nodeId).toBe('node-x');
+
+    agent.alert('ha', 'hi');
+
+    expect(raised).toEqual([
+      expect.objectContaining({
+        destination: 'ha',
+        message: 'hi',
+        path: agent.payload.path,
+        jobId: agent.payload.jobId,
+      }),
+    ]);
+  });
+
   it('starts as many workers as the schedule allows and no more', async () => {
     const { supervisor, agents, db } = harness({
       queued: 5,

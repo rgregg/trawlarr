@@ -313,7 +313,9 @@ const connectNode = async (
   });
 
 /** Online node with one running job the hub has sent it. */
-const startRemoteJob = async (over: { logPath?: string } = {}) => {
+const startRemoteJob = async (
+  over: { logPath?: string; onAlert?: AgentFactoryInput['onAlert'] } = {},
+) => {
   const client = await connectNode();
   await client.hello();
   const claimed = claimJob();
@@ -321,6 +323,7 @@ const startRemoteJob = async (over: { logPath?: string } = {}) => {
   const sinks: Sinks = { steps: [], logs: [], heartbeats: [] };
   const agent = hub.createAgent({
     ...factoryInput(sinks),
+    ...(over.onAlert === undefined ? {} : { onAlert: over.onAlert }),
     // What the supervisor's sink does with a heartbeat.
     onHeartbeat: (at) => {
       sinks.heartbeats.push(at);
@@ -632,6 +635,22 @@ describe('createNodeHub', () => {
     expect(leaseOf(payload.jobId)).toEqual({ state: 'connected', expiresAtMs: null });
     const leased = jobs.listLeased().find((row) => row.jobId === payload.jobId)!;
     expect((JSON.parse(leased.payloadJson) as JobPayload).path).toBe(payload.path);
+  });
+
+  // The remote half of Send Webhook: a node's enveloped alert-request must reach the
+  // supervisor's relay through the hub's handle, as a local fork's does through its own.
+  it("routes a node's alert-request frame to the factory's onAlert", async () => {
+    const alerts: unknown[] = [];
+    const { client, payload } = await startRemoteJob({
+      onAlert: (request) => alerts.push(request),
+    });
+    client.send({
+      type: 'agent',
+      jobId: payload.jobId,
+      message: { type: 'alert-request', destination: 'ha', message: 'hi', path: '/smuggled' },
+    });
+    await waitFor(() => alerts.length > 0, 'the alert');
+    expect(alerts).toEqual([{ destination: 'ha', message: 'hi' }]);
   });
 
   it('appends log frames and a backfill to the server job log', async () => {
