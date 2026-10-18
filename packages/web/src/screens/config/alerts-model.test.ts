@@ -108,6 +108,17 @@ describe('validateAlerts', () => {
     expect(validateAlerts(form, loaded)).toMatch(/header/i);
   });
 
+  it('compares names trimmed, as they are sent', () => {
+    const loaded = resource();
+    const form = formFromResource(loaded);
+    form.destinations.push({ ...form.destinations[0]!, key: 'dup', name: 'ops ' });
+    expect(validateAlerts(form, loaded)).toMatch(/unique/i);
+    // A padded name still finds the stored destination, so its masked url is kept.
+    const padded = formFromResource(loaded);
+    padded.destinations[0]!.name = ' ops';
+    expect(validateAlerts(padded, loaded)).toBeNull();
+  });
+
   it('refuses duplicate names', () => {
     const loaded = resource();
     const form = formFromResource(loaded);

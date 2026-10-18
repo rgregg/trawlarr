@@ -139,7 +139,25 @@ export const AlertsSection = (props: { client: ApiClient }): JSX.Element => {
   };
 
   const editable = form !== null && loaded !== null;
-  const storedNames = new Set(loaded?.destinations.map((d) => d.name));
+  // The daemon tests what is STORED under a name, so Test is only meaningful for a row that is
+  // exactly its loaded self: an edited row would test the old config, and a row renamed to
+  // another stored name would run that other destination's test.
+  const isSaved = (d: DestinationForm): boolean => {
+    const old = loaded?.destinations.find((x) => x.name === d.name.trim());
+    if (old === undefined || d.name !== d.name.trim()) return false;
+    return (
+      JSON.stringify(
+        toPutBody({ publicBaseUrl: '', destinations: [d] }, loaded!).destinations[0],
+      ) ===
+      JSON.stringify({
+        name: old.name,
+        enabled: old.enabled,
+        events: old.events,
+        url: old.url,
+        headers: old.headers,
+      })
+    );
+  };
 
   return (
     <div className="config-section">
@@ -203,6 +221,7 @@ export const AlertsSection = (props: { client: ApiClient }): JSX.Element => {
                   </div>
                   <input
                     aria-label="URL"
+                    type="password"
                     autoComplete="off"
                     spellCheck={false}
                     value={d.url}
@@ -248,6 +267,7 @@ export const AlertsSection = (props: { client: ApiClient }): JSX.Element => {
                       />
                       <input
                         aria-label="Header value"
+                        type="password"
                         autoComplete="off"
                         spellCheck={false}
                         value={h.value}
@@ -293,7 +313,8 @@ export const AlertsSection = (props: { client: ApiClient }): JSX.Element => {
                         destination has nothing to test yet. */}
                     <button
                       type="button"
-                      disabled={saving || !storedNames.has(d.name) || state?.kind === 'running'}
+                      title={isSaved(d) ? undefined : 'Save first'}
+                      disabled={saving || !isSaved(d) || state?.kind === 'running'}
                       onClick={() => void test(d.name)}
                     >
                       Test

@@ -52,6 +52,7 @@ const publishWith = async (published: Record<string, unknown>) => {
   const confirm = await screen.findByRole('button', { name: 'Confirm publish' });
   await screen.findByText(/Hash:/);
   await user.click(confirm);
+  return { user, client };
 };
 
 describe('FlowEditor publish', () => {
@@ -63,6 +64,24 @@ describe('FlowEditor publish', () => {
     const notice = await screen.findByRole('note');
     expect(notice).toHaveTextContent('unknown destination "ops"');
     expect(notice.closest('[role="alert"]')).toBeNull();
+  });
+
+  it('clears the notice when the draft is saved, and a later clean publish shows none', async () => {
+    const { user, client } = await publishWith({ warnings: ['Send Webhook node "n" is off.'] });
+    expect(await screen.findByRole('note')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText(/Draft saved/, { selector: 'p' })).toBeInTheDocument();
+    expect(screen.queryByRole('note')).toBeNull();
+
+    client.route('PUT /flows/f1', { ...flow });
+    const review = screen.getByRole('button', { name: /Review & publish/ });
+    await waitFor(() => {
+      expect(review).toBeEnabled();
+    });
+    await user.click(review);
+    await user.click(await screen.findByRole('button', { name: 'Confirm publish' }));
+    expect(await screen.findByText(/^Published\. This version is now live/)).toBeInTheDocument();
+    expect(screen.queryByRole('note')).toBeNull();
   });
 
   it('shows no notice when the daemon sends no warnings', async () => {

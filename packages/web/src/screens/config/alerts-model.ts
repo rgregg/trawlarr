@@ -137,7 +137,7 @@ export const validateDestination = (d: DestinationForm): string | null => {
  * daemon refuses (a rename, or a masked url pasted into another destination).
  */
 const urlIsKept = (d: DestinationForm, loaded: AlertsResource): boolean => {
-  const old = loaded.destinations.find((x) => x.name === d.name);
+  const old = loaded.destinations.find((x) => x.name === d.name.trim());
   return old !== undefined && d.url === old.url;
 };
 
@@ -150,12 +150,14 @@ export const validateAlerts = (form: AlertsForm, loaded: AlertsResource): string
   for (const d of form.destinations) {
     const problem = validateDestination(d);
     if (problem !== null) return problem;
-    if (seen.has(d.name)) return `"${d.name}": names must be unique.`;
-    seen.add(d.name);
+    // Trimmed, as `toPutBody` sends it: "ops" and "ops " are one name to the daemon.
+    const name = d.name.trim();
+    if (seen.has(name)) return `"${name}": names must be unique.`;
+    seen.add(name);
 
     const kept = urlIsKept(d, loaded);
     if (isMasked(d.url) && !kept) return `"${d.name}": re-enter the url.`;
-    const old = loaded.destinations.find((x) => x.name === d.name);
+    const old = loaded.destinations.find((x) => x.name === name);
     const occurrences = new Map<string, number>();
     for (const h of d.headers) {
       const n = occurrences.get(h.name) ?? 0;

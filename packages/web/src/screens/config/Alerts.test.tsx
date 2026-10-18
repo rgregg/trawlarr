@@ -183,6 +183,38 @@ describe('AlertsSection', () => {
     });
   });
 
+  it('renders url and header value inputs as password fields', async () => {
+    render(<AlertsSection client={createFakeClient({ 'GET /alerts': resource() })} />);
+    await screen.findByDisplayValue('ops');
+    expect(within(row(1)).getByLabelText('URL')).toHaveAttribute('type', 'password');
+    expect(within(row(1)).getByLabelText('Header value')).toHaveAttribute('type', 'password');
+  });
+
+  it('disables Test for a row with unsaved edits or a name that is not its stored one', async () => {
+    const user = userEvent.setup();
+    render(<AlertsSection client={createFakeClient({ 'GET /alerts': resource() })} />);
+    await screen.findByDisplayValue('ops');
+    expect(within(row(1)).getByRole('button', { name: 'Test' })).toBeEnabled();
+    await user.type(within(row(1)).getByLabelText('Name'), 'x');
+    expect(within(row(1)).getByRole('button', { name: 'Test' })).toBeDisabled();
+    await user.type(within(row(2)).getByLabelText('URL'), 'https://new.example.com/h');
+    expect(within(row(2)).getByRole('button', { name: 'Test' })).toBeDisabled();
+    expect(within(row(2)).getByRole('button', { name: 'Test' })).toHaveAttribute(
+      'title',
+      'Save first',
+    );
+  });
+
+  it('disables Test for a row renamed to another stored name', async () => {
+    const user = userEvent.setup();
+    render(<AlertsSection client={createFakeClient({ 'GET /alerts': resource() })} />);
+    await screen.findByDisplayValue('ops');
+    const name = within(row(1)).getByLabelText('Name');
+    await user.clear(name);
+    await user.type(name, 'backup');
+    expect(within(row(1)).getByRole('button', { name: 'Test' })).toBeDisabled();
+  });
+
   it('shows the test result inline, and failures as a short line', async () => {
     const user = userEvent.setup();
     const client = createFakeClient({

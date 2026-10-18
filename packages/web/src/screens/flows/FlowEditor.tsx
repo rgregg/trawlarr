@@ -304,6 +304,7 @@ const Editor = (
     setDefinition(next);
     setPreview(null);
     setMessage(null);
+    setWarnings([]);
   };
 
   const report = (error: unknown): void => {
@@ -320,6 +321,7 @@ const Editor = (
       // Only the name: the definition being edited is this tab's business,
       // and a rename must not reach in and replace an unsaved graph.
       setFlow((current) => ({ ...current, name: next.name }));
+      setWarnings([]);
       setMessage(`Renamed to “${next.name}”. The flow definition is unchanged.`);
     } catch (error) {
       report(error);
@@ -337,6 +339,9 @@ const Editor = (
     setSaved(definition);
     editorBuffers.delete(id);
     setValidation({ key, result });
+    // Warnings describe the publish just made; once the editor moves on they would be read as
+    // describing the draft beneath them.
+    setWarnings([]);
     setMessage(
       result.ok
         ? 'Draft saved. The published flow is unchanged.'
