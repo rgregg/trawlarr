@@ -48,7 +48,8 @@ folder of media, scan it, and drain the queue against real `ffmpeg`/`ffprobe`
 unattended behind an HTTP API, a filesystem watcher and a schedule (see "Run
 it as a service"), plus the libraries behind both. The daemon serves a web UI
 covering library setup, flow attachment, a library-centric overview, live
-activity, and a visual flow editor with drafts and published version history.
+activity, a visual flow editor with drafts and published version history, and
+webhook alerts (see "Alerts").
 
 The pnpm workspace holds six packages:
 
@@ -56,7 +57,7 @@ The pnpm workspace holds six packages:
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@trawlarr/core`         | Pure domain logic: file identity, fact extraction, the convergence ledger, flow definitions and their signature hash, and the cooperative ffmpeg command model (build → compile to argv). No I/O.                                                                                                                                                                                              |
 | `@trawlarr/plugin-api`   | Types for the Tdarr flow-plugin contract — the `args` object, `details()` metadata, inputs/outputs, and the injected `deps`.                                                                                                                                                                                                                                                                   |
-| `@trawlarr/plugins-core` | First-party flow nodes: Start, Check Video Codec, Check Audio Stream, Check Condition, Begin Command, Set Video Encoder, Audio Tracks, Subtitle Tracks, Set Container, Execute, Verify Output, Check Size Change, Replace Original File, Write to Log, Fail File, On Error, and Hold for Review.                                                                                               |
+| `@trawlarr/plugins-core` | First-party flow nodes: Start, Check Video Codec, Check Audio Stream, Check Condition, Begin Command, Set Video Encoder, Audio Tracks, Subtitle Tracks, Set Container, Execute, Verify Output, Check Size Change, Replace Original File, Write to Log, Send Webhook, Fail File, On Error, and Hold for Review.                                                                                 |
 | `@trawlarr/engine`       | The plugin host and executor: a validating CommonJS loader, the `deps` implementations (`crudTransDBN`, `axiosMiddleware`, and the injected npm modules), the file-object projection community plugins expect, ffmpeg invocation with progress parsing, the flow walker, and dry run.                                                                                                          |
 | `@trawlarr/server`       | SQLite persistence (connection setup, forward-only migrations, identity-preserving upsert, atomic claim), the library scanner, the worker supervisor and its forked worker processes, the filesystem watcher and scan coordinator, the REST API and its event stream, the daemon that composes all of it, and the `trawlarr` CLI — which becomes that daemon's client whenever one is running. |
 | `@trawlarr/web`          | The React UI the daemon serves as static files: the login/SSO gate, library setup and flow attachment, live activity, and a visual flow editor with drafts and version history. Built by `pnpm build`; the Docker image ships it.                                                                                                                                                              |
@@ -451,6 +452,104 @@ no outgoing connections and does not delete or modify the media file. The normal
 error-handler and retry policy applies: without an `onFlowError` handler,
 the attempt fails, and the file becomes terminally `failed` only after its retry
 budget is exhausted. Both components work in dry runs too.
+
+### Alerts
+
+When something needs a person, the daemon sends a JSON `POST` to a webhook.
+Home Assistant is the first target, but any receiver that accepts a webhook
+works. This is outbound, and separate from the Sonarr, Radarr and Lidarr
+notifications the daemon receives (see "Run it as a service"). Configure it
+under **Configure → System → Alerts**.
+
+A destination has a name, a URL, optional headers, a switch per event, and an
+enabled switch. The URL and the header values are secrets: after saving they
+show masked, and the API never returns them. Changing a destination's URL means
+re-entering its header values. **Test** sends a test message to the saved
+destination, so save first.
+
+**Public base URL** is used only to build the `url` link back to the job in the
+payload. Leave it empty and `url` is omitted.
+
+#### What alerts
+
+- `file.failed` and `file.not_converging`: a file reached a terminal state. A
+  single failed attempt that will be retried never alerts.
+- `node.offline`: a node has been offline for over five minutes, or a node was
+  refused.
+- `library.root_missing`: a library root cannot be reached, so nothing was
+  reconciled.
+- `scan.aborted`: a scan stopped with an error.
+- `library.paused`: a library was paused.
+- `hardware.check_failed`: declared hardware cannot encode.
+
+Outage events other than `hardware.check_failed` send `<event>.recovered` when
+the condition clears, and only if the outage was alerted. A `.recovered` follows
+its event's switch. Outages already present at startup wait two minutes before
+they are reported.
+
+#### Noise control
+
+Alerts are grouped by event type, library or node, and cause. The first message
+goes out at once. Repeats within 15 minutes become one "N more" message, with up
+to three example paths. Up to ten distinct causes per group per window are sent
+individually; the rest are only counted. An outage that keeps being reported
+repeats at most hourly, and stops when it goes quiet.
+
+#### Delivery
+
+Sending never blocks a job, a scan or shutdown. Each attempt times out after 10
+seconds. Timeouts, network errors, 5xx, 408 and 429 are retried up to three
+times, 1, 5 then 15 seconds apart; redirects are refused, so a header can never
+be replayed at another host. Each destination has its own bounded queue
+(1000, oldest dropped). Nothing is persisted: unsent alerts are lost on restart,
+and at shutdown the daemon waits briefly, then logs how many it dropped.
+
+#### Payload
+
+```json
+{
+  "event": "file.failed",
+  "at": "2026-10-17T18:04:11.000Z",
+  "summary": "/media/tv/Show/S01E02.mkv failed: ffmpeg exited with code 1",
+  "library": "TV",
+  "path": "/media/tv/Show/S01E02.mkv",
+  "reason": "ffmpeg exited with code 1",
+  "url": "https://trawlarr.example.com/jobs/abc123"
+}
+```
+
+`library`, `path`, `reason` and `url` appear when known. A grouped follow-up
+carries `count`, plus `examples` and `otherCauses` when there are any. Known
+secrets are redacted from every field.
+
+#### Home Assistant
+
+Create an automation with a **Webhook** trigger and copy its webhook URL
+(`http(s)://<ha-host>:8123/api/webhook/<id>`) into a destination. The JSON
+body is available as `trigger.json`:
+
+```yaml
+action:
+  - action: notify.notify
+    data:
+      message: '{{ trigger.json.summary }}'
+```
+
+#### The Send Webhook node
+
+**Send Webhook** sends its own message from inside a flow to a named
+destination; it ignores that destination's event switches. The message accepts
+the usual placeholders, and a blank one sends the file name. It never fails the
+flow, and the daemon does the sending, so it works on remote nodes, which never
+hold a URL. A dry run only logs what it would send.
+
+Place it before **Hold for Review**: Hold ends the run, so a node after it never
+runs. Editing the node's text or destination changes the flow definition and so
+its signature, which re-queues the library like any node edit. Changing a
+destination's URL, headers or switches does not.
+
+Publishing a flow that names an unknown or disabled destination succeeds with a
+warning. Removing or renaming a destination a published flow names is refused.
 
 ### The development CLI
 
