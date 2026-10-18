@@ -71,6 +71,12 @@ const destinationWarnings = (ctx: ApiContext, flow: FlowRecord): string[] => {
   return warnings;
 };
 
+/** The flow resource plus advisory `warnings`, present only when there are any. */
+const publishedResource = (ctx: ApiContext, flow: FlowRecord) => {
+  const warnings = destinationWarnings(ctx, flow);
+  return warnings.length === 0 ? toFlowResource(flow) : { ...toFlowResource(flow), warnings };
+};
+
 const requireFlow = (ctx: ApiContext, id: string): FlowRecord => {
   const flow = createFlowRepo(ctx.db).getById(id);
   if (flow === null) throw new ApiError(404, 'flow-not-found', `No flow with id "${id}".`);
@@ -251,7 +257,7 @@ export const flowRoutes: Route[] = [
           definition,
           nowMs: ctx.nowMs(),
         });
-        return created(toFlowResource(flow));
+        return created(publishedResource(ctx, flow));
       } catch (error) {
         return asFlowValidationError(error);
       }
@@ -419,7 +425,7 @@ export const flowRoutes: Route[] = [
       } catch (error) {
         return asFlowValidationError(error);
       }
-      return toFlowResource(updated);
+      return publishedResource(ctx, updated);
     },
   },
 
@@ -515,10 +521,7 @@ export const flowRoutes: Route[] = [
       } catch (error) {
         return asFlowValidationError(error);
       }
-      const warnings = destinationWarnings(ctx, updated);
-      return warnings.length === 0
-        ? toFlowResource(updated)
-        : { ...toFlowResource(updated), warnings };
+      return publishedResource(ctx, updated);
     },
   },
 

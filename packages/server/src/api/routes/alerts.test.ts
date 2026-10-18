@@ -412,6 +412,14 @@ describe('PUT /alerts — destinations a published flow uses', () => {
     );
   });
 
+  it('allows saving a disabled destination that a published flow still names', async () => {
+    seed();
+    createFlowRepo(db).create({ name: 'movies', definition: hookFlow('ha'), nowMs: 1 });
+    const body = await withDestinations(['ha']);
+    body.destinations[0].enabled = false;
+    expect((await api('PUT', '/alerts', { body })).status).toBe(200);
+  });
+
   it('does not count a destination only a draft names', async () => {
     seed();
     const flow = createFlowRepo(db).create({

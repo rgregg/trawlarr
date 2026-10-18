@@ -28,7 +28,7 @@ import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
-import { createSettingsRepo, type SettingsRepo } from '../db/settings-repo.js';
+import { createSettingsRepo, newDestination, type SettingsRepo } from '../db/settings-repo.js';
 import { createPluginRepo } from '../plugins/plugin-repo.js';
 import {
   createPluginSyncCoordinator,
@@ -1555,6 +1555,67 @@ describe('flows', () => {
     expect(createLibraryRepo(db).getById(library.id)!.pausedReason).toBeNull();
     const plain = await api('PUT', `/flows/${created.body.id}`, { definition: VALID_FLOW });
     expect(plain.body.warnings).toBeUndefined();
+  });
+
+  describe('destination warnings on every publish door', () => {
+    const hookDef = (destination: string) => ({
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'hook',
+          pluginId: 'trawlarr:sendWebhook',
+          pluginVersion: '1.0.0',
+          inputs: { destination },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', toNodeId: 'hook', outputNumber: 1 }],
+    });
+    const UNKNOWN = ['Send Webhook "Send Webhook" names an unknown destination "ha"'];
+
+    it('warns on POST /flows and on restoring a version naming an unknown destination', async () => {
+      const posted = await api('POST', '/flows', { name: 'p', definition: hookDef('ha') });
+      expect(posted.status).toBe(201);
+      expect(posted.body.warnings).toEqual(UNKNOWN);
+
+      const flow = await api('POST', '/flows', { name: 'r', definition: hookDef('ha') });
+      await api('PUT', `/flows/${flow.body.id}`, { definition: VALID_FLOW });
+      const versions = await api('GET', `/flows/${flow.body.id}/versions`);
+      const original = versions.body.items.find(
+        (v: ResponseBody) => v.definitionHash === flow.body.definitionHash,
+      );
+      const restored = await api(
+        'POST',
+        `/flows/${flow.body.id}/versions/${original.id}/restore`,
+        {},
+      );
+      expect(restored.status).toBe(200);
+      expect(restored.body.warnings).toEqual(UNKNOWN);
+    });
+
+    it('words a disabled destination differently and warns nothing for enabled ones', async () => {
+      const dest = (enabled: boolean) => ({
+        ...newDestination('ha', 'http://127.0.0.1:9/x'),
+        enabled,
+      });
+      settings.setAlerts({ publicBaseUrl: '', destinations: [dest(false)] });
+      const off = await api('POST', '/flows', { name: 'off', definition: hookDef('ha') });
+      expect(off.body.warnings).toEqual([
+        'Send Webhook "Send Webhook" names a disabled destination "ha"',
+      ]);
+      settings.setAlerts({ publicBaseUrl: '', destinations: [dest(true)] });
+      const post = await api('POST', '/flows', { name: 'on', definition: hookDef('ha') });
+      expect(post.body.warnings).toBeUndefined();
+      const put = await api('PUT', `/flows/${post.body.id}`, { definition: hookDef('ha') });
+      expect(put.body.warnings).toBeUndefined();
+      const versions = await api('GET', `/flows/${post.body.id}/versions`);
+      const restored = await api(
+        'POST',
+        `/flows/${post.body.id}/versions/${versions.body.items[0].id}/restore`,
+        {},
+      );
+      expect(restored.status).toBe(200);
+      expect(restored.body.warnings).toBeUndefined();
+    });
   });
 
   it('creates, reads and updates a flow, changing its hash', async () => {
