@@ -92,9 +92,10 @@ export type TrawlarrEvent =
   /**
    * A node's connection was refused (bad credentials, protocol mismatch). `nodeId` is null unless
    * it names a node this server knows: the id on an unauthenticated upgrade is attacker-chosen
-   * and must not mint alert scopes.
+   * and must not mint alert scopes. `authenticated` is true when the node proved its secret
+   * first (protocol mismatch), so the id cannot be spoofed.
    */
-  | { type: 'node.refused'; nodeId: string | null; reason: string };
+  | { type: 'node.refused'; nodeId: string | null; reason: string; authenticated: boolean };
 
 export interface EventBus {
   emit(event: TrawlarrEvent): void;

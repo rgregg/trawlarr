@@ -278,7 +278,19 @@ describe('daemon alerts: conditions standing at boot', () => {
 
 describe('daemon alerts: refused nodes', () => {
   const refuse = (t: ReturnType<typeof setup>, nodeId: string | null) =>
-    t.emit({ type: 'node.refused', nodeId, reason: 'credentials were refused' });
+    t.emit({
+      type: 'node.refused',
+      nodeId,
+      reason: 'credentials were refused',
+      authenticated: false,
+    });
+  const mismatch = (t: ReturnType<typeof setup>, nodeId: string) =>
+    t.emit({
+      type: 'node.refused',
+      nodeId,
+      reason: 'protocol version mismatch',
+      authenticated: true,
+    });
 
   it('does not alert on a single refusal, alerts on the third inside the window, once', () => {
     const t = setup();
@@ -346,5 +358,41 @@ describe('daemon alerts: refused nodes', () => {
     expect(t.raised).toHaveLength(2);
     expect(t.raised.every((r) => r.scope === 'refused:n1')).toBe(true);
     expect(t.raised.every((r) => r.summary.includes('was refused'))).toBe(true);
+  });
+
+  it('alerts at once on one authenticated protocol-mismatch refusal, and recovers when it connects', () => {
+    const t = setup();
+    mismatch(t, 'n1');
+    expect(t.raised).toHaveLength(1);
+    expect(t.raised[0]).toMatchObject({
+      event: 'node.offline',
+      scope: 'refused:n1',
+      reason: 'protocol version mismatch',
+    });
+    expect(t.raised[0]?.summary).toContain('protocol version mismatch');
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: true });
+    expect(t.names()).toEqual(['node.offline', 'node.offline.recovered']);
+  });
+
+  it('a mismatch refusal then detach, past the grace, raises no offline-for-N-minutes alert on its scope', () => {
+    const t = setup();
+    mismatch(t, 'n1');
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    t.advance(10 * MIN);
+    t.alerts.reraise();
+    const onRefusedScope = t.raised.filter((r) => r.scope === 'refused:n1');
+    expect(onRefusedScope.every((r) => r.summary.includes('was refused'))).toBe(true);
+    expect(onRefusedScope.some((r) => r.summary.includes('offline for'))).toBe(false);
+  });
+
+  it('keeps the threshold and a bounded history under 10,000 rapid unauthenticated refusals', () => {
+    const t = setup();
+    for (let i = 0; i < 10_000; i++) refuse(t, 'n1');
+    expect(t.raised).toHaveLength(1);
+    t.advance(11 * MIN);
+    t.alerts.reraise();
+    refuse(t, 'n1');
+    refuse(t, 'n1');
+    expect(t.raised).toHaveLength(1);
   });
 });

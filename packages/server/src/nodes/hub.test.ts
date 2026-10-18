@@ -368,9 +368,24 @@ describe('createNodeHub', () => {
     await expect(connectNode({})).rejects.toThrow(/401/);
     const refusals = () => events.filter((e) => e.type === 'node.refused');
     expect(refusals()).toEqual([
-      { type: 'node.refused', nodeId: creds.nodeId, reason: 'credentials were refused' },
-      { type: 'node.refused', nodeId: null, reason: 'credentials were refused' },
-      { type: 'node.refused', nodeId: null, reason: 'credentials were refused' },
+      {
+        type: 'node.refused',
+        nodeId: creds.nodeId,
+        reason: 'credentials were refused',
+        authenticated: false,
+      },
+      {
+        type: 'node.refused',
+        nodeId: null,
+        reason: 'credentials were refused',
+        authenticated: false,
+      },
+      {
+        type: 'node.refused',
+        nodeId: null,
+        reason: 'credentials were refused',
+        authenticated: false,
+      },
     ]);
 
     const good = await connectNode();
@@ -383,7 +398,11 @@ describe('createNodeHub', () => {
     const client = await connectNode();
     await client.hello([], { protocolVersion: 99 });
     expect(events).toContainEqual(
-      expect.objectContaining({ type: 'node.refused', nodeId: creds.nodeId }),
+      expect.objectContaining({
+        type: 'node.refused',
+        nodeId: creds.nodeId,
+        authenticated: true,
+      }),
     );
   });
 

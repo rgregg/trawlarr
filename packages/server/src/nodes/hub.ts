@@ -653,7 +653,12 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
         retryAfterMs: PROTOCOL_REFUSAL_RETRY_MS,
       });
       conn.ws.close(NODE_CLOSE_PROTOCOL, 'protocol version mismatch');
-      bus.emit({ type: 'node.refused', nodeId: conn.nodeId, reason: 'protocol version mismatch' });
+      bus.emit({
+        type: 'node.refused',
+        nodeId: conn.nodeId,
+        reason: 'protocol version mismatch',
+        authenticated: true,
+      });
       return;
     }
 
@@ -951,6 +956,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
             type: 'node.refused',
             nodeId: nodeId !== undefined && nodes.getById(nodeId) !== null ? nodeId : null,
             reason: 'credentials were refused',
+            authenticated: false,
           });
         }
         return;

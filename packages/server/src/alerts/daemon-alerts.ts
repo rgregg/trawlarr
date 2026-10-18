@@ -181,7 +181,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
   /** Recent refusal times per KNOWN node, to tell a revoked node from one wrong-secret probe. */
   const refusals = new Map<string, number[]>();
 
-  const onRefused = (nodeId: string | null, reason: string): void => {
+  const onRefused = (nodeId: string | null, reason: string, authenticated: boolean): void => {
     if (nodeId === null) {
       // No standing entry: anyone can probe the socket path, and a standing entry would repeat
       // hourly until restart. Offered per refusal instead, so the coalescer's repeat lasts
@@ -194,13 +194,20 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       });
       return;
     }
-    const at = nowMs();
-    const recent = [...(refusals.get(nodeId) ?? []), at].filter(
-      (time) => at - time <= REFUSAL_WINDOW_MS,
-    );
-    refusals.set(nodeId, recent);
-    // One refusal can be anyone presenting a wrong secret for a healthy node's id.
-    if (recent.length < REFUSALS_TO_ALERT) return;
+    // An authenticated refusal (protocol mismatch) is a fact about a node that proved who it
+    // is, and such a node retries only every ~5 minutes, so a count-in-window rule would
+    // never fire for it.
+    if (!authenticated) {
+      const at = nowMs();
+      // Only the last REFUSALS_TO_ALERT times are ever needed; an unauthenticated client can
+      // send these at request rate, so the list must not grow with it.
+      const recent = (refusals.get(nodeId) ?? []).filter((time) => at - time <= REFUSAL_WINDOW_MS);
+      recent.push(at);
+      if (recent.length > REFUSALS_TO_ALERT) recent.splice(0, recent.length - REFUSALS_TO_ALERT);
+      refusals.set(nodeId, recent);
+      // One refusal can be anyone presenting a wrong secret for a healthy node's id.
+      if (recent.length < REFUSALS_TO_ALERT) return;
+    }
     // Its own scope, apart from the offline scope `nodes.changed` uses: a refused connection
     // is also detached, and sharing a key let that overwrite this entry's summary.
     begin({
@@ -259,7 +266,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         }
         return;
       case 'node.refused':
-        onRefused(event.nodeId, event.reason);
+        onRefused(event.nodeId, event.reason, event.authenticated);
         return;
       default:
         return;
