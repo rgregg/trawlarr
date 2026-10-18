@@ -79,7 +79,10 @@ interface Group {
   /** Outage groups outlive their first window so a long outage is not silent after message one. */
   phase: 'window' | 'repeat';
   noticeAtMs: number;
+  /** Causes already announced; a repeat of one is counted, not re-sent. */
   causes: Set<string>;
+  /** Individually sent causes this window; reset at each rollover so the cap is per window. */
+  sentThisWindow: number;
   overflowCauses: Set<string>;
   pending: number;
   examples: string[];
@@ -98,6 +101,7 @@ export function createCoalescer(opts: {
   const take = (g: Group): { count: number; otherCauses: number; examples: string[] } => {
     const out = { count: g.pending, otherCauses: g.overflowCauses.size, examples: g.examples };
     g.pending = 0;
+    g.sentThisWindow = 0;
     g.overflowCauses = new Set();
     g.examples = [];
     return out;
@@ -116,6 +120,7 @@ export function createCoalescer(opts: {
           phase: 'window',
           noticeAtMs: nowMs,
           causes: new Set([cause]),
+          sentThisWindow: 1,
           overflowCauses: new Set(),
           pending: 0,
           examples: [],
@@ -129,8 +134,9 @@ export function createCoalescer(opts: {
         // Why a cap: a loose key (one per library) floods on a mount failure, but a tight
         // one (per file) hides a second, unrelated failure behind the first for a whole
         // window. Ten distinct causes go out individually; the rest are only counted.
-        if (g.causes.size < opts.maxCausesPerWindow) {
+        if (g.sentThisWindow < opts.maxCausesPerWindow) {
           g.causes.add(cause);
+          g.sentThisWindow++;
           return { send: true };
         }
         g.overflowCauses.add(cause);

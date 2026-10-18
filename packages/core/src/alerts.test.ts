@@ -95,4 +95,40 @@ describe('createCoalescer', () => {
   it('lists the seven daemon event types', () => {
     expect(ALERT_EVENT_TYPES).toHaveLength(7);
   });
+
+  it('applies the cause cap per window on a long-running outage, not for its lifetime', () => {
+    const c = createCoalescer(opts);
+    for (let i = 0; i < 10; i++) {
+      expect(
+        c.offer({ event: 'library.root_missing', scope: 'lib1', cause: `cause ${i}`, nowMs: i })
+          .send,
+      ).toBe(true);
+    }
+    expect(
+      c.offer({ event: 'library.root_missing', scope: 'lib1', cause: 'cause 10', nowMs: 20 }).send,
+    ).toBe(false);
+    c.due(opts.windowMs + 1);
+    // Window rolled over: an unrelated new cause must not stay hidden for the outage's lifetime.
+    expect(
+      c.offer({
+        event: 'library.root_missing',
+        scope: 'lib1',
+        cause: 'cause 10',
+        nowMs: opts.windowMs + 2,
+      }).send,
+    ).toBe(true);
+    // A still-down emission is also a rollover.
+    const e = 'library.root_missing' as const;
+    let t = opts.windowMs + 3;
+    let stillDown = 0;
+    while (stillDown === 0) {
+      c.offer({ event: e, scope: 'lib1', cause: 'cause 0', nowMs: t });
+      stillDown = c.due(t).filter((f) => f.kind === 'still-down').length;
+      t += MIN;
+    }
+    const sent = [];
+    for (let i = 20; i < 31; i++)
+      sent.push(c.offer({ event: e, scope: 'lib1', cause: `cause ${i}`, nowMs: t }).send);
+    expect(sent.filter(Boolean)).toHaveLength(10);
+  });
 });
