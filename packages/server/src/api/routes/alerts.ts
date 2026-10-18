@@ -3,6 +3,8 @@ import {
   type AlertDestination,
   type AlertSettings,
 } from '../../db/settings-repo.js';
+import { findDestinationReferences } from '../../alerts/flow-references.js';
+import { createFlowRepo } from '../../db/flow-repo.js';
 import { ApiError, type ApiContext, type Route } from '../router.js';
 
 /** What stands in for every secret in a response. */
@@ -117,6 +119,41 @@ const merge = (body: unknown, stored: AlertSettings): unknown => {
   return { publicBaseUrl: body.publicBaseUrl, destinations };
 };
 
+/**
+ * A destination a PUBLISHED flow names may not be removed or renamed: the node would silently
+ * stop alerting on the next failure, and nothing would say so. Only the live definition counts
+ * (what runs), not drafts or old versions. A rename is indistinguishable from remove-and-add,
+ * so it is refused the same way. Runs before anything is stored.
+ */
+const refuseReferencedRemoval = (ctx: ApiContext, stored: AlertSettings, next: unknown): void => {
+  if (!isRecord(next) || !Array.isArray(next.destinations)) return;
+  const kept = new Set(
+    next.destinations.flatMap((d: unknown) =>
+      isRecord(d) && typeof d.name === 'string' ? [d.name] : [],
+    ),
+  );
+  const gone = new Set(stored.destinations.map((d) => d.name).filter((n) => !kept.has(n)));
+  if (gone.size === 0) return;
+  const users = new Map<string, string[]>();
+  for (const flow of createFlowRepo(ctx.db).list()) {
+    for (const ref of findDestinationReferences(flow.definition)) {
+      if (!gone.has(ref.destination)) continue;
+      const list = users.get(ref.destination) ?? [];
+      const label = `${flow.name} (${flow.id})`;
+      if (!list.includes(label)) list.push(label);
+      users.set(ref.destination, list);
+    }
+  }
+  if (users.size === 0) return;
+  const detail = [...users].map(([name, flows]) => `"${name}" in ${flows.join(', ')}`).join('; ');
+  throw new ApiError(
+    409,
+    'destination-in-use',
+    `Cannot remove or rename an alert destination a published flow uses: ${detail}. ` +
+      `Change those flows first.`,
+  );
+};
+
 export const alertRoutes: Route[] = [
   {
     method: 'GET',
@@ -137,6 +174,7 @@ export const alertRoutes: Route[] = [
         // See above.
       }
       const next = merge(body, stored);
+      refuseReferencedRemoval(ctx, stored, next);
       try {
         ctx.settings.setAlerts(next as AlertSettings);
       } catch (error) {

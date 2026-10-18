@@ -11,6 +11,7 @@ import { migrate } from '../../db/migrate.js';
 import { createEventBus } from '../../daemon/events.js';
 import type { ScanCoordinator } from '../../daemon/scan-coordinator.js';
 import type { Supervisor } from '../../daemon/supervisor.js';
+import { createFlowRepo } from '../../db/flow-repo.js';
 import { createSettingsRepo, newDestination, type SettingsRepo } from '../../db/settings-repo.js';
 import { createApiContext, createApiServer } from '../server.js';
 
@@ -346,5 +347,84 @@ describe('auth', () => {
       expect(res.status, `${method} ${path}`).toBe(401);
     }
     expect((await api('GET', '/nodes', { apiKey: null })).status).toBe(401);
+  });
+});
+
+describe('PUT /alerts — destinations a published flow uses', () => {
+  const hookFlow = (destination: string) => ({
+    nodes: [
+      { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+      {
+        id: 'hook',
+        pluginId: 'trawlarr:sendWebhook',
+        pluginVersion: '1.0.0',
+        inputs: { destination },
+      },
+    ],
+    edges: [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'hook' }],
+  });
+  const withDestinations = async (names: string[]) => {
+    const current = (await api('GET', '/alerts')).body;
+    const template = current.destinations[0];
+    return {
+      publicBaseUrl: current.publicBaseUrl,
+      destinations: names.map((name) =>
+        name === 'ha'
+          ? { ...template, name }
+          : { ...template, name, url: `${receiverUrl}/fresh`, headers: [] },
+      ),
+    };
+  };
+
+  it('refuses to remove a destination a published flow names, and stores nothing', async () => {
+    seed();
+    const flow = createFlowRepo(db).create({
+      name: 'movies',
+      definition: hookFlow('ha'),
+      nowMs: 1,
+    });
+    const before = settings.getAlerts();
+    const res = await api('PUT', '/alerts', { body: await withDestinations([]) });
+    expect(res.status).toBe(409);
+    expect(res.body.error.message).toContain('"ha"');
+    expect(res.body.error.message).toContain('movies');
+    expect(res.body.error.message).toContain(flow.id);
+    expect(settings.getAlerts()).toEqual(before);
+  });
+
+  it('refuses a rename the same way', async () => {
+    seed();
+    createFlowRepo(db).create({ name: 'movies', definition: hookFlow('ha'), nowMs: 1 });
+    const before = settings.getAlerts();
+    const res = await api('PUT', '/alerts', { body: await withDestinations(['ha2']) });
+    expect(res.status).toBe(409);
+    expect(settings.getAlerts()).toEqual(before);
+  });
+
+  it('allows removing a destination no published flow names, and keeping or adding others', async () => {
+    seed();
+    createFlowRepo(db).create({ name: 'movies', definition: hookFlow('other'), nowMs: 1 });
+    expect(
+      (await api('PUT', '/alerts', { body: await withDestinations(['ha', 'new']) })).status,
+    ).toBe(200);
+    expect((await api('PUT', '/alerts', { body: await withDestinations(['new']) })).status).toBe(
+      200,
+    );
+  });
+
+  it('does not count a destination only a draft names', async () => {
+    seed();
+    const flow = createFlowRepo(db).create({
+      name: 'movies',
+      definition: hookFlow('other'),
+      nowMs: 1,
+    });
+    createFlowRepo(db).saveDraft({
+      id: flow.id,
+      draft: hookFlow('ha'),
+      baseHash: flow.definitionHash,
+      nowMs: 2,
+    });
+    expect((await api('PUT', '/alerts', { body: await withDestinations([]) })).status).toBe(200);
   });
 });

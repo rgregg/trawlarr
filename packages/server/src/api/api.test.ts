@@ -1532,6 +1532,31 @@ describe('flows', () => {
     expect(createFlowRepo(db).list()).toHaveLength(0);
   });
 
+  it('publishes a flow naming an unknown alert destination, with a warning and no pause', async () => {
+    const created = await api('POST', '/flows', { name: 'warn', definition: VALID_FLOW });
+    const library = seedLibrary({ flowId: created.body.id });
+    const definition = {
+      nodes: [
+        { id: 'start', pluginId: 'trawlarr:start', pluginVersion: '1.0.0', inputs: {} },
+        {
+          id: 'hook',
+          pluginId: 'trawlarr:sendWebhook',
+          pluginVersion: '1.0.0',
+          inputs: { destination: 'ha' },
+        },
+      ],
+      edges: [{ fromNodeId: 'start', toNodeId: 'hook', outputNumber: 1 }],
+    };
+    const res = await api('PUT', `/flows/${created.body.id}`, { definition });
+    expect(res.status).toBe(200);
+    expect(res.body.warnings).toEqual([
+      'Send Webhook "Send Webhook" names an unknown destination "ha"',
+    ]);
+    expect(createLibraryRepo(db).getById(library.id)!.pausedReason).toBeNull();
+    const plain = await api('PUT', `/flows/${created.body.id}`, { definition: VALID_FLOW });
+    expect(plain.body.warnings).toBeUndefined();
+  });
+
   it('creates, reads and updates a flow, changing its hash', async () => {
     const created = await api('POST', '/flows', { name: 'good', definition: VALID_FLOW });
     expect(created.status).toBe(201);
