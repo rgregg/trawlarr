@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseAgentMessage, parseDaemonMessage } from './protocol.js';
+import {
+  MAX_ALERT_DESTINATION_CHARS,
+  MAX_ALERT_MESSAGE_CHARS,
+  parseAgentMessage,
+  parseDaemonMessage,
+} from './protocol.js';
 
 describe('review hold wire fields', () => {
   it.each([
@@ -70,5 +75,62 @@ describe('protocol v2: commit round trip and superseded failures', () => {
     for (const message of messages) {
       expect(parseAgentMessage(JSON.parse(JSON.stringify(message)))).toEqual(message);
     }
+  });
+});
+
+describe('alert-request', () => {
+  it('accepts a destination and a message, and survives a JSON round trip', () => {
+    const message = { type: 'alert-request', destination: 'ha', message: 'x' };
+    expect(parseAgentMessage(JSON.parse(JSON.stringify(message)))).toEqual(message);
+  });
+
+  it.each([
+    { destination: 'ha' },
+    { message: 'x' },
+    { destination: 1, message: 'x' },
+    { destination: 'ha', message: { text: 'x' } },
+    { destination: null, message: 'x' },
+  ])('rejects missing or non-string fields %j', (fields) => {
+    expect(parseAgentMessage({ type: 'alert-request', ...fields })).toBeNull();
+  });
+
+  it('rejects an oversized destination rather than clipping it to a different name', () => {
+    const destination = 'd'.repeat(MAX_ALERT_DESTINATION_CHARS + 1);
+    expect(parseAgentMessage({ type: 'alert-request', destination, message: 'x' })).toBeNull();
+    const edge = 'd'.repeat(MAX_ALERT_DESTINATION_CHARS);
+    expect(
+      parseAgentMessage({ type: 'alert-request', destination: edge, message: 'x' }),
+    ).not.toBeNull();
+  });
+
+  it('truncates an oversized message', () => {
+    const parsed = parseAgentMessage({
+      type: 'alert-request',
+      destination: 'ha',
+      message: 'm'.repeat(MAX_ALERT_MESSAGE_CHARS + 500),
+    });
+    expect(parsed).toEqual({
+      type: 'alert-request',
+      destination: 'ha',
+      message: 'm'.repeat(MAX_ALERT_MESSAGE_CHARS),
+    });
+  });
+
+  it('drops any extra field a plugin attaches, so library, path and jobId cannot be spoofed', () => {
+    const parsed = parseAgentMessage({
+      type: 'alert-request',
+      destination: 'ha',
+      message: 'x',
+      library: 'Other',
+      path: '/etc/passwd',
+      jobId: 'someone-else',
+    });
+    expect(parsed).toEqual({ type: 'alert-request', destination: 'ha', message: 'x' });
+  });
+
+  it('still drops an unrecognised message type', () => {
+    expect(
+      parseAgentMessage({ type: 'alert-requests', destination: 'ha', message: 'x' }),
+    ).toBeNull();
   });
 });

@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -848,5 +849,79 @@ describe('the agent process reaches no database', () => {
     const { files } = runtimeClosure(join(here, 'run-job.ts'));
     const local = files.map((file) => relative(join(here, '..'), file));
     expect(local.filter((file) => file.startsWith('db/')).length).toBeGreaterThan(1);
+  });
+});
+
+describe('alert-request', () => {
+  it('hands only destination and message to onAlert, never replies, and the job still completes', async () => {
+    const child = fakeChild();
+    const alerts: unknown[] = [];
+    const handle = createAgentHandle(
+      depsFor(child, {
+        onAlert: (request) => {
+          alerts.push(request);
+        },
+      }),
+    );
+    const running = handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', {
+      type: 'alert-request',
+      destination: 'ha',
+      message: 'hi',
+      library: 'spoof',
+      path: '/spoof',
+      jobId: 'spoof',
+    });
+    expect(alerts).toEqual([{ destination: 'ha', message: 'hi' }]);
+    expect(child.sent).toEqual([{ type: 'job', payload }]); // no reply of any kind
+    child.emit('message', { type: 'done', report });
+    await expect(running).resolves.toEqual(report);
+  });
+
+  it('survives an onAlert that throws, and a malformed or unrecognised message is dropped', async () => {
+    const child = fakeChild();
+    let calls = 0;
+    const handle = createAgentHandle(
+      depsFor(child, {
+        onAlert: () => {
+          calls += 1;
+          throw new Error('boom');
+        },
+      }),
+    );
+    const running = handle.run(payload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', { type: 'alert-request', destination: 'ha', message: 'hi' });
+    child.emit('message', { type: 'alert-request', destination: 7, message: 'hi' });
+    child.emit('message', { type: 'alert-reqest', destination: 'ha', message: 'hi' });
+    expect(calls).toBe(1);
+    child.emit('message', { type: 'done', report });
+    await expect(running).resolves.toEqual(report);
+  });
+
+  it("gives onAlert a log sink that reaches the live log and this job's log file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'trawlarr-alert-log-'));
+    const logPath = join(dir, 'job-1.log');
+    writeFileSync(logPath, 'agent line\n');
+    const child = fakeChild();
+    const live: string[] = [];
+    const handle = createAgentHandle(
+      depsFor(child, {
+        onLog: (text) => live.push(text),
+        onAlert: (_request, log) => {
+          log('Alert not sent: destination "ha" is unknown');
+        },
+      }),
+    );
+    const running = handle.run({ ...payload, logPath } as JobPayload);
+    child.emit('message', { type: 'ready', pid: 4242 });
+    child.emit('message', { type: 'alert-request', destination: 'ha', message: 'hi' });
+    expect(live).toEqual(['Alert not sent: destination "ha" is unknown']);
+    expect(readFileSync(logPath, 'utf8')).toBe(
+      'agent line\nAlert not sent: destination "ha" is unknown\n',
+    );
+    child.emit('message', { type: 'done', report });
+    await running;
   });
 });

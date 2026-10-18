@@ -316,6 +316,8 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     dataDir,
     nowMs,
     createAgent: input.createAgent,
+    // alertService is built below; this runs only when a job's node asks for an alert.
+    raiseFlowMessage: (request) => alertService.raiseFlowMessage(request),
     remoteNodes: () => hub.onlineNodes(),
     createRemoteAgent: (factoryInput) => hub.createAgent(factoryInput),
   });

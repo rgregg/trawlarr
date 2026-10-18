@@ -451,6 +451,11 @@ describe('startNodeHost', () => {
     await conn.next('agent', (f) => f.message.type === 'progress');
     await conn.next('agent', (f) => f.message.type === 'log');
 
+    // An alert-request is relayed to the server as an `agent` frame, with only a destination and message.
+    agent.deps.onAlert?.({ destination: 'ha', message: 'hi' }, () => {});
+    const alert = await conn.next('agent', (f) => f.message.type === 'alert-request');
+    expect(alert.message).toEqual({ type: 'alert-request', destination: 'ha', message: 'hi' });
+
     // A duplicate job frame for a running job is not run twice.
     conn.send({ type: 'job', jobId: 'job-1', payload: payloadFor('job-1', server.bundle) });
     agent.resolve(reportFor('job-1'));

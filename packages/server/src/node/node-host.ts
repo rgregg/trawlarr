@@ -637,6 +637,16 @@ export const startNodeHost = async (input: NodeHostInput): Promise<NodeHost> => 
           }
           sendAgent(jobId, { type: 'log', text });
         },
+        // Relayed, not answered here: the destination's URL and headers live
+        // only on the server, so the node can do nothing but pass the name on.
+        // Unjournaled: an alert sent while disconnected is lost, like a log line.
+        onAlert: (request) => {
+          sendAgent(jobId, {
+            type: 'alert-request',
+            destination: request.destination,
+            message: request.message,
+          });
+        },
         nowMs,
       });
     } catch (error) {

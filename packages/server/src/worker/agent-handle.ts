@@ -10,6 +10,8 @@ import type { DocumentPort, KillFn, StepRecord } from '@trawlarr/engine';
 import type { JobPayload } from './job-payload.js';
 import type { JobReport } from './run-payload.js';
 import type { AgentToDaemon, DaemonToAgent } from './protocol.js';
+import type { AlertRequest, JobLogSink } from './alert-relay.js';
+import { createJobLogWriter } from '../job-log/job-log-writer.js';
 import { PROTOCOL_VERSION, PROTOCOL_VERSION_ENV, parseAgentMessage } from './protocol.js';
 
 /** Where the built agent entry point lives, relative to this module. */
@@ -169,6 +171,12 @@ export interface AgentHandleDeps {
   onHeartbeat: (nowMs: number) => void;
   onProgress: (progress: { percent: number | null; stage: string }) => void;
   onLog: (text: string) => void;
+  /**
+   * A flow node asked the daemon for an alert (fire and forget). Must not
+   * throw and must not touch job state; the handle passes its own job-log
+   * sink so a refusal is written where this job's log lines go.
+   */
+  onAlert?: (request: AlertRequest, log: JobLogSink) => void;
   nowMs: () => number;
   /** Answers the agent's commit requests. Defaults to {@link GRANT_ALL}. */
   commits?: CommitPort;
@@ -289,6 +297,29 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
   let cancelled = false;
   let gone = false;
   let pendingPayload: JobPayload | null = null;
+  let jobLogPath: string | null = null;
+
+  /**
+   * Where the daemon's own notes about this job go: the live event stream and
+   * the job's log file. The file is the agent's too (an `a`-mode descriptor,
+   * so appends from two processes do not overwrite each other); without
+   * writing it here a refused alert would be visible only to someone watching
+   * live, and gone from the log read afterwards.
+   */
+  const alertLog = (text: string): void => {
+    input.onLog(text);
+    if (jobLogPath === null) return;
+    try {
+      const writer = createJobLogWriter({ path: jobLogPath });
+      try {
+        writer.append(text);
+      } finally {
+        writer.close();
+      }
+    } catch {
+      // The live line was delivered; a log file that cannot be opened costs detail only.
+    }
+  };
   let settle:
     | ((outcome: { ok: true; report: JobReport } | { ok: false; error: AgentFailure }) => void)
     | null = null;
@@ -440,6 +471,13 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
       case 'commit-request':
         answerCommitRequest(message);
         return;
+      case 'alert-request':
+        try {
+          input.onAlert?.({ destination: message.destination, message: message.message }, alertLog);
+        } catch {
+          // Fire and forget: an alert is never worth disturbing the run.
+        }
+        return;
       case 'done':
         disarmGrace();
         finish({ ok: true, report: message.report });
@@ -582,6 +620,7 @@ export const createAgentHandle = (input: AgentHandleDeps & { id: string }): Agen
         );
       }
       started = true;
+      jobLogPath = payload.logPath ?? null;
       if (gone) {
         return Promise.reject(
           new AgentFailure(`Worker ${input.id} exited before it was given a job.`, {

@@ -85,6 +85,11 @@ export interface RunPayloadPorts {
    * existed. See `CommitGate`.
    */
   commitGate?: CommitGate;
+  /**
+   * Fire-and-forget alert to a named destination, handled by the daemon. The
+   * flow node that uses it arrives separately; absent in the in-process path.
+   */
+  sendAlert?: (destination: string, message: string) => void;
 }
 
 /**

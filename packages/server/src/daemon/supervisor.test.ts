@@ -128,6 +128,8 @@ interface FakeAgent {
   fail(error: AgentFailure): Promise<void>;
   step(over?: { seq?: number; pluginId?: string }): void;
   progress(percent: number): void;
+  /** A flow node's alert-request, through the sinks the supervisor handed this agent. */
+  alert(destination: string, message: string, log?: (text: string) => void): void;
 }
 
 /**
@@ -293,6 +295,9 @@ const harness = (input: HarnessInput) => {
       progress: (percent: number) => {
         factoryInput.onProgress({ percent, stage: 'transcode' });
       },
+      alert: (destination, message, log = factoryInput.onLog) => {
+        factoryInput.onAlert?.({ destination, message }, log);
+      },
     };
 
     all.push(agent);
@@ -327,6 +332,8 @@ const harness = (input: HarnessInput) => {
     });
   };
 
+  const raised: unknown[] = [];
+
   const newSupervisor = (): Supervisor =>
     createSupervisor({
       db,
@@ -336,6 +343,10 @@ const harness = (input: HarnessInput) => {
       createAgent,
       remoteNodes: () => online,
       createRemoteAgent: (factoryInput) => makeFake(factoryInput, factoryInput.nodeId),
+      raiseFlowMessage: (request) => {
+        raised.push(request);
+        return 'queued';
+      },
     });
 
   const supervisor = newSupervisor();
@@ -366,6 +377,7 @@ const harness = (input: HarnessInput) => {
     db,
     supervisor,
     newSupervisor,
+    raised,
     makeFake,
     online,
     addNode,
@@ -389,6 +401,30 @@ const harness = (input: HarnessInput) => {
 };
 
 describe('the supervisor', () => {
+  it("raises a flow node's alert with the job's own library, path and id", async () => {
+    const { supervisor, agents, raised, db } = harness({
+      queued: 1,
+      target: { transcode: 1, health: 0 },
+    });
+    await supervisor.tick();
+    const agent = agents.running()[0]!;
+
+    agent.alert('ha', 'hi');
+
+    const row = db
+      .prepare('SELECT l.name AS library FROM library l WHERE l.id = ?')
+      .get(agent.payload.libraryId) as { library: string };
+    expect(raised).toEqual([
+      {
+        destination: 'ha',
+        message: 'hi',
+        library: row.library,
+        path: agent.payload.path,
+        jobId: agent.payload.jobId,
+      },
+    ]);
+  });
+
   it('starts as many workers as the schedule allows and no more', async () => {
     const { supervisor, agents, db } = harness({
       queued: 5,
