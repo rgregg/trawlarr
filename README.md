@@ -458,19 +458,21 @@ budget is exhausted. Both components work in dry runs too.
 When something needs a person, the daemon sends a JSON `POST` to a webhook.
 Home Assistant is the first target, but any receiver that accepts a webhook
 works. This is outbound, and separate from the Sonarr, Radarr and Lidarr
-notifications the daemon receives (see "Run it as a service"). Configure it
-under **Configure → System → Alerts**.
+notifications the daemon receives (see "Try it" and
+[`docs/deployment.md`](docs/deployment.md)). Configure it under **Configure →
+System → Alerts**.
 
 A destination has a name, a URL, optional headers, a switch per event, and an
 enabled switch. The URL and the header values are secrets: after saving they
-show masked, and the API never returns them. Changing a destination's URL means
-re-entering its header values. **Test** sends a test message to the saved
-destination, so save first.
+show masked, and the API never returns them. Changing a destination's URL, or
+renaming it, means re-entering its header values (and, for a rename, its URL).
+**Test** sends a test message to the saved destination, so save first.
 
 **Public base URL** is used only to build the `url` link back to the job in the
-payload. Leave it empty and `url` is omitted.
+payload. It appears only on events tied to a job (file events and Send Webhook
+messages), never on outage events, and is omitted when this is empty.
 
-#### What alerts
+**What alerts.**
 
 - `file.failed` and `file.not_converging`: a file reached a terminal state. A
   single failed attempt that will be retried never alerts.
@@ -479,7 +481,8 @@ payload. Leave it empty and `url` is omitted.
 - `library.root_missing`: a library root cannot be reached, so nothing was
   reconciled.
 - `scan.aborted`: a scan stopped with an error.
-- `library.paused`: a library was paused.
+- `library.paused`: Trawlarr paused a library automatically. Pausing one
+  yourself never alerts.
 - `hardware.check_failed`: declared hardware cannot encode.
 
 Outage events other than `hardware.check_failed` send `<event>.recovered` when
@@ -487,24 +490,26 @@ the condition clears, and only if the outage was alerted. A `.recovered` follows
 its event's switch. Outages already present at startup wait two minutes before
 they are reported.
 
-#### Noise control
+**Noise control.** Alerts are grouped by event type, library or node, and cause.
+The first message goes out at once. Repeats within 15 minutes become one "N
+more" message, with up to three example paths. Up to ten distinct causes per
+group per window are sent individually; the rest are only counted. A standing
+outage (an offline node, a paused library, failed hardware) is re-reported at
+most hourly until it recovers, or for hardware until restart. Repeated refusals
+of a node stop repeating once they stop arriving.
 
-Alerts are grouped by event type, library or node, and cause. The first message
-goes out at once. Repeats within 15 minutes become one "N more" message, with up
-to three example paths. Up to ten distinct causes per group per window are sent
-individually; the rest are only counted. An outage that keeps being reported
-repeats at most hourly, and stops when it goes quiet.
+**Delivery.** Sending never blocks a job, a scan or shutdown. Each attempt times
+out after 10 seconds. Timeouts, network errors, 5xx, 408 and 429 are retried up
+to three times, 1, 5 then 15 seconds apart. Any other 4xx (a wrong webhook id,
+say) is not retried, and redirects are refused, so a header can never be
+replayed at another host. After the last attempt a failed alert is dropped, not
+re-queued, and the daemon log gets `Alert delivery to "<name>" failed: <error>`.
+The settings page shows the last result for each destination; those two are
+where to look. Each destination has its own bounded queue (1000, oldest
+dropped). Nothing is persisted: unsent alerts are lost on restart, and at
+shutdown the daemon waits briefly, then logs how many it dropped.
 
-#### Delivery
-
-Sending never blocks a job, a scan or shutdown. Each attempt times out after 10
-seconds. Timeouts, network errors, 5xx, 408 and 429 are retried up to three
-times, 1, 5 then 15 seconds apart; redirects are refused, so a header can never
-be replayed at another host. Each destination has its own bounded queue
-(1000, oldest dropped). Nothing is persisted: unsent alerts are lost on restart,
-and at shutdown the daemon waits briefly, then logs how many it dropped.
-
-#### Payload
+**Payload.**
 
 ```json
 {
@@ -519,14 +524,15 @@ and at shutdown the daemon waits briefly, then logs how many it dropped.
 ```
 
 `library`, `path`, `reason` and `url` appear when known. A grouped follow-up
-carries `count`, plus `examples` and `otherCauses` when there are any. Known
-secrets are redacted from every field.
+carries `count`, plus `examples` and `otherCauses` when there are any. Send
+Webhook messages arrive as `event: "flow.message"` with `summary`, and `library`,
+`path` and `url` when known, but no `reason`. The Test button sends
+`event: "test"`. Known secrets are scrubbed from `summary`, `path`, `reason` and
+`examples`, not from `library` or `url`.
 
-#### Home Assistant
-
-Create an automation with a **Webhook** trigger and copy its webhook URL
-(`http(s)://<ha-host>:8123/api/webhook/<id>`) into a destination. The JSON
-body is available as `trigger.json`:
+**Home Assistant.** Create an automation with a **Webhook** trigger and copy its
+webhook URL (`http(s)://<ha-host>:8123/api/webhook/<id>`) into a destination.
+The JSON body is available as `trigger.json`:
 
 ```yaml
 action:
@@ -535,13 +541,11 @@ action:
       message: '{{ trigger.json.summary }}'
 ```
 
-#### The Send Webhook node
-
-**Send Webhook** sends its own message from inside a flow to a named
-destination; it ignores that destination's event switches. The message accepts
-the usual placeholders, and a blank one sends the file name. It never fails the
-flow, and the daemon does the sending, so it works on remote nodes, which never
-hold a URL. A dry run only logs what it would send.
+**The Send Webhook node.** It sends its own message from inside a flow to a
+named destination; it ignores that destination's event switches. The message
+accepts the usual placeholders, and a blank one sends the file name. It never
+fails the flow, and the daemon does the sending, so it works on remote nodes,
+which never hold a URL. A dry run only logs what it would send.
 
 Place it before **Hold for Review**: Hold ends the run, so a node after it never
 runs. Editing the node's text or destination changes the flow definition and so
