@@ -268,7 +268,7 @@ const HEADER_NAME_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
  */
 const validateAlerts = (
   value: { publicBaseUrl: unknown; destinations: unknown },
-  options: { fillMissingEvents?: boolean } = {},
+  options: { fillMissingEvents?: boolean; forWrite?: boolean } = {},
 ): AlertSettings => {
   const publicBaseUrl = requireHttpUrl(value.publicBaseUrl, 'alerts.publicBaseUrl', true);
   if (!Array.isArray(value.destinations)) {
@@ -280,6 +280,15 @@ const validateAlerts = (
     if (!isRecord(raw)) throw new SettingValidationError(`${at} must be an object.`);
     const name = requireString(raw.name, `${at}.name`);
     if (name.trim() === '') throw new SettingValidationError(`${at}.name must not be empty.`);
+    // The Send Webhook node and the flow-reference check both trim the name, so " ops" could
+    // be saved and never reached. Checked on write only: a stored row like it must not make
+    // every destination unreadable. The name is not echoed, to keep this message free of text
+    // the caller typed into a secret-bearing form.
+    if (options.forWrite === true && name.trim() !== name) {
+      throw new SettingValidationError(
+        `${at}.name must not start or end with a space or other whitespace.`,
+      );
+    }
     // Names key delivery state and the UI's rows; two the same would merge them.
     if (seen.has(name)) {
       throw new SettingValidationError(`${at}.name "${name}" is used by another destination.`);
@@ -705,11 +714,13 @@ export const createSettingsRepo = (input: {
       { fillMissingEvents: true },
     );
 
-  const setAlerts = (next: AlertSettings): void => {
-    const valid = validateAlerts(next);
+  // One transaction: a base url saved without the destinations saved beside it would pair a
+  // new link with the old destinations (or the reverse) after a failed write.
+  const setAlerts = db.transaction((next: AlertSettings): void => {
+    const valid = validateAlerts(next, { forWrite: true });
     writeField(SETTING_KEYS.alerts, 'publicBaseUrl', valid.publicBaseUrl);
     writeField(SETTING_KEYS.alerts, 'destinations', valid.destinations);
-  };
+  });
 
   return {
     getAlerts,

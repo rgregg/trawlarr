@@ -192,6 +192,42 @@ describe('settings repo', () => {
       expect(repo.getAlerts().destinations).toEqual([]);
     });
 
+    // The node and every reference trim the name, so a saved " ops" could never be reached.
+    it('rejects a name with leading or trailing whitespace on write, without echoing a secret', () => {
+      const repo = createSettingsRepo({ db: freshDb() });
+      for (const name of [' ops', 'ops ', '\tops']) {
+        let message = '';
+        try {
+          repo.setAlerts({
+            publicBaseUrl: '',
+            destinations: [newDestination(name, 'https://hooks.example/tok-456')],
+          });
+        } catch (error) {
+          expect(error).toBeInstanceOf(SettingValidationError);
+          message = (error as Error).message;
+        }
+        expect(message).toMatch(/space/);
+        expect(message).not.toContain('tok-456');
+      }
+      expect(repo.getAlerts().destinations).toEqual([]);
+    });
+
+    it('writes the base url and the destinations together or not at all', () => {
+      const db = freshDb();
+      const repo = createSettingsRepo({ db });
+      db.exec(
+        `CREATE TRIGGER no_destinations BEFORE INSERT ON setting
+         WHEN NEW.key = 'alerts.destinations' BEGIN SELECT RAISE(ABORT, 'disk full'); END`,
+      );
+      expect(() =>
+        repo.setAlerts({
+          publicBaseUrl: 'https://trawlarr.example',
+          destinations: [newDestination('ops', 'https://hooks.example/x')],
+        }),
+      ).toThrow();
+      expect(repo.getAlerts().publicBaseUrl).toBe('');
+    });
+
     it('accepts an empty public base url and rejects a non-http(s) one', () => {
       const repo = createSettingsRepo({ db: freshDb() });
       repo.setAlerts({ publicBaseUrl: '', destinations: [] });
