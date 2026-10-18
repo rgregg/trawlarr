@@ -10,6 +10,7 @@ import { publishDryRunSummary, type DryRunRun, type NodeLabels } from './dry-run
 import { nodeLabels, type EditorPlugin, type ValidationProblem } from './flow-canvas-model.js';
 import { hasUnsavedLayout, layoutStoreFor, saveFlowLayout } from './flow-layout-model.js';
 import type { FlowFieldCatalogue } from './plugin-input-model.js';
+import { PublishWarnings } from './PublishWarnings.js';
 import {
   editorBuffers,
   hasDefinitionChanges,
@@ -254,6 +255,7 @@ const Editor = (
       ? 'Recovered unsaved changes from this tab. Save draft to keep them on the daemon.'
       : null,
   );
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [preview, setPreview] = useState<ReturnType<typeof summarizePublish> | null>(null);
   const [note, setNote] = useState('');
   const [canvasKey, setCanvasKey] = useState(0);
@@ -386,8 +388,14 @@ const Editor = (
   const publish = async (): Promise<void> => {
     setBusy(true);
     setFailure(null);
+    setWarnings([]);
     try {
-      const next = await client.put<EditorFlow>(`/flows/${id}`, { definition, baseHash, note });
+      const next = await client.put<EditorFlow & { warnings?: string[] }>(`/flows/${id}`, {
+        definition,
+        baseHash,
+        note,
+      });
+      setWarnings(next.warnings ?? []);
       setFlow(next);
       setDefinition(next.definition);
       setSaved(next.definition);
@@ -441,6 +449,7 @@ const Editor = (
       setLiveHash(next.definitionHash);
       setPreview(null);
       setCanvasKey((value) => value + 1);
+      setWarnings([]);
       setMessage('Draft discarded. Showing the current published flow.');
     } catch (error) {
       report(error);
@@ -531,6 +540,7 @@ const Editor = (
             {message}
           </p>
         )}
+        <PublishWarnings warnings={warnings} />
         {stale && (
           <p role="alert" className="failure">
             This draft is based on an older published version. Publishing is blocked to avoid

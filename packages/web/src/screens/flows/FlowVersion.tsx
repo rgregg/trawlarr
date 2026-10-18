@@ -5,6 +5,7 @@ import { Link } from '../../shell/Link.js';
 import { formatRoute } from '../../shell/route.js';
 import { describeFailure } from '../config/library-form-model.js';
 import { GraphNode } from './FlowDetail.js';
+import { PublishWarnings } from './PublishWarnings.js';
 import { toGraphRows } from './flow-graph-model.js';
 import {
   describeRestoreConfirmation,
@@ -238,6 +239,8 @@ export const FlowVersion = (props: {
     null,
   );
 
+  const [restoreWarnings, setRestoreWarnings] = useState<string[] | null>(null);
+
   const restore = async (): Promise<void> => {
     // Guarded defensively — the Restore button below only ever renders once
     // `version` is loaded, at which point `resolvedFlowId` is always a
@@ -246,7 +249,17 @@ export const FlowVersion = (props: {
     setRestoring(true);
     setRestoreFailure(null);
     try {
-      await client.post(`/flows/${resolvedFlowId}/versions/${versionId}/restore`, {});
+      const restored = await client.post<{ warnings?: string[] } | undefined>(
+        `/flows/${resolvedFlowId}/versions/${versionId}/restore`,
+        {},
+      );
+      // Navigating away would discard the daemon's warnings unread (e.g. a Send Webhook node
+      // naming a destination that no longer exists). Only then stay; with none, behave as before.
+      const found = restored?.warnings ?? [];
+      if (found.length > 0) {
+        setRestoreWarnings(found);
+        return;
+      }
       props.navigate(formatRoute({ name: 'flow', id: resolvedFlowId }));
     } catch (error) {
       setRestoreFailure(describeFailure(error));
@@ -378,7 +391,21 @@ export const FlowVersion = (props: {
             </div>
           )}
 
-          {status === 'historical' && (
+          {restoreWarnings !== null && (
+            <>
+              <PublishWarnings warnings={restoreWarnings} />
+              <p className="detail">
+                <Link
+                  to={formatRoute({ name: 'flow', id: version.flowId })}
+                  navigate={props.navigate}
+                >
+                  Continue to flow
+                </Link>
+              </p>
+            </>
+          )}
+
+          {restoreWarnings === null && status === 'historical' && (
             <>
               <h3>Restore</h3>
               <p className="help">
