@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import type { HardwareType } from '@trawlarr/core';
 import { createAlertService } from '../alerts/alert-service.js';
 import { createDaemonAlerts } from '../alerts/daemon-alerts.js';
-import { createDeliverer } from '../alerts/deliver.js';
+import { createDeliverer, type Deliverer } from '../alerts/deliver.js';
 import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createApiContext, createApiServer } from '../api/server.js';
 import { attachWebSocket, type WsChannel } from '../api/ws.js';
@@ -147,6 +147,8 @@ export interface StartDaemonInput {
     startupDelayMs?: number;
     /** Period of the follow-up/re-offer tick. */
     tickMs?: number;
+    /** A test hands in its own deliverer to observe what shutdown does to it. */
+    deliverer?: Deliverer;
   };
 }
 
@@ -392,11 +394,13 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   // daemon left behind. A subscriber created after them would never see any of it.
   const alertLibraries = createLibraryRepo(db);
   const alertFiles = createMediaFileRepo(db);
-  const alertDeliverer = createDeliverer({
-    log: (line) => {
-      console.warn(`[daemon] ${line}`);
-    },
-  });
+  const alertDeliverer =
+    input.alerts?.deliverer ??
+    createDeliverer({
+      log: (line) => {
+        console.warn(`[daemon] ${line}`);
+      },
+    });
   const alertService = createAlertService({
     settings,
     deliverer: alertDeliverer,

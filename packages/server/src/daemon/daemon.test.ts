@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSyn
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
+import { createDeliverer } from '../alerts/deliver.js';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
@@ -1081,24 +1082,26 @@ describe('alerts', () => {
     expect(hook.bodies).toHaveLength(0);
   });
 
-  it('aborts a test send still in flight when it shuts down, instead of waiting out the receiver', async () => {
+  it('refuses new test sends once shutdown has drained, so none outlives the deadline', async () => {
     const dataDir = newDataDir();
     seedLibrary(dataDir);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const hook = await receiver(true);
+    const hook = await receiver();
     configureAlerts(dataDir, hook.url);
-    const daemon = await start({ dataDir, drainDeadlineMs: 400 });
-    const record = (await readDaemonRecord({ dataDir }))!;
-    const pending = fetch(`http://127.0.0.1:${String(daemon.port)}/api/v1/alerts/hook/test`, {
-      method: 'POST',
-      headers: { 'x-api-key': record.apiKey },
-    }).catch(() => null);
-    await until(() => hook.bodies.length > 0);
+    const deliverer = createDeliverer({ retries: 0, log: () => {} });
+    const daemon = await start({ dataDir, alerts: { deliverer } });
+    const target = { name: 'hook', url: hook.url, headers: [] };
+    // Sanity: before shutdown the same handle really reaches the receiver.
+    expect((await deliverer.sendNow(target, { event: 'probe' })).ok).toBe(true);
+    const before = hook.bodies.length;
 
-    const startedAt = Date.now();
     await daemon.stop();
-    await pending;
 
-    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    // The alert service's drain only empties the queue; `sendNow` (the "send test" path) stays
+    // live until the deliverer itself is stopped, so without that call this would reach the
+    // receiver and could run for its full timeout after the shutdown deadline.
+    const result = await deliverer.sendNow(target, { event: 'late' });
+    expect(result).toMatchObject({ ok: false, error: 'aborted' });
+    expect(hook.bodies).toHaveLength(before);
   });
 });
