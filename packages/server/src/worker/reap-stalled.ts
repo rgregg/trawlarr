@@ -399,11 +399,14 @@ export const stallOpenJob = (input: {
   const { db } = input;
   const mediaFileRepo = createMediaFileRepo(db);
   const jobRepo = createJobRepo(db);
-  // The file's state once the job is closed, so a caller can say what the file became
-  // (`failed` when this stall spent the last retry). Null only for a file that is gone.
+  // The file's new state, but ONLY when this stall really wrote the ledger. Null when the guard
+  // skipped it (file not running, or another job holds the claim): announcing the file's
+  // current state then would repeat a `failed` already announced, or call a file another job is
+  // running `running`.
   return db.transaction((): FileState | null => {
     const file = mediaFileRepo.getById(input.fileId);
     const latest = jobRepo.listForFile(input.fileId)[0];
+    let stalledState: FileState | null = null;
     if (file !== null && file.state === 'running' && latest?.id === input.jobId) {
       mediaFileRepo.setLedger({
         fileId: file.id,
@@ -413,6 +416,7 @@ export const stallOpenJob = (input: {
         }),
         lastRunId: input.jobId,
       });
+      stalledState = mediaFileRepo.getById(input.fileId)?.state ?? null;
     }
     jobRepo.finish({
       jobId: input.jobId,
@@ -420,6 +424,6 @@ export const stallOpenJob = (input: {
       outcome: input.outcome,
       nowMs: input.nowMs,
     });
-    return mediaFileRepo.getById(input.fileId)?.state ?? null;
+    return stalledState;
   })();
 };

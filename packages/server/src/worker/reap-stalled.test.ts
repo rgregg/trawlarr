@@ -7,6 +7,7 @@ import { migrate } from '../db/migrate.js';
 import { createMediaFileRepo, type MediaFileRepo } from '../db/media-file-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import {
+  stallOpenJob,
   DEFAULT_STALE_AFTER_MS,
   MIN_STALE_AFTER_MS,
   StaleThresholdTooShortError,
@@ -482,5 +483,22 @@ describe('stallUnsentRemoteJobs', () => {
     expect(jobRow(sent).ended_at).toBeNull();
     expect(jobRow(local).ended_at).toBeNull();
     expect(repo.getById(localFile)?.state).toBe('running');
+  });
+});
+
+describe('stallOpenJob', () => {
+  it('returns the new state only when it really stalled the file, null when the guard skipped it', () => {
+    const fileId = runningFile({ claimedAtMs: NOW - 60_000 });
+    db.prepare(`UPDATE media_file SET attempt_count = 2 WHERE id = ?`).run(fileId);
+    const older = runningJob({ fileId, startedAtMs: NOW - 60_000, heartbeatAtMs: null });
+    const newer = runningJob({ fileId, startedAtMs: NOW - 30_000, heartbeatAtMs: null });
+
+    // An older job is not the latest: the newer job holds the claim.
+    expect(stallOpenJob({ db, jobId: older, fileId, outcome: 'x', nowMs: NOW })).toBeNull();
+    expect(repo.getById(fileId)?.state).toBe('running');
+    expect(stallOpenJob({ db, jobId: newer, fileId, outcome: 'x', nowMs: NOW })).toBe('failed');
+    // The file is no longer running: a second stall must not re-announce `failed`.
+    const again = runningJob({ fileId, startedAtMs: NOW, heartbeatAtMs: null });
+    expect(stallOpenJob({ db, jobId: again, fileId, outcome: 'x', nowMs: NOW })).toBeNull();
   });
 });

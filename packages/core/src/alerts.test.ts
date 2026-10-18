@@ -132,3 +132,30 @@ describe('createCoalescer', () => {
     expect(sent.filter(Boolean)).toHaveLength(10);
   });
 });
+
+describe('standing outage re-offered by the daemon every tick', () => {
+  it('sends no summary in the first window, and still-down no more often than repeatMs', () => {
+    const c = createCoalescer(opts);
+    const followUps: { kind: string; at: number }[] = [];
+    let sends = 0;
+    for (let t = 0; t <= 3 * 60 * MIN; t += MIN) {
+      if (c.offer({ event: 'library.root_missing', scope: 'l', cause: 'root', nowMs: t }).send) {
+        sends++;
+      }
+      for (const f of c.due(t)) followUps.push({ kind: f.kind, at: t });
+    }
+    expect(sends).toBe(1);
+    expect(followUps.some((f) => f.kind === 'summary')).toBe(false);
+    expect(followUps.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < followUps.length; i++) {
+      expect(followUps[i]!.at - followUps[i - 1]!.at).toBeGreaterThanOrEqual(opts.repeatMs);
+    }
+  });
+
+  it('still summarises repeats of a non-outage event', () => {
+    const c = createCoalescer(opts);
+    c.offer({ event: 'file.failed', scope: 'l', cause: 'c', nowMs: 0 });
+    c.offer({ event: 'file.failed', scope: 'l', cause: 'c', nowMs: MIN });
+    expect(c.due(16 * MIN).map((f) => f.kind)).toEqual(['summary']);
+  });
+});

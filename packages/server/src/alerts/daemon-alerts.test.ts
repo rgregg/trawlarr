@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ScanSummary } from '../scanner/scan-library.js';
 import { createEventBus, type TrawlarrEvent } from '../daemon/events.js';
-import { createDaemonAlerts, subscribeDaemonAlerts } from './daemon-alerts.js';
+import {
+  createDaemonAlerts,
+  subscribeDaemonAlerts,
+  type DaemonAlertsOptions,
+} from './daemon-alerts.js';
 import type { AlertInput } from './alert-service.js';
 
 const MIN = 60_000;
@@ -14,6 +18,7 @@ const setup = (
     startupDelayMs?: number;
     nodeOfflineGraceMs?: number;
     raise?: (i: AlertInput) => void;
+    initial?: DaemonAlertsOptions['initial'];
   } = {},
 ) => {
   let now = 10 * MIN;
@@ -35,6 +40,7 @@ const setup = (
     nowMs: () => now,
     startupDelayMs: options.startupDelayMs ?? 0,
     nodeOfflineGraceMs: options.nodeOfflineGraceMs ?? 5 * MIN,
+    initial: options.initial,
   });
   const emit = (event: TrawlarrEvent): void => bus.emit(event);
   return {
@@ -226,5 +232,72 @@ describe('daemon alerts: startup and robustness', () => {
     stop();
     bus.emit(finished('failed'));
     expect(raised).toHaveLength(1);
+  });
+});
+
+describe('daemon alerts: conditions standing at boot', () => {
+  const initial = () => ({
+    pausedLibraries: [
+      { id: 'l1', reason: 'flow-invalid: no flow' },
+      { id: 'l2', reason: 'operator: maintenance' },
+    ],
+    offlineNodes: [{ id: 'n1' }],
+  });
+
+  it('alerts a pre-paused library and a never-reconnecting node once, after the delay; not an operator pause', () => {
+    const t = setup({ startupDelayMs: 2 * MIN, initial });
+    t.alerts.reraise();
+    expect(t.raised).toEqual([]);
+    t.advance(2 * MIN);
+    t.alerts.reraise();
+    expect(t.names()).toEqual(['library.paused']); // node still inside its offline grace
+    t.advance(3 * MIN);
+    t.alerts.reraise();
+    expect(t.names().filter((n) => n === 'node.offline')).toHaveLength(1);
+    expect(t.raised.find((r) => r.event === 'library.paused')?.scope).toBe('l1');
+  });
+
+  it('does not duplicate when the bus also reports the same condition', () => {
+    const t = setup({ startupDelayMs: 0, initial });
+    t.emit({ type: 'library.paused', libraryId: 'l1', reason: 'flow-invalid: no flow' });
+    expect(t.names()).toEqual(['library.paused']);
+    t.emit({ type: 'library.paused', libraryId: 'l1', reason: 'flow-invalid: no flow' });
+    expect(t.names()).toEqual(['library.paused']);
+  });
+
+  it('survives a throwing provider', () => {
+    expect(() =>
+      setup({
+        initial: () => {
+          throw new Error('db closed');
+        },
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('daemon alerts: refused nodes', () => {
+  it('raises node.offline with the refusal reason, once for many retries, recovered on connect', () => {
+    const t = setup();
+    for (let i = 0; i < 50; i++) {
+      t.emit({ type: 'node.refused', nodeId: 'n1', reason: 'credentials were refused' });
+    }
+    expect(t.raised).toHaveLength(1);
+    expect(t.raised[0]).toMatchObject({
+      event: 'node.offline',
+      scope: 'n1',
+      reason: 'credentials were refused',
+    });
+    expect(t.raised[0]?.summary).toContain('Node n1');
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: true });
+    expect(t.names()).toEqual(['node.offline', 'node.offline.recovered']);
+  });
+
+  it('uses one constant scope for an unknown node', () => {
+    const t = setup();
+    t.emit({ type: 'node.refused', nodeId: null, reason: 'credentials were refused' });
+    t.emit({ type: 'node.refused', nodeId: null, reason: 'credentials were refused' });
+    expect(t.raised).toHaveLength(1);
+    expect(t.raised[0]?.scope).toBe('unknown-node');
   });
 });

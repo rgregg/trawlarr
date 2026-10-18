@@ -9,6 +9,7 @@ export const DEFAULT_STARTUP_DELAY_MS = 2 * 60_000;
 export const DEFAULT_NODE_OFFLINE_GRACE_MS = 5 * 60_000;
 
 const HARDWARE_SCOPE = 'hardware';
+const UNKNOWN_NODE_SCOPE = 'unknown-node';
 
 export interface DaemonAlertsOptions {
   bus: EventBus;
@@ -22,6 +23,16 @@ export interface DaemonAlertsOptions {
   nowMs: () => number;
   startupDelayMs?: number;
   nodeOfflineGraceMs?: number;
+  /**
+   * Conditions already true when the daemon starts, read once at creation. The bus cannot say
+   * these: library-health does not re-emit `library.paused` for a library already paused with
+   * the same reason, and the hub emits `nodes.changed` offline only when a connection closes, so
+   * a pre-paused library or a node that never reconnects would otherwise never alert.
+   */
+  initial?: () => {
+    pausedLibraries: Array<{ id: string; reason: string }>;
+    offlineNodes: Array<{ id: string }>;
+  };
 }
 
 export interface DaemonAlerts {
@@ -82,7 +93,9 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       raised: previous?.raised ?? false,
     };
     standing.set(key, entry);
-    if (nowMs() >= entry.notBeforeMs) offer(entry);
+    // A repeat of an outage that is already out is left to `reraise()`: offering it on every
+    // event would let a node refused every few seconds drive the service at that rate.
+    if (!entry.raised && nowMs() >= entry.notBeforeMs) offer(entry);
   };
 
   const recover = (event: RecoverableEventType, scope: string, summary: string): void => {
@@ -137,6 +150,29 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     }
   };
 
+  const beginPaused = (libraryId: string, reason: string): void => {
+    // An operator's own pause is not news to the operator.
+    if (reason.startsWith(PAUSE_PREFIX_OPERATOR)) return;
+    begin({
+      event: 'library.paused',
+      scope: libraryId,
+      summary: `${libraryName(libraryId)} was paused: ${reason}`,
+      reason,
+      library: libraryName(libraryId),
+    });
+  };
+
+  const beginNodeOffline = (nodeId: string): void => {
+    begin(
+      {
+        event: 'node.offline',
+        scope: nodeId,
+        summary: `Node ${nodeName(nodeId)} has been offline for over ${String(Math.round(nodeOfflineGraceMs / 60_000))} minute(s).`,
+      },
+      nodeOfflineGraceMs,
+    );
+  };
+
   const onEvent = (event: TrawlarrEvent): void => {
     switch (event.type) {
       case 'job.finished':
@@ -155,21 +191,14 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         });
         return;
       case 'library.paused':
-        // An operator's own pause is not news to the operator.
-        if (event.reason.startsWith(PAUSE_PREFIX_OPERATOR)) return;
-        begin({
-          event: 'library.paused',
-          scope: event.libraryId,
-          summary: `${libraryName(event.libraryId)} was paused: ${event.reason}`,
-          reason: event.reason,
-          library: libraryName(event.libraryId),
-        });
+        beginPaused(event.libraryId, event.reason);
         return;
       case 'library.resumed':
         // From any source, an operator's resume included: the library is running again either way.
         recover('library.paused', event.libraryId, `${libraryName(event.libraryId)} was resumed.`);
         return;
       case 'hardware.check_failed':
+        // Clears only on restart: there is no recovery event for it.
         begin({
           event: 'hardware.check_failed',
           scope: HARDWARE_SCOPE,
@@ -181,20 +210,34 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         if (event.online) {
           recover('node.offline', event.nodeId, `Node ${nodeName(event.nodeId)} is back online.`);
         } else {
-          begin(
-            {
-              event: 'node.offline',
-              scope: event.nodeId,
-              summary: `Node ${nodeName(event.nodeId)} has been offline for over ${String(Math.round(nodeOfflineGraceMs / 60_000))} minute(s).`,
-            },
-            nodeOfflineGraceMs,
-          );
+          beginNodeOffline(event.nodeId);
         }
         return;
+      case 'node.refused': {
+        // Refusals retry every few seconds; `begin` keeps one standing entry per node, so the
+        // service hears of it once and then on `reraise()`, never per attempt.
+        const scope = event.nodeId ?? UNKNOWN_NODE_SCOPE;
+        const who = event.nodeId === null ? 'An unknown node' : `Node ${nodeName(event.nodeId)}`;
+        begin({
+          event: 'node.offline',
+          scope,
+          summary: `${who} was refused: ${event.reason}`,
+          reason: event.reason,
+        });
+        return;
+      }
       default:
         return;
     }
   };
+
+  try {
+    const initial = opts.initial?.();
+    for (const library of initial?.pausedLibraries ?? []) beginPaused(library.id, library.reason);
+    for (const node of initial?.offlineNodes ?? []) beginNodeOffline(node.id);
+  } catch {
+    // A failing provider costs the boot-time alerts, never the daemon.
+  }
 
   const unsubscribeBus = opts.bus.subscribe((event) => {
     try {

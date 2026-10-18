@@ -140,6 +140,12 @@ export function createCoalescer(opts: {
           return { send: true };
         }
         g.overflowCauses.add(cause);
+      } else if (OUTAGE_EVENTS.has(g.event) && g.phase === 'window') {
+        // An identical re-offer of a standing outage is the same condition, not a new
+        // occurrence: counting it would send a "N more" summary at the window close for an
+        // outage that is simply still down. Only the repeat phase counts them (the hourly
+        // still-down).
+        return { send: false };
       }
       g.pending++;
       if (

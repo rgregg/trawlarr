@@ -297,6 +297,11 @@ describe('AlertService', () => {
     }
     h.advance(16 * 60_000);
     h.service.tick();
+    // An outage's identical re-offers only count once its window has closed (they are the same
+    // condition, not new occurrences), so the node follow-up is the hourly still-down.
+    h.service.raise({ event: 'node.offline', scope: 'n1', summary: 's' });
+    h.advance(46 * 60_000);
+    h.service.tick();
     const follow = h.sent.filter((s) => 'count' in s.body);
     expect(follow.find((s) => s.body.event === 'file.failed')!.body.library).toBe('Movies');
     expect('library' in follow.find((s) => s.body.event === 'node.offline')!.body).toBe(false);

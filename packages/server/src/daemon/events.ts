@@ -88,7 +88,13 @@ export type TrawlarrEvent =
    * reported which libraries it can reach. The node's row is the record;
    * this only tells a UI to re-fetch `GET /nodes`.
    */
-  | { type: 'nodes.changed'; nodeId: string; online: boolean };
+  | { type: 'nodes.changed'; nodeId: string; online: boolean }
+  /**
+   * A node's connection was refused (bad credentials, protocol mismatch). `nodeId` is null unless
+   * it names a node this server knows: the id on an unauthenticated upgrade is attacker-chosen
+   * and must not mint alert scopes.
+   */
+  | { type: 'node.refused'; nodeId: string | null; reason: string };
 
 export interface EventBus {
   emit(event: TrawlarrEvent): void;

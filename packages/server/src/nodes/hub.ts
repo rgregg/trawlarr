@@ -653,6 +653,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
         retryAfterMs: PROTOCOL_REFUSAL_RETRY_MS,
       });
       conn.ws.close(NODE_CLOSE_PROTOCOL, 'protocol version mismatch');
+      bus.emit({ type: 'node.refused', nodeId: conn.nodeId, reason: 'protocol version mismatch' });
       return;
     }
 
@@ -943,6 +944,11 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       // it can report rather than a socket that opens and drops.
       if (!ok || nodeId === undefined) {
         denyUpgrade(socket, 401, 'unauthorized', NODE_UNAUTHORIZED_MESSAGE);
+        bus.emit({
+          type: 'node.refused',
+          nodeId: nodeId !== undefined && nodes.getById(nodeId) !== null ? nodeId : null,
+          reason: 'credentials were refused',
+        });
         return;
       }
       wss.handleUpgrade(req, socket, head, (ws) => {

@@ -857,6 +857,28 @@ describe('createNodeHub', () => {
     );
   });
 
+  it('announces a corrupt-payload stall as failed when it spent the last retry, and nothing when the guard skips it', async () => {
+    const { payload: bad } = await startRemoteJob();
+    db.prepare(`UPDATE media_file SET attempt_count = 2 WHERE id = ?`).run(bad.fileId);
+    db.prepare(`UPDATE job SET payload_json = '{not json' WHERE id = ?`).run(bad.jobId);
+    const restarted = makeHub();
+    extraHubs.push(restarted);
+    restarted.adoptLeasedJobs(() => factoryInput({ steps: [], logs: [], heartbeats: [] }));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'job.finished', jobId: bad.jobId, state: 'failed' }),
+    );
+
+    // The file has left `running`: a second corrupt job on it must not re-announce.
+    const { payload: second } = await startRemoteJob();
+    db.prepare(`UPDATE media_file SET state = 'failed' WHERE id = ?`).run(second.fileId);
+    db.prepare(`UPDATE job SET payload_json = '{not json' WHERE id = ?`).run(second.jobId);
+    events.length = 0;
+    const again = makeHub();
+    extraHubs.push(again);
+    again.adoptLeasedJobs(() => factoryInput({ steps: [], logs: [], heartbeats: [] }));
+    expect(events.filter((e) => e.type === 'job.finished' && e.jobId === second.jobId)).toEqual([]);
+  });
+
   it('appends a late result for a job already released, without touching the ledger, and acks it', async () => {
     const { client, payload, outcome } = await startRemoteJob();
     client.ws.close();
