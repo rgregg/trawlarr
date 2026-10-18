@@ -86,6 +86,28 @@ describe('createDeliverer', () => {
     expect(d.lastResult('ntfy')?.status).toBe(200);
   });
 
+  // The body is always JSON. A header object holding both "content-type" and "Content-Type"
+  // is combined by fetch into "text/plain, application/json", which receivers reject.
+  it('drops a destination content-type header in any case, keeping the built-in one', async () => {
+    const { origin, seen } = await receiver((_req, res) => res.writeHead(200).end());
+    const d = make({ log: () => undefined });
+    d.enqueue(
+      {
+        name: 'ct',
+        url: origin,
+        headers: [
+          { name: 'content-type', value: 'text/plain' },
+          { name: 'CONTENT-TYPE', value: 'text/html' },
+          { name: 'X-Auth', value: 'abc' },
+        ],
+      },
+      {},
+    );
+    await d.drain(1000);
+    expect(seen[0]?.headers['content-type']).toBe('application/json');
+    expect(seen[0]?.headers['x-auth']).toBe('abc');
+  });
+
   it('returns from enqueue immediately and aborts an attempt past the timeout', async () => {
     const { origin } = await receiver(hang);
     const d = make({ timeoutMs: 50, retries: 1, backoffMs: [1], log: () => undefined });

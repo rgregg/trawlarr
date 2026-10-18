@@ -115,7 +115,13 @@ export const createDeliverer = (opts: {
       const response = await fetch(target.url, {
         method: 'POST',
         headers: {
-          ...Object.fromEntries(target.headers.map((h) => [h.name, h.value])),
+          // A destination's own content-type is dropped, not merged: fetch combined it with
+          // the built-in one into "text/plain, application/json", and the body is always JSON.
+          ...Object.fromEntries(
+            target.headers
+              .filter((h) => h.name.toLowerCase() !== 'content-type')
+              .map((h) => [h.name, h.value]),
+          ),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
