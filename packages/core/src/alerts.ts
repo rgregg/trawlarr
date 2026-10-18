@@ -179,7 +179,14 @@ export function createCoalescer(opts: {
             g.phase = 'repeat';
             g.noticeAtMs = count > 0 ? nowMs : g.windowEndMs - opts.windowMs;
             // Causes stay known, so the same outage does not re-send as a "first" event.
+          } else if (count > 0 || otherCauses > 0) {
+            // Still happening: open the next window with the causes still known, so the next
+            // failure is counted into it. Deleting here made that failure open a fresh group
+            // and send at once, beside this summary — a sustained flood sent two messages
+            // every window for as long as it lasted.
+            g.windowEndMs = nowMs + opts.windowMs;
           } else {
+            // A whole window with nothing in it: the flood is over, and the next one is news.
             groups.delete(key);
           }
           continue;

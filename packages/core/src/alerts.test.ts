@@ -159,3 +159,61 @@ describe('standing outage re-offered by the daemon every tick', () => {
     expect(c.due(16 * MIN).map((f) => f.kind)).toEqual(['summary']);
   });
 });
+
+describe('sustained flood of one non-outage cause', () => {
+  // Deleting the group at each window close made the next failure open a fresh group and send
+  // at once, beside the "N more" summary: two messages per window for as long as it lasted.
+  it('is one message per window: the first at once, then one summary per window', () => {
+    const c = createCoalescer(opts);
+    const spanMs = 2 * 60 * MIN;
+    const events = 5_000;
+    let sends = 0;
+    const summaries: number[] = [];
+    let next = 0;
+    for (let t = 0; t <= spanMs + 2 * opts.windowMs; t += MIN) {
+      while (next < events && (next * spanMs) / events <= t) {
+        const at = (next * spanMs) / events;
+        if (c.offer({ event: 'file.failed', scope: 'l', cause: 'boom', nowMs: at }).send) sends++;
+        next++;
+      }
+      for (const f of c.due(t)) {
+        expect(f.kind).toBe('summary');
+        summaries.push(t);
+      }
+    }
+    expect(sends).toBe(1);
+    // 120 minutes of failures in 15-minute windows: eight summaries, and nothing once quiet.
+    expect(sends + summaries.length).toBe(9);
+    for (let i = 1; i < summaries.length; i++) {
+      expect(summaries[i]! - summaries[i - 1]!).toBeGreaterThanOrEqual(opts.windowMs);
+    }
+  });
+
+  it('still sends a second, distinct cause at once in the middle of the flood', () => {
+    const c = createCoalescer(opts);
+    for (let t = 0; t < 40 * MIN; t += MIN) {
+      c.offer({ event: 'file.failed', scope: 'l', cause: 'boom', nowMs: t });
+      c.due(t);
+    }
+    expect(
+      c.offer({ event: 'file.failed', scope: 'l', cause: 'other', nowMs: 40 * MIN }).send,
+    ).toBe(true);
+  });
+
+  it('counts a recurrence right after a summary instead of sending it', () => {
+    const c = createCoalescer(opts);
+    c.offer({ event: 'file.failed', scope: 'l', cause: 'boom', nowMs: 0 });
+    c.offer({ event: 'file.failed', scope: 'l', cause: 'boom', nowMs: MIN });
+    expect(c.due(opts.windowMs)).toHaveLength(1);
+    expect(
+      c.offer({ event: 'file.failed', scope: 'l', cause: 'boom', nowMs: opts.windowMs + 1 }).send,
+    ).toBe(false);
+    expect(c.due(2 * opts.windowMs)).toMatchObject([{ kind: 'summary', count: 1 }]);
+    // A whole quiet window ends the group, so the next failure is news again.
+    expect(c.due(3 * opts.windowMs)).toEqual([]);
+    expect(
+      c.offer({ event: 'file.failed', scope: 'l', cause: 'boom', nowMs: 3 * opts.windowMs + 1 })
+        .send,
+    ).toBe(true);
+  });
+});
