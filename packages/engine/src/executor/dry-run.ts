@@ -173,10 +173,13 @@ export const runDryFlow = async (
     // replaced, here, once, so no caller (CLI, library dry run) can forget.
     buildArgs: (invocation) => {
       const args = options.buildArgs(invocation);
-      return {
-        ...args,
-        sendAlert: (destination) => args.jobLog(`would send alert to "${destination}"`),
-      };
+      // Defined even when the caller's args had none, so a plugin in a dry
+      // run never sees a missing hook and never reaches a real one.
+      // Mutated in place and `jobLog` read lazily: runFlow re-wraps `jobLog`
+      // on this same object to record the step's log, and a spread copy
+      // would write the line to the unwrapped original, out of that record.
+      args.sendAlert = (destination) => args.jobLog(`would send alert to "${destination}"`);
+      return args;
     },
     loadPlugin: (node) => {
       const plugin = options.loadPlugin(node);

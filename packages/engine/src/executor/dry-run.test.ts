@@ -537,5 +537,11 @@ describe('runDryFlow — sendAlert', () => {
     expect(result.failed).toBe(false);
     expect(real).not.toHaveBeenCalled();
     expect(logs).toContain('would send alert to "ha"');
+    // The step's RECORDED log is what the dry-run result and flow editor show;
+    // runFlow wraps jobLog on the args it passes the plugin, so a line written
+    // to any other jobLog reaches the raw sink but never this.
+    expect(result.steps.find((step) => step.nodeId === 'log')!.logExcerpt).toBe(
+      'would send alert to "ha"',
+    );
   });
 });
