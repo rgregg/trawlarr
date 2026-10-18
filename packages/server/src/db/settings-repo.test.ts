@@ -3,8 +3,10 @@ import { openDatabase } from './connection.js';
 import { migrate } from './migrate.js';
 import {
   createSettingsRepo,
+  knownSecrets,
   MIN_LEASE_GRACE_MS,
   minLeaseGraceMs,
+  newDestination,
   SettingValidationError,
 } from './settings-repo.js';
 
@@ -144,5 +146,73 @@ describe('settings repo', () => {
     );
     expect(minLeaseGraceMs({ NODE_ENV: 'test' })).toBe(MIN_LEASE_GRACE_MS);
     expect(minLeaseGraceMs({ NODE_ENV: 'test', TRAWLARR_TEST_ALLOW_SHORT_GRACE: '1' })).toBe(1);
+  });
+
+  describe('alerts', () => {
+    it('defaults to no destinations and round-trips a saved one', () => {
+      const repo = createSettingsRepo({ db: freshDb() });
+      expect(repo.getAlerts()).toEqual({ publicBaseUrl: '', destinations: [] });
+      const next = {
+        publicBaseUrl: 'https://trawlarr.example',
+        destinations: [
+          {
+            ...newDestination('ops', 'https://hooks.example/x'),
+            headers: [{ name: 'Authorization', value: 'Bearer s3cret' }],
+          },
+        ],
+      };
+      repo.setAlerts(next);
+      expect(repo.getAlerts()).toEqual(next);
+    });
+
+    it('builds a new destination with every event and the destination enabled', () => {
+      const dest = newDestination('ops', 'http://hooks.example/x');
+      expect(dest.enabled).toBe(true);
+      expect(dest.headers).toEqual([]);
+      expect(Object.keys(dest.events).length).toBeGreaterThan(0);
+      expect(Object.values(dest.events).every((on) => on === true)).toBe(true);
+    });
+
+    it('rejects a duplicate name, an empty name, a non-http(s) url and an unknown event key', () => {
+      const repo = createSettingsRepo({ db: freshDb() });
+      const set = (destinations: unknown[], publicBaseUrl = ''): void =>
+        repo.setAlerts({ publicBaseUrl, destinations } as never);
+      const ok = newDestination('a', 'https://a.example');
+      expect(() => set([ok, newDestination('a', 'https://b.example')])).toThrow(
+        SettingValidationError,
+      );
+      expect(() => set([newDestination('  ', 'https://a.example')])).toThrow(
+        SettingValidationError,
+      );
+      expect(() => set([newDestination('a', 'ftp://x')])).toThrow(SettingValidationError);
+      expect(() => set([newDestination('a', 'javascript:1')])).toThrow(SettingValidationError);
+      expect(() => set([{ ...ok, events: { ...ok.events, bogus: true } }])).toThrow(
+        SettingValidationError,
+      );
+      expect(repo.getAlerts().destinations).toEqual([]);
+    });
+
+    it('accepts an empty public base url and rejects a non-http(s) one', () => {
+      const repo = createSettingsRepo({ db: freshDb() });
+      repo.setAlerts({ publicBaseUrl: '', destinations: [] });
+      repo.setAlerts({ publicBaseUrl: 'http://nas.lan:8265', destinations: [] });
+      expect(() => repo.setAlerts({ publicBaseUrl: 'ftp://x', destinations: [] })).toThrow(
+        SettingValidationError,
+      );
+    });
+
+    it('lists every destination url and non-empty header value as a secret, and nothing else', () => {
+      const dest = {
+        ...newDestination('ops', 'https://hooks.example/token'),
+        headers: [
+          { name: 'Authorization', value: 'Bearer s3cret' },
+          { name: 'X-Empty', value: '' },
+        ],
+      };
+      expect(knownSecrets({ publicBaseUrl: 'https://t.example', destinations: [dest] })).toEqual([
+        'https://hooks.example/token',
+        'Bearer s3cret',
+      ]);
+    });
   });
 });

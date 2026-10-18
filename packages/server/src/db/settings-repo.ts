@@ -1,11 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import {
+  ALERT_EVENT_TYPES,
   DEFAULT_SCHEDULE,
   HARDWARE_TYPES,
   PathMapError,
   ScheduleConfigError,
   validatePathMap,
   validateSchedule,
+  type AlertEventType,
   type HardwareType,
   type PathMapping,
   type ScheduleConfig,
@@ -99,6 +101,47 @@ export interface MetadataSettings {
   tmdbApiKey: string;
 }
 
+/**
+ * One place alerts are POSTed. `url` and every header `value` are secrets
+ * (a webhook URL usually embeds its token); this layer stores and returns them
+ * in full, and masking is the API layer's job.
+ */
+export interface AlertDestination {
+  name: string;
+  url: string;
+  headers: Array<{ name: string; value: string }>;
+  events: Record<AlertEventType, boolean>;
+  enabled: boolean;
+}
+
+export interface AlertSettings {
+  /** Base for links in alert bodies; empty means no links. */
+  publicBaseUrl: string;
+  destinations: AlertDestination[];
+}
+
+/** A destination with every event on and delivery enabled. */
+export const newDestination = (name: string, url: string): AlertDestination => ({
+  name,
+  url,
+  headers: [],
+  events: Object.fromEntries(ALERT_EVENT_TYPES.map((event) => [event, true])) as Record<
+    AlertEventType,
+    boolean
+  >,
+  enabled: true,
+});
+
+/**
+ * Everything that must never appear in a log line or an API response: each
+ * destination URL and each non-empty header value. Nothing else is secret.
+ */
+export const knownSecrets = (settings: AlertSettings): string[] =>
+  settings.destinations.flatMap((destination) => [
+    destination.url,
+    ...destination.headers.map((header) => header.value).filter((value) => value !== ''),
+  ]);
+
 export interface SettingsRepo {
   getDaemon(): DaemonSettings;
   setDaemon(patch: Partial<DaemonSettings>): void;
@@ -116,6 +159,8 @@ export interface SettingsRepo {
   setNodes(value: NodesSettings): void;
   getMetadata(): MetadataSettings;
   setMetadata(patch: Partial<MetadataSettings>): void;
+  getAlerts(): AlertSettings;
+  setAlerts(next: AlertSettings): void;
   isSet(key: string): boolean;
 }
 
@@ -142,6 +187,7 @@ const SETTING_KEYS = {
   auth: 'auth',
   nodes: 'nodes',
   metadata: 'metadata',
+  alerts: 'alerts',
 } as const;
 
 /** Five minutes: see `NodesSettings`. */
@@ -190,6 +236,80 @@ const requireBoolean = (value: unknown, label: string): boolean => {
     throw new SettingValidationError(`${label} must be a boolean, got ${JSON.stringify(value)}.`);
   }
   return value;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const requireHttpUrl = (value: unknown, label: string, allowEmpty: boolean): string => {
+  const text = requireString(value, label);
+  if (allowEmpty && text === '') return text;
+  let protocol: string;
+  try {
+    protocol = new URL(text).protocol;
+  } catch {
+    // Deliberately does not echo the value: a destination URL is a secret.
+    throw new SettingValidationError(`${label} must be an http(s) URL.`);
+  }
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    throw new SettingValidationError(`${label} must be an http(s) URL.`);
+  }
+  return text;
+};
+
+const ALERT_EVENT_SET: ReadonlySet<string> = new Set(ALERT_EVENT_TYPES);
+
+const validateAlerts = (value: {
+  publicBaseUrl: unknown;
+  destinations: unknown;
+}): AlertSettings => {
+  const publicBaseUrl = requireHttpUrl(value.publicBaseUrl, 'alerts.publicBaseUrl', true);
+  if (!Array.isArray(value.destinations)) {
+    throw new SettingValidationError('alerts.destinations must be an array.');
+  }
+  const seen = new Set<string>();
+  const destinations = value.destinations.map((raw: unknown, index): AlertDestination => {
+    const at = `alerts.destinations[${index}]`;
+    if (!isRecord(raw)) throw new SettingValidationError(`${at} must be an object.`);
+    const name = requireString(raw.name, `${at}.name`);
+    if (name.trim() === '') throw new SettingValidationError(`${at}.name must not be empty.`);
+    // Names key delivery state and the UI's rows; two the same would merge them.
+    if (seen.has(name)) {
+      throw new SettingValidationError(`${at}.name "${name}" is used by another destination.`);
+    }
+    seen.add(name);
+    if (!Array.isArray(raw.headers)) {
+      throw new SettingValidationError(`${at}.headers must be an array.`);
+    }
+    const headers = raw.headers.map((header: unknown, h) => {
+      if (!isRecord(header)) {
+        throw new SettingValidationError(`${at}.headers[${h}] must be an object.`);
+      }
+      const headerName = requireString(header.name, `${at}.headers[${h}].name`);
+      if (headerName.trim() === '') {
+        throw new SettingValidationError(`${at}.headers[${h}].name must not be empty.`);
+      }
+      return { name: headerName, value: requireString(header.value, `${at}.headers[${h}].value`) };
+    });
+    if (!isRecord(raw.events)) throw new SettingValidationError(`${at}.events must be an object.`);
+    for (const key of Object.keys(raw.events)) {
+      if (!ALERT_EVENT_SET.has(key)) {
+        throw new SettingValidationError(`${at}.events has unknown event "${key}".`);
+      }
+    }
+    const events = {} as Record<AlertEventType, boolean>;
+    for (const event of ALERT_EVENT_TYPES) {
+      events[event] = requireBoolean(raw.events[event], `${at}.events.${event}`);
+    }
+    return {
+      name,
+      url: requireHttpUrl(raw.url, `${at}.url`, false),
+      headers,
+      events,
+      enabled: requireBoolean(raw.enabled, `${at}.enabled`),
+    };
+  });
+  return { publicBaseUrl, destinations };
 };
 
 const HARDWARE_TYPE_SET: ReadonlySet<string> = new Set(HARDWARE_TYPES);
@@ -552,7 +672,21 @@ export const createSettingsRepo = (input: {
     );
   };
 
+  const getAlerts = (): AlertSettings =>
+    validateAlerts({
+      publicBaseUrl: readField(SETTING_KEYS.alerts, 'publicBaseUrl') ?? '',
+      destinations: readField(SETTING_KEYS.alerts, 'destinations') ?? [],
+    });
+
+  const setAlerts = (next: AlertSettings): void => {
+    const valid = validateAlerts(next);
+    writeField(SETTING_KEYS.alerts, 'publicBaseUrl', valid.publicBaseUrl);
+    writeField(SETTING_KEYS.alerts, 'destinations', valid.destinations);
+  };
+
   return {
+    getAlerts,
+    setAlerts,
     getMetadata,
     setMetadata,
     getDaemon,
