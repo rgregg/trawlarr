@@ -95,7 +95,13 @@ export type TrawlarrEvent =
    * and must not mint alert scopes. `authenticated` is true when the node proved its secret
    * first (protocol mismatch), so the id cannot be spoofed.
    */
-  | { type: 'node.refused'; nodeId: string | null; reason: string; authenticated: boolean };
+  | { type: 'node.refused'; nodeId: string | null; reason: string; authenticated: boolean }
+  /**
+   * An operator revoked or deleted a node. Its disconnect is an `online: false` that no
+   * `online: true` will ever follow, and it may keep retrying with credentials that no longer
+   * work; neither is an outage, so alerts and the hub's refusal reporting drop it on this.
+   */
+  | { type: 'node.removed'; nodeId: string };
 
 export interface EventBus {
   emit(event: TrawlarrEvent): void;

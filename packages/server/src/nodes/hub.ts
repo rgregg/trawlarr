@@ -280,6 +280,22 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   let closing = false;
 
+  /**
+   * Nodes an operator deleted while this daemon runs. A deleted row is indistinguishable from a
+   * forged id, so without this a deleted node still retrying was reported as an unknown node
+   * refused, hourly, until restart. Capped: ids are only ever added by an operator action.
+   */
+  const MAX_REMOVED_IDS = 1_000;
+  const removedNodeIds = new Set<string>();
+  const unsubscribeRemoved = bus.subscribe((event) => {
+    if (event.type !== 'node.removed') return;
+    removedNodeIds.add(event.nodeId);
+    if (removedNodeIds.size > MAX_REMOVED_IDS) {
+      const oldest = removedNodeIds.values().next();
+      if (!oldest.done) removedNodeIds.delete(oldest.value);
+    }
+  });
+
   const nodeName = (nodeId: string): string => nodes.getById(nodeId)?.name ?? nodeId;
 
   const sendFrame = (conn: Connection, frame: ServerFrame): boolean => {
@@ -950,11 +966,16 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       if (!ok || nodeId === undefined) {
         denyUpgrade(socket, 401, 'unauthorized', NODE_UNAUTHORIZED_MESSAGE);
         // Not for a node that is connected right now: an unauthenticated probe naming a healthy
-        // node's id must not raise an outage for it.
-        if (nodeId === undefined || !connections.has(nodeId)) {
+        // node's id must not raise an outage for it. Nor for one the operator revoked or deleted:
+        // such a node keeps retrying every 30 s, and reporting that alerted hourly until restart
+        // for something the operator did on purpose.
+        const row = nodeId === undefined ? null : nodes.getById(nodeId);
+        const removedByOperator =
+          nodeId !== undefined && (row?.revokedAt != null || removedNodeIds.has(nodeId));
+        if ((nodeId === undefined || !connections.has(nodeId)) && !removedByOperator) {
           bus.emit({
             type: 'node.refused',
-            nodeId: nodeId !== undefined && nodes.getById(nodeId) !== null ? nodeId : null,
+            nodeId: nodeId !== undefined && row !== null ? nodeId : null,
             reason: 'credentials were refused',
             authenticated: false,
           });
@@ -1164,6 +1185,7 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
 
     close: async () => {
       closing = true;
+      unsubscribeRemoved();
       if (pingTimer !== null) clearInterval(pingTimer);
       pingTimer = null;
       if (server !== null) {

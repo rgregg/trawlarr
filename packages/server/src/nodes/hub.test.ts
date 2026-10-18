@@ -80,6 +80,8 @@ let pluginRoot: string;
 let clients: WebSocket[];
 let extraHubs: NodeHub[];
 let hubErrors: string[];
+/** The bus of the hub `makeHub` built last, so a test can emit what the API would. */
+let hubBus: ReturnType<typeof createEventBus>;
 
 const makeHub = (
   over: {
@@ -90,6 +92,7 @@ const makeHub = (
 ): NodeHub => {
   const bus = createEventBus();
   bus.subscribe((event) => events.push(event));
+  hubBus = bus;
   return createNodeHub({
     db,
     nodes,
@@ -392,6 +395,27 @@ describe('createNodeHub', () => {
     await good.hello();
     await expect(connectNode(wrong)).rejects.toThrow(/401/);
     expect(refusals()).toHaveLength(3);
+  });
+
+  // A revoked or deleted node that keeps retrying is the operator's own doing; reporting its
+  // 401s made a revoke alert at once and then hourly until restart.
+  it('emits no node.refused for a revoked node, or a deleted one, that keeps retrying', async () => {
+    const refusals = () => events.filter((e) => e.type === 'node.refused');
+    const as = { 'x-trawlarr-node': creds.nodeId, authorization: `Bearer ${creds.secret}` };
+    nodes.revoke(creds.nodeId, now);
+    await expect(connectNode(as)).rejects.toThrow(/401/);
+    await expect(connectNode(as)).rejects.toThrow(/401/);
+    expect(refusals()).toEqual([]);
+
+    nodes.remove(creds.nodeId);
+    hubBus.emit({ type: 'node.removed', nodeId: creds.nodeId });
+    await expect(connectNode(as)).rejects.toThrow(/401/);
+    expect(refusals()).toEqual([]);
+    // Any other unknown id is still reported.
+    await expect(
+      connectNode({ 'x-trawlarr-node': 'forged-id', authorization: 'Bearer x' }),
+    ).rejects.toThrow(/401/);
+    expect(refusals()).toHaveLength(1);
   });
 
   it('emits node.refused for a protocol mismatch', async () => {

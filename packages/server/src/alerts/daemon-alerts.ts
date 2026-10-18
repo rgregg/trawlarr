@@ -180,7 +180,28 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     });
   };
 
+  /**
+   * Nodes an operator revoked or deleted. Revoking disconnects the node, and that `online: false`
+   * could only ever be cleared by an `online: true` a revoked node never sends, so it alerted
+   * hourly until restart. Capped: ids are only added by an operator action.
+   */
+  const MAX_REMOVED_NODES = 1_000;
+  const removedNodes = new Set<string>();
+
+  const onNodeRemoved = (nodeId: string): void => {
+    // The operator's own act: no `.recovered`, just forget the outage.
+    standing.delete(keyOf('node.offline', nodeId));
+    standing.delete(keyOf('node.offline', refusedScope(nodeId)));
+    refusals.delete(nodeId);
+    removedNodes.add(nodeId);
+    if (removedNodes.size > MAX_REMOVED_NODES) {
+      const oldest = removedNodes.values().next();
+      if (!oldest.done) removedNodes.delete(oldest.value);
+    }
+  };
+
   const beginNodeOffline = (nodeId: string): void => {
+    if (removedNodes.has(nodeId)) return;
     begin(
       {
         event: 'node.offline',
@@ -209,6 +230,7 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       });
       return;
     }
+    if (removedNodes.has(nodeId)) return;
     // An authenticated refusal (protocol mismatch) is a fact about a node that proved who it
     // is, and such a node retries only every ~5 minutes, so a count-in-window rule would
     // never fire for it.
@@ -284,6 +306,9 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
         return;
       case 'node.refused':
         onRefused(event.nodeId, event.reason, event.authenticated);
+        return;
+      case 'node.removed':
+        onNodeRemoved(event.nodeId);
         return;
       default:
         return;

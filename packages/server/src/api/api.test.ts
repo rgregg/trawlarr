@@ -3414,6 +3414,21 @@ describe('node management', () => {
     expect(nodeHub.disconnectCalls).toEqual([{ nodeId: node.node.id, reason: 'revoked' }]);
   });
 
+  // Revoking or deleting is the operator's own act: alerts and the hub's refusal reporting hear
+  // it from this event, or the disconnect it causes stands as an outage alerting hourly.
+  it('announces node.removed on revoke and delete, and not on a refused delete', async () => {
+    const revoked = await createNode();
+    await api('POST', `/nodes/${revoked.node.id}/revoke`);
+    const deleted = await createNode();
+    await api('DELETE', `/nodes/${deleted.node.id}`);
+    expect(events.filter((e) => e.type === 'node.removed')).toEqual([
+      { type: 'node.removed', nodeId: revoked.node.id },
+      { type: 'node.removed', nodeId: deleted.node.id },
+    ]);
+    expect((await api('DELETE', '/nodes/local')).status).toBe(400);
+    expect(events.filter((e) => e.type === 'node.removed')).toHaveLength(2);
+  });
+
   it('deletes a node with 204, and 409s while it has an unended job', async () => {
     const node = await createNode();
     const deleted = await api('DELETE', `/nodes/${node.node.id}`);

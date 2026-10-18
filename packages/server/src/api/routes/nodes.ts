@@ -240,6 +240,8 @@ export const nodeRoutes: Route[] = [
       requireNode(repo, id);
       repo.revoke(id, ctx.nowMs());
       ctx.nodes.disconnect(id, 'revoked');
+      // After the disconnect, whose offline event this is what clears.
+      ctx.bus.emit({ type: 'node.removed', nodeId: id });
       return toNodeResource(requireNode(repo, id));
     },
   },
@@ -258,6 +260,7 @@ export const nodeRoutes: Route[] = [
         if (error instanceof NodeRepoError) throw new ApiError(409, 'node-busy', error.message);
         throw error;
       }
+      ctx.bus.emit({ type: 'node.removed', nodeId: id });
       return noContent();
     },
   },

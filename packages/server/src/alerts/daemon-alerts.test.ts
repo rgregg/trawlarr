@@ -426,3 +426,48 @@ describe('daemon alerts: display labels', () => {
     expect(t.raised.map((r) => r.label)).toEqual([undefined, undefined]);
   });
 });
+
+describe('daemon alerts: revoked and deleted nodes', () => {
+  // Revoking disconnects the node, and that disconnect is an `online: false` only an
+  // `online: true` could clear; a revoked node never comes back, so it alerted hourly for ever.
+  it('a removal clears a standing offline outage, with no recovery and no further offers', () => {
+    const t = setup({ nodeOfflineGraceMs: 5 * MIN });
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    t.advance(6 * MIN);
+    t.alerts.reraise();
+    expect(t.names()).toEqual(['node.offline']);
+    t.emit({ type: 'node.removed', nodeId: 'n1' });
+    for (let i = 0; i < 180; i++) {
+      t.advance(MIN);
+      t.alerts.reraise();
+    }
+    expect(t.names()).toEqual(['node.offline']);
+  });
+
+  it('a revoke inside the grace never alerts at all', () => {
+    const t = setup({ nodeOfflineGraceMs: 5 * MIN });
+    // What the revoke route does: the disconnect's offline event, then the removal.
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    t.emit({ type: 'node.removed', nodeId: 'n1' });
+    t.advance(10 * MIN);
+    t.alerts.reraise();
+    expect(t.raised).toEqual([]);
+  });
+
+  it('a removal clears a refused entry, and later refusals or detaches of that node stay silent', () => {
+    const t = setup({ nodeOfflineGraceMs: 0 });
+    t.emit({ type: 'node.refused', nodeId: 'n1', reason: 'mismatch', authenticated: true });
+    expect(t.raised).toHaveLength(1);
+    t.emit({ type: 'node.removed', nodeId: 'n1' });
+    t.emit({ type: 'node.refused', nodeId: 'n1', reason: 'mismatch', authenticated: true });
+    for (let i = 0; i < 3; i++) {
+      t.emit({ type: 'node.refused', nodeId: 'n1', reason: 'creds', authenticated: false });
+    }
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    for (let i = 0; i < 120; i++) {
+      t.advance(MIN);
+      t.alerts.reraise();
+    }
+    expect(t.raised).toHaveLength(1);
+  });
+});
