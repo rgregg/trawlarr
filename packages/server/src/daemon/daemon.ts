@@ -43,9 +43,20 @@ export const SUPERVISOR_TICK_MS = 30_000;
 /** How often the expected-runtime lookup runs a pass (each pass is a small, paced batch). */
 const RUNTIME_CHECK_INTERVAL_MS = 30_000;
 
-/** How often stalled `running` rows are reclaimed (`reapStalled`'s own threshold is a day). */
 /** How often coalesced follow-ups are flushed and standing outages are offered again. */
 export const ALERT_TICK_INTERVAL_MS = 60_000;
+
+/**
+ * The most a shutdown spends delivering queued alerts, whatever is left of the drain deadline.
+ *
+ * Spec 6: alert delivery must not hold a stop open. Bounded only by the remaining drain
+ * deadline, one queued alert to a receiver that never answers held every restart for the
+ * whole five minutes, and Docker then SIGKILLed the daemon. Alerts still queued past this are
+ * dropped and counted.
+ */
+export const ALERT_STOP_BUDGET_MS = 5_000;
+
+/** How often stalled `running` rows are reclaimed (`reapStalled`'s own threshold is a day). */
 export const REAP_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
@@ -149,6 +160,8 @@ export interface StartDaemonInput {
     tickMs?: number;
     /** A test hands in its own deliverer to observe what shutdown does to it. */
     deliverer?: Deliverer;
+    /** Overrides `ALERT_STOP_BUDGET_MS`, so a test need not wait five seconds for it. */
+    stopBudgetMs?: number;
   };
 }
 
@@ -911,14 +924,20 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       // upserted but unreconciled), but nothing below may run under it.
       await scansStopped;
 
-      // ALERTS LAST OF THE WORK, AND ONLY FOR WHAT IS LEFT OF THE SAME DEADLINE. Jobs that ended
-      // during the drain have just queued their alerts, so this is the first point at which they
-      // can all be delivered; but a receiver that never answers must not be able to hold the exit
-      // past `stop_grace_period`, where Docker SIGKILLs the daemon mid-shutdown. The budget is the
-      // deadline minus what the stop has already spent, so alert delivery can use idle time and
-      // can never add any.
+      // ALERTS LAST OF THE WORK, AND FOR A FEW SECONDS AT MOST. Jobs that ended during the drain
+      // have just queued their alerts, so this is the first point at which they can all be
+      // delivered; but a receiver that never answers must not be able to hold the exit. The
+      // budget is the smaller of what is left of the drain deadline (so delivery never adds to
+      // it) and a fixed cap: the remaining deadline alone let one dead receiver hold every
+      // restart for the full five minutes (see `ALERT_STOP_BUDGET_MS`).
       daemonAlerts.unsubscribe();
-      const alertBudgetMs = Math.max(0, drainDeadlineMs - (performance.now() - stopStartedAt));
+      const alertBudgetMs = Math.max(
+        0,
+        Math.min(
+          drainDeadlineMs - (performance.now() - stopStartedAt),
+          input.alerts?.stopBudgetMs ?? ALERT_STOP_BUDGET_MS,
+        ),
+      );
       const { dropped } = await alertService.stop(alertBudgetMs);
       // `stop` only drains the queue; "send test" goes through `sendNow`, which stays live
       // until the deliverer itself is stopped. Left open, a test request landing before the

@@ -1045,6 +1045,28 @@ describe('alerts', () => {
     expect(warn.mock.calls.some((c) => String(c[0]).includes('dropped at shutdown'))).toBe(true);
   });
 
+  it('caps the alert drain at its own budget, not the whole drain deadline, so a dead receiver cannot hold a restart', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir, { deleteFlow: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const hook = await receiver(true);
+    configureAlerts(dataDir, hook.url);
+    const daemon = await start({
+      dataDir,
+      // The production-sized deadline: with nothing running the job drain ends at once, so
+      // only the alert cap can stop the shutdown spending the rest of these five minutes.
+      drainDeadlineMs: 5 * 60_000,
+      alerts: { startupDelayMs: 0, stopBudgetMs: 200 },
+    });
+    await until(() => hook.bodies.length > 0);
+
+    const startedAt = Date.now();
+    await daemon.stop();
+
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('dropped at shutdown'))).toBe(true);
+  });
+
   /** Pause the seeded library with a reason `checkAllLibraries` leaves alone, bypassing the bus. */
   const prePause = (dataDir: string, reason: string): void => {
     const db = openDataDb(dataDir);
@@ -1059,7 +1081,9 @@ describe('alerts', () => {
     const hook = await receiver();
     configureAlerts(dataDir, hook.url);
 
-    await start({ dataDir, alerts: { startupDelayMs: 300, tickMs: 50 } });
+    // Two seconds, not a few hundred ms: the delay runs from inside start(), and the zero-bodies
+    // check below is only meaningful if start() returns before it ends (a 300 ms delay flaked).
+    await start({ dataDir, alerts: { startupDelayMs: 2_000, tickMs: 50 } });
 
     // No bus event announces this pause, so only the `initial` provider can have raised it,
     // and only the tick's reraise can have released it from the startup delay.
