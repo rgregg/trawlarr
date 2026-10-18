@@ -16,6 +16,7 @@ import * as subtitleTracks from './subtitleTracks/index.js';
 import * as setContainer from './setContainer/index.js';
 import * as onError from './onError/index.js';
 import * as holdForReview from './holdForReview/index.js';
+import * as sendWebhook from './sendWebhook/index.js';
 
 const entry = (id: string, module: PluginModule): { id: string; module: PluginModule } => ({
   id,
@@ -40,6 +41,7 @@ export const FIRST_PARTY_PLUGINS: Record<string, { id: string; module: PluginMod
   'trawlarr:setContainer': entry('trawlarr:setContainer', setContainer),
   'trawlarr:onError': entry('trawlarr:onError', onError),
   'trawlarr:holdForReview': entry('trawlarr:holdForReview', holdForReview),
+  'trawlarr:sendWebhook': entry('trawlarr:sendWebhook', sendWebhook),
 };
 
 // The property catalogue is part of this package's public surface because the

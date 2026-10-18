@@ -146,10 +146,13 @@ const base = { initialPath: '/in.mkv', startNodeId: 'a', buildArgs, outputPathFo
 const discovering = { initialPath: '/in.mkv', buildArgs, outputPathFor };
 
 describe('classifySideEffects', () => {
-  it.each(['trawlarr:writeToLog', 'trawlarr:failFile'])('can run %s during a dry run', (id) => {
-    const entry = FIRST_PARTY_PLUGINS[id]!;
-    expect(classifySideEffects(loaded(id, entry.module, entry.module.details()))).toBe('inert');
-  });
+  it.each(['trawlarr:writeToLog', 'trawlarr:failFile', 'trawlarr:sendWebhook'])(
+    'can run %s during a dry run',
+    (id) => {
+      const entry = FIRST_PARTY_PLUGINS[id]!;
+      expect(classifySideEffects(loaded(id, entry.module, entry.module.details()))).toBe('inert');
+    },
+  );
 
   it('knows first-party filters are inert', () => {
     expect(classifySideEffects(loaded('trawlarr:checkVideoCodec', pass))).toBe('inert');
@@ -543,5 +546,33 @@ describe('runDryFlow — sendAlert', () => {
     expect(result.steps.find((step) => step.nodeId === 'log')!.logExcerpt).toBe(
       'would send alert to "ha"',
     );
+  });
+});
+
+describe('runDryFlow — Send Webhook node', () => {
+  it('passes through the real node and logs what it would have sent', async () => {
+    const real = vi.fn();
+    const logs: string[] = [];
+    const nodes = [node('start', 'trawlarr:start'), node('hook', 'trawlarr:sendWebhook')];
+    nodes[1]!.inputs = { destination: 'ha', message: 'hello' };
+    const result = await runDryFlow({
+      ...discovering,
+      flow: flow(nodes, [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'hook' }]),
+      loadPlugin: (n) => {
+        const entry = FIRST_PARTY_PLUGINS[n.pluginId]!;
+        return loaded(entry.id, entry.module, entry.module.details());
+      },
+      buildArgs: (invocation) =>
+        ({
+          ...buildArgs(invocation),
+          inputs: invocation.node.inputs,
+          sendAlert: real,
+          jobLog: (text: string) => logs.push(text),
+        }) as unknown as PluginInputArgs,
+    });
+    expect(result.failed).toBe(false);
+    expect(result.stoppedAtNodeId).toBeNull();
+    expect(real).not.toHaveBeenCalled();
+    expect(logs).toContain('would send alert to "ha"');
   });
 });
