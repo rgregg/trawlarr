@@ -201,6 +201,75 @@ describe('settings repo', () => {
       );
     });
 
+    describe('stored destinations and headers', () => {
+      const store = (db: ReturnType<typeof freshDb>, destinations: unknown): void => {
+        db.prepare(`INSERT INTO setting (key, value) VALUES (?, ?)`).run(
+          'alerts.destinations',
+          JSON.stringify(destinations),
+        );
+      };
+
+      it('reads a stored destination missing an event type as on', () => {
+        const db = freshDb();
+        const dest = newDestination('a', 'https://a.example');
+        const [first, ...rest] = Object.keys(dest.events);
+        const events: Record<string, boolean> = { ...dest.events };
+        events[first as string] = false;
+        for (const key of rest.slice(0, 1)) delete events[key];
+        store(db, [{ ...dest, events }]);
+        const read = createSettingsRepo({ db }).getAlerts().destinations[0];
+        expect(read?.events[first as keyof typeof dest.events]).toBe(false);
+        expect(Object.values(read?.events ?? {}).length).toBe(Object.keys(dest.events).length);
+        if (rest[0] !== undefined) {
+          expect(read?.events[rest[0] as keyof typeof dest.events]).toBe(true);
+        }
+      });
+
+      it('still throws on read for a wrong-typed or unknown event key', () => {
+        const dest = newDestination('a', 'https://a.example');
+        const first = Object.keys(dest.events)[0] as string;
+        const wrong = freshDb();
+        store(wrong, [{ ...dest, events: { ...dest.events, [first]: 'yes' } }]);
+        expect(() => createSettingsRepo({ db: wrong }).getAlerts()).toThrow(SettingValidationError);
+        const unknown = freshDb();
+        store(unknown, [{ ...dest, events: { ...dest.events, bogus: true } }]);
+        expect(() => createSettingsRepo({ db: unknown }).getAlerts()).toThrow(
+          SettingValidationError,
+        );
+      });
+
+      it('rejects a missing event key on write', () => {
+        const repo = createSettingsRepo({ db: freshDb() });
+        const dest = newDestination('a', 'https://a.example');
+        const events: Record<string, boolean> = { ...dest.events };
+        delete events[Object.keys(events)[0] as string];
+        expect(() =>
+          repo.setAlerts({ publicBaseUrl: '', destinations: [{ ...dest, events } as never] }),
+        ).toThrow(SettingValidationError);
+      });
+
+      it.each([
+        ['a name with a space', { name: 'X Bad', value: 'v-secret-1' }, 'v-secret-1'],
+        ['a name with a colon', { name: 'X:Bad', value: 'v-secret-2' }, 'v-secret-2'],
+        ['a value with CRLF', { name: 'X-Ok', value: 'abc\r\nX-Evil: 1' }, 'X-Evil'],
+        ['a value with NUL', { name: 'X-Ok', value: 'abc\0def' }, 'abc'],
+      ])('rejects %s without echoing the value', (_label, header, leak) => {
+        const repo = createSettingsRepo({ db: freshDb() });
+        const dest = { ...newDestination('a', 'https://a.example/tok-123'), headers: [header] };
+        let message = '';
+        try {
+          repo.setAlerts({ publicBaseUrl: '', destinations: [dest] });
+        } catch (error) {
+          expect(error).toBeInstanceOf(SettingValidationError);
+          message = (error as Error).message;
+        }
+        expect(message).not.toBe('');
+        expect(message).not.toContain(leak);
+        expect(message).not.toContain('tok-123');
+        expect(repo.getAlerts().destinations).toEqual([]);
+      });
+    });
+
     it('lists every destination url and non-empty header value as a secret, and nothing else', () => {
       const dest = {
         ...newDestination('ops', 'https://hooks.example/token'),

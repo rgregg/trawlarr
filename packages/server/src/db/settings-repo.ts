@@ -259,10 +259,17 @@ const requireHttpUrl = (value: unknown, label: string, allowEmpty: boolean): str
 
 const ALERT_EVENT_SET: ReadonlySet<string> = new Set(ALERT_EVENT_TYPES);
 
-const validateAlerts = (value: {
-  publicBaseUrl: unknown;
-  destinations: unknown;
-}): AlertSettings => {
+const HEADER_NAME_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/**
+ * `fillMissingEvents` is for reads only: a destination saved before a release
+ * added an event type has no key for it, and failing to load would stop the
+ * daemon. Missing means on, as in `newDestination`. Writes stay strict.
+ */
+const validateAlerts = (
+  value: { publicBaseUrl: unknown; destinations: unknown },
+  options: { fillMissingEvents?: boolean } = {},
+): AlertSettings => {
   const publicBaseUrl = requireHttpUrl(value.publicBaseUrl, 'alerts.publicBaseUrl', true);
   if (!Array.isArray(value.destinations)) {
     throw new SettingValidationError('alerts.destinations must be an array.');
@@ -289,7 +296,20 @@ const validateAlerts = (value: {
       if (headerName.trim() === '') {
         throw new SettingValidationError(`${at}.headers[${h}].name must not be empty.`);
       }
-      return { name: headerName, value: requireString(header.value, `${at}.headers[${h}].value`) };
+      // A name or value that is not a legal header would break or inject into
+      // the outbound request. Messages never echo the value: it is a secret.
+      if (!HEADER_NAME_TOKEN.test(headerName)) {
+        throw new SettingValidationError(
+          `${at}.headers[${h}].name must be a valid HTTP header name (letters, digits and !#$%&'*+.^_\`|~-).`,
+        );
+      }
+      const headerValue = requireString(header.value, `${at}.headers[${h}].value`);
+      if (/[\r\n\0]/.test(headerValue)) {
+        throw new SettingValidationError(
+          `${at}.headers[${h}].value must not contain line breaks or NUL characters.`,
+        );
+      }
+      return { name: headerName, value: headerValue };
     });
     if (!isRecord(raw.events)) throw new SettingValidationError(`${at}.events must be an object.`);
     for (const key of Object.keys(raw.events)) {
@@ -299,7 +319,11 @@ const validateAlerts = (value: {
     }
     const events = {} as Record<AlertEventType, boolean>;
     for (const event of ALERT_EVENT_TYPES) {
-      events[event] = requireBoolean(raw.events[event], `${at}.events.${event}`);
+      const flag = raw.events[event];
+      events[event] =
+        flag === undefined && options.fillMissingEvents === true
+          ? true
+          : requireBoolean(flag, `${at}.events.${event}`);
     }
     return {
       name,
@@ -673,10 +697,13 @@ export const createSettingsRepo = (input: {
   };
 
   const getAlerts = (): AlertSettings =>
-    validateAlerts({
-      publicBaseUrl: readField(SETTING_KEYS.alerts, 'publicBaseUrl') ?? '',
-      destinations: readField(SETTING_KEYS.alerts, 'destinations') ?? [],
-    });
+    validateAlerts(
+      {
+        publicBaseUrl: readField(SETTING_KEYS.alerts, 'publicBaseUrl') ?? '',
+        destinations: readField(SETTING_KEYS.alerts, 'destinations') ?? [],
+      },
+      { fillMissingEvents: true },
+    );
 
   const setAlerts = (next: AlertSettings): void => {
     const valid = validateAlerts(next);
