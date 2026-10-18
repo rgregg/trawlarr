@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDeliverer, type Deliverer } from './deliver.js';
 
 interface Seen {
@@ -56,6 +56,7 @@ const until = async (check: () => boolean, limitMs = 2000): Promise<void> => {
 };
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const d of deliverers.splice(0)) d.stop();
   for (const socket of sockets) socket.destroy();
   await Promise.all(
@@ -260,5 +261,52 @@ describe('createDeliverer', () => {
     const result = await sent;
     expect(performance.now() - start).toBeLessThan(250);
     expect(result.error).toBe('aborted');
+  });
+
+  // Runs `hook` synchronously inside drain's deadline abort: the attempt's
+  // signal fires from within epoch.abort(), before drain has settled or swapped.
+  const onDrainAbort = (hook: () => void): void => {
+    const real = globalThis.fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      init?.signal?.addEventListener('abort', hook, { once: true });
+      return real(input, init);
+    });
+  };
+
+  it('ends a sendNow started inside the drain wait as aborted, not a full attempt', async () => {
+    const hung = await receiver(hang);
+    const d = make({ log: () => undefined });
+    let late: Promise<{ error: string | null }> | undefined;
+    onDrainAbort(() => {
+      late ??= d.sendNow({ name: 'T', url: hung.origin, headers: [] }, {});
+    });
+    d.enqueue({ name: 'A', url: hung.origin, headers: [] }, {});
+    await until(() => hung.seen.length >= 1);
+    const start = performance.now();
+    await d.drain(30);
+    const result = await Promise.race([
+      late ?? Promise.reject(new Error('hook never ran')),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('outlived drain')), 500)),
+    ]);
+    expect(performance.now() - start).toBeLessThan(400);
+    expect(result.error).toBe('aborted');
+    expect(hung.seen).toHaveLength(1);
+  });
+
+  it('sends nothing for work enqueued inside the drain wait and still meets the deadline', async () => {
+    const hung = await receiver(hang);
+    const ok = await receiver((_req, res) => res.writeHead(200).end());
+    const d = make({ log: () => undefined });
+    onDrainAbort(() => {
+      d.enqueue({ name: 'A', url: ok.origin, headers: [] }, {});
+      d.enqueue({ name: 'C', url: ok.origin, headers: [] }, {});
+    });
+    d.enqueue({ name: 'A', url: hung.origin, headers: [] }, {});
+    await until(() => hung.seen.length >= 1);
+    const start = performance.now();
+    await d.drain(50);
+    expect(performance.now() - start).toBeLessThan(200);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(ok.seen).toHaveLength(0);
   });
 });

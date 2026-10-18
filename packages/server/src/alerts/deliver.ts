@@ -251,12 +251,14 @@ export const createDeliverer = (opts: {
             dropped += lane.queue.length + (lane.inFlight ? 1 : 0);
             lane.queue.length = 0;
           }
-          // Swap first: anything starting while the aborted work settles must
-          // attach to a live signal that a later stop() can still abort.
-          const aborted = epoch;
-          epoch = new AbortController();
-          aborted.abort();
+          // Abort, settle, THEN swap. Swapping first would hand a live signal
+          // to anything enqueued while the aborted request settles (its lane's
+          // pump would send for real and hold this drain past its deadline).
+          // Work that starts in the window sees the aborted signal instead and
+          // ends as `aborted` without a request.
+          epoch.abort();
           await Promise.all(pending);
+          epoch = new AbortController();
         }
       }
       const count = dropped;
