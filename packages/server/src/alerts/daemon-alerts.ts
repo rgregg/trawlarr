@@ -9,7 +9,12 @@ export const DEFAULT_STARTUP_DELAY_MS = 2 * 60_000;
 export const DEFAULT_NODE_OFFLINE_GRACE_MS = 5 * 60_000;
 
 const HARDWARE_SCOPE = 'hardware';
-const UNKNOWN_NODE_SCOPE = 'unknown-node';
+/** One scope for every refusal that names no known node: forged ids must not mint scopes. */
+const UNKNOWN_REFUSAL_SCOPE = 'refused:unknown';
+/** A known node is only reported refused after this many refusals inside the window. */
+const REFUSALS_TO_ALERT = 3;
+const REFUSAL_WINDOW_MS = 10 * 60_000;
+const refusedScope = (nodeId: string): string => `refused:${nodeId}`;
 
 export interface DaemonAlertsOptions {
   bus: EventBus;
@@ -173,6 +178,39 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     );
   };
 
+  /** Recent refusal times per KNOWN node, to tell a revoked node from one wrong-secret probe. */
+  const refusals = new Map<string, number[]>();
+
+  const onRefused = (nodeId: string | null, reason: string): void => {
+    if (nodeId === null) {
+      // No standing entry: anyone can probe the socket path, and a standing entry would repeat
+      // hourly until restart. Offered per refusal instead, so the coalescer's repeat lasts
+      // only while refusals keep arriving.
+      service.raise({
+        event: 'node.offline',
+        scope: UNKNOWN_REFUSAL_SCOPE,
+        summary: `An unknown node was refused: ${reason}`,
+        reason,
+      });
+      return;
+    }
+    const at = nowMs();
+    const recent = [...(refusals.get(nodeId) ?? []), at].filter(
+      (time) => at - time <= REFUSAL_WINDOW_MS,
+    );
+    refusals.set(nodeId, recent);
+    // One refusal can be anyone presenting a wrong secret for a healthy node's id.
+    if (recent.length < REFUSALS_TO_ALERT) return;
+    // Its own scope, apart from the offline scope `nodes.changed` uses: a refused connection
+    // is also detached, and sharing a key let that overwrite this entry's summary.
+    begin({
+      event: 'node.offline',
+      scope: refusedScope(nodeId),
+      summary: `Node ${nodeName(nodeId)} was refused: ${reason}`,
+      reason,
+    });
+  };
+
   const onEvent = (event: TrawlarrEvent): void => {
     switch (event.type) {
       case 'job.finished':
@@ -209,23 +247,20 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
       case 'nodes.changed':
         if (event.online) {
           recover('node.offline', event.nodeId, `Node ${nodeName(event.nodeId)} is back online.`);
+          // It authenticated: whatever refusals preceded were a different attempt.
+          refusals.delete(event.nodeId);
+          recover(
+            'node.offline',
+            refusedScope(event.nodeId),
+            `Node ${nodeName(event.nodeId)} connected again.`,
+          );
         } else {
           beginNodeOffline(event.nodeId);
         }
         return;
-      case 'node.refused': {
-        // Refusals retry every few seconds; `begin` keeps one standing entry per node, so the
-        // service hears of it once and then on `reraise()`, never per attempt.
-        const scope = event.nodeId ?? UNKNOWN_NODE_SCOPE;
-        const who = event.nodeId === null ? 'An unknown node' : `Node ${nodeName(event.nodeId)}`;
-        begin({
-          event: 'node.offline',
-          scope,
-          summary: `${who} was refused: ${event.reason}`,
-          reason: event.reason,
-        });
+      case 'node.refused':
+        onRefused(event.nodeId, event.reason);
         return;
-      }
       default:
         return;
     }
@@ -254,6 +289,16 @@ export const createDaemonAlerts = (opts: DaemonAlertsOptions): DaemonAlerts => {
     },
     reraise: () => {
       const at = nowMs();
+      // A refusal entry lasts only while refusals keep arriving; otherwise it would repeat for ever.
+      for (const [nodeId, times] of [...refusals]) {
+        const recent = times.filter((time) => at - time <= REFUSAL_WINDOW_MS);
+        if (recent.length > 0) {
+          refusals.set(nodeId, recent);
+        } else {
+          refusals.delete(nodeId);
+          standing.delete(keyOf('node.offline', refusedScope(nodeId)));
+        }
+      }
       for (const entry of [...standing.values()]) {
         if (at < entry.notBeforeMs) continue;
         try {

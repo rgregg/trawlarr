@@ -944,11 +944,15 @@ export const createNodeHub = (input: CreateNodeHubInput): NodeHub => {
       // it can report rather than a socket that opens and drops.
       if (!ok || nodeId === undefined) {
         denyUpgrade(socket, 401, 'unauthorized', NODE_UNAUTHORIZED_MESSAGE);
-        bus.emit({
-          type: 'node.refused',
-          nodeId: nodeId !== undefined && nodes.getById(nodeId) !== null ? nodeId : null,
-          reason: 'credentials were refused',
-        });
+        // Not for a node that is connected right now: an unauthenticated probe naming a healthy
+        // node's id must not raise an outage for it.
+        if (nodeId === undefined || !connections.has(nodeId)) {
+          bus.emit({
+            type: 'node.refused',
+            nodeId: nodeId !== undefined && nodes.getById(nodeId) !== null ? nodeId : null,
+            reason: 'credentials were refused',
+          });
+        }
         return;
       }
       wss.handleUpgrade(req, socket, head, (ws) => {

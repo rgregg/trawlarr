@@ -359,6 +359,34 @@ describe('createNodeHub', () => {
     expect(hub.isOnline(creds.nodeId)).toBe(false);
   });
 
+  it('emits node.refused for a bad-secret upgrade, never for a node that is connected, and never with a forged id', async () => {
+    const wrong = { 'x-trawlarr-node': creds.nodeId, authorization: 'Bearer not-the-secret' };
+    await expect(connectNode(wrong)).rejects.toThrow(/401/);
+    await expect(
+      connectNode({ 'x-trawlarr-node': 'forged-id', authorization: 'Bearer x' }),
+    ).rejects.toThrow(/401/);
+    await expect(connectNode({})).rejects.toThrow(/401/);
+    const refusals = () => events.filter((e) => e.type === 'node.refused');
+    expect(refusals()).toEqual([
+      { type: 'node.refused', nodeId: creds.nodeId, reason: 'credentials were refused' },
+      { type: 'node.refused', nodeId: null, reason: 'credentials were refused' },
+      { type: 'node.refused', nodeId: null, reason: 'credentials were refused' },
+    ]);
+
+    const good = await connectNode();
+    await good.hello();
+    await expect(connectNode(wrong)).rejects.toThrow(/401/);
+    expect(refusals()).toHaveLength(3);
+  });
+
+  it('emits node.refused for a protocol mismatch', async () => {
+    const client = await connectNode();
+    await client.hello([], { protocolVersion: 99 });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'node.refused', nodeId: creds.nodeId }),
+    );
+  });
+
   it('refuses a mismatched protocol version naming both, then closes 4002', async () => {
     const client = await connectNode();
     const refused = await client.hello([], { protocolVersion: 99 });

@@ -277,27 +277,74 @@ describe('daemon alerts: conditions standing at boot', () => {
 });
 
 describe('daemon alerts: refused nodes', () => {
-  it('raises node.offline with the refusal reason, once for many retries, recovered on connect', () => {
+  const refuse = (t: ReturnType<typeof setup>, nodeId: string | null) =>
+    t.emit({ type: 'node.refused', nodeId, reason: 'credentials were refused' });
+
+  it('does not alert on a single refusal, alerts on the third inside the window, once', () => {
     const t = setup();
-    for (let i = 0; i < 50; i++) {
-      t.emit({ type: 'node.refused', nodeId: 'n1', reason: 'credentials were refused' });
-    }
+    refuse(t, 'n1');
+    refuse(t, 'n1');
+    t.alerts.reraise();
+    expect(t.raised).toEqual([]);
+    for (let i = 0; i < 50; i++) refuse(t, 'n1');
     expect(t.raised).toHaveLength(1);
     expect(t.raised[0]).toMatchObject({
       event: 'node.offline',
-      scope: 'n1',
+      scope: 'refused:n1',
       reason: 'credentials were refused',
     });
     expect(t.raised[0]?.summary).toContain('Node n1');
-    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: true });
-    expect(t.names()).toEqual(['node.offline', 'node.offline.recovered']);
   });
 
-  it('uses one constant scope for an unknown node', () => {
+  it('does not count refusals spread wider than the window', () => {
     const t = setup();
-    t.emit({ type: 'node.refused', nodeId: null, reason: 'credentials were refused' });
-    t.emit({ type: 'node.refused', nodeId: null, reason: 'credentials were refused' });
-    expect(t.raised).toHaveLength(1);
-    expect(t.raised[0]?.scope).toBe('unknown-node');
+    refuse(t, 'n1');
+    t.advance(6 * MIN);
+    refuse(t, 'n1');
+    t.advance(6 * MIN);
+    refuse(t, 'n1');
+    expect(t.raised).toEqual([]);
+  });
+
+  it('recovers only when the node authenticates, and only if an alert went out', () => {
+    const t = setup();
+    refuse(t, 'n1');
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: true });
+    expect(t.raised).toEqual([]);
+    for (let i = 0; i < 3; i++) refuse(t, 'n1');
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: true });
+    expect(t.names()).toEqual(['node.offline', 'node.offline.recovered']);
+    expect(t.raised[1]?.scope).toBe('refused:n1');
+  });
+
+  it('collapses forged ids into one constant scope that stops repeating when probes stop', () => {
+    const t = setup();
+    for (let i = 0; i < 20; i++) refuse(t, null);
+    expect(new Set(t.raised.map((r) => r.scope))).toEqual(new Set(['refused:unknown']));
+    const before = t.raised.length;
+    t.advance(3 * 60 * MIN);
+    t.alerts.reraise();
+    t.alerts.reraise();
+    expect(t.raised).toHaveLength(before);
+  });
+
+  it('stops re-offering a known node refusal once refusals stop', () => {
+    const t = setup();
+    for (let i = 0; i < 3; i++) refuse(t, 'n1');
+    t.alerts.reraise();
+    const before = t.raised.length;
+    t.advance(11 * MIN);
+    t.alerts.reraise();
+    expect(t.raised).toHaveLength(before);
+  });
+
+  it('a refusal followed by that connection detaching raises no offline alert and keeps its summary', () => {
+    const t = setup();
+    for (let i = 0; i < 3; i++) refuse(t, 'n1');
+    t.emit({ type: 'nodes.changed', nodeId: 'n1', online: false });
+    t.alerts.reraise();
+    expect(t.raised).toHaveLength(2);
+    expect(t.raised.every((r) => r.scope === 'refused:n1')).toBe(true);
+    expect(t.raised.every((r) => r.summary.includes('was refused'))).toBe(true);
   });
 });
