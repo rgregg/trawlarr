@@ -301,6 +301,11 @@ describe('mounted through createApiHandler', () => {
       envApplications: [],
       hardwareFindings: [],
       nodes: createNoopNodeHub(),
+      alerts: {
+        sendTest: async () =>
+          await Promise.resolve({ ok: false, status: null, error: null, atMs: 0 }),
+        lastResult: () => undefined,
+      },
     };
     const nodeHttp = createNodeHttpHandler({ nodes: nodeRepo, bundles, nowMs: () => NOW });
     mountedServer = createServer(

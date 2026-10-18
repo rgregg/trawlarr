@@ -2,6 +2,10 @@ import type { Server } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { HardwareType } from '@trawlarr/core';
+import { createAlertService } from '../alerts/alert-service.js';
+import { createDaemonAlerts } from '../alerts/daemon-alerts.js';
+import { createDeliverer } from '../alerts/deliver.js';
+import { createMediaFileRepo } from '../db/media-file-repo.js';
 import { createApiContext, createApiServer } from '../api/server.js';
 import { attachWebSocket, type WsChannel } from '../api/ws.js';
 import { openDatabase, type Db } from '../db/connection.js';
@@ -40,6 +44,8 @@ export const SUPERVISOR_TICK_MS = 30_000;
 const RUNTIME_CHECK_INTERVAL_MS = 30_000;
 
 /** How often stalled `running` rows are reclaimed (`reapStalled`'s own threshold is a day). */
+/** How often coalesced follow-ups are flushed and standing outages are offered again. */
+export const ALERT_TICK_INTERVAL_MS = 60_000;
 export const REAP_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
@@ -135,6 +141,13 @@ export interface StartDaemonInput {
   createAgent?: CreateAgentFn;
   /** Seam: a test drives notification without a Plex server or a real timer. */
   plexNotifier?: PlexNotifier;
+  /** Seams for the alert machinery; production sets none of them. */
+  alerts?: {
+    /** How long a condition true at boot waits before it alerts. */
+    startupDelayMs?: number;
+    /** Period of the follow-up/re-offer tick. */
+    tickMs?: number;
+  };
 }
 
 const messageOf = (error: unknown): string =>
@@ -374,6 +387,58 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     },
   });
 
+  // Alerts are built BEFORE anything below can emit: `hardware.check_failed` is emitted exactly
+  // once, at startup, and the startup reaper/stall passes emit `job.finished` for rows a dead
+  // daemon left behind. A subscriber created after them would never see any of it.
+  const alertLibraries = createLibraryRepo(db);
+  const alertFiles = createMediaFileRepo(db);
+  const alertDeliverer = createDeliverer({
+    log: (line) => {
+      console.warn(`[daemon] ${line}`);
+    },
+  });
+  const alertService = createAlertService({
+    settings,
+    deliverer: alertDeliverer,
+    // Read fresh on each call: a Plex token or the key can change while the daemon runs, and a
+    // stale list would let the new value through into a webhook body.
+    extraSecrets: () => [
+      settings.getDaemon().apiKey,
+      ...alertLibraries.list().flatMap((library) => {
+        const token = library.plex?.token;
+        return token === undefined || token === '' ? [] : [token];
+      }),
+    ],
+    nowMs,
+    log: (line) => {
+      console.warn(`[daemon] ${line}`);
+    },
+  });
+  const daemonAlerts = createDaemonAlerts({
+    bus,
+    service: alertService,
+    nowMs,
+    startupDelayMs: input.alerts?.startupDelayMs,
+    describe: {
+      library: (id) => alertLibraries.getById(id)?.name,
+      node: (id) => nodeRepo.getById(id)?.name,
+      file: (id) => {
+        const row = alertFiles.getById(id);
+        return row === null ? undefined : { path: row.path, libraryId: row.library_id };
+      },
+    },
+    initial: () => ({
+      pausedLibraries: alertLibraries.list().flatMap((library) =>
+        // An operator pause is not an outage; daemon-alerts filters by the reason's prefix.
+        library.pausedReason === null ? [] : [{ id: library.id, reason: library.pausedReason }],
+      ),
+      offlineNodes: nodeRepo
+        .list()
+        .filter((node) => node.enrolled && node.revokedAt === null && !hub.isOnline(node.id))
+        .map((node) => ({ id: node.id })),
+    }),
+  });
+
   // Check the operator's hardware DECLARATION against the ffmpeg that will
   // have to honour it — once, here, rather than one failed job per file for
   // ever. Nothing is corrected: `hardware.available` is what the operator
@@ -432,6 +497,10 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     envApplications,
     hardwareFindings,
     nodes: hub,
+    alerts: {
+      sendTest: (name) => alertService.sendTest(name),
+      lastResult: (name) => alertDeliverer.lastResult(name),
+    },
   });
 
   // Before any work is attempted, and before the API can be asked: a library
@@ -449,6 +518,8 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   let lock: DaemonLock | null = null;
 
   const unwind = async (): Promise<void> => {
+    daemonAlerts.unsubscribe();
+    alertDeliverer.stop();
     if (lock !== null) await lock.release();
     await hub.close();
     if (ws !== null) await ws.close();
@@ -638,6 +709,11 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
     await runtimeChecker.runOnce();
   });
 
+  every(input.alerts?.tickMs ?? ALERT_TICK_INTERVAL_MS, 'alert tick', () => {
+    alertService.tick();
+    daemonAlerts.reraise();
+  });
+
   every(REAP_INTERVAL_MS, 'stall reaper', async () => {
     reapStalled({ db, nowMs: nowMs(), onSettled: announceSettled });
     await recoverSwaps();
@@ -776,6 +852,10 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
   const stop = async (): Promise<void> => {
     if (stopPromise !== null) return stopPromise;
     stopping = true;
+    // Monotonic and real even when the daemon's clock is injected: the alert budget below is a
+    // bound on wall time, and a frozen test clock would read as "no time has passed".
+    const stopStartedAt = performance.now();
+    const drainDeadlineMs = input.drainDeadlineMs ?? DEFAULT_DRAIN_DEADLINE_MS;
     stopPromise = (async () => {
       removeSignalHandlers();
 
@@ -806,7 +886,7 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       const deadline = new Promise<'deadline'>((resolveDeadline) => {
         deadlineHandle = setTimer(() => {
           resolveDeadline('deadline');
-        }, input.drainDeadlineMs ?? DEFAULT_DRAIN_DEADLINE_MS);
+        }, drainDeadlineMs);
       });
       const scansStopped = scans.stop();
       // LOCAL runs only, in both the drain and the cancel. A remote job
@@ -824,6 +904,21 @@ export const startDaemon = async (input: StartDaemonInput): Promise<Daemon> => {
       // A scan in flight is not interrupted (an interrupted walk leaves rows
       // upserted but unreconciled), but nothing below may run under it.
       await scansStopped;
+
+      // ALERTS LAST OF THE WORK, AND ONLY FOR WHAT IS LEFT OF THE SAME DEADLINE. Jobs that ended
+      // during the drain have just queued their alerts, so this is the first point at which they
+      // can all be delivered; but a receiver that never answers must not be able to hold the exit
+      // past `stop_grace_period`, where Docker SIGKILLs the daemon mid-shutdown. The budget is the
+      // deadline minus what the stop has already spent, so alert delivery can use idle time and
+      // can never add any.
+      daemonAlerts.unsubscribe();
+      const alertBudgetMs = Math.max(0, drainDeadlineMs - (performance.now() - stopStartedAt));
+      const { dropped } = await alertService.stop(alertBudgetMs);
+      if (dropped > 0) {
+        console.warn(
+          `[daemon] alerts: ${String(dropped)} undelivered alert(s) dropped at shutdown.`,
+        );
+      }
 
       // Node sockets close with the rest of the daemon; their leases are
       // not touched on the way out (the hub is closing, so a socket close

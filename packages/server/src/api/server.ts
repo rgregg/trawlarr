@@ -17,6 +17,7 @@ import type { NodeHttpHandler } from '../nodes/node-http.js';
 import { API_KEY_HEADER, isAuthorised, unauthorized } from './auth.js';
 import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from './session.js';
 import { createAccountRepo, type AccountRepo } from '../db/account-repo.js';
+import { alertRoutes } from './routes/alerts.js';
 import { authRoutes } from './routes/auth.js';
 import { createStaticHandler, resolveWebRoot } from './static-files.js';
 import { fileRoutes } from './routes/files.js';
@@ -54,6 +55,7 @@ export const ALL_ROUTES: Route[] = [
   ...pluginRoutes,
   ...jobRoutes,
   ...nodeRoutes,
+  ...alertRoutes,
   ...workerRoutes,
 ];
 
@@ -415,6 +417,8 @@ export interface CreateApiContextInput {
   accounts?: AccountRepo;
   /** The daemon passes its real hub; a context built without one gets the no-op hub. */
   nodes?: NodeHub;
+  /** The daemon passes its alert service and deliverer; the default sends nothing. */
+  alerts?: ApiContext['alerts'];
 }
 
 /**
@@ -458,6 +462,16 @@ export const createApiContext = (input: CreateApiContextInput): ApiContext => {
     envApplications: input.envApplications ?? [],
     hardwareFindings: input.hardwareFindings ?? [],
     nodes: input.nodes ?? createNoopNodeHub(),
+    alerts: input.alerts ?? {
+      sendTest: async () =>
+        await Promise.resolve({
+          ok: false,
+          status: null,
+          error: 'alerts not running',
+          atMs: nowMs(),
+        }),
+      lastResult: () => undefined,
+    },
   };
 };
 

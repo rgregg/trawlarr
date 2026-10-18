@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { extractFacts, type FactSet, type FlowDefinition } from '@trawlarr/core';
@@ -11,7 +13,7 @@ import { createFlowRepo } from '../db/flow-repo.js';
 import { createLibraryRepo } from '../db/library-repo.js';
 import { createJobRepo } from '../db/job-repo.js';
 import { createMediaFileRepo, type MediaFileRow } from '../db/media-file-repo.js';
-import { createSettingsRepo } from '../db/settings-repo.js';
+import { createSettingsRepo, newDestination } from '../db/settings-repo.js';
 import { migrate, SCHEMA_VERSION } from '../db/migrate.js';
 import { AgentFailure, type AgentHandle } from '../worker/agent-handle.js';
 import type { JobPayload } from '../worker/job-payload.js';
@@ -948,5 +950,97 @@ describe('shutdown drain', () => {
 
     releaseScans();
     await stopping;
+  });
+});
+
+describe('alerts', () => {
+  const receivers: Server[] = [];
+  afterEach(async () => {
+    while (receivers.length > 0) {
+      const r = receivers.pop()!;
+      r.closeAllConnections();
+      await new Promise<void>((resolve) => r.close(() => resolve()));
+    }
+  });
+
+  /** A real HTTP receiver; `hang` accepts the request and never answers. */
+  const receiver = async (
+    hang = false,
+  ): Promise<{ url: string; bodies: Array<{ event: string }> }> => {
+    const bodies: Array<{ event: string }> = [];
+    const server = createServer((req, res) => {
+      let text = '';
+      req.on('data', (c: Buffer) => (text += c.toString()));
+      req.on('end', () => {
+        bodies.push(JSON.parse(text) as { event: string });
+        if (!hang) res.end('ok');
+      });
+    });
+    receivers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/h`, bodies };
+  };
+
+  const configureAlerts = (dataDir: string, url: string): void => {
+    const db = openDataDb(dataDir);
+    migrate(db);
+    createSettingsRepo({ db }).setAlerts({
+      publicBaseUrl: '',
+      destinations: [newDestination('hook', url)],
+    });
+    db.close();
+  };
+
+  const until = async (check: () => boolean, ms = 5_000): Promise<void> => {
+    const end = Date.now() + ms;
+    while (!check()) {
+      if (Date.now() > end) throw new Error('timed out waiting');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  it('delivers the one-time startup hardware failure to a configured receiver', async () => {
+    const dataDir = newDataDir();
+    seedHardware(dataDir, fakeNvencFfmpeg({ encodeWorks: false }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const hook = await receiver();
+    configureAlerts(dataDir, hook.url);
+
+    await start({ dataDir, alerts: { startupDelayMs: 0 } });
+
+    await until(() => hook.bodies.some((b) => b.event === 'hardware.check_failed'));
+  });
+
+  it('delivers an alert end to end when a library is paused at startup', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir, { deleteFlow: true });
+    const hook = await receiver();
+    configureAlerts(dataDir, hook.url);
+
+    await start({ dataDir, alerts: { startupDelayMs: 0 } });
+
+    await until(() => hook.bodies.some((b) => b.event === 'library.paused'));
+  });
+
+  it('completes shutdown inside the drain deadline against a receiver that never answers, and reports what it dropped', async () => {
+    const dataDir = newDataDir();
+    seedLibrary(dataDir, { deleteFlow: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const hook = await receiver(true);
+    configureAlerts(dataDir, hook.url);
+    const daemon = await start({
+      dataDir,
+      drainDeadlineMs: 400,
+      alerts: { startupDelayMs: 0 },
+    });
+    await until(() => hook.bodies.length > 0);
+
+    const startedAt = Date.now();
+    await daemon.stop();
+
+    // The deliverer's own timeout is 10 s and its retries add more: only the deadline-bounded
+    // drain can end this shutdown in well under that.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('dropped at shutdown'))).toBe(true);
   });
 });

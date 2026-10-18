@@ -37,6 +37,10 @@ const stubContext = (over: Partial<ApiContext> = {}): ApiContext => ({
   envApplications: [],
   hardwareFindings: [],
   nodes: createNoopNodeHub(),
+  alerts: {
+    sendTest: async () => await Promise.resolve({ ok: false, status: null, error: null, atMs: 0 }),
+    lastResult: () => undefined,
+  },
   ...over,
 });
 
