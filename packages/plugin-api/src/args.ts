@@ -119,6 +119,15 @@ export interface PluginInputArgs {
   logFullCliOutput: boolean;
 
   jobLog: (text: string) => void;
+  /**
+   * TRAWLARR EXTENSION, not part of the Tdarr plugin contract: ask the daemon
+   * to send an alert to a named destination. Fire and forget, never throws.
+   * Optional because Tdarr has no such field and community plugins must not
+   * depend on it; absent when the host has no alert channel (in-process
+   * `trawlarr run`, the engine harness), in which case a caller should log
+   * and carry on.
+   */
+  sendAlert?: (destination: string, message: string) => void;
   updateWorker: (obj: Record<string, unknown>) => void;
   logOutcome: (outcome: string) => void;
   updateStat: (db: string, key: string, inc: number) => Promise<void>;

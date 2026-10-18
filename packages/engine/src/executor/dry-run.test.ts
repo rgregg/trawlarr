@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { FlowDefinition, FlowNode } from '@trawlarr/core';
 import type { PluginDetails, PluginInputArgs, PluginModule } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
@@ -498,5 +498,44 @@ describe('runDryFlow', () => {
     expect(result.complete).toBe(false);
     expect(result.failed).toBe(false);
     expect(result.stoppedAtNodeId).toBe('b');
+  });
+});
+
+describe('runDryFlow — sendAlert', () => {
+  it('never reaches the real port and says what it would have sent', async () => {
+    const real = vi.fn();
+    const logs: string[] = [];
+    const alerting: PluginModule = {
+      details: () => details(),
+      plugin: (args) => {
+        args.sendAlert!('ha', 'hi');
+        return {
+          outputNumber: 1,
+          outputFileObj: { _id: args.inputFileObj._id },
+          variables: args.variables,
+        };
+      },
+    };
+    const result = await runDryFlow({
+      ...discovering,
+      startNodeId: 'start',
+      flow: flow(
+        [node('start', 'trawlarr:start'), node('log', 'trawlarr:writeToLog')],
+        [{ fromNodeId: 'start', outputNumber: 1, toNodeId: 'log' }],
+      ),
+      loadPlugin: (n) =>
+        n.pluginId === 'trawlarr:writeToLog'
+          ? loaded('trawlarr:writeToLog', alerting)
+          : loaded('trawlarr:start', pass),
+      buildArgs: (invocation) =>
+        ({
+          ...buildArgs(invocation),
+          sendAlert: real,
+          jobLog: (text: string) => logs.push(text),
+        }) as unknown as PluginInputArgs,
+    });
+    expect(result.failed).toBe(false);
+    expect(real).not.toHaveBeenCalled();
+    expect(logs).toContain('would send alert to "ha"');
   });
 });

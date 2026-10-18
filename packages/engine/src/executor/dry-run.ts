@@ -168,6 +168,16 @@ export const runDryFlow = async (
   const result = await runFlow({
     ...options,
     routeLoadErrors: false,
+    // A dry run must never fire a real alert: it would page someone for work
+    // that never happened. Whatever port the caller built into the args is
+    // replaced, here, once, so no caller (CLI, library dry run) can forget.
+    buildArgs: (invocation) => {
+      const args = options.buildArgs(invocation);
+      return {
+        ...args,
+        sendAlert: (destination) => args.jobLog(`would send alert to "${destination}"`),
+      };
+    },
     loadPlugin: (node) => {
       const plugin = options.loadPlugin(node);
       const classification = classifySideEffects(plugin);

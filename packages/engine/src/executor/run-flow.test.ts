@@ -7,6 +7,7 @@ import type {
   RunVariables,
 } from '@trawlarr/plugin-api';
 import type { LoadedPlugin } from '../host/loader.js';
+import { buildPluginInputArgs } from '../host/args.js';
 import { DEFAULT_MAX_STEPS, FlowAbort, runFlow } from './run-flow.js';
 
 const details = (over: Partial<PluginDetails> = {}): PluginDetails => ({
@@ -684,5 +685,51 @@ describe('runFlow — state threading', () => {
       },
     });
     expect(result.steps[0]?.durationMs).toBe(250);
+  });
+});
+
+describe('runFlow — sendAlert', () => {
+  it('hands the port the caller built into args to the plugin, untouched by the walk', async () => {
+    const sendAlert = vi.fn();
+    const alerting: PluginModule = {
+      details: () => details(),
+      plugin: (args) => {
+        args.sendAlert!('ha', 'hi');
+        return {
+          outputNumber: 1,
+          outputFileObj: { _id: args.inputFileObj._id },
+          variables: args.variables,
+        };
+      },
+    };
+    const result = await runFlow({
+      flow: flow([node('a')], []),
+      initialPath: '/in.mkv',
+      startNodeId: 'a',
+      loadPlugin: loaderFor({ a: { module: alerting } }),
+      buildArgs: (invocation) =>
+        buildPluginInputArgs({
+          fileObject: { _id: invocation.currentPath } as never,
+          originalFileObject: { _id: '/in.mkv' } as never,
+          nodeInputs: {},
+          variables: invocation.variables,
+          librarySettings: {},
+          userVariables: { global: {}, library: {} },
+          configVars: { config: {} } as never,
+          deps: {} as never,
+          workDir: '/work',
+          jobId: 'j',
+          footprintId: 'f',
+          fileId: 'i',
+          jobStartMs: 0,
+          workerClass: 'transcode',
+          hardwareType: 'cpu',
+          log: () => {},
+          sendAlert,
+        }),
+    });
+    expect(result.failed).toBe(false);
+    expect(sendAlert).toHaveBeenCalledOnce();
+    expect(sendAlert).toHaveBeenCalledWith('ha', 'hi');
   });
 });

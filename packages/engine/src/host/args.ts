@@ -25,9 +25,32 @@ export interface BuildArgsInput {
   workerClass: string;
   hardwareType: string;
   log: (text: string) => void;
+  /**
+   * Trawlarr extension (see `PluginInputArgs.sendAlert`). Absent leaves the
+   * built args without one, as under Tdarr.
+   */
+  sendAlert?: (destination: string, message: string) => void;
   onWorkerUpdate?: (obj: Record<string, unknown>) => void;
   probeFile?: (path: string) => Promise<PluginFileObject>;
 }
+
+/**
+ * A plugin calls this inline in its own control flow, so a port that throws
+ * (or returns a promise that later rejects) must not turn an alert problem
+ * into a failed encode or an unhandled rejection that takes the worker down.
+ * Alerts are advisory; the file's outcome is not theirs to decide.
+ */
+const guardedSendAlert = (port: BuildArgsInput['sendAlert']): PluginInputArgs['sendAlert'] =>
+  port === undefined
+    ? undefined
+    : (destination, message) => {
+        try {
+          const returned: unknown = port(destination, message);
+          if (returned instanceof Promise) returned.catch(() => {});
+        } catch {
+          // swallowed on purpose; see above
+        }
+      };
 
 export const buildPluginInputArgs = (input: BuildArgsInput): PluginInputArgs => {
   const config = input.configVars.config;
@@ -63,6 +86,7 @@ export const buildPluginInputArgs = (input: BuildArgsInput): PluginInputArgs => 
     logFullCliOutput: false,
 
     jobLog: input.log,
+    sendAlert: guardedSendAlert(input.sendAlert),
     updateWorker: (obj) => input.onWorkerUpdate?.(obj),
     logOutcome: (outcome) => input.log(`Outcome: ${outcome}`),
     updateStat: async () => {},

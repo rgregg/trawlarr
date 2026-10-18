@@ -1013,3 +1013,35 @@ describe.runIf(corpusAvailable())('a flow that reaches a terminal community plug
     expect(report.success).toBe(true);
   });
 });
+
+describe('runPayload sendAlert', () => {
+  it('forwards ports.sendAlert to a plugin that calls it, and leaves it absent otherwise', async () => {
+    const seen: Array<[string, string]> = [];
+    const alertingPath = writePlugin(`
+const details = () => ({
+  name: 'Alerting', description: '', style: { borderColor: '#000000' }, tags: 'test',
+  isStartPlugin: false, pType: '', sidebarPosition: 1, icon: 'faQuestion', inputs: [],
+  outputs: [{ number: 1, tooltip: 'ok', outcome: 'success' }], requiresVersion: '1.0.0',
+});
+const plugin = (args) => {
+  if (typeof args.sendAlert === 'function') args.sendAlert('ha', 'hi');
+  else args.jobLog('no-alert-port');
+  return { outputNumber: 1, outputFileObj: { _id: args.inputFileObj._id }, variables: args.variables };
+};
+module.exports = { details, plugin };
+`);
+    const logs: string[] = [];
+    const withPort = await runPayload({
+      payload: payloadFor(flowEndingIn(alertingPath)),
+      ports: { ...quietPorts(), sendAlert: (d, m) => seen.push([d, m]) },
+    });
+    expect(withPort.failed).toBe(false);
+    expect(seen).toEqual([['ha', 'hi']]);
+
+    await runPayload({
+      payload: payloadFor(flowEndingIn(alertingPath)),
+      ports: { ...quietPorts(), onLog: (t) => logs.push(t) },
+    });
+    expect(logs).toContain('no-alert-port');
+  });
+});

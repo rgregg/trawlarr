@@ -686,6 +686,7 @@ export const runPayload = async (input: {
           }),
           hardwareType: payload.hardwareType,
           log: onLog,
+          sendAlert: ports.sendAlert,
         });
         lastFileObject = args.inputFileObj;
         currentArgs = args;
