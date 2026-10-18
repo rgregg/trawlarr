@@ -21,6 +21,9 @@ export interface AlertInput {
   jobId?: string;
 }
 
+/** Why a flow message did or did not go out, so the job log can say so (spec 11.5). */
+export type FlowMessageStatus = 'queued' | 'unknown' | 'disabled' | 'stopped' | 'error';
+
 export interface AlertService {
   raise(input: AlertInput): void;
   raiseFlowMessage(input: {
@@ -29,7 +32,7 @@ export interface AlertService {
     library?: string;
     path?: string;
     jobId?: string;
-  }): void;
+  }): FlowMessageStatus;
   sendTest(name: string): Promise<DeliveryResult>;
   tick(): void;
   stop(deadlineMs: number): Promise<{ dropped: number }>;
@@ -63,14 +66,18 @@ export const createAlertService = (opts: {
     repeatMs: REPEAT_MS,
   });
   let stopped = false;
+  // event|scope -> library of the offer, so a follow-up can say which library it is about.
+  // The coalescer forgets groups on its own, so the map is capped instead of tracked.
+  const MAX_LIBRARY_KEYS = 1_000;
+  const libraryOf = new Map<string, string>();
   const loggedErrors = new Set<string>();
 
-  // Log text is only the error's message when it is a settings validation error, which
-  // never embeds a stored value; once per distinct message so a corrupt section does not
-  // write a line per job.
+  // Never log the error's message: settings validation puts JSON.stringify(value) in it
+  // (requireString/requireBoolean), so a hand-edited row holding a token would land in the
+  // daemon log. The line is fixed text plus the error's class, which also dedupes it to
+  // once per error name so a corrupt section does not write a line per job.
   const logOnce = (what: string, error: unknown): void => {
-    const message = error instanceof Error ? error.message : String(error);
-    const line = `${what}: ${message}`;
+    const line = `${what} (${error instanceof Error ? error.name : 'non-error'})`;
     if (loggedErrors.has(line)) return;
     loggedErrors.add(line);
     try {
@@ -80,20 +87,15 @@ export const createAlertService = (opts: {
     }
   };
 
-  const safeLog = (line: string): void => {
-    try {
-      opts.log(line);
-    } catch {
-      // see logOnce
-    }
-  };
-
   // A corrupt or hand-edited stored section makes getAlerts throw. That must mean "no
   // alerts", not an exception on the job path.
+  let readFailed = false;
   const readSettings = (): AlertSettings => {
+    readFailed = false;
     try {
       return opts.settings.getAlerts();
     } catch (error) {
+      readFailed = true;
       logOnce('could not read alert settings, sending nothing', error);
       return { publicBaseUrl: '', destinations: [] };
     }
@@ -144,14 +146,17 @@ export const createAlertService = (opts: {
     settings: AlertSettings,
     to: AlertDestination[],
     body: Record<string, unknown>,
-  ): void => {
+  ): boolean => {
+    let ok = true;
     for (const d of to) {
       try {
         opts.deliverer.enqueue(targetOf(d), body);
       } catch (error) {
-        logOnce(`could not queue alert for "${d.name}"`, error);
+        ok = false;
+        logOnce('could not queue alert', error);
       }
     }
+    return ok;
   };
 
   const baseBody = (event: string, summary: string): Record<string, unknown> => ({
@@ -175,6 +180,8 @@ export const createAlertService = (opts: {
     const redact = redactor(settings);
     const body = baseBody(f.event, redact(followUpSummary(f)));
     body.count = f.count;
+    const library = libraryOf.get(`${f.event}|${f.scope}`);
+    if (library !== undefined) body.library = library;
     if (f.examples.length > 0) body.examples = f.examples.map(redact);
     if (f.otherCauses > 0) body.otherCauses = f.otherCauses;
     dispatch(settings, to, body);
@@ -191,8 +198,20 @@ export const createAlertService = (opts: {
           // Without this a recurrence right after recovery would be counted into the old
           // window and stay silent, the opposite of what "it is down again" needs.
           const base = baseEventOf(input.event);
-          if (base !== undefined) coalescer.clear(base, input.scope);
+          if (base !== undefined) {
+            coalescer.clear(base, input.scope);
+            libraryOf.delete(`${base}|${input.scope}`);
+          }
         } else {
+          if (input.library !== undefined) {
+            const key = `${input.event}|${input.scope}`;
+            libraryOf.delete(key);
+            libraryOf.set(key, input.library);
+            if (libraryOf.size > MAX_LIBRARY_KEYS) {
+              const oldest = libraryOf.keys().next();
+              if (!oldest.done) libraryOf.delete(oldest.value);
+            }
+          }
           const { send } = coalescer.offer({
             event: input.event,
             scope: input.scope,
@@ -217,27 +236,24 @@ export const createAlertService = (opts: {
     },
 
     raiseFlowMessage(input) {
-      if (stopped) return;
+      if (stopped) return 'stopped';
       try {
         const settings = readSettings();
+        // An unreadable section is not "unknown destination": the author's name may be fine.
+        if (readFailed) return 'error';
         const d = settings.destinations.find((x) => x.name === input.destination);
-        if (d === undefined || !d.enabled) {
-          safeLog(
-            `alerts: flow message not sent, destination "${input.destination}" is ${
-              d === undefined ? 'unknown' : 'disabled'
-            }`,
-          );
-          return;
-        }
+        if (d === undefined) return 'unknown';
+        if (!d.enabled) return 'disabled';
         const redact = redactor(settings);
         const body = baseBody('flow.message', redact(input.message));
         if (input.library !== undefined) body.library = input.library;
         if (input.path !== undefined) body.path = redact(input.path);
         const url = linkFor(settings, input.jobId);
         if (url !== undefined) body.url = url;
-        dispatch(settings, [d], body);
+        return dispatch(settings, [d], body) ? 'queued' : 'error';
       } catch (error) {
         logOnce('could not raise flow message', error);
+        return 'error';
       }
     },
 

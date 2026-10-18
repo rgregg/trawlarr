@@ -13,6 +13,7 @@ const harness = (initial: Partial<AlertSettings> = {}) => {
   };
   let throwSettings: Error | null = null;
   let throwEnqueue = false;
+  let throwExtra = false;
   let now = Date.parse('2026-10-17T18:00:00Z');
   const sent: Array<{ target: DeliveryTarget; body: Body }> = [];
   const now_: Array<{ target: DeliveryTarget; body: Body }> = [];
@@ -43,7 +44,10 @@ const harness = (initial: Partial<AlertSettings> = {}) => {
       },
     },
     deliverer,
-    extraSecrets: () => ['api-key-123', ''],
+    extraSecrets: () => {
+      if (throwExtra) throw new Error('no secrets');
+      return ['api-key-123', ''];
+    },
     nowMs: () => now,
     log: (l) => logs.push(l),
   });
@@ -59,6 +63,7 @@ const harness = (initial: Partial<AlertSettings> = {}) => {
     set: (s: AlertSettings) => (settings = s),
     breakSettings: (e: Error) => (throwSettings = e),
     breakEnqueue: () => (throwEnqueue = true),
+    breakExtra: () => (throwExtra = true),
     advance: (ms: number) => (now += ms),
   };
 };
@@ -150,7 +155,7 @@ describe('AlertService', () => {
         event: 'file.failed',
         scope: 'Movies',
         summary: `f${i} failed`,
-        path: `/m/${i}.mkv`,
+        path: `/m/api-key-123/${i}.mkv`,
         reason: `mount gone for /m/${i}.mkv`,
       });
     }
@@ -159,7 +164,11 @@ describe('AlertService', () => {
     h.service.tick();
     expect(h.sent).toHaveLength(2);
     expect(h.sent[1]!.body).toMatchObject({ event: 'file.failed', count: 499 });
-    expect((h.sent[1]!.body.examples as string[]).length).toBeGreaterThan(0);
+    expect(h.sent[1]!.body.examples).toEqual([
+      '/m/[redacted]/1.mkv',
+      '/m/[redacted]/2.mkv',
+      '/m/[redacted]/3.mkv',
+    ]);
     expect(typeof h.sent[1]!.body.summary).toBe('string');
     expect('otherCauses' in h.sent[1]!.body).toBe(false);
   });
@@ -197,16 +206,100 @@ describe('AlertService', () => {
         { ...newDestination('dis', 'https://a/2'), enabled: false },
       ],
     });
-    expect(() => h.service.raiseFlowMessage({ destination: 'nope', message: 'm' })).not.toThrow();
-    h.service.raiseFlowMessage({ destination: 'dis', message: 'm' });
+    expect(h.service.raiseFlowMessage({ destination: 'nope', message: 'm' })).toBe('unknown');
+    expect(h.service.raiseFlowMessage({ destination: 'dis', message: 'm' })).toBe('disabled');
     expect(h.sent).toHaveLength(0);
-    expect(h.logs).toHaveLength(2);
-    h.service.raiseFlowMessage({ destination: 'hook', message: 'm' });
-    h.service.raiseFlowMessage({ destination: 'hook', message: 'm' });
+    expect(h.service.raiseFlowMessage({ destination: 'hook', message: 'm' })).toBe('queued');
+    expect(h.service.raiseFlowMessage({ destination: 'hook', message: 'm' })).toBe('queued');
     expect(h.sent.map((s) => [s.target.name, s.body.event])).toEqual([
       ['hook', 'flow.message'],
       ['hook', 'flow.message'],
     ]);
+    expect(h.logs.join('\n')).not.toContain('https://');
+  });
+
+  it('flow message status is error when settings or enqueue throw, stopped after stop', async () => {
+    const a = harness();
+    a.breakSettings(new Error('x'));
+    expect(a.service.raiseFlowMessage({ destination: 'hook', message: 'm' })).toBe('error');
+    const b = harness();
+    b.breakEnqueue();
+    expect(b.service.raiseFlowMessage({ destination: 'hook', message: 'm' })).toBe('error');
+    const c = harness();
+    await c.service.stop(10);
+    expect(c.service.raiseFlowMessage({ destination: 'hook', message: 'm' })).toBe('stopped');
+  });
+
+  it('redacts flow message text and path', () => {
+    const h = harness();
+    h.service.raiseFlowMessage({
+      destination: 'hook',
+      message: 'key api-key-123 here',
+      path: '/m/api-key-123.mkv',
+    });
+    expect(h.sent[0]!.body).toMatchObject({
+      summary: 'key [redacted] here',
+      path: '/m/[redacted].mkv',
+    });
+  });
+
+  it('redacts a secret saved after the first event in the later follow-up', () => {
+    const h = harness();
+    const raise = (i: number): void =>
+      h.service.raise({
+        event: 'file.failed',
+        scope: 'Movies',
+        summary: 'failed',
+        path: `/m/late-secret/${i}.mkv`,
+        reason: 'same',
+      });
+    raise(0);
+    raise(1);
+    const d = newDestination('hook', 'https://hooks.example/secret-token');
+    d.headers = [{ name: 'X', value: 'late-secret' }];
+    h.set({ publicBaseUrl: '', destinations: [d] });
+    h.advance(16 * 60_000);
+    h.service.tick();
+    expect(h.sent[1]!.body.examples).toEqual(['/m/[redacted]/1.mkv']);
+  });
+
+  it('still sends, redacting stored secrets only, when extraSecrets throws', () => {
+    const h = harness();
+    h.breakExtra();
+    h.service.raise({
+      event: 'file.failed',
+      scope: 'M',
+      summary: 'https://hooks.example/secret-token api-key-123',
+    });
+    expect(h.sent[0]!.body.summary).toBe('[redacted] api-key-123');
+  });
+
+  it('redacts the follow-up summary', () => {
+    const h = harness();
+    for (let i = 0; i < 2; i++)
+      h.service.raise({ event: 'file.failed', scope: 'api-key-123', summary: 's', reason: 'r' });
+    h.advance(16 * 60_000);
+    h.service.tick();
+    expect(h.sent[1]!.body.summary).toBe('[redacted]: 1 more file.failed');
+  });
+
+  it('puts the library on a follow-up when known and omits it for node events', () => {
+    const h = harness();
+    for (let i = 0; i < 2; i++) {
+      h.service.raise({
+        event: 'file.failed',
+        scope: 'lib1',
+        summary: 's',
+        library: 'Movies',
+        reason: 'r',
+      });
+      h.service.raise({ event: 'node.offline', scope: 'n1', summary: 's' });
+    }
+    h.advance(16 * 60_000);
+    h.service.tick();
+    const follow = h.sent.filter((s) => 'count' in s.body);
+    expect(follow.find((s) => s.body.event === 'file.failed')!.body.library).toBe('Movies');
+    expect('library' in follow.find((s) => s.body.event === 'node.offline')!.body).toBe(false);
   });
 
   it('sendTest uses sendNow regardless of toggles and returns its result', async () => {
@@ -229,7 +322,16 @@ describe('AlertService', () => {
       h.service.tick();
     }).not.toThrow();
     expect(h.sent).toHaveLength(0);
-    expect(h.logs.filter((l) => l.includes('corrupt section'))).toHaveLength(1);
+    expect(h.logs.filter((l) => l.includes('could not read alert settings'))).toHaveLength(1);
+  });
+
+  it('never logs the message of a settings error', () => {
+    const h = harness();
+    h.breakSettings(new Error('bad value {"token":"distinct-secret-xyz"}'));
+    h.service.raise({ event: 'file.failed', scope: 'M', summary: 's' });
+    expect(h.sent).toHaveLength(0);
+    expect(h.logs.length).toBeGreaterThan(0);
+    expect(h.logs.join('\n')).not.toContain('distinct-secret-xyz');
   });
 
   it('does not propagate a throwing deliverer.enqueue', () => {
